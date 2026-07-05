@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sprite-lab"
+version = "0.1.0"
+description = "Native 32x32 palette-index pixel-art generator foundations."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "Pillow",
+  "pytest",
+]
+
+[project.optional-dependencies]
+ui = ["gradio>=4"]
+prefill = ["requests>=2.31"]
+prefill-transformers = ["torch>=2.0", "transformers>=4.56", "accelerate>=1.0", "pillow>=10"]
+ml = ["torch>=2.0", "tqdm>=4.66"]
+harvest = ["requests>=2.31", "tqdm>=4.66"]
+harvest-ui = ["gradio>=4"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --basetemp=.pytest_tmp_run -p no:cacheprovider"
