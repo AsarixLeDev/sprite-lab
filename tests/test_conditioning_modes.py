@@ -75,6 +75,18 @@ def test_conditioning_modes_route_caption_and_semantic_streams() -> None:
     assert torch.count_nonzero(unconditioned["caption_tokens"]) == 0
     assert unconditioned["semantic_tokens"] is None
 
+    structured = {"category_id": torch.tensor([1, 2], dtype=torch.long)}
+    structured_mode = apply_conditioning_mode(
+        caption_tokens=caption,
+        semantic_tokens=semantic,
+        structured_conditioning=structured,
+        mode="caption_semantic_structured",
+        pad_token_id=0,
+    )
+    assert torch.equal(structured_mode["caption_tokens"], caption)
+    assert torch.equal(structured_mode["semantic_tokens"], semantic)
+    assert structured_mode["structured_conditioning"] is structured
+
 
 def test_old_checkpoint_conditioning_mode_falls_back_to_default() -> None:
     assert checkpoint_conditioning_mode({"checkpoint_type": "caption_rgba_generator_v0"}) == DEFAULT_CONDITIONING_MODE

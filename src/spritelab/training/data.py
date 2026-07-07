@@ -15,8 +15,14 @@ try:  # torch is an optional project dependency.
 except ImportError:  # pragma: no cover - exercised when torch is absent or broken.
     torch = None  # type: ignore[assignment]
 
+from spritelab.training.palette_swap import PaletteSwapConfig, apply_palette_swap
 from spritelab.training.tokenization import SpriteTextTokenizer
 from spritelab.training.rgba import npz_row_to_rgba
+from spritelab.training.structured_conditioning import (
+    STRUCTURED_BATCH_KEYS,
+    StructuredConditioningVocab,
+    encode_structured_conditioning,
+)
 
 SPRITE_SIZE = 32
 REQUIRED_NPZ_KEYS = (
@@ -67,6 +73,11 @@ class SpriteTrainingDataset(_DatasetBase):
         caption_max_length: int = 32,
         semantic_max_length: int = 48,
         caption_policy_filter: str | None = None,
+        sprite_ids: Sequence[str] | None = None,
+        structured_vocab: StructuredConditioningVocab | None = None,
+        cache_samples: bool = True,
+        npz_cache: dict[str, dict[str, np.ndarray]] | None = None,
+        palette_swap: PaletteSwapConfig | None = None,
     ) -> None:
         _require_torch()
         self.dataset_dir = Path(dataset_dir)
@@ -75,14 +86,20 @@ class SpriteTrainingDataset(_DatasetBase):
         self.caption_max_length = int(caption_max_length)
         self.semantic_max_length = int(semantic_max_length)
         self.caption_policy_filter = caption_policy_filter
+        self.sprite_ids = None if sprite_ids is None else tuple(str(sprite_id) for sprite_id in sprite_ids)
+        self.structured_vocab = structured_vocab
+        self.cache_samples = bool(cache_samples)
+        self.palette_swap = palette_swap if (palette_swap is not None and palette_swap.active()) else None
 
         all_records = read_jsonl(self.training_manifest)
         self.all_records = list(all_records)
+        sprite_id_set = None if self.sprite_ids is None else set(self.sprite_ids)
         records = [
             record
             for record in all_records
             if (split is None or record.get("split") == split)
             and _matches_caption_policy(record, caption_policy_filter)
+            and (sprite_id_set is None or str(record.get("sprite_id", "")) in sprite_id_set)
         ]
         if max_records is not None:
             records = records[: max(0, int(max_records))]
@@ -91,12 +108,21 @@ class SpriteTrainingDataset(_DatasetBase):
             all_records,
             max_length=self.caption_max_length,
         )
-        self._npz_cache: dict[str, dict[str, np.ndarray]] = {}
+        # ``npz_cache`` may be shared across split datasets so each ``.npz`` file
+        # is decompressed at most once per run. ``_sample_cache`` memoizes the
+        # fully-built per-sample dict: ``__getitem__`` has no randomness, so a
+        # cached sample is byte-for-byte identical to a freshly built one.
+        self._npz_cache: dict[str, dict[str, np.ndarray]] = npz_cache if npz_cache is not None else {}
+        self._sample_cache: dict[int, dict[str, Any]] = {}
 
     def __len__(self) -> int:
         return len(self.records)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        if self.cache_samples:
+            cached = self._sample_cache.get(index)
+            if cached is not None:
+                return cached
         th = _require_torch()
         record = self.records[index]
         npz_file = str(record.get("npz_file") or f"{record.get('split', '')}.npz")
@@ -121,16 +147,38 @@ class SpriteTrainingDataset(_DatasetBase):
         palette = _palette_rgb_float(palette_raw)
         palette_u8 = np.rint(np.clip(palette, 0.0, 1.0) * 255.0).astype(np.uint8)
         palette_mask_np = np.asarray(arrays["palette_mask"][npz_row], dtype=bool)
+        category_id = int(np.asarray(arrays["category_id"])[npz_row])
+        caption = str(record.get("caption", ""))
+        active_record: Mapping[str, Any] = record
+
+        palette_swap_meta: dict[str, Any] | None = None
+        if self.palette_swap is not None:
+            swap = apply_palette_swap(
+                index_map=index_np,
+                alpha=alpha_np,
+                role_map=role_np,
+                palette_rgb=palette,
+                palette_mask=palette_mask_np,
+                record=record,
+                caption=caption,
+                sprite_id=sprite_id,
+                config=self.palette_swap,
+            )
+            palette_swap_meta = swap.metadata()
+            if swap.applied:
+                palette = np.asarray(swap.palette_rgb, dtype=np.float32)
+                palette_u8 = np.rint(np.clip(palette, 0.0, 1.0) * 255.0).astype(np.uint8)
+                caption = swap.caption
+                active_record = swap.record
+
         rgba_np = npz_row_to_rgba(
             index_map=index_np,
             alpha=alpha_np,
-            palette=palette_raw,
+            palette=palette,
             palette_mask=palette_mask_np,
         )
-        category_id = int(np.asarray(arrays["category_id"])[npz_row])
-        caption = str(record.get("caption", ""))
 
-        return {
+        sample = {
             "rgba": th.as_tensor(rgba_np, dtype=th.float32),
             "rgb": th.as_tensor(rgba_np[:3], dtype=th.float32),
             "alpha": th.as_tensor(rgba_np[3:4], dtype=th.float32),
@@ -146,7 +194,7 @@ class SpriteTrainingDataset(_DatasetBase):
                 dtype=th.long,
             ),
             "semantic_tokens": th.as_tensor(
-                self.tokenizer.encode_record_semantics(record, max_length=self.semantic_max_length),
+                self.tokenizer.encode_record_semantics(active_record, max_length=self.semantic_max_length),
                 dtype=th.long,
             ),
             "sprite_id": sprite_id,
@@ -155,6 +203,18 @@ class SpriteTrainingDataset(_DatasetBase):
             "npz_row": npz_row,
             "manifest_record": dict(record),
         }
+        if palette_swap_meta is not None:
+            sample["palette_swap"] = palette_swap_meta
+        if self.structured_vocab is not None:
+            structured = encode_structured_conditioning(active_record, self.structured_vocab)
+            for key in STRUCTURED_BATCH_KEYS:
+                field = key.removeprefix("structured_")
+                dtype = th.float32 if key.endswith("_multi_hot") else th.long
+                sample[key] = th.as_tensor(structured[field], dtype=dtype)
+            sample["structured_present"] = th.as_tensor(bool(structured["structured_present"]), dtype=th.bool)
+        if self.cache_samples:
+            self._sample_cache[index] = sample
+        return sample
 
     def split_counts(self) -> dict[str, int]:
         return dict(Counter(str(record.get("split", "")) for record in self.all_records))
@@ -214,8 +274,13 @@ def collate_sprite_batch(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     batch: dict[str, Any] = {}
     for key in tensor_keys:
         batch[key] = th.stack([sample[key] for sample in samples])
+    for key in (*STRUCTURED_BATCH_KEYS, "structured_present"):
+        if key in samples[0]:
+            batch[key] = th.stack([sample[key] for sample in samples])
     for key in ("caption", "sprite_id", "split", "npz_file"):
         batch[key] = [sample[key] for sample in samples]
+    if "palette_swap" in samples[0]:
+        batch["palette_swap"] = [dict(sample.get("palette_swap") or {}) for sample in samples]
     batch["npz_row"] = [int(sample["npz_row"]) for sample in samples]
     batch["manifest_record"] = [dict(sample["manifest_record"]) for sample in samples]
     return batch

@@ -53,6 +53,7 @@ class SampleGeneratorConfig:
     write_raw_rgba: bool = True
     write_hard_rgba: bool = True
     batch_size: int = 16
+    contact_sheet_labels: str = "prompt"
 
 
 def run_sample_generator(config: SampleGeneratorConfig) -> dict[str, Any]:
@@ -144,6 +145,7 @@ def run_sample_generator(config: SampleGeneratorConfig) -> dict[str, Any]:
         out_dir / "generation_contact_sheet.png",
         include_raw=config.write_raw_rgba,
     )
+    _write_contact_sheet_label_mapping(out_dir, manifest_records, label_mode=config.contact_sheet_labels)
     config_json = {key: _jsonable(value) for key, value in asdict(config).items()}
     report = write_generation_reports(
         out_dir=out_dir,
@@ -219,6 +221,37 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _write_contact_sheet_label_mapping(out_dir: Path, records: list[dict[str, Any]], *, label_mode: str) -> None:
+    rows = []
+    for record in records:
+        paths = record.get("paths") if isinstance(record.get("paths"), dict) else {}
+        rows.append(
+            {
+                "sample_id": record.get("sample_id"),
+                "sample_filename": paths.get("indexed_png") or paths.get("hard_rgba") or paths.get("raw_rgba"),
+                "prompt": record.get("prompt"),
+                "prompt_id": record.get("prompt_id"),
+                "seed": record.get("seed"),
+                "noise_seed": record.get("noise_seed"),
+                "conditioning": record.get("conditioning_mode"),
+                "label_mode": label_mode,
+                "nearest_source_object": record.get("nearest_source_object"),
+                "nearest_source_category": record.get("nearest_source_category"),
+            }
+        )
+    (out_dir / "contact_sheet_labels.json").write_text(
+        json.dumps(rows, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    lines = ["# Contact Sheet Labels", ""]
+    for row in rows:
+        lines.append(
+            f"- `{row.get('sample_id')}` `{row.get('prompt_id')}` seed={row.get('noise_seed')}: {row.get('prompt')}"
+        )
+    lines.append("")
+    (out_dir / "contact_sheet_labels.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> None:
     import argparse
 
@@ -239,6 +272,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--write-hard-rgba", action="store_true", dest="write_hard_rgba", default=True)
     parser.add_argument("--no-write-hard-rgba", action="store_false", dest="write_hard_rgba")
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--contact-sheet-labels",
+        choices=["prompt", "prompt_and_seed", "prompt_and_nearest_source"],
+        default="prompt",
+    )
     parsed = parser.parse_args(argv)
     report = run_sample_generator(SampleGeneratorConfig(**vars(parsed)))
     print(f"Generated samples: {report['sample_count']}")

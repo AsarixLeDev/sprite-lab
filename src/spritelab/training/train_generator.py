@@ -27,6 +27,19 @@ from spritelab.training.conditioning import (
 )
 from spritelab.training.generator_losses import rgba_generator_loss
 from spritelab.training.generator_models import TinyCaptionSpriteGenerator
+from spritelab.training.optim_utils import (
+    amp_autocast,
+    build_lr_scheduler,
+    clip_gradients,
+    dataloader_perf_kwargs,
+    device_type,
+)
+from spritelab.training.overfit_subset import (
+    OverfitSubsetSelection,
+    read_sprite_id_list,
+    select_overfit_subset,
+)
+from spritelab.training.progress import StepProgressBar
 from spritelab.training.rgba import save_rgba_contact_sheet
 from spritelab.training.tokenization import SpriteTextTokenizer
 
@@ -67,6 +80,16 @@ class GeneratorTrainConfig:
     center_weight: float = 0.0
     margin_band_weight: float = 0.0
     margin_band_size: int = 2
+    max_train_sprites: int | None = None
+    sprite_id_list: Path | None = None
+    overfit_split: str | None = None
+    validation_mode: str = "auto"
+    # Opt-in speed/quality knobs. Defaults below keep training numerically
+    # identical to the pre-existing fp32, constant-LR, unclipped path.
+    amp: bool = False
+    grad_clip: float = 0.0
+    lr_schedule: str = "none"
+    lr_warmup_steps: int = 0
 
 
 def set_deterministic_seed(seed: int) -> None:
@@ -93,59 +116,77 @@ def run_generator_training(config: GeneratorTrainConfig) -> dict[str, Any]:
 
     manifest_rows = read_jsonl(config.training_manifest)
     token_rows = [row for row in manifest_rows if _matches_caption_policy(row, config.caption_policy_filter)]
-    train_rows = [row for row in token_rows if row.get("split") == config.split]
+    effective_split = str(config.overfit_split or config.split)
+    subset_selection = _select_training_subset(token_rows, config, split=effective_split)
+    selected_sprite_ids = None if subset_selection is None else subset_selection.sprite_ids
+    train_rows = (
+        list(subset_selection.rows)
+        if subset_selection is not None
+        else [row for row in token_rows if row.get("split") == effective_split]
+    )
     tokenizer = SpriteTextTokenizer.build_from_records(
         train_rows or token_rows or manifest_rows,
         max_length=config.caption_max_length,
     )
     tokenizer.save(out_dir / "vocab.json")
 
+    shared_npz_cache: dict[str, Any] = {}
     train_dataset = SpriteTrainingDataset(
         config.dataset_dir,
         config.training_manifest,
-        split=config.split,
+        split=effective_split,
         max_records=config.max_records,
         tokenizer=tokenizer,
         caption_max_length=config.caption_max_length,
         semantic_max_length=config.semantic_max_length,
         caption_policy_filter=config.caption_policy_filter,
-    )
-    val_dataset = SpriteTrainingDataset(
-        config.dataset_dir,
-        config.training_manifest,
-        split="val",
-        tokenizer=tokenizer,
-        caption_max_length=config.caption_max_length,
-        semantic_max_length=config.semantic_max_length,
-        caption_policy_filter=config.caption_policy_filter,
+        sprite_ids=selected_sprite_ids,
+        npz_cache=shared_npz_cache,
     )
     if len(train_dataset) == 0:
-        raise ValueError(f"training manifest has no records for split {config.split!r}")
+        raise ValueError(f"training manifest has no records for split {effective_split!r}")
 
     train_source = _overfit_subset(train_dataset, config.batch_size, config.overfit_batches)
+    validation_mode = _resolve_validation_mode(config.validation_mode, subset_selection)
+    if validation_mode == "same":
+        val_source = train_source
+    elif validation_mode == "none":
+        val_source = []
+    else:
+        val_source = SpriteTrainingDataset(
+            config.dataset_dir,
+            config.training_manifest,
+            split="val",
+            tokenizer=tokenizer,
+            caption_max_length=config.caption_max_length,
+            semantic_max_length=config.semantic_max_length,
+            caption_policy_filter=config.caption_policy_filter,
+            npz_cache=shared_npz_cache,
+        )
     shuffle = config.overfit_batches <= 0
     loader_generator = th.Generator().manual_seed(config.seed)
+    loader_perf = dataloader_perf_kwargs(device, num_workers=config.num_workers)
     train_loader = th.utils.data.DataLoader(
         train_source,
         batch_size=config.batch_size,
         shuffle=shuffle,
         generator=loader_generator if shuffle else None,
-        num_workers=max(0, int(config.num_workers)),
         collate_fn=collate_sprite_batch,
+        **loader_perf,
     )
     eval_train_loader = th.utils.data.DataLoader(
         train_source,
         batch_size=config.batch_size,
         shuffle=False,
-        num_workers=max(0, int(config.num_workers)),
         collate_fn=collate_sprite_batch,
+        **loader_perf,
     )
     val_loader = th.utils.data.DataLoader(
-        val_dataset,
+        val_source,
         batch_size=config.batch_size,
         shuffle=False,
-        num_workers=max(0, int(config.num_workers)),
         collate_fn=collate_sprite_batch,
+        **loader_perf,
     )
 
     model_config = {
@@ -157,6 +198,13 @@ def run_generator_training(config: GeneratorTrainConfig) -> dict[str, Any]:
     }
     model = TinyCaptionSpriteGenerator(**model_config).to(device)
     optimizer = th.optim.Adam(model.parameters(), lr=config.learning_rate)
+    scheduler = build_lr_scheduler(
+        optimizer,
+        schedule=config.lr_schedule,
+        max_steps=config.max_steps,
+        warmup_steps=config.lr_warmup_steps,
+    )
+    non_blocking = device_type(device) == "cuda"
 
     config_json = {
         **{key: _jsonable(value) for key, value in asdict(config).items()},
@@ -164,7 +212,9 @@ def run_generator_training(config: GeneratorTrainConfig) -> dict[str, Any]:
         "model_config": model_config,
         "train_records": len(train_dataset),
         "effective_train_records": len(train_source),
-        "val_records": len(val_dataset),
+        "val_records": len(val_source),
+        "validation_mode": validation_mode,
+        "overfit_subset": None if subset_selection is None else subset_selection.to_report(),
     }
     (out_dir / "config.json").write_text(json.dumps(config_json, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -185,59 +235,73 @@ def run_generator_training(config: GeneratorTrainConfig) -> dict[str, Any]:
     last_loss_components: dict[str, float] = {}
     framing_config = _framing_config(config)
     model.train()
-    while step < config.max_steps:
-        for batch in train_loader:
-            if step >= config.max_steps:
-                break
-            batch = move_batch_to_device(batch, device)
-            noise = _training_noise(model, batch, device=device, overfit=config.overfit_batches > 0)
-            model_inputs = apply_conditioning_mode(
-                caption_tokens=batch["caption_tokens"],
-                semantic_tokens=batch["semantic_tokens"],
-                mode=conditioning_mode,
-                pad_token_id=tokenizer.pad_id,
-            )
-            outputs = model(
-                **model_inputs,
-                noise=noise,
-            )
-            losses = rgba_generator_loss(outputs, batch, framing_config=framing_config)
-            optimizer.zero_grad(set_to_none=True)
-            losses["loss"].backward()
-            optimizer.step()
-            step += 1
-            last_loss = float(losses["loss"].detach().cpu())
-            loss_metrics = _loss_metrics(losses)
-            last_loss_components = dict(loss_metrics)
-            _append_jsonl(
-                metrics_path,
-                {
-                    "step": step,
-                    **loss_metrics,
-                    "learning_rate": float(optimizer.param_groups[0]["lr"]),
-                    "elapsed_seconds": time.perf_counter() - started,
-                },
-            )
-            if config.sample_every > 0 and step % int(config.sample_every) == 0:
-                _write_sample_sheet(
-                    model,
-                    preview_batch,
-                    out_dir / f"samples_step_{step:06d}.png",
-                    device=device,
-                    conditioning_mode=conditioning_mode,
+    progress = StepProgressBar(config.max_steps, desc=f"generator:{out_dir.name}")
+    # Keep the metrics file open for the whole run instead of reopening it every
+    # step; the line content and order are unchanged, so the file is identical.
+    metrics_handle = metrics_path.open("a", encoding="utf-8")
+    try:
+        while step < config.max_steps:
+            for batch in train_loader:
+                if step >= config.max_steps:
+                    break
+                batch = move_batch_to_device(batch, device, non_blocking=non_blocking)
+                noise = _training_noise(model, batch, device=device, overfit=config.overfit_batches > 0)
+                model_inputs = apply_conditioning_mode(
+                    caption_tokens=batch["caption_tokens"],
+                    semantic_tokens=batch["semantic_tokens"],
+                    mode=conditioning_mode,
                     pad_token_id=tokenizer.pad_id,
                 )
-            if config.save_every > 0 and step % int(config.save_every) == 0:
-                _save_checkpoint(
-                    out_dir / f"checkpoint_step_{step:06d}.pt",
-                    model=model,
-                    optimizer=optimizer,
-                    tokenizer=tokenizer,
-                    config_json=config_json,
-                    step=step,
+                with amp_autocast(device, config.amp):
+                    outputs = model(
+                        **model_inputs,
+                        noise=noise,
+                    )
+                    losses = rgba_generator_loss(outputs, batch, framing_config=framing_config)
+                optimizer.zero_grad(set_to_none=True)
+                losses["loss"].backward()
+                clip_gradients(model, config.grad_clip)
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+                step += 1
+                last_loss = float(losses["loss"].detach().cpu())
+                loss_metrics = _loss_metrics(losses)
+                last_loss_components = dict(loss_metrics)
+                progress.update(step, last_loss, lr=float(optimizer.param_groups[0]["lr"]))
+                _write_jsonl_line(
+                    metrics_handle,
+                    {
+                        "step": step,
+                        **loss_metrics,
+                        "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                        "elapsed_seconds": time.perf_counter() - started,
+                    },
                 )
-        if len(train_loader) == 0:
-            break
+                if config.sample_every > 0 and step % int(config.sample_every) == 0:
+                    _write_sample_sheet(
+                        model,
+                        preview_batch,
+                        out_dir / f"samples_step_{step:06d}.png",
+                        device=device,
+                        conditioning_mode=conditioning_mode,
+                        pad_token_id=tokenizer.pad_id,
+                    )
+                if config.save_every > 0 and step % int(config.save_every) == 0:
+                    metrics_handle.flush()
+                    _save_checkpoint(
+                        out_dir / f"checkpoint_step_{step:06d}.pt",
+                        model=model,
+                        optimizer=optimizer,
+                        tokenizer=tokenizer,
+                        config_json=config_json,
+                        step=step,
+                    )
+            if len(train_loader) == 0:
+                break
+    finally:
+        metrics_handle.close()
+        progress.close(final_loss=last_loss)
 
     final_metrics = evaluate_generator_model(
         model,
@@ -254,7 +318,7 @@ def run_generator_training(config: GeneratorTrainConfig) -> dict[str, Any]:
             conditioning_mode=conditioning_mode,
             pad_token_id=tokenizer.pad_id,
         )
-        if len(val_dataset)
+        if len(val_source)
         else None
     )
     _save_checkpoint(
@@ -284,11 +348,13 @@ def run_generator_training(config: GeneratorTrainConfig) -> dict[str, Any]:
         "max_steps": config.max_steps,
         "steps_completed": step,
         "device": str(device),
-        "split": config.split,
+        "split": effective_split,
         "overfit_batches": config.overfit_batches,
         "train_records": len(train_dataset),
         "effective_train_records": len(train_source),
-        "val_records": len(val_dataset),
+        "val_records": len(val_source),
+        "validation_mode": validation_mode,
+        "overfit_subset": None if subset_selection is None else subset_selection.to_report(),
         "initial_train_loss": initial_metrics["loss"],
         "final_train_loss": final_metrics["loss"],
         "loss_decrease": initial_metrics["loss"] - final_metrics["loss"],
@@ -393,6 +459,33 @@ def _overfit_subset(dataset: Any, batch_size: int, overfit_batches: int) -> Any:
     return th.utils.data.Subset(dataset, list(range(count)))
 
 
+def _select_training_subset(
+    token_rows: list[dict[str, Any]],
+    config: GeneratorTrainConfig,
+    *,
+    split: str,
+) -> OverfitSubsetSelection | None:
+    sprite_ids = read_sprite_id_list(config.sprite_id_list) if config.sprite_id_list is not None else None
+    if config.max_train_sprites is None and sprite_ids is None:
+        return None
+    return select_overfit_subset(
+        token_rows,
+        count=config.max_train_sprites,
+        sprite_ids=sprite_ids,
+        split=split,
+        seed=config.seed,
+    )
+
+
+def _resolve_validation_mode(mode: str, subset_selection: OverfitSubsetSelection | None) -> str:
+    normalized = str(mode or "auto").strip().lower().replace("-", "_")
+    if normalized == "auto":
+        return "same" if subset_selection is not None else "val"
+    if normalized not in {"val", "same", "none"}:
+        raise ValueError("validation_mode must be one of: auto, val, same, none")
+    return normalized
+
+
 def _matches_caption_policy(record: dict[str, Any], caption_policy_filter: str | None) -> bool:
     if not caption_policy_filter:
         return True
@@ -400,9 +493,8 @@ def _matches_caption_policy(record: dict[str, Any], caption_policy_filter: str |
     return str(audit.get("caption_policy", "")) == str(caption_policy_filter)
 
 
-def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
+def _write_jsonl_line(handle: Any, record: dict[str, Any]) -> None:
+    handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def _jsonable(value: Any) -> Any:
@@ -441,6 +533,14 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--center-weight", type=float, default=0.0)
     parser.add_argument("--margin-band-weight", type=float, default=0.0)
     parser.add_argument("--margin-band-size", type=int, default=2)
+    parser.add_argument("--max-train-sprites", type=int)
+    parser.add_argument("--sprite-id-list", type=Path)
+    parser.add_argument("--overfit-split")
+    parser.add_argument("--validation-mode", choices=["auto", "val", "same", "none"], default="auto")
+    parser.add_argument("--amp", action="store_true", default=False, help="Enable bf16 autocast (CUDA only).")
+    parser.add_argument("--grad-clip", type=float, default=0.0, help="Clip gradient norm; 0 disables.")
+    parser.add_argument("--lr-schedule", choices=["none", "cosine"], default="none")
+    parser.add_argument("--lr-warmup-steps", type=int, default=0)
     parsed = parser.parse_args(argv)
     report = run_generator_training(GeneratorTrainConfig(**vars(parsed)))
     print(f"Initial train loss: {report['initial_train_loss']:.6f}")

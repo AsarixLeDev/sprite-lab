@@ -27,4 +27,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --basetemp=.pytest_tmp_run -p no:cacheprovider"
+addopts = "-ra --basetemp=.pytest_tmp_spritelab -p no:cacheprovider"

@@ -113,11 +113,11 @@ def evaluate_baseline_checkpoint(
     return report
 
 
-def move_batch_to_device(batch: dict[str, Any], device: Any) -> dict[str, Any]:
+def move_batch_to_device(batch: dict[str, Any], device: Any, *, non_blocking: bool = False) -> dict[str, Any]:
     th = _require_torch()
     moved: dict[str, Any] = {}
     for key, value in batch.items():
-        moved[key] = value.to(device) if isinstance(value, th.Tensor) else value
+        moved[key] = value.to(device, non_blocking=non_blocking) if isinstance(value, th.Tensor) else value
     return moved
 
 

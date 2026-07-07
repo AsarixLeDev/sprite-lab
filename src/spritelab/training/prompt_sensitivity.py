@@ -36,6 +36,11 @@ from spritelab.training.generated_canonicalizer import (
 )
 from spritelab.training.generator_models import TinyCaptionSpriteGenerator
 from spritelab.training.sample_generator import read_prompt_records
+from spritelab.training.structured_conditioning import (
+    MULTI_HOT_FIELDS,
+    StructuredConditioningVocab,
+    encode_structured_conditioning,
+)
 
 SPRITE_SIZE = 32
 SCHEMA_VERSION = "prompt_sensitivity_v1.0"
@@ -100,12 +105,24 @@ def run_prompt_sensitivity(config: PromptSensitivityConfig) -> dict[str, Any]:
     device = resolve_device(config.device)
 
     ckpt = _load_checkpoint(config.checkpoint)
-    tokenizer = _tokenizer_from_checkpoint(ckpt)
-    conditioning_mode = checkpoint_conditioning_mode(ckpt)
-    semantic_max_length = checkpoint_semantic_max_length(ckpt)
-    model = TinyCaptionSpriteGenerator(**dict(ckpt["model_config"])).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
+    if str(ckpt.get("model_type") or "") == "generator_challenger":
+        from spritelab.training.generator_challenger import load_challenger_prompt_adapter
+
+        model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_prompt_adapter(
+            ckpt,
+            device=device,
+            steps=30,
+            cfg_scale=1.0,
+        )
+        structured_vocab = getattr(model, "structured_vocab", None)
+    else:
+        tokenizer = _tokenizer_from_checkpoint(ckpt)
+        conditioning_mode = checkpoint_conditioning_mode(ckpt)
+        semantic_max_length = checkpoint_semantic_max_length(ckpt)
+        model = TinyCaptionSpriteGenerator(**dict(ckpt["model_config"])).to(device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.eval()
+        structured_vocab = None
 
     prompts = read_prompt_records(config.prompts, max_records=config.max_prompts)
     if not prompts:
@@ -119,6 +136,7 @@ def run_prompt_sensitivity(config: PromptSensitivityConfig) -> dict[str, Any]:
         checkpoint=config.checkpoint,
         conditioning_mode=conditioning_mode,
         semantic_max_length=semantic_max_length,
+        structured_vocab=structured_vocab,
         device=device,
         batch_size=config.batch_size,
         max_colors=config.max_colors,
@@ -142,6 +160,7 @@ def run_prompt_sensitivity(config: PromptSensitivityConfig) -> dict[str, Any]:
         checkpoint=config.checkpoint,
         conditioning_mode=conditioning_mode,
         semantic_max_length=semantic_max_length,
+        structured_vocab=structured_vocab,
         device=device,
         batch_size=config.batch_size,
         max_colors=config.max_colors,
@@ -168,6 +187,7 @@ def run_prompt_sensitivity(config: PromptSensitivityConfig) -> dict[str, Any]:
         checkpoint=config.checkpoint,
         conditioning_mode=conditioning_mode,
         semantic_max_length=semantic_max_length,
+        structured_vocab=structured_vocab,
         device=device,
         max_colors=config.max_colors,
         alpha_threshold=config.alpha_threshold,
@@ -427,6 +447,7 @@ def _generate_prompt_set(
     checkpoint: Path,
     conditioning_mode: str,
     semantic_max_length: int,
+    structured_vocab: StructuredConditioningVocab | None,
     device: Any,
     batch_size: int,
     max_colors: int,
@@ -458,7 +479,7 @@ def _generate_prompt_set(
             device=device,
         )
         if fixed_noise is not None:
-            noise = fixed_noise.repeat(len(batch), 1)
+            noise = fixed_noise.repeat((len(batch),) + (1,) * (fixed_noise.ndim - 1))
             noise_seeds = [int(fixed_noise_seed)] * len(batch)
         else:
             start = int(noise_seed_start if noise_seed_start is not None else seed * 100000)
@@ -469,6 +490,11 @@ def _generate_prompt_set(
             semantic_tokens=semantic_tokens,
             mode=conditioning_mode,
             pad_token_id=tokenizer.pad_id,
+            structured_conditioning=_structured_conditioning_for_records(
+                batch,
+                structured_vocab=structured_vocab,
+                device=device,
+            ),
         )
         with th.no_grad():
             outputs = model(**inputs, noise=noise)
@@ -522,6 +548,7 @@ def _generate_prompt_pairs(
     checkpoint: Path,
     conditioning_mode: str,
     semantic_max_length: int,
+    structured_vocab: StructuredConditioningVocab | None,
     device: Any,
     max_colors: int,
     alpha_threshold: float,
@@ -544,6 +571,7 @@ def _generate_prompt_pairs(
             checkpoint=checkpoint,
             conditioning_mode=conditioning_mode,
             semantic_max_length=semantic_max_length,
+            structured_vocab=structured_vocab,
             device=device,
             batch_size=2,
             max_colors=max_colors,
@@ -589,6 +617,24 @@ def _generate_prompt_pairs(
         contact_sheet=None if contact_sheet is None else contact_sheet.name,
     )
     return generated_records, pair_reports
+
+
+def _structured_conditioning_for_records(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    structured_vocab: StructuredConditioningVocab | None,
+    device: Any,
+) -> dict[str, Any] | None:
+    if structured_vocab is None:
+        return None
+    th = _require_torch()
+    encoded = [encode_structured_conditioning(record, structured_vocab) for record in records]
+    result: dict[str, Any] = {}
+    for field in ("category_id", "object_id", "base_object_id", "primary_color_id"):
+        result[field] = th.as_tensor([int(row[field]) for row in encoded], dtype=th.long, device=device)
+    for field in MULTI_HOT_FIELDS:
+        result[field] = th.as_tensor([row[field] for row in encoded], dtype=th.float32, device=device)
+    return result
 
 
 def _outputs_to_rgba(outputs: Mapping[str, Any]) -> np.ndarray:

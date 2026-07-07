@@ -5,7 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-CONDITIONING_MODES: tuple[str, ...] = ("caption", "semantic", "caption_semantic", "none")
+STRUCTURED_CONDITIONING_MODE = "caption_semantic_structured"
+CONDITIONING_MODES: tuple[str, ...] = (
+    "caption",
+    "semantic",
+    "caption_semantic",
+    STRUCTURED_CONDITIONING_MODE,
+    "none",
+)
 DEFAULT_CONDITIONING_MODE = "caption_semantic"
 
 
@@ -42,12 +49,17 @@ def checkpoint_semantic_max_length(checkpoint: Mapping[str, Any], *, fallback: i
     return max(1, int(fallback))
 
 
+def uses_structured_conditioning(mode: str | None) -> bool:
+    return validate_conditioning_mode(mode) == STRUCTURED_CONDITIONING_MODE
+
+
 def apply_conditioning_mode(
     *,
     caption_tokens: Any,
     semantic_tokens: Any | None,
     mode: str,
     pad_token_id: int = 0,
+    structured_conditioning: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return model inputs for a selected conditioning mode.
 
@@ -65,4 +77,9 @@ def apply_conditioning_mode(
         return {"caption_tokens": null_caption, "semantic_tokens": semantic_tokens}
     if normalized == "caption_semantic":
         return {"caption_tokens": caption_tokens, "semantic_tokens": semantic_tokens}
+    if normalized == STRUCTURED_CONDITIONING_MODE:
+        result = {"caption_tokens": caption_tokens, "semantic_tokens": semantic_tokens}
+        if structured_conditioning is not None:
+            result["structured_conditioning"] = structured_conditioning
+        return result
     return {"caption_tokens": null_caption, "semantic_tokens": None}

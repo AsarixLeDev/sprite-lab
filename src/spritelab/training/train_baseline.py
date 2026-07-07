@@ -20,6 +20,13 @@ from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch,
 from spritelab.training.eval_baseline import evaluate_model, move_batch_to_device, resolve_device, save_reconstruction_sheet
 from spritelab.training.losses import sprite_reconstruction_loss
 from spritelab.training.models import SpriteCondAutoencoder
+from spritelab.training.optim_utils import (
+    amp_autocast,
+    build_lr_scheduler,
+    clip_gradients,
+    dataloader_perf_kwargs,
+    device_type,
+)
 from spritelab.training.tokenization import SpriteTextTokenizer
 
 
@@ -44,6 +51,12 @@ class BaselineTrainConfig:
     caption_max_length: int = 32
     semantic_max_length: int = 48
     hidden_dim: int = 48
+    num_workers: int = 0
+    # Opt-in speed/quality knobs; defaults keep training numerically identical.
+    amp: bool = False
+    grad_clip: float = 0.0
+    lr_schedule: str = "none"
+    lr_warmup_steps: int = 0
 
 
 def set_deterministic_seed(seed: int) -> None:
@@ -72,6 +85,7 @@ def run_baseline_training(config: BaselineTrainConfig) -> dict[str, Any]:
     tokenizer = SpriteTextTokenizer.build_from_records(train_rows or manifest_rows, max_length=config.caption_max_length)
     tokenizer.save(out_dir / "vocab.json")
 
+    shared_npz_cache: dict[str, Any] = {}
     train_dataset = SpriteTrainingDataset(
         config.dataset_dir,
         config.training_manifest,
@@ -80,6 +94,7 @@ def run_baseline_training(config: BaselineTrainConfig) -> dict[str, Any]:
         tokenizer=tokenizer,
         caption_max_length=config.caption_max_length,
         semantic_max_length=config.semantic_max_length,
+        npz_cache=shared_npz_cache,
     )
     val_dataset = SpriteTrainingDataset(
         config.dataset_dir,
@@ -88,6 +103,7 @@ def run_baseline_training(config: BaselineTrainConfig) -> dict[str, Any]:
         tokenizer=tokenizer,
         caption_max_length=config.caption_max_length,
         semantic_max_length=config.semantic_max_length,
+        npz_cache=shared_npz_cache,
     )
     if len(train_dataset) == 0:
         raise ValueError("training manifest has no train records")
@@ -95,20 +111,29 @@ def run_baseline_training(config: BaselineTrainConfig) -> dict[str, Any]:
     train_source = _overfit_subset(train_dataset, config.batch_size, config.overfit_batches)
     shuffle = config.overfit_batches <= 0
     generator = th.Generator().manual_seed(config.seed)
+    loader_perf = dataloader_perf_kwargs(device, num_workers=config.num_workers)
     train_loader = th.utils.data.DataLoader(
         train_source,
         batch_size=config.batch_size,
         shuffle=shuffle,
         generator=generator if shuffle else None,
         collate_fn=collate_sprite_batch,
+        **loader_perf,
     )
     eval_train_loader = th.utils.data.DataLoader(
         train_source,
         batch_size=config.batch_size,
         shuffle=False,
         collate_fn=collate_sprite_batch,
+        **loader_perf,
     )
-    val_loader = th.utils.data.DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False, collate_fn=collate_sprite_batch)
+    val_loader = th.utils.data.DataLoader(
+        val_dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        collate_fn=collate_sprite_batch,
+        **loader_perf,
+    )
 
     first_sample = train_dataset[0]
     num_palette_slots = int(first_sample["palette_mask"].shape[0])
@@ -125,6 +150,13 @@ def run_baseline_training(config: BaselineTrainConfig) -> dict[str, Any]:
     }
     model = SpriteCondAutoencoder(**model_config).to(device)
     optimizer = th.optim.Adam(model.parameters(), lr=config.learning_rate)
+    scheduler = build_lr_scheduler(
+        optimizer,
+        schedule=config.lr_schedule,
+        max_steps=config.max_steps,
+        warmup_steps=config.lr_warmup_steps,
+    )
+    non_blocking = device_type(device) == "cuda"
 
     config_json = {
         **{key: _jsonable(value) for key, value in asdict(config).items()},
@@ -141,37 +173,47 @@ def run_baseline_training(config: BaselineTrainConfig) -> dict[str, Any]:
     step = 0
     last_loss = initial_metrics["loss"]
     model.train()
-    while step < config.max_steps:
-        for batch in train_loader:
-            if step >= config.max_steps:
+    # Keep the metrics file open for the whole run instead of reopening it every
+    # step; the line content and order are unchanged, so the file is identical.
+    metrics_handle = metrics_path.open("a", encoding="utf-8")
+    try:
+        while step < config.max_steps:
+            for batch in train_loader:
+                if step >= config.max_steps:
+                    break
+                batch = move_batch_to_device(batch, device, non_blocking=non_blocking)
+                with amp_autocast(device, config.amp):
+                    outputs = model(
+                        index_map=batch["index_map"],
+                        alpha=batch["alpha"],
+                        role_map=batch["role_map"],
+                        caption_tokens=batch["caption_tokens"],
+                        semantic_tokens=batch["semantic_tokens"],
+                        category_id=batch["category_id"],
+                    )
+                    losses = sprite_reconstruction_loss(outputs, batch)
+                optimizer.zero_grad(set_to_none=True)
+                losses["loss"].backward()
+                clip_gradients(model, config.grad_clip)
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+                step += 1
+                last_loss = float(losses["loss"].detach().cpu())
+                _write_jsonl_line(
+                    metrics_handle,
+                    {
+                        "step": step,
+                        "loss": last_loss,
+                        "loss_alpha": float(losses["loss_alpha"].detach().cpu()),
+                        "loss_index": float(losses["loss_index"].detach().cpu()),
+                        "loss_role": float(losses["loss_role"].detach().cpu()),
+                    },
+                )
+            if len(train_loader) == 0:
                 break
-            batch = move_batch_to_device(batch, device)
-            outputs = model(
-                index_map=batch["index_map"],
-                alpha=batch["alpha"],
-                role_map=batch["role_map"],
-                caption_tokens=batch["caption_tokens"],
-                semantic_tokens=batch["semantic_tokens"],
-                category_id=batch["category_id"],
-            )
-            losses = sprite_reconstruction_loss(outputs, batch)
-            optimizer.zero_grad(set_to_none=True)
-            losses["loss"].backward()
-            optimizer.step()
-            step += 1
-            last_loss = float(losses["loss"].detach().cpu())
-            _append_jsonl(
-                metrics_path,
-                {
-                    "step": step,
-                    "loss": last_loss,
-                    "loss_alpha": float(losses["loss_alpha"].detach().cpu()),
-                    "loss_index": float(losses["loss_index"].detach().cpu()),
-                    "loss_role": float(losses["loss_role"].detach().cpu()),
-                },
-            )
-        if len(train_loader) == 0:
-            break
+    finally:
+        metrics_handle.close()
 
     final_metrics = evaluate_model(model, eval_train_loader, device=device)
     val_metrics = evaluate_model(model, val_loader, device=device) if len(val_dataset) else None
@@ -341,9 +383,8 @@ def _max_category_id(dataset: SpriteTrainingDataset) -> int:
     return max_category
 
 
-def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
+def _write_jsonl_line(handle: Any, record: dict[str, Any]) -> None:
+    handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def _jsonable(value: Any) -> Any:
@@ -366,6 +407,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--overfit-batches", type=int, default=0)
     parser.add_argument("--max-records", type=int)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--amp", action="store_true", default=False, help="Enable bf16 autocast (CUDA only).")
+    parser.add_argument("--grad-clip", type=float, default=0.0, help="Clip gradient norm; 0 disables.")
+    parser.add_argument("--lr-schedule", choices=["none", "cosine"], default="none")
+    parser.add_argument("--lr-warmup-steps", type=int, default=0)
     parsed = parser.parse_args(argv)
     report = run_baseline_training(BaselineTrainConfig(**vars(parsed)))
     print(f"Initial train loss: {report['initial_train_loss']:.6f}")
