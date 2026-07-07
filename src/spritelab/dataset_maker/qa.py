@@ -50,6 +50,17 @@ _EXPECTED_NPZ_KEYS: frozenset[str] = frozenset(
     {"alpha", "index_map", "role_map", "palette", "palette_mask", "category_id", "sprite_id"}
 )
 
+# semantic_v3 caption hygiene: these must never appear inside a caption.
+FORBIDDEN_CAPTION_CONTENT: tuple[str, ...] = ("photorealistic", "watermark", "text overlay")
+
+# Hard cap on caption length; anything longer is a caption-generation bug.
+MAX_SEMANTIC_CAPTION_LENGTH = 300
+
+# Base objects whose sprites are expected to carry color information.
+_COLOR_EXPECTED_BASE_OBJECTS: frozenset[str] = frozenset(
+    {"gem", "crystal", "potion", "vial", "bottle", "flask", "jar"}
+)
+
 
 @dataclass
 class DatasetQAResult:
@@ -65,6 +76,7 @@ class DatasetQAResult:
     image_checks: dict[str, Any] = field(default_factory=dict)
     manifest_checks: dict[str, Any] = field(default_factory=dict)
     label_v2_checks: dict[str, Any] = field(default_factory=dict)
+    semantic_v3_checks: dict[str, Any] = field(default_factory=dict)
     split_checks: dict[str, Any] = field(default_factory=dict)
     review_queue_overlap: list[str] = field(default_factory=list)
 
@@ -96,6 +108,7 @@ class DatasetQAResult:
             "image_checks": dict(self.image_checks),
             "manifest_checks": dict(self.manifest_checks),
             "label_v2_checks": dict(self.label_v2_checks),
+            "semantic_v3_checks": dict(self.semantic_v3_checks),
             "split_checks": dict(self.split_checks),
             "review_queue_overlap": list(self.review_queue_overlap),
         }
@@ -112,11 +125,14 @@ def qa_dataset(
     expected_fractions: tuple[float, float, float] = (0.8, 0.1, 0.1),
     max_object_share: float = 0.20,
     strict: bool = False,
+    require_semantic_v3: bool = False,
 ) -> DatasetQAResult:
     """Validate an exported dataset directory. Never mutates the dataset.
 
     ``strict`` escalates the normally-soft raster warnings (all-transparent
-    sprites, single-tag records) to errors.
+    sprites, single-tag records) to errors. ``require_semantic_v3`` makes
+    missing ``semantic_v3`` metadata an error on every record; without it,
+    semantic checks only apply to records that carry the metadata.
     """
 
     dataset_dir = Path(dataset_dir)
@@ -143,6 +159,7 @@ def qa_dataset(
     _check_images(result, manifests, npz_by_split, max_palette_slots=max_palette_slots, strict=strict)
     _check_manifests(result, dataset_dir, all_records, config, strict=strict)
     _check_label_v2(result, all_records)
+    _check_semantic_v3(result, all_records, require_semantic_v3=require_semantic_v3)
     _check_splits(result, manifests, npz_by_split, expected_fractions=expected_fractions)
     _build_counts(result, all_records, vocab)
     _check_distribution(result, all_records, vocab, max_object_share=max_object_share)
@@ -509,6 +526,163 @@ def _check_label_v2(result: DatasetQAResult, records: Sequence[Mapping[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# Semantic-v3 checks
+# ---------------------------------------------------------------------------
+
+
+def _check_semantic_v3(
+    result: DatasetQAResult,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    require_semantic_v3: bool,
+) -> None:
+    records_with = [r for r in records if isinstance(r.get("semantic_v3"), Mapping) and r.get("semantic_v3")]
+    is_semantic_dataset = bool(records_with)
+
+    missing_semantic: list[str] = []
+    missing_schema_version: list[str] = []
+    missing_base_object: list[str] = []
+    missing_open_name: list[str] = []
+    missing_attributes: list[str] = []
+    missing_captions: list[str] = []
+    bad_captions: list[str] = []
+    forbidden_captions: list[str] = []
+    category_mismatch: list[str] = []
+    object_name_mismatch: list[str] = []
+    few_captions: list[str] = []
+    missing_negative_tags: list[str] = []
+    no_attributes: list[str] = []
+    base_equals_compound_name: list[str] = []
+    missing_expected_colors: list[str] = []
+
+    for record in records:
+        sprite_id = str(record.get("sprite_id", ""))
+        semantic = record.get("semantic_v3")
+        if not isinstance(semantic, Mapping) or not semantic:
+            missing_semantic.append(sprite_id)
+            continue
+
+        if not str(semantic.get("schema_version", "")).strip():
+            missing_schema_version.append(sprite_id)
+        base_object = str(semantic.get("base_object", "")).strip()
+        if not base_object:
+            missing_base_object.append(sprite_id)
+        if not str(semantic.get("open_name", "")).strip():
+            missing_open_name.append(sprite_id)
+
+        attributes = semantic.get("attributes")
+        if not isinstance(attributes, Mapping):
+            missing_attributes.append(sprite_id)
+            attributes = {}
+
+        captions = semantic.get("captions")
+        caption_texts: list[str] = []
+        if not isinstance(captions, list) or not captions:
+            missing_captions.append(sprite_id)
+        else:
+            for caption in captions:
+                if not isinstance(caption, str) or not caption.strip():
+                    bad_captions.append(f"{sprite_id}: non-string or empty caption")
+                    continue
+                if len(caption) > MAX_SEMANTIC_CAPTION_LENGTH:
+                    bad_captions.append(f"{sprite_id}: caption longer than {MAX_SEMANTIC_CAPTION_LENGTH} chars")
+                    continue
+                caption_texts.append(caption)
+            for caption in caption_texts:
+                lowered = caption.lower()
+                for forbidden in FORBIDDEN_CAPTION_CONTENT:
+                    if forbidden in lowered:
+                        forbidden_captions.append(f"{sprite_id}: '{forbidden}' in caption")
+            if len(caption_texts) < 3:
+                few_captions.append(sprite_id)
+
+        semantic_category = str(semantic.get("category", "")).strip()
+        manifest_category = str(record.get("category", "")).strip()
+        if semantic_category and manifest_category and semantic_category != manifest_category:
+            category_mismatch.append(f"{sprite_id}: semantic={semantic_category} manifest={manifest_category}")
+        semantic_object = str(semantic.get("object_name", "")).strip()
+        manifest_object = str(record.get("object_name", "")).strip()
+        if semantic_object and manifest_object and semantic_object != manifest_object:
+            object_name_mismatch.append(f"{sprite_id}: semantic={semantic_object} manifest={manifest_object}")
+
+        negative_tags = semantic.get("negative_tags")
+        if not isinstance(negative_tags, list) or not negative_tags:
+            missing_negative_tags.append(sprite_id)
+
+        attribute_lists = [value for value in attributes.values() if isinstance(value, list) and value]
+        if not attribute_lists:
+            no_attributes.append(sprite_id)
+        if base_object and base_object == manifest_object and "_" in manifest_object:
+            base_equals_compound_name.append(sprite_id)
+        colors = attributes.get("colors") if isinstance(attributes, Mapping) else None
+        if base_object in _COLOR_EXPECTED_BASE_OBJECTS and not (isinstance(colors, list) and colors):
+            missing_expected_colors.append(sprite_id)
+
+    result.semantic_v3_checks = {
+        "is_semantic_v3_dataset": is_semantic_dataset,
+        "require_semantic_v3": bool(require_semantic_v3),
+        "records_with_semantic_v3": len(records_with),
+        "missing_semantic_v3": missing_semantic,
+        "missing_schema_version": missing_schema_version,
+        "missing_base_object": missing_base_object,
+        "missing_open_name": missing_open_name,
+        "missing_attributes": missing_attributes,
+        "missing_captions": missing_captions,
+        "bad_captions": bad_captions,
+        "forbidden_caption_content": forbidden_captions,
+        "category_mismatch": category_mismatch,
+        "object_name_mismatch": object_name_mismatch,
+        "few_captions": few_captions,
+        "missing_negative_tags": missing_negative_tags,
+        "no_attributes_extracted": no_attributes,
+        "base_object_equals_compound_name": base_equals_compound_name,
+        "missing_expected_colors": missing_expected_colors,
+    }
+
+    if require_semantic_v3:
+        for sprite_id in missing_semantic:
+            result.add_error(f"record missing required semantic_v3 metadata: {sprite_id}")
+    elif is_semantic_dataset and missing_semantic:
+        result.add_warning(
+            f"{len(missing_semantic)}/{len(records)} records lack semantic_v3 in a semantic dataset"
+        )
+
+    for sprite_id in missing_schema_version:
+        result.add_error(f"semantic_v3.schema_version missing: {sprite_id}")
+    for sprite_id in missing_base_object:
+        result.add_error(f"semantic_v3.base_object missing: {sprite_id}")
+    for sprite_id in missing_open_name:
+        result.add_error(f"semantic_v3.open_name missing: {sprite_id}")
+    for sprite_id in missing_attributes:
+        result.add_error(f"semantic_v3.attributes missing: {sprite_id}")
+    for sprite_id in missing_captions:
+        result.add_error(f"semantic_v3.captions missing or empty: {sprite_id}")
+    for entry in bad_captions:
+        result.add_error(f"semantic_v3 caption invalid: {entry}")
+    for entry in forbidden_captions:
+        result.add_error(f"semantic_v3 caption contains forbidden content: {entry}")
+    for entry in category_mismatch:
+        result.add_error(f"semantic_v3.category does not match manifest: {entry}")
+    for entry in object_name_mismatch:
+        result.add_error(f"semantic_v3.object_name does not match manifest: {entry}")
+
+    if few_captions:
+        result.add_warning(f"{len(few_captions)} semantic_v3 records have fewer than 3 captions")
+    if missing_negative_tags:
+        result.add_warning(f"{len(missing_negative_tags)} semantic_v3 records have no negative_tags")
+    if no_attributes:
+        result.add_warning(f"{len(no_attributes)} semantic_v3 records have no extracted attributes")
+    if records_with and len(base_equals_compound_name) > max(2, len(records_with) // 4):
+        result.add_warning(
+            f"{len(base_equals_compound_name)} semantic_v3 records keep the full compound name as base_object"
+        )
+    if missing_expected_colors:
+        result.add_warning(
+            f"{len(missing_expected_colors)} semantic_v3 gem/container records have no color information"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Split checks
 # ---------------------------------------------------------------------------
 
@@ -756,6 +930,21 @@ def _render_markdown(result: DatasetQAResult) -> str:
     lines.append(f"- applied != true: {len(lc.get('applied_not_true', []))}")
     lines.append(f"- missing bucket: {len(lc.get('missing_bucket', []))}")
     lines.append(f"- missing flags: {len(lc.get('missing_flags', []))}")
+    lines.append("")
+
+    lines.append("## Semantic-v3 Checks")
+    lines.append("")
+    sc = result.semantic_v3_checks
+    lines.append(f"- semantic-v3 dataset: {sc.get('is_semantic_v3_dataset')}")
+    lines.append(f"- required: {sc.get('require_semantic_v3')}")
+    lines.append(f"- records with semantic_v3: {sc.get('records_with_semantic_v3', 0)}")
+    lines.append(f"- missing semantic_v3: {len(sc.get('missing_semantic_v3', []))}")
+    lines.append(f"- missing base_object: {len(sc.get('missing_base_object', []))}")
+    lines.append(f"- missing captions: {len(sc.get('missing_captions', []))}")
+    lines.append(f"- invalid captions: {len(sc.get('bad_captions', []))}")
+    lines.append(f"- forbidden caption content: {len(sc.get('forbidden_caption_content', []))}")
+    lines.append(f"- category mismatches: {len(sc.get('category_mismatch', []))}")
+    lines.append(f"- object_name mismatches: {len(sc.get('object_name_mismatch', []))}")
     lines.append("")
 
     lines.append("## Distribution")

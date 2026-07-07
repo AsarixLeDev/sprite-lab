@@ -138,11 +138,11 @@ def detect_source_profile(record: Mapping[str, Any]) -> SourceProfile:
     source_name = normalize_tag(str(record.get("source_name", "")))
     text = f"{source_id}_{source_name}_{haystack}"
 
-    if "oga_cc0_food_ocal" in text or {"cc0", "food", "ocal"} <= tokens:
+    if "oga_cc0_food" in text or {"cc0", "food"} <= tokens:
         return _PROFILES["cc0_food"]
-    if "oga_cc0_tool_ocal" in text or {"cc0", "tool", "ocal"} <= tokens:
+    if "oga_cc0_tool" in text or {"cc0", "tool"} <= tokens:
         return _PROFILES["cc0_tool"]
-    if "oga_cc0_gem_7soul1" in text or {"cc0", "gem", "7soul1"} <= tokens:
+    if "oga_cc0_gem" in text or {"cc0", "gem"} <= tokens:
         return _PROFILES["cc0_gem"]
     if "jewelry" in tokens or "jewellery" in tokens:
         return _PROFILES["cc0_jewelry"]

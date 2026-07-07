@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-torch = pytest.importorskip("torch")
+torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from _ml_testdata import PALETTE_ROWS, make_synthetic_arrays, write_synthetic_dataset
 

@@ -289,6 +289,7 @@ def _manifest_records(sprites: Sequence[_PreparedSprite]) -> list[dict[str, Any]
         item = sprite.item
         label_v2 = _label_v2_manifest_metadata(sprite.auto_metadata)
         safe_prefill = _mapping(sprite.auto_metadata.get("label_v2_safe_prefill")) if isinstance(sprite.auto_metadata, Mapping) else {}
+        semantic_v3 = _mapping(sprite.auto_metadata.get("semantic_v3")) if isinstance(sprite.auto_metadata, Mapping) else {}
         records.append(
             {
                 "sprite_id": item.sprite_id,
@@ -308,6 +309,7 @@ def _manifest_records(sprites: Sequence[_PreparedSprite]) -> list[dict[str, Any]
                 "author": item.author,
                 "notes": item.notes,
                 "label_v2": label_v2,
+                **({"semantic_v3": semantic_v3} if semantic_v3 else {}),
             }
         )
     return records
@@ -323,6 +325,8 @@ def _label_v2_manifest_metadata(auto_metadata: Mapping[str, Any]) -> dict[str, A
         "flags": [str(value) for value in auto_metadata.get("label_v2_flags") or ()],
         "candidate_object_names": [str(value) for value in auto_metadata.get("label_v2_candidate_object_names") or ()],
     }
+    if auto_metadata.get("label_v2_applied_at_build_id"):
+        result["applied_at_build_id"] = str(auto_metadata.get("label_v2_applied_at_build_id", ""))
     safe_prefill = _mapping(auto_metadata.get("label_v2_safe_prefill"))
     if safe_prefill:
         result["safe_prefill"] = safe_prefill

@@ -26,6 +26,7 @@ from spritelab.harvest.visual_facts import extract_visual_facts_from_png, visual
 LABEL_V2_SUGGESTIONS = "label_v2_suggestions.jsonl"
 LABEL_V2_REPORT = "label_v2_report.md"
 LABEL_V2_SUMMARY = "label_v2_summary.json"
+DEFAULT_LABEL_V2_INCLUDE_STATUSES = ("accepted", "quarantine", "needs_fix")
 VLM_STAT_KEYS = (
     "vlm_reused_existing",
     "vlm_backend_called",
@@ -43,6 +44,20 @@ class _VlmSelection:
     stats: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class LabelV2InputSelection:
+    selected_records: tuple[dict[str, Any], ...]
+    skipped_by_reason: dict[str, int]
+    include_statuses: tuple[str, ...]
+
+    def to_summary(self) -> dict[str, Any]:
+        return {
+            "eligible_imported_records": len(self.selected_records),
+            "include_statuses": list(self.include_statuses),
+            "skipped_by_reason": dict(sorted(self.skipped_by_reason.items())),
+        }
+
+
 def build_label_v2_records(
     run_dir: str | Path,
     *,
@@ -58,15 +73,17 @@ def build_label_v2_records(
     refresh_vlm: bool = False,
     ignore_existing_vlm: bool = False,
     workers: int = 1,
+    include_statuses: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Build label-v2 suggestion records for accepted sprites in a harvest run."""
+    """Build label-v2 suggestion records for valid onboarded sprites in a harvest run."""
 
     run_path = Path(run_dir)
-    imported = [record for record in read_jsonl(run_path / "imported.jsonl") if str(record.get("status", "")).lower() == "accepted"]
+    selection = select_label_v2_input_records(run_path, include_statuses=include_statuses)
+    imported = list(selection.selected_records)
     if max_items is not None:
         imported = imported[: max(0, int(max_items))]
 
-    reuse_existing_vlm = not (refresh_vlm or ignore_existing_vlm)
+    reuse_existing_vlm = bool(use_vlm) and not (refresh_vlm or ignore_existing_vlm)
     qwen_by_id = dict(existing_vlm_by_id or _qwen_by_id(read_jsonl(run_path / "qwen_suggestions.jsonl"))) if reuse_existing_vlm else {}
     thresholds = FusionThresholds(
         trusted_filename_threshold=trusted_filename_threshold,
@@ -125,6 +142,57 @@ def build_label_v2_records(
             )
 
     return [output_by_index[index] for index in sorted(output_by_index)]
+
+
+def select_label_v2_input_records(
+    run_dir: str | Path,
+    *,
+    include_statuses: Sequence[str] | None = None,
+) -> LabelV2InputSelection:
+    """Return imported records eligible for label-v2 and deterministic skip counts."""
+
+    run_path = Path(run_dir)
+    statuses = normalize_include_statuses(include_statuses)
+    status_filter = None if statuses == ("all",) else set(statuses)
+    selected: list[dict[str, Any]] = []
+    skipped: Counter[str] = Counter()
+    for record in read_jsonl(run_path / "imported.jsonl"):
+        status = str(record.get("status", "")).strip().lower()
+        if status_filter is not None and status not in status_filter:
+            skipped["skipped_status_filtered"] += 1
+            continue
+        errors = record.get("errors")
+        if isinstance(errors, Sequence) and not isinstance(errors, (str, bytes)) and errors:
+            skipped["skipped_invalid_bundle"] += 1
+            continue
+        image_path = _resolve_path(record, run_dir=run_path)
+        if not image_path.is_file():
+            skipped["skipped_missing_png"] += 1
+            continue
+        selected.append(dict(record))
+    return LabelV2InputSelection(
+        selected_records=tuple(selected),
+        skipped_by_reason={key: int(value) for key, value in skipped.items()},
+        include_statuses=statuses,
+    )
+
+
+def normalize_include_statuses(values: Sequence[str] | None) -> tuple[str, ...]:
+    if not values:
+        return DEFAULT_LABEL_V2_INCLUDE_STATUSES
+    raw_values: list[str] = []
+    for value in values:
+        raw_values.extend(str(value).split(","))
+    normalized = tuple(
+        str(value).strip().lower()
+        for value in raw_values
+        if str(value).strip()
+    )
+    if not normalized or "all_valid" in normalized:
+        return DEFAULT_LABEL_V2_INCLUDE_STATUSES
+    if "all" in normalized:
+        return ("all",)
+    return normalized
 
 
 def _select_vlm_for_groups(
@@ -288,11 +356,19 @@ def build_label_v2_record(
     return output
 
 
-def write_label_v2_outputs(run_dir: str | Path, records: Sequence[Mapping[str, Any]], *, out: str | Path | None = None) -> dict[str, Path]:
+def write_label_v2_outputs(
+    run_dir: str | Path,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    out: str | Path | None = None,
+    input_selection: LabelV2InputSelection | None = None,
+) -> dict[str, Path]:
     run_path = Path(run_dir)
-    suggestions_path = Path(out) if out is not None else run_path / LABEL_V2_SUGGESTIONS
+    suggestions_path = _resolve_output_path(run_path, out) if out is not None else run_path / LABEL_V2_SUGGESTIONS
     write_jsonl(suggestions_path, records)
     summary = summarize_label_v2_records(records)
+    if input_selection is not None:
+        summary["input_selection"] = input_selection.to_summary()
     summary_path = run_path / LABEL_V2_SUMMARY
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     report_path = run_path / LABEL_V2_REPORT
@@ -374,6 +450,24 @@ def format_label_v2_run_report(summary: Mapping[str, Any]) -> str:
     vlm_stats = dict(summary.get("vlm_stats") or {})
     for key in VLM_STAT_KEYS:
         lines.append(f"- {key}: {int(vlm_stats.get(key, 0))}")
+    lines.extend(
+        [
+            "",
+            "## Input selection",
+        ]
+    )
+    selection = dict(summary.get("input_selection") or {})
+    if selection:
+        lines.append(f"- eligible_imported_records: {int(selection.get('eligible_imported_records', 0))}")
+        lines.append("- include_statuses: " + ", ".join(str(value) for value in selection.get("include_statuses") or ()))
+        skipped = dict(selection.get("skipped_by_reason") or {})
+        if skipped:
+            for reason, count in skipped.items():
+                lines.append(f"- {reason}: {count}")
+        else:
+            lines.append("- skipped: 0")
+    else:
+        lines.append("- (not recorded)")
     lines.extend(
         [
             "",
@@ -538,6 +632,11 @@ def _resolve_path(record: Mapping[str, Any], *, run_dir: str | Path) -> Path:
         if candidate.exists():
             return candidate.resolve()
     return (Path.cwd() / path).resolve()
+
+
+def _resolve_output_path(run_dir: Path, value: str | Path) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else run_dir / path
 
 
 def _object_from_mapping(value: Any) -> str:

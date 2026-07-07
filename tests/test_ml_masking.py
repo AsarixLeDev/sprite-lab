@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-torch = pytest.importorskip("torch")
+torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from _ml_testdata import write_synthetic_dataset
 

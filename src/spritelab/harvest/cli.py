@@ -81,6 +81,18 @@ def main(argv: Sequence[str] | None = None) -> None:
     apply_label_v2.add_argument("--dry-run", action="store_true")
     apply_label_v2.add_argument("--overwrite-human-labels", action="store_true")
 
+    semantic_v3 = subparsers.add_parser("semantic-v3", help="Add semantic-v3 compositional metadata to label-v2 predictions.")
+    semantic_v3.add_argument("--run", required=True, type=Path)
+    semantic_v3.add_argument("--prediction-file", default="label_v2_suggestions.jsonl")
+    semantic_v3.add_argument("--out", type=Path, help="Defaults to <prediction-file stem>_semantic_v3.jsonl in the run directory.")
+    semantic_v3.add_argument("--max-captions", type=int, default=8)
+
+    semantic_v3_report = subparsers.add_parser("semantic-v3-report", help="Summarize semantic-v3 coverage for a prediction file.")
+    semantic_v3_report.add_argument("--run", required=True, type=Path)
+    semantic_v3_report.add_argument("--prediction-file", default="label_v2_suggestions_semantic_v3.jsonl")
+    semantic_v3_report.add_argument("--out-json", type=Path)
+    semantic_v3_report.add_argument("--out-md", type=Path)
+
     prefill_eval_v2 = subparsers.add_parser("prefill-eval-v2", help="Evaluate label-v2 safe prefill against cross-run golden labels.")
     prefill_eval_v2.add_argument("--golden", required=True, type=Path)
     prefill_eval_v2.add_argument("--runs", required=True, help="Comma-separated harvest run directories.")
@@ -171,6 +183,118 @@ def main(argv: Sequence[str] | None = None) -> None:
     dataset_qa.add_argument("--sample-limit", type=int, default=64)
     dataset_qa.add_argument("--strict", action="store_true", help="Escalate soft raster/tag warnings to errors.")
     dataset_qa.add_argument("--fail-on-warning", action="store_true", help="Exit non-zero if any warnings exist.")
+    dataset_qa.add_argument("--require-semantic-v3", action="store_true", help="Fail records that lack semantic_v3 metadata.")
+
+    build_training_manifest = subparsers.add_parser(
+        "build-training-manifest", help="Expand a semantic-v3 dataset into training conditioning rows."
+    )
+    build_training_manifest.add_argument("--dataset", required=True, type=Path)
+    build_training_manifest.add_argument("--out", type=Path, help="Defaults to <dataset>/training_manifest.jsonl.")
+    build_training_manifest.add_argument(
+        "--caption-policy", default="mixed", choices=["object_only", "style_aware", "attribute", "minimal", "mixed"]
+    )
+    build_training_manifest.add_argument("--variants-per-sprite", type=int, default=8)
+    build_training_manifest.add_argument("--seed", type=int, default=4962026)
+    build_training_manifest.add_argument("--per-split", action="store_true", help="Also write training_manifest_{split}.jsonl.")
+
+    training_manifest_qa = subparsers.add_parser(
+        "training-manifest-qa", help="Validate a generated training manifest against its source dataset."
+    )
+    training_manifest_qa.add_argument("--dataset", required=True, type=Path)
+    training_manifest_qa.add_argument("--manifest", type=Path, help="Defaults to <dataset>/training_manifest.jsonl.")
+    training_manifest_qa.add_argument("--allow-duplicate-captions", action="store_true")
+    training_manifest_qa.add_argument("--out-json", type=Path)
+    training_manifest_qa.add_argument("--out-md", type=Path)
+    training_manifest_qa.add_argument("--fail-on-warning", action="store_true")
+
+    training_manifest_report = subparsers.add_parser(
+        "training-manifest-report", help="Summarize an existing training manifest."
+    )
+    training_manifest_report.add_argument("--manifest", required=True, type=Path)
+    training_manifest_report.add_argument("--out-json", type=Path)
+    training_manifest_report.add_argument("--out-md", type=Path)
+
+    build_eval_prompts = subparsers.add_parser(
+        "build-eval-prompts", help="Generate a fixed evaluation prompt set from a semantic-v3 dataset."
+    )
+    build_eval_prompts.add_argument("--dataset", required=True, type=Path)
+    build_eval_prompts.add_argument("--out", type=Path, help="Defaults to <dataset>/eval_prompts.jsonl.")
+    build_eval_prompts.add_argument("--seed", type=int, default=4962026)
+    build_eval_prompts.add_argument("--seen-object-count", type=int, default=40)
+    build_eval_prompts.add_argument("--unseen-composition-count", type=int, default=40)
+
+    dataset_readiness = subparsers.add_parser(
+        "dataset-readiness", help="Scan harvest runs and datasets and report merge readiness."
+    )
+    dataset_readiness.add_argument("--runs-root", default="harvest_runs", type=Path)
+    dataset_readiness.add_argument("--datasets-root", default="datasets", type=Path)
+    dataset_readiness.add_argument("--out", type=Path, help="Markdown report path.")
+    dataset_readiness.add_argument("--out-json", type=Path, help="JSON report path.")
+    dataset_readiness.add_argument("--review-rate-ceiling", type=float, default=0.25)
+
+    acceptance_gap_report = subparsers.add_parser(
+        "acceptance-gap-report", help="Rank packs by raw-auto/apply/export acceptance gaps."
+    )
+    acceptance_gap_report.add_argument("--runs-root", default="harvest_runs", type=Path)
+    acceptance_gap_report.add_argument("--datasets-root", default="datasets", type=Path)
+    acceptance_gap_report.add_argument("--out", type=Path, help="Markdown report path.")
+    acceptance_gap_report.add_argument("--out-json", type=Path, help="JSON report path.")
+
+    pack_drilldown = subparsers.add_parser(
+        "pack-drilldown", help="Write a read-only drilldown report for one harvest run."
+    )
+    pack_drilldown.add_argument("--run", required=True, type=Path)
+    pack_drilldown.add_argument("--prediction-file", default="label_v2_suggestions.jsonl")
+    pack_drilldown.add_argument("--out", type=Path, help="Markdown report path.")
+    pack_drilldown.add_argument("--out-json", type=Path, help="JSON report path.")
+
+    build_semantic_dataset = subparsers.add_parser(
+        "build-semantic-dataset",
+        help="Safely build one exported+QA'd semantic-v3 dataset from a harvest run.",
+    )
+    build_semantic_dataset.add_argument("--run", required=True, type=Path)
+    build_semantic_dataset.add_argument("--dataset-name", required=True)
+    build_semantic_dataset.add_argument("--output-root", default="datasets", type=Path)
+    build_semantic_dataset.add_argument("--prediction-file", default="label_v2_suggestions.jsonl")
+    build_semantic_dataset.add_argument("--max-palette-slots", type=int, default=32)
+    build_semantic_dataset.add_argument("--max-captions", type=int, default=8)
+    build_semantic_dataset.add_argument("--caption-policy", default="mixed", choices=["object_only", "style_aware", "attribute", "minimal", "mixed"])
+    build_semantic_dataset.add_argument("--variants-per-sprite", type=int, default=8)
+    build_semantic_dataset.add_argument("--seed", type=int, default=20260706)
+    accept_auto = build_semantic_dataset.add_mutually_exclusive_group()
+    accept_auto.add_argument("--accept-auto-only", action="store_true", dest="accept_auto_only", default=True)
+    accept_auto.add_argument("--no-accept-auto-only", action="store_false", dest="accept_auto_only")
+    build_semantic_dataset.add_argument("--overwrite", action="store_true")
+
+    merge_datasets = subparsers.add_parser(
+        "merge-datasets", help="Merge exported semantic-v3 datasets into one multi-source dataset."
+    )
+    merge_datasets.add_argument("--datasets", required=True, nargs="+", type=Path)
+    merge_datasets.add_argument("--out", required=True, type=Path)
+    merge_datasets.add_argument("--seed", type=int, default=20260706)
+    merge_datasets.add_argument("--split-policy", default="preserve", choices=["preserve", "reshuffle"])
+    merge_datasets.add_argument("--max-palette-slots", type=int, default=32)
+    merge_datasets.add_argument("--overwrite", action="store_true")
+
+    build_multisource = subparsers.add_parser(
+        "build-multisource", help="Build a safe multisource dataset from atomic ready datasets."
+    )
+    build_multisource.add_argument("--datasets-root", default="datasets", type=Path)
+    build_multisource.add_argument("--out", required=True, type=Path)
+    build_multisource.add_argument("--seed", type=int, default=20260706)
+    build_multisource.add_argument("--split-policy", default="preserve", choices=["preserve", "reshuffle"])
+    build_multisource.add_argument("--caption-policy", default="mixed", choices=["object_only", "style_aware", "attribute", "minimal", "mixed"])
+    build_multisource.add_argument("--variants-per-sprite", type=int, default=8)
+    build_multisource.add_argument("--max-palette-slots", type=int, default=32)
+    build_multisource.add_argument("--only-atomic-ready", action="store_true", default=False)
+    build_multisource.add_argument("--overwrite", action="store_true")
+
+    import_diagnostics = subparsers.add_parser(
+        "import-diagnostics", help="Diagnose empty/import-broken harvest run state without mutating it."
+    )
+    import_diagnostics.add_argument("--run", required=True, type=Path)
+    import_diagnostics.add_argument("--out", type=Path, help="Markdown report path.")
+    import_diagnostics.add_argument("--out-json", type=Path, help="JSON report path.")
 
     export = subparsers.add_parser("export", help="Export accepted sprites to a dataset.")
     export.add_argument("--run", required=True, type=Path)
@@ -209,6 +333,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         _run_label_v2_report(parsed)
     elif parsed.subcommand == "apply-label-v2":
         _run_apply_label_v2(parsed)
+    elif parsed.subcommand == "semantic-v3":
+        _run_semantic_v3(parsed)
+    elif parsed.subcommand == "semantic-v3-report":
+        _run_semantic_v3_report(parsed)
     elif parsed.subcommand == "prefill-eval-v2":
         _run_prefill_eval_v2(parsed)
     elif parsed.subcommand == "golden-lint":
@@ -233,6 +361,28 @@ def main(argv: Sequence[str] | None = None) -> None:
         _run_apply_policy(parsed)
     elif parsed.subcommand == "dataset-qa":
         _run_dataset_qa(parsed)
+    elif parsed.subcommand == "build-training-manifest":
+        _run_build_training_manifest(parsed)
+    elif parsed.subcommand == "training-manifest-qa":
+        _run_training_manifest_qa(parsed)
+    elif parsed.subcommand == "training-manifest-report":
+        _run_training_manifest_report(parsed)
+    elif parsed.subcommand == "build-eval-prompts":
+        _run_build_eval_prompts(parsed)
+    elif parsed.subcommand == "dataset-readiness":
+        _run_dataset_readiness(parsed)
+    elif parsed.subcommand == "acceptance-gap-report":
+        _run_acceptance_gap_report(parsed)
+    elif parsed.subcommand == "pack-drilldown":
+        _run_pack_drilldown(parsed)
+    elif parsed.subcommand == "build-semantic-dataset":
+        _run_build_semantic_dataset(parsed)
+    elif parsed.subcommand == "merge-datasets":
+        _run_merge_datasets(parsed)
+    elif parsed.subcommand == "build-multisource":
+        _run_build_multisource(parsed)
+    elif parsed.subcommand == "import-diagnostics":
+        _run_import_diagnostics(parsed)
     elif parsed.subcommand == "export":
         _run_export(parsed)
 
@@ -327,6 +477,11 @@ def _add_label_v2_args(parser: argparse.ArgumentParser, *, include_vlm_args: boo
     parser.add_argument("--out", type=Path)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--max-items", type=int)
+    parser.add_argument(
+        "--include-status",
+        action="append",
+        help="Imported sprite status to include (repeatable/comma-separated). Defaults to accepted,quarantine,needs_fix; use all for every status.",
+    )
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--trusted-filename-threshold", type=float, default=0.85)
     parser.add_argument("--auto-vlm-threshold", type=float, default=0.80)
@@ -597,11 +752,13 @@ def _run_label_v2(parsed: argparse.Namespace) -> None:
     from spritelab.harvest.label_v2_pipeline import (
         build_label_v2_records,
         create_vlm_backend_from_args,
+        select_label_v2_input_records,
         summarize_label_v2_records,
         write_label_v2_outputs,
     )
 
     backend = create_vlm_backend_from_args(parsed) if parsed.use_vlm else None
+    input_selection = select_label_v2_input_records(parsed.run, include_statuses=parsed.include_status)
     records = build_label_v2_records(
         parsed.run,
         use_vlm=bool(parsed.use_vlm),
@@ -615,12 +772,16 @@ def _run_label_v2(parsed: argparse.Namespace) -> None:
         refresh_vlm=bool(parsed.refresh_vlm),
         ignore_existing_vlm=bool(parsed.ignore_existing_vlm),
         workers=parsed.workers,
+        include_statuses=parsed.include_status,
     )
-    paths = write_label_v2_outputs(parsed.run, records, out=parsed.out)
+    paths = write_label_v2_outputs(parsed.run, records, out=parsed.out, input_selection=input_selection)
     summary = summarize_label_v2_records(records)
+    summary["input_selection"] = input_selection.to_summary()
     print(f"Wrote: {paths['suggestions']}")
     print(f"Suggestions: {summary['total']}")
     print(f"Needs review: {summary['needs_review_count']}")
+    for reason, count in summary.get("input_selection", {}).get("skipped_by_reason", {}).items():
+        print(f"{reason}: {count}")
     print(f"Workers: {max(1, int(parsed.workers or 1))}")
     for key, count in summary.get("vlm_stats", {}).items():
         print(f"{key}: {count}")
@@ -629,8 +790,14 @@ def _run_label_v2(parsed: argparse.Namespace) -> None:
 
 
 def _run_fuse_prefill_v2(parsed: argparse.Namespace) -> None:
-    from spritelab.harvest.label_v2_pipeline import build_label_v2_records, summarize_label_v2_records, write_label_v2_outputs
+    from spritelab.harvest.label_v2_pipeline import (
+        build_label_v2_records,
+        select_label_v2_input_records,
+        summarize_label_v2_records,
+        write_label_v2_outputs,
+    )
 
+    input_selection = select_label_v2_input_records(parsed.run, include_statuses=parsed.include_status)
     records = build_label_v2_records(
         parsed.run,
         use_vlm=True,
@@ -642,27 +809,41 @@ def _run_fuse_prefill_v2(parsed: argparse.Namespace) -> None:
         review_conflicts=bool(parsed.review_conflicts),
         backend=None,
         workers=parsed.workers,
+        include_statuses=parsed.include_status,
     )
-    paths = write_label_v2_outputs(parsed.run, records, out=parsed.out)
+    paths = write_label_v2_outputs(parsed.run, records, out=parsed.out, input_selection=input_selection)
     summary = summarize_label_v2_records(records)
+    summary["input_selection"] = input_selection.to_summary()
     print(f"Wrote: {paths['suggestions']}")
     print(f"Suggestions: {summary['total']}")
     print(f"Needs review: {summary['needs_review_count']}")
+    for reason, count in summary.get("input_selection", {}).get("skipped_by_reason", {}).items():
+        print(f"{reason}: {count}")
     print(f"Workers: {max(1, int(parsed.workers or 1))}")
     for bucket, count in summary["buckets"].items():
         print(f"{bucket}: {count}")
 
 
 def _run_label_v2_report(parsed: argparse.Namespace) -> None:
+    import json
+
     from spritelab.harvest.catalog import read_jsonl
     from spritelab.harvest.label_v2_pipeline import format_label_v2_run_report, summarize_label_v2_records
 
     run_dir = Path(parsed.run)
     records = read_jsonl(run_dir / parsed.prediction_file)
     summary = summarize_label_v2_records(records)
+    summary_path = run_dir / "label_v2_summary.json"
+    if summary_path.is_file():
+        try:
+            previous = json.loads(summary_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            previous = {}
+        if isinstance(previous, dict) and isinstance(previous.get("input_selection"), dict):
+            summary["input_selection"] = previous["input_selection"]
     report = format_label_v2_run_report(summary)
-    (run_dir / "label_v2_summary.json").write_text(
-        __import__("json").dumps(summary, indent=2, sort_keys=True) + "\n",
+    summary_path.write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     (run_dir / "label_v2_report.md").write_text(report, encoding="utf-8")
@@ -683,6 +864,73 @@ def _run_apply_label_v2(parsed: argparse.Namespace) -> None:
         overwrite_human_labels=bool(parsed.overwrite_human_labels),
     )
     print(format_apply_summary(report), end="")
+
+
+def _run_semantic_v3(parsed: argparse.Namespace) -> None:
+    from spritelab.harvest.catalog import append_harvest_event, read_jsonl, write_jsonl
+    from spritelab.harvest.semantic_v3 import convert_label_v2_predictions, summarize_semantic_v3_records
+
+    run_dir = Path(parsed.run)
+    prediction_path = _resolve_in_run(run_dir, parsed.prediction_file)
+    if not prediction_path.exists():
+        raise SystemExit(f"prediction file not found: {prediction_path}")
+    if parsed.out is not None:
+        output_path = _resolve_in_run(run_dir, parsed.out)
+    else:
+        output_path = prediction_path.with_name(f"{prediction_path.stem}_semantic_v3.jsonl")
+
+    predictions = read_jsonl(prediction_path)
+    converted = convert_label_v2_predictions(predictions, max_captions=max(1, int(parsed.max_captions)))
+    write_jsonl(output_path, converted)
+    summary = summarize_semantic_v3_records(converted)
+    append_harvest_event(
+        run_dir,
+        "semantic_v3",
+        {
+            "prediction_file": prediction_path.name,
+            "out": output_path.name,
+            "records": summary["records"],
+            "records_with_semantic_v3": summary["records_with_semantic_v3"],
+        },
+    )
+    print(f"Wrote: {output_path}")
+    print(f"Records: {summary['records']}")
+    print(f"Records with semantic_v3: {summary['records_with_semantic_v3']}")
+    print(f"Average captions: {summary['average_captions']:.2f}")
+    print(f"Base object coverage: {summary['base_object_coverage']:.3f}")
+    for warning, count in dict(summary.get("warnings") or {}).items():
+        print(f"warning {warning}: {count}")
+
+
+def _run_semantic_v3_report(parsed: argparse.Namespace) -> None:
+    import json
+
+    from spritelab.harvest.catalog import read_jsonl
+    from spritelab.harvest.semantic_v3 import format_semantic_v3_report, summarize_semantic_v3_records
+
+    run_dir = Path(parsed.run)
+    prediction_path = _resolve_in_run(run_dir, parsed.prediction_file)
+    if not prediction_path.exists():
+        raise SystemExit(f"prediction file not found: {prediction_path}")
+    records = read_jsonl(prediction_path)
+    summary = summarize_semantic_v3_records(records)
+    report = format_semantic_v3_report(summary)
+    if parsed.out_json is not None:
+        out_json = _resolve_in_run(run_dir, parsed.out_json)
+        out_json.parent.mkdir(parents=True, exist_ok=True)
+        out_json.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"Wrote: {out_json}")
+    if parsed.out_md is not None:
+        out_md = _resolve_in_run(run_dir, parsed.out_md)
+        out_md.parent.mkdir(parents=True, exist_ok=True)
+        out_md.write_text(report, encoding="utf-8")
+        print(f"Wrote: {out_md}")
+    print(report, end="")
+
+
+def _resolve_in_run(run_dir: Path, value: str | Path) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else run_dir / path
 
 
 def _run_prefill_eval_v2(parsed: argparse.Namespace) -> None:
@@ -935,6 +1183,7 @@ def _run_dataset_qa(parsed: argparse.Namespace) -> None:
         sample_limit=parsed.sample_limit,
         review_queue=parsed.review_queue,
         strict=bool(parsed.strict),
+        require_semantic_v3=bool(parsed.require_semantic_v3),
     )
 
     out_json = parsed.out_json or (dataset_dir / "dataset_qa_report.json")
@@ -968,6 +1217,306 @@ def _run_dataset_qa(parsed: argparse.Namespace) -> None:
             print(f"  error: {error}")
         raise SystemExit(1)
     if parsed.fail_on_warning and result.warnings:
+        raise SystemExit(1)
+
+
+def _run_build_training_manifest(parsed: argparse.Namespace) -> None:
+    from spritelab.dataset_maker.training_manifest import (
+        build_training_manifest,
+        format_training_manifest_report,
+        summarize_training_manifest,
+        write_per_split_manifests,
+        write_training_manifest,
+        write_training_manifest_reports,
+    )
+
+    dataset_dir = Path(parsed.dataset)
+    if not dataset_dir.is_dir():
+        raise SystemExit(f"dataset directory not found: {dataset_dir}")
+    out_path = parsed.out or (dataset_dir / "training_manifest.jsonl")
+
+    result = build_training_manifest(
+        dataset_dir,
+        variants_per_sprite=parsed.variants_per_sprite,
+        caption_policy=parsed.caption_policy,
+        seed=parsed.seed,
+    )
+    write_training_manifest(out_path, result.rows)
+    if parsed.per_split:
+        write_per_split_manifests(out_path, result.rows)
+
+    summary = summarize_training_manifest(result)
+    write_training_manifest_reports(
+        summary,
+        out_json=dataset_dir / "training_manifest_report.json",
+        out_md=dataset_dir / "training_manifest_report.md",
+    )
+    print(format_training_manifest_report(summary), end="")
+    print(f"Wrote: {out_path}")
+
+
+def _run_training_manifest_qa(parsed: argparse.Namespace) -> None:
+    from spritelab.dataset_maker.training_manifest_qa import (
+        qa_training_manifest,
+        write_training_manifest_qa_reports,
+    )
+
+    dataset_dir = Path(parsed.dataset)
+    manifest_path = parsed.manifest or (dataset_dir / "training_manifest.jsonl")
+    result = qa_training_manifest(
+        dataset_dir, manifest_path, allow_duplicate_captions=bool(parsed.allow_duplicate_captions)
+    )
+    out_json = parsed.out_json or (dataset_dir / "training_manifest_qa_report.json")
+    out_md = parsed.out_md or (dataset_dir / "training_manifest_qa_report.md")
+    write_training_manifest_qa_reports(result, out_json=out_json, out_md=out_md)
+
+    variant_values = [count for sid, count in result.variants_per_sprite.items() if sid]
+    low = min(variant_values) if variant_values else 0
+    high = max(variant_values) if variant_values else 0
+    avg = (sum(variant_values) / len(variant_values)) if variant_values else 0.0
+    print(f"Training manifest: {manifest_path}")
+    print(f"Rows: {result.total_rows}")
+    print(f"Unique sprites: {result.unique_sprites}")
+    print(f"Variants per sprite: min={low} max={high} avg={avg:.1f}")
+    print(f"Errors: {len(result.errors)}")
+    print(f"Warnings: {len(result.warnings)}")
+    print(f"Wrote: {out_json}")
+    print(f"Wrote: {out_md}")
+    if result.errors:
+        for error in result.errors[:20]:
+            print(f"  error: {error}")
+        raise SystemExit(1)
+    if parsed.fail_on_warning and result.warnings:
+        raise SystemExit(1)
+
+
+def _run_training_manifest_report(parsed: argparse.Namespace) -> None:
+    from spritelab.dataset_maker.training_manifest import (
+        TrainingManifestResult,
+        _read_jsonl,
+        format_training_manifest_report,
+        summarize_training_manifest,
+        write_training_manifest_reports,
+    )
+
+    manifest_path = Path(parsed.manifest)
+    if not manifest_path.is_file():
+        raise SystemExit(f"training manifest not found: {manifest_path}")
+    rows = _read_jsonl(manifest_path)
+    if not rows:
+        raise SystemExit("training manifest is empty")
+
+    from collections import Counter
+
+    split_rows = Counter(str(row.get("split", "")) for row in rows)
+    policies = {str(row.get("audit", {}).get("caption_policy", "")) for row in rows if isinstance(row.get("audit"), dict)}
+    seeds = {int(row.get("audit", {}).get("seed", 0)) for row in rows if isinstance(row.get("audit"), dict)}
+    variants = Counter(str(row.get("sprite_id", "")) for row in rows)
+    result = TrainingManifestResult(
+        dataset_dir=Path(str(rows[0].get("source", {}).get("dataset_dir", ""))),
+        rows=rows,
+        caption_policy=next(iter(sorted(policies)), "mixed") if policies else "mixed",
+        variants_per_sprite=max(variants.values()) if variants else 0,
+        seed=next(iter(sorted(seeds)), 0) if seeds else 0,
+        source_records=len(variants),
+        unique_sprites=len([sid for sid in variants if sid]),
+        split_rows={split: split_rows.get(split, 0) for split in ("train", "val", "test")},
+        warnings=[],
+    )
+    summary = summarize_training_manifest(result)
+    if parsed.out_json is not None or parsed.out_md is not None:
+        write_training_manifest_reports(
+            summary,
+            out_json=parsed.out_json or manifest_path.with_name("training_manifest_report.json"),
+            out_md=parsed.out_md or manifest_path.with_name("training_manifest_report.md"),
+        )
+    print(format_training_manifest_report(summary), end="")
+
+
+def _run_build_eval_prompts(parsed: argparse.Namespace) -> None:
+    from spritelab.dataset_maker.eval_prompts import (
+        build_eval_prompts,
+        format_eval_prompts_report,
+        summarize_eval_prompts,
+        write_eval_prompts,
+        write_eval_prompts_reports,
+    )
+
+    dataset_dir = Path(parsed.dataset)
+    if not dataset_dir.is_dir():
+        raise SystemExit(f"dataset directory not found: {dataset_dir}")
+    out_path = parsed.out or (dataset_dir / "eval_prompts.jsonl")
+
+    result = build_eval_prompts(
+        dataset_dir,
+        seed=parsed.seed,
+        seen_object_count=parsed.seen_object_count,
+        unseen_composition_count=parsed.unseen_composition_count,
+    )
+    write_eval_prompts(out_path, result.prompts)
+    summary = summarize_eval_prompts(result)
+    write_eval_prompts_reports(
+        summary,
+        out_json=dataset_dir / "eval_prompts_report.json",
+        out_md=dataset_dir / "eval_prompts_report.md",
+    )
+    print(format_eval_prompts_report(summary), end="")
+    print(f"Wrote: {out_path}")
+
+
+def _run_dataset_readiness(parsed: argparse.Namespace) -> None:
+    from spritelab.harvest.dataset_readiness import (
+        format_readiness_report,
+        scan_readiness,
+        write_readiness_reports,
+    )
+
+    report = scan_readiness(
+        parsed.runs_root,
+        parsed.datasets_root,
+        review_rate_ceiling=parsed.review_rate_ceiling,
+    )
+    write_readiness_reports(report, out_md=parsed.out, out_json=parsed.out_json)
+    print(format_readiness_report(report), end="")
+    ready = [pack.run_name for pack in report.packs if pack.recommended_action == "ready_for_merge"]
+    print(f"\nPacks scanned: {len(report.packs)}")
+    print(f"Ready for merge: {len(ready)}")
+    if parsed.out is not None:
+        print(f"Wrote: {parsed.out}")
+    if parsed.out_json is not None:
+        print(f"Wrote: {parsed.out_json}")
+
+
+def _run_acceptance_gap_report(parsed: argparse.Namespace) -> None:
+    from spritelab.harvest.acceptance_gap_report import (
+        build_acceptance_gap_report,
+        format_acceptance_gap_report,
+        write_acceptance_gap_reports,
+    )
+
+    report = build_acceptance_gap_report(parsed.runs_root, parsed.datasets_root)
+    write_acceptance_gap_reports(report, out_md=parsed.out, out_json=parsed.out_json)
+    print(format_acceptance_gap_report(report), end="")
+    if parsed.out is not None:
+        print(f"Wrote: {parsed.out}")
+    if parsed.out_json is not None:
+        print(f"Wrote: {parsed.out_json}")
+
+
+def _run_pack_drilldown(parsed: argparse.Namespace) -> None:
+    from spritelab.harvest.pack_drilldown import (
+        build_pack_drilldown,
+        format_pack_drilldown,
+        write_pack_drilldown_reports,
+    )
+
+    report = build_pack_drilldown(parsed.run, prediction_file=parsed.prediction_file)
+    write_pack_drilldown_reports(report, out_md=parsed.out, out_json=parsed.out_json)
+    print(format_pack_drilldown(report), end="")
+    if parsed.out is not None:
+        print(f"Wrote: {parsed.out}")
+    if parsed.out_json is not None:
+        print(f"Wrote: {parsed.out_json}")
+
+
+def _run_import_diagnostics(parsed: argparse.Namespace) -> None:
+    from spritelab.harvest.import_diagnostics import (
+        build_import_diagnostics,
+        format_import_diagnostics,
+        write_import_diagnostics_reports,
+    )
+
+    report = build_import_diagnostics(parsed.run)
+    write_import_diagnostics_reports(report, out_md=parsed.out, out_json=parsed.out_json)
+    print(format_import_diagnostics(report), end="")
+    if parsed.out is not None:
+        print(f"Wrote: {parsed.out}")
+    if parsed.out_json is not None:
+        print(f"Wrote: {parsed.out_json}")
+
+
+def _run_build_semantic_dataset(parsed: argparse.Namespace) -> None:
+    from spritelab.harvest.build_semantic_dataset import (
+        BuildError,
+        build_semantic_dataset,
+        format_build_report,
+    )
+
+    try:
+        report = build_semantic_dataset(
+            parsed.run,
+            dataset_name=parsed.dataset_name,
+            output_root=parsed.output_root,
+            prediction_file=parsed.prediction_file,
+            max_palette_slots=parsed.max_palette_slots,
+            accept_auto_only=bool(parsed.accept_auto_only),
+            caption_policy=parsed.caption_policy,
+            variants_per_sprite=parsed.variants_per_sprite,
+            seed=parsed.seed,
+            max_captions=parsed.max_captions,
+            overwrite=bool(parsed.overwrite),
+        )
+    except BuildError as exc:
+        print(f"Build failed: {exc}")
+        raise SystemExit(1)
+
+    print(format_build_report(report), end="")
+    print(f"\nOutput: {report.output_dir}")
+    if not report.ok:
+        raise SystemExit(1)
+
+
+def _run_merge_datasets(parsed: argparse.Namespace) -> None:
+    from spritelab.harvest.merge_datasets import MergeError, format_merge_report, merge_datasets
+
+    try:
+        result = merge_datasets(
+            parsed.datasets,
+            parsed.out,
+            seed=parsed.seed,
+            split_policy=parsed.split_policy,
+            max_palette_slots=parsed.max_palette_slots,
+            overwrite=bool(parsed.overwrite),
+        )
+    except MergeError as exc:
+        print(f"Merge failed: {exc}")
+        raise SystemExit(1)
+
+    print(format_merge_report(result), end="")
+    print(f"\nOutput: {result.output_dir}")
+    print(f"Total records: {result.total_records}")
+    print(f"Splits: " + " ".join(f"{s}={result.split_counts.get(s, 0)}" for s in ("train", "val", "test")))
+    if result.errors:
+        raise SystemExit(1)
+
+
+def _run_build_multisource(parsed: argparse.Namespace) -> None:
+    from spritelab.harvest.build_multisource import (
+        BuildMultisourceError,
+        build_multisource_dataset,
+        format_build_multisource_report,
+    )
+
+    try:
+        report = build_multisource_dataset(
+            parsed.datasets_root,
+            parsed.out,
+            seed=parsed.seed,
+            split_policy=parsed.split_policy,
+            caption_policy=parsed.caption_policy,
+            variants_per_sprite=parsed.variants_per_sprite,
+            max_palette_slots=parsed.max_palette_slots,
+            only_atomic_ready=bool(parsed.only_atomic_ready),
+            overwrite=bool(parsed.overwrite),
+        )
+    except BuildMultisourceError as exc:
+        print(f"Build multisource failed: {exc}")
+        raise SystemExit(1)
+
+    print(format_build_multisource_report(report), end="")
+    print(f"\nOutput: {report.output_dir}")
+    print(f"Total records: {report.total_records}")
+    if not report.ok:
         raise SystemExit(1)
 
 

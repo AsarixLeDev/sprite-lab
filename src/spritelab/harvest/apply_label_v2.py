@@ -38,6 +38,8 @@ def apply_label_v2_predictions(
     out_review: str | Path | None = None,
     dry_run: bool = False,
     overwrite_human_labels: bool = False,
+    build_id: str = "",
+    require_semantic_v3_for_auto: bool = False,
 ) -> dict[str, Any]:
     """Apply label-v2 suggestions to ``imported.jsonl`` and write audit outputs."""
 
@@ -68,10 +70,18 @@ def apply_label_v2_predictions(
     buckets: Counter[str] = Counter()
     categories: Counter[str] = Counter()
     skipped_reasons: Counter[str] = Counter()
+    auto_skip_reasons: Counter[str] = Counter()
+    auto_validation_counts: Counter[str] = Counter()
     matched_imported_ids: set[str] = set()
     applied_ids: list[str] = []
     accepted_ids: list[str] = []
     human_preserved_ids: list[str] = []
+    raw_auto_rows_seen = sum(1 for prediction in predictions if is_raw_auto_prediction(prediction))
+    for prediction in predictions:
+        if not is_raw_auto_prediction(prediction):
+            continue
+        for reason in _auto_prediction_validation_errors(prediction, require_semantic_v3=True):
+            auto_validation_counts[reason] += 1
 
     for prediction in predictions:
         bucket = prediction_bucket(prediction)
@@ -111,6 +121,8 @@ def apply_label_v2_predictions(
                 skipped_reasons["review_bucket"] += 1
             else:
                 skipped_reasons["bucket_not_selected"] += 1
+                if is_raw_auto_prediction(prediction):
+                    auto_skip_reasons["bucket_not_selected"] += 1
             updated.append(skipped_record)
             continue
         if _has_human_label(record) and not overwrite_human_labels:
@@ -118,12 +130,25 @@ def apply_label_v2_predictions(
             counts["human_labels_preserved"] += 1
             human_preserved_ids.append(sprite_id)
             skipped_reasons["human_label_preserved"] += 1
+            if is_raw_auto_prediction(prediction):
+                auto_skip_reasons["human_label_preserved"] += 1
+            continue
+        auto_validation_errors = _auto_prediction_validation_errors(
+            prediction,
+            require_semantic_v3=require_semantic_v3_for_auto,
+        )
+        if is_safe_auto_prediction(prediction) and auto_validation_errors:
+            updated.append(dict(record))
+            for reason in auto_validation_errors:
+                skipped_reasons[reason] += 1
+                auto_skip_reasons[reason] += 1
             continue
         applied = apply_prediction_to_imported_record(
             record,
             prediction,
             prediction_file=prediction_path.name,
             accept_auto=accept_auto and is_safe_auto_prediction(prediction),
+            build_id=build_id,
         )
         if is_review_prediction(prediction):
             review_status = _review_status(record)
@@ -144,7 +169,13 @@ def apply_label_v2_predictions(
 
     missing_predictions = sorted(imported_ids - prediction_ids)
     missing_imported = sorted(prediction_ids - imported_ids)
-
+    for prediction in predictions:
+        if not is_raw_auto_prediction(prediction):
+            continue
+        if str(prediction.get("sprite_id", "")) in imported_ids:
+            continue
+        auto_skip_reasons["sprite_id_mismatch"] += 1
+        skipped_reasons["sprite_id_mismatch"] += 1
     report: dict[str, Any] = {
         "run_dir": str(run_path),
         "prediction_file": str(prediction_path),
@@ -152,8 +183,11 @@ def apply_label_v2_predictions(
         "dry_run": bool(dry_run),
         "accept_auto": bool(accept_auto),
         "overwrite_human_labels": bool(overwrite_human_labels),
+        "build_id": str(build_id),
+        "require_semantic_v3_for_auto": bool(require_semantic_v3_for_auto),
         "predictions": len(predictions),
         "imported_sprites": len(imported),
+        "raw_auto_rows_seen": int(raw_auto_rows_seen),
         "matched_imported_sprites": len(matched_imported_ids),
         "applied_auto_labels": int(counts["applied_auto_labels"]),
         "applied_review_labels": int(counts["applied_review_labels"]),
@@ -168,6 +202,9 @@ def apply_label_v2_predictions(
         "review_queue_size": len(review_queue),
         "counts_by_bucket": dict(sorted(buckets.items())),
         "counts_by_category": dict(sorted(categories.items())),
+        "auto_rows_skipped": max(0, int(raw_auto_rows_seen) - int(counts["applied_auto_labels"])),
+        "auto_validation_counts": dict(sorted(auto_validation_counts.items())),
+        "auto_skip_reasons": dict(sorted(auto_skip_reasons.items())),
         "skipped_by_reason": dict(sorted(skipped_reasons.items())),
         "missing_prediction_sprite_ids": missing_predictions,
         "missing_imported_sprite_ids": missing_imported,
@@ -205,6 +242,7 @@ def apply_label_v2_predictions(
                 "applied_total": len(applied_ids),
                 "review_queue_size": len(review_queue),
                 "accept_auto": bool(accept_auto),
+                "build_id": str(build_id),
             },
         )
     return report
@@ -216,6 +254,7 @@ def apply_prediction_to_imported_record(
     *,
     prediction_file: str,
     accept_auto: bool,
+    build_id: str = "",
 ) -> dict[str, Any]:
     """Return an imported record with one prediction applied and audited."""
 
@@ -249,6 +288,17 @@ def apply_prediction_to_imported_record(
         updated["status"] = "accepted"
 
     auto_metadata = dict(updated.get("auto_metadata") or {}) if isinstance(updated.get("auto_metadata"), Mapping) else {}
+    label_v2_metadata = {
+        "applied": True,
+        "prediction_file": prediction_file,
+        "bucket": bucket,
+        "flags": flags,
+        "safe_prefill": dict(safe),
+        "vlm_descriptor": dict(vlm_descriptor),
+        "candidate_object_names": candidate_object_names,
+    }
+    if build_id:
+        label_v2_metadata["applied_at_build_id"] = str(build_id)
     auto_metadata.update(
         {
             "label_v2_applied": True,
@@ -258,13 +308,20 @@ def apply_prediction_to_imported_record(
             "label_v2_safe_prefill": dict(safe),
             "label_v2_vlm_descriptor": dict(vlm_descriptor),
             "label_v2_candidate_object_names": candidate_object_names,
+            "label_v2": label_v2_metadata,
         }
     )
+    if build_id:
+        auto_metadata["label_v2_applied_at_build_id"] = str(build_id)
     if label_quality:
         auto_metadata["label_v2_label_quality"] = dict(label_quality)
+        label_v2_metadata["label_quality"] = dict(label_quality)
     conflict_reasons = [str(value) for value in label_quality.get("conflict_reasons") or prediction.get("conflict_reasons") or () if str(value)]
     if conflict_reasons:
         auto_metadata["label_v2_conflict_reasons"] = conflict_reasons
+    semantic_v3 = _mapping(prediction.get("semantic_v3"))
+    if semantic_v3:
+        auto_metadata["semantic_v3"] = semantic_v3
     updated["auto_metadata"] = auto_metadata
     return updated
 
@@ -289,9 +346,34 @@ def is_review_prediction(prediction: Mapping[str, Any]) -> bool:
     return bool(prediction.get("needs_review", quality.get("needs_review", False))) or bucket in REVIEW_BUCKETS or bucket.startswith("needs_review")
 
 
+def is_raw_auto_prediction(prediction: Mapping[str, Any]) -> bool:
+    return not is_review_prediction(prediction)
+
+
 def prediction_bucket(prediction: Mapping[str, Any]) -> str:
     quality = _mapping(prediction.get("label_quality"))
     return str(prediction.get("bucket") or quality.get("bucket") or "missing")
+
+
+def _auto_prediction_validation_errors(
+    prediction: Mapping[str, Any],
+    *,
+    require_semantic_v3: bool,
+) -> list[str]:
+    errors: list[str] = []
+    safe = prediction.get("safe_prefill")
+    if not isinstance(safe, Mapping) or not safe:
+        errors.append("invalid_safe_prefill")
+        safe = {}
+    object_name = normalize_tag(str(safe.get("object_name", "")))
+    category = normalize_category(str(safe.get("category", "")))
+    if not object_name:
+        errors.append("missing_object_name")
+    if not category or category == "unknown":
+        errors.append("missing_category")
+    if require_semantic_v3 and not _mapping(prediction.get("semantic_v3")):
+        errors.append("missing_semantic_v3")
+    return errors
 
 
 def build_review_queue_record(
@@ -329,8 +411,10 @@ def build_review_queue_record(
 def format_apply_summary(report: Mapping[str, Any]) -> str:
     lines = [
         f"Predictions: {int(report.get('predictions', 0))}",
+        f"Raw auto rows seen: {int(report.get('raw_auto_rows_seen', 0))}",
         f"Matched imported sprites: {int(report.get('matched_imported_sprites', 0))}",
         f"Applied auto labels: {int(report.get('applied_auto_labels', 0))}",
+        f"Auto rows skipped: {int(report.get('auto_rows_skipped', 0))}",
         f"Skipped review labels: {int(report.get('skipped_review_labels', 0))}",
         f"Missing predictions: {int(report.get('missing_predictions', 0))}",
         f"Missing imported sprites: {int(report.get('missing_imported_sprites', 0))}",
@@ -339,6 +423,10 @@ def format_apply_summary(report: Mapping[str, Any]) -> str:
         f"Wrote imported: {report.get('wrote_imported') or '(dry-run) ' + str(report.get('out_imported', ''))}",
         f"Wrote review queue: {report.get('wrote_review_queue') or '(dry-run) ' + str(report.get('out_review', ''))}",
     ]
+    for reason, count in dict(report.get("auto_skip_reasons") or {}).items():
+        lines.append(f"Auto skip {reason}: {count}")
+    for reason, count in dict(report.get("auto_validation_counts") or {}).items():
+        lines.append(f"Auto validation {reason}: {count}")
     if report.get("wrote_report_json"):
         lines.append(f"Wrote report json: {report['wrote_report_json']}")
     if report.get("wrote_report_md"):
@@ -356,13 +444,16 @@ def format_apply_report_markdown(report: Mapping[str, Any]) -> str:
         f"Dry run: `{bool(report.get('dry_run', False))}`",
         f"Accept auto: `{bool(report.get('accept_auto', False))}`",
         f"Overwrite human labels: `{bool(report.get('overwrite_human_labels', False))}`",
+        f"Require semantic-v3 for auto: `{bool(report.get('require_semantic_v3_for_auto', False))}`",
         "",
         "## Summary",
         "",
         f"- Predictions: {int(report.get('predictions', 0))}",
         f"- Imported sprites: {int(report.get('imported_sprites', 0))}",
+        f"- Raw auto rows seen: {int(report.get('raw_auto_rows_seen', 0))}",
         f"- Matched imported sprites: {int(report.get('matched_imported_sprites', 0))}",
         f"- Applied auto labels: {int(report.get('applied_auto_labels', 0))}",
+        f"- Auto rows skipped: {int(report.get('auto_rows_skipped', 0))}",
         f"- Applied review labels: {int(report.get('applied_review_labels', 0))}",
         f"- Applied other labels: {int(report.get('applied_other_labels', 0))}",
         f"- Skipped review labels: {int(report.get('skipped_review_labels', 0))}",
@@ -380,6 +471,12 @@ def format_apply_report_markdown(report: Mapping[str, Any]) -> str:
     lines.extend(["", "## Categories"])
     for category, count in dict(report.get("counts_by_category") or {}).items():
         lines.append(f"- {category}: {count}")
+    lines.extend(["", "## Auto Skips"])
+    for reason, count in dict(report.get("auto_skip_reasons") or {}).items():
+        lines.append(f"- {reason}: {count}")
+    lines.extend(["", "## Auto Validation Counts"])
+    for reason, count in dict(report.get("auto_validation_counts") or {}).items():
+        lines.append(f"- {reason}: {count}")
     lines.extend(["", "## Skipped"])
     for reason, count in dict(report.get("skipped_by_reason") or {}).items():
         lines.append(f"- {reason}: {count}")

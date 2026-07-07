@@ -9,7 +9,7 @@ from collections.abc import Sequence
 def main(argv: Sequence[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:
-        print("Usage: python -m spritelab curation <summary|validate|decide|browser> ...")
+        print("Usage: python -m spritelab <curation|training|train|dataset-maker|harvest|ml> ...")
         raise SystemExit(2)
 
     command = args[0]
@@ -18,6 +18,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
     if command == "training":
         _run_training(args[1:])
+        return
+    if command == "train":
+        from spritelab.training.cli import main as train_main
+
+        train_main(args[1:])
         return
     if command == "dataset-maker":
         _run_dataset_maker(args[1:])

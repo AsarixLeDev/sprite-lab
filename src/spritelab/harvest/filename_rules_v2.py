@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +65,37 @@ _GENERIC_TOKENS = {
 
 _GRID_TOKEN_RE = re.compile(r"^[rc]\d+$")
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_SOURCE_AUTHOR_TOKENS = {"arlantr", "arlan", "tr", "rcorre", "buch", "dcss", "bizmasterstudios", "kotnaszynce", "melle"}
+_SOURCE_AUTHOR_COMPOUNDS = {
+    "arlan_tr",
+    "arlantr",
+    "key_rcorre",
+    "tool_dcss",
+    "potion_bizmasterstudios",
+    "potion_buch",
+    "potion_kotnaszynce",
+    "potion_melle",
+    "potion_rcorre",
+}
+_COLOR_ATTRIBUTE_TOKENS = {
+    "red",
+    "blue",
+    "green",
+    "yellow",
+    "orange",
+    "purple",
+    "violet",
+    "pink",
+    "white",
+    "black",
+    "gray",
+    "grey",
+    "brown",
+    "gold",
+    "golden",
+    "silver",
+    "bronze",
+}
 
 _FRUITS = {
     "apple",
@@ -161,6 +192,9 @@ _FOOD_OBJECTS = {
     "fish",
     "grapes",
     "grape",
+    "berry",
+    "fruit",
+    "fantasy_fruit",
     "ham",
     "hamburger",
     "honey",
@@ -237,6 +271,29 @@ _TOOL_OBJECTS = {
     "knife",
     "torch",
     "rope",
+    "clock",
+    "telescope",
+    "net",
+    "throwing_net",
+    "hoe",
+    "bucket",
+}
+
+_JEWELRY_OBJECTS = {
+    "ring",
+    "necklace",
+    "amulet",
+    "bracelet",
+    "crown",
+    "jewel",
+    "gem",
+}
+
+_KEY_OBJECTS = {
+    "key",
+    "golden_key",
+    "silver_key",
+    "rusty_key",
 }
 
 _GEM_OBJECTS = {
@@ -398,6 +455,7 @@ def suggest_from_filename_v2(record: Mapping[str, Any]) -> FilenameRuleResult:
     else:
         object_name, confidence, reason, alias_used = _choose_object(parsed_tokens, profile)
         suggestion = _suggestion_for_object(object_name, profile, confidence, reason, alias_used=alias_used)
+    suggestion = _apply_filename_attributes(suggestion, parsed_tokens)
 
     return FilenameRuleResult(
         suggestion=suggestion,
@@ -438,6 +496,9 @@ def _raw_tokens(value: str | Path) -> tuple[str, ...]:
     tokens: list[str] = []
     for raw in stem.split("_"):
         token = normalize_tag(raw)
+        if _GRID_TOKEN_RE.fullmatch(token):
+            tokens.append(token)
+            continue
         token = re.sub(r"(\D)\d+$", r"\1", token)
         token = normalize_tag(token)
         if token:
@@ -455,8 +516,17 @@ def _semantic_tokens(raw_tokens: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _choose_object(tokens: tuple[str, ...], profile: SourceProfile) -> tuple[str, float, str, bool]:
+    potion_fallback = _potion_family_object(tokens, profile)
+    if potion_fallback:
+        object_name, reason = potion_fallback
+        return object_name, 0.92, reason, object_name not in tokens
+    if profile.name == "mushroom" and "mushroom" in tokens:
+        return "mushroom", 0.95, "known mushroom source profile with mushroom object token", False
     if not tokens:
         return "", 0.25, "grid cell or generic sheet name with no object clue", False
+    if _contains_source_author_artifact(tokens):
+        object_name = canonicalize_object_name("_".join(tokens))
+        return object_name, 0.25, f"filename token {object_name!r} looks like a source/author artifact", False
 
     special = _special_food_container(tokens)
     if special:
@@ -513,6 +583,29 @@ def _special_food_container(tokens: tuple[str, ...]) -> tuple[str, bool] | None:
     return None
 
 
+def _potion_family_object(tokens: tuple[str, ...], profile: SourceProfile) -> tuple[str, str] | None:
+    if profile.name != "cc0_potion":
+        return None
+    normalized = tuple(canonicalize_object_name(token) for token in tokens if token)
+    object_tokens = tuple(
+        token
+        for token in normalized
+        if token
+        and token not in _SOURCE_AUTHOR_TOKENS
+        and token not in _COLOR_ATTRIBUTE_TOKENS
+        and token not in _GENERIC_TOKENS
+        and token not in {"r", "c"}
+    )
+    for token in object_tokens:
+        if token in {"potion", "vial", "bottle", "flask"}:
+            return token, f"known potion-only source profile with clear object token {token!r}"
+    if not object_tokens or all(_contains_source_author_artifact((token,)) for token in object_tokens):
+        return "potion", "known potion-only source profile fallback for coordinate/source-author filename"
+    if "potion" in normalized:
+        return "potion", "known potion-only source profile with potion token"
+    return None
+
+
 def _alias_object(name: str) -> str:
     aliases = {
         "blueberries": "blueberry",
@@ -557,6 +650,8 @@ def _is_known_object(name: str, profile: SourceProfile) -> bool:
     if name in _FOOD_OBJECTS or name in {canonicalize_object_name(value) for value in _FOOD_OBJECTS}:
         return True
     if name in _TOOL_OBJECTS or name in _GEM_OBJECTS or name in _POTION_CONTAINER_OBJECTS:
+        return True
+    if name in _JEWELRY_OBJECTS or name in _KEY_OBJECTS:
         return True
     if profile.name == "oga_496_rpg_icons" and name in _RPG_MAIN_TOKENS:
         return True
@@ -611,6 +706,8 @@ def _category_for_object(object_name: str, profile: SourceProfile) -> str:
         return "tool"
     if profile.name == "cc0_gem" or object_name in _GEM_OBJECTS:
         return "material"
+    if profile.name in {"cc0_jewelry", "cc0_key"} or object_name in _JEWELRY_OBJECTS or object_name in _KEY_OBJECTS:
+        return "item_icon"
     if profile.name == "mushroom":
         return "plant"
     if profile.name == "cc0_potion":
@@ -704,8 +801,24 @@ def _tags_for_object(object_name: str, profile: SourceProfile) -> tuple[str, ...
             tags.append("cutting_tool")
         if base in {"hammer", "axe", "shovel", "pickaxe", "wrench", "screwdriver"}:
             tags.append("construction")
+        if base in {"torch", "rope", "clock", "telescope", "net", "throwing_net", "bucket"}:
+            tags.append("utility")
         if base == "secateur":
             tags.extend(["shears", "gardening", "plant_tool"])
+    elif base in _JEWELRY_OBJECTS or profile.name == "cc0_jewelry":
+        tags.extend(["jewelry", "accessory"])
+        if base in {"ring", "necklace", "amulet", "bracelet", "crown"}:
+            tags.append("wearable")
+        if base in {"jewel", "gem"}:
+            tags.extend(["gem", "treasure"])
+    elif base in _KEY_OBJECTS or profile.name == "cc0_key":
+        tags.extend(["key", "utility", "unlock"])
+        if base.startswith("golden"):
+            tags.extend(["gold", "metal"])
+        if base.startswith("silver"):
+            tags.extend(["silver", "metal"])
+        if base.startswith("rusty"):
+            tags.extend(["rusty", "metal"])
     elif base in _GEM_OBJECTS or profile.name == "cc0_gem":
         tags.extend(["gem", "gemstone", "mineral", "treasure", "crafting_material"])
         if "crystal" in base:
@@ -738,6 +851,30 @@ def _tags_for_object(object_name: str, profile: SourceProfile) -> tuple[str, ...
 
 def _is_food_object(object_name: str) -> bool:
     return object_name in {canonicalize_object_name(value) for value in _FOOD_OBJECTS} or object_name.startswith("soda_can_")
+
+
+def _contains_source_author_artifact(tokens: tuple[str, ...]) -> bool:
+    normalized = tuple(canonicalize_object_name(token) for token in tokens if token)
+    joined = canonicalize_object_name("_".join(normalized))
+    if joined in _SOURCE_AUTHOR_COMPOUNDS:
+        return True
+    return any(token in _SOURCE_AUTHOR_TOKENS for token in normalized)
+
+
+def _apply_filename_attributes(suggestion: LabelSuggestion, tokens: tuple[str, ...]) -> LabelSuggestion:
+    colors = [
+        "purple" if token == "violet" else "gray" if token == "grey" else "gold" if token == "golden" else token
+        for token in (canonicalize_object_name(value) for value in tokens)
+        if token in _COLOR_ATTRIBUTE_TOKENS
+    ]
+    if not colors:
+        return suggestion
+    return replace(
+        suggestion,
+        tags=normalize_tags((*suggestion.tags, *colors)),
+        dominant_colors=normalize_tags((*suggestion.dominant_colors, *colors)),
+        evidence=(*suggestion.evidence, *(f"filename_attribute:{color}" for color in colors)),
+    )
 
 
 def _description(object_name: str, category: str) -> str:
