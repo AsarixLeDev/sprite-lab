@@ -54,6 +54,10 @@ class SampleGeneratorConfig:
     write_hard_rgba: bool = True
     batch_size: int = 16
     contact_sheet_labels: str = "prompt"
+    project_palette: bool = False
+    project_palette_target_colors: int = 16
+    project_palette_min_pixel_share: float = 0.01
+    project_palette_method: str = "deterministic_kmeans"
 
 
 def run_sample_generator(config: SampleGeneratorConfig) -> dict[str, Any]:
@@ -128,16 +132,27 @@ def run_sample_generator(config: SampleGeneratorConfig) -> dict[str, Any]:
                 "max_colors": int(config.max_colors),
                 "dither": bool(config.dither),
             }
-            manifest_records.append(
-                write_generated_sprite_artifacts(
+            record = write_generated_sprite_artifacts(
+                sprite,
+                out_dir,
+                sample_id,
+                metadata,
+                write_raw_rgba=config.write_raw_rgba,
+                write_hard_rgba=config.write_hard_rgba,
+            )
+            if config.project_palette:
+                from spritelab.training.palette_projection import project_generated_sprite_record
+
+                record = project_generated_sprite_record(
                     sprite,
                     out_dir,
-                    sample_id,
-                    metadata,
-                    write_raw_rgba=config.write_raw_rgba,
-                    write_hard_rgba=config.write_hard_rgba,
+                    record,
+                    target_colors=config.project_palette_target_colors,
+                    min_pixel_share=config.project_palette_min_pixel_share,
+                    alpha_threshold=config.alpha_threshold,
+                    method=config.project_palette_method,
                 )
-            )
+            manifest_records.append(record)
 
     contact_sheet_path = build_generation_contact_sheet(
         out_dir,
@@ -146,7 +161,27 @@ def run_sample_generator(config: SampleGeneratorConfig) -> dict[str, Any]:
         include_raw=config.write_raw_rgba,
     )
     _write_contact_sheet_label_mapping(out_dir, manifest_records, label_mode=config.contact_sheet_labels)
+    projection_report = None
+    if config.project_palette:
+        from spritelab.training.palette_projection import write_runtime_projection_report
+
+        projection_report = write_runtime_projection_report(
+            out_dir,
+            manifest_records,
+            target_colors=config.project_palette_target_colors,
+            min_pixel_share=config.project_palette_min_pixel_share,
+            alpha_threshold=config.alpha_threshold,
+            method=config.project_palette_method,
+        )
     config_json = {key: _jsonable(value) for key, value in asdict(config).items()}
+    if not config.project_palette:
+        for key in (
+            "project_palette",
+            "project_palette_target_colors",
+            "project_palette_min_pixel_share",
+            "project_palette_method",
+        ):
+            config_json.pop(key, None)
     report = write_generation_reports(
         out_dir=out_dir,
         records=manifest_records,
@@ -159,6 +194,23 @@ def run_sample_generator(config: SampleGeneratorConfig) -> dict[str, Any]:
         },
         contact_sheet=None if contact_sheet_path is None else contact_sheet_path.name,
     )
+    if projection_report is not None:
+        report["palette_projection"] = {
+            "applied": True,
+            "report": "palette_projection_report.json",
+            "contact_sheet": "contact_sheet_projected.png"
+            if (out_dir / "contact_sheet_projected.png").is_file()
+            else None,
+            "method": str(config.project_palette_method),
+            "target_colors": int(config.project_palette_target_colors),
+            "min_pixel_share": float(config.project_palette_min_pixel_share),
+            "mean_rgb_mae_visible": projection_report.get("mean_rgb_mae_visible"),
+            "destructive_rate": projection_report.get("destructive_rate"),
+        }
+        (out_dir / "generation_report.json").write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     return report
 
 
@@ -277,6 +329,10 @@ def main(argv: list[str] | None = None) -> None:
         choices=["prompt", "prompt_and_seed", "prompt_and_nearest_source"],
         default="prompt",
     )
+    parser.add_argument("--project-palette", action="store_true", default=False)
+    parser.add_argument("--project-palette-target-colors", type=int, default=16)
+    parser.add_argument("--project-palette-min-pixel-share", type=float, default=0.01)
+    parser.add_argument("--project-palette-method", choices=["deterministic_kmeans"], default="deterministic_kmeans")
     parsed = parser.parse_args(argv)
     report = run_sample_generator(SampleGeneratorConfig(**vars(parsed)))
     print(f"Generated samples: {report['sample_count']}")

@@ -95,6 +95,26 @@ def _review_config(dataset: Path, manifest: Path, out: Path, **overrides) -> Pal
     return PaletteSwapReviewConfig(**params)
 
 
+def _rewrite_manifest_rows(manifest: Path, transform) -> None:
+    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+    rows = [transform(index, row) for index, row in enumerate(rows)]
+    manifest.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _build_multicategory_dataset(tmp_path: Path, categories: list[str]) -> tuple[Path, Path]:
+    dataset, manifest = _build_dataset(tmp_path, count=len(categories))
+
+    def transform(index: int, row: dict) -> dict:
+        category = categories[index]
+        row["category"] = category
+        row["object_name"] = f"green_{category}_{index}"
+        row["base_object"] = category
+        return row
+
+    _rewrite_manifest_rows(manifest, transform)
+    return dataset, manifest
+
+
 # --- Part F: review CLI writes JSON/Markdown/contact sheets -------------------
 
 
@@ -148,8 +168,11 @@ def test_review_json_has_stable_top_level_schema_fields(tmp_path: Path) -> None:
         "applied_count",
         "applied_rate",
         "eligible_count",
+        "eligible_rate",
         "ineligible_count",
         "applied_rate_eligible",
+        "kept_original_rate_eligible",
+        "effective_eligible_rate_total",
         "fallback_heuristic_rate",
         "material_conflict_drop_count",
         "caption_color_replaced_count",
@@ -164,6 +187,8 @@ def test_review_json_has_stable_top_level_schema_fields(tmp_path: Path) -> None:
         "source_to_target_matrix",
         "ineligibility_reason_counts",
         "same_family_skip_count",
+        "category_coverage",
+        "review_category_counts",
         "red_flags",
     ):
         assert key in report
@@ -191,6 +216,11 @@ def test_review_cli_runs(tmp_path: Path) -> None:
             "red,blue,green,yellow,purple",
             "--palette-swap-require-explicit-caption-color",
             "--palette-swap-require-explicit-semantic-color",
+            "--palette-swap-stochastic",
+            "--palette-swap-keep-original-prob",
+            "0.25",
+            "--draws-per-sprite",
+            "2",
             "--palette-swap-no-caption-prepend",
             "--max-samples",
             "8",
@@ -204,6 +234,10 @@ def test_review_cli_runs(tmp_path: Path) -> None:
     assert report["require_explicit_semantic_color"] is True
     assert report["no_caption_prepend"] is True
     assert report["config"]["palette_swap_no_caption_prepend"] is True
+    assert report["config"]["palette_swap_stochastic"] is True
+    assert report["config"]["palette_swap_keep_original_prob"] == 0.25
+    assert report["draws_per_sprite"] == 2
+    assert report["review_selection"] == "first"
 
 
 def test_generator_challenger_cli_accepts_conservative_palette_options(
@@ -258,6 +292,135 @@ def test_source_to_target_matrix_is_deterministic(tmp_path: Path) -> None:
     second = review_palette_swap(_review_config(dataset, manifest, tmp_path / "r2"))
     assert first.report["metrics"]["source_to_target_matrix"] == second.report["metrics"]["source_to_target_matrix"]
     assert first.report["metrics"]["target_family_counts"] == second.report["metrics"]["target_family_counts"]
+
+
+def test_material_conflict_rows_are_inspectable_and_counted_by_row(tmp_path: Path) -> None:
+    dataset, manifest = _build_dataset(tmp_path, count=4)
+
+    def transform(_index: int, row: dict) -> dict:
+        row["materials"] = ["gold"]
+        row["conditioning"] = {"semantic_v3": {"attributes": {"colors": ["green"], "materials": ["gold"]}}}
+        return row
+
+    _rewrite_manifest_rows(manifest, transform)
+    result = review_palette_swap(
+        _review_config(
+            dataset,
+            manifest,
+            tmp_path / "review",
+            palette_swap_target_families="blue",
+            max_samples=4,
+        )
+    )
+    rows = [json.loads(line) for line in result.jsonl_path.read_text(encoding="utf-8").splitlines()]
+    assert rows
+    for row in rows:
+        assert "material_conflict_dropped" in row
+        assert "material_conflict_tokens_dropped" in row
+        assert "material_conflict_reason" in row
+    conflicts = [row for row in rows if row["material_conflict_dropped"]]
+    assert conflicts
+    assert result.report["material_conflict_drop_count"] == len(conflicts)
+    assert result.report["metrics"]["material_conflict_drop_count"] == len(conflicts)
+    assert all(row["material_conflict_tokens_dropped"] == ["gold"] for row in conflicts)
+    assert all(
+        row["material_conflict_reason"] == "material_color_token_conflicted_with_target_family"
+        for row in conflicts
+    )
+
+
+def test_balanced_review_selection_reports_multiple_categories(tmp_path: Path) -> None:
+    categories = ["armor"] * 6 + ["weapon"] * 6 + ["tool"] * 6
+    dataset, manifest = _build_multicategory_dataset(tmp_path, categories)
+    result = review_palette_swap(
+        _review_config(
+            dataset,
+            manifest,
+            tmp_path / "review",
+            review_selection="balanced",
+            max_samples=9,
+        )
+    )
+    assert result.report["review_selection"] == "balanced"
+    counts = result.report["review_category_counts"]
+    assert set(counts) == {"armor", "tool", "weapon"}
+    assert counts == {"armor": 3, "tool": 3, "weapon": 3}
+
+
+def test_all_review_selection_does_not_truncate_to_first_categories(tmp_path: Path) -> None:
+    categories = ["armor", "armor", "armor", "weapon", "tool"]
+    dataset, manifest = _build_multicategory_dataset(tmp_path, categories)
+    result = review_palette_swap(
+        _review_config(
+            dataset,
+            manifest,
+            tmp_path / "review",
+            review_selection="all",
+            max_samples=2,
+        )
+    )
+    assert result.report["review_selection"] == "all"
+    assert result.report["review_selected_record_count"] == 5
+    assert result.report["review_category_counts"] == {"armor": 3, "tool": 1, "weapon": 1}
+    assert set(result.report["category_coverage"]) == {"armor", "tool", "weapon"}
+
+
+def test_repeated_draw_review_reports_per_sprite_target_diversity(tmp_path: Path) -> None:
+    dataset, manifest = _build_dataset(tmp_path)
+    result = review_palette_swap(
+        _review_config(
+            dataset,
+            manifest,
+            tmp_path / "review",
+            palette_swap_stochastic=True,
+            draws_per_sprite=5,
+            max_samples=8,
+            palette_swap_target_families="red,blue,yellow,purple",
+        )
+    )
+    metrics = result.report["metrics"]
+    assert metrics["sample_count"] == 40
+    diversity = metrics["per_sprite_target_diversity"]
+    assert diversity
+    assert max(int(item["distinct_target_family_count"]) for item in diversity.values()) > 1
+    assert metrics["target_family_diversity_histogram_per_sprite"]
+
+
+def test_stochastic_keep_original_counts_are_reported(tmp_path: Path) -> None:
+    dataset, manifest = _build_dataset(tmp_path)
+    result = review_palette_swap(
+        _review_config(
+            dataset,
+            manifest,
+            tmp_path / "review",
+            palette_swap_stochastic=True,
+            palette_swap_keep_original_prob=1.0,
+        )
+    )
+    metrics = result.report["metrics"]
+    assert metrics["eligible_count"] == 8
+    assert metrics["kept_original_count"] == 8
+    assert metrics["swapped_count"] == 0
+    assert metrics["effective_kept_original_rate_eligible"] == 1.0
+
+
+def test_colorless_caption_structured_only_expansion_does_not_prepend(tmp_path: Path) -> None:
+    dataset, manifest = _build_dataset(tmp_path, explicit_color=False, semantic_color=True)
+    result = review_palette_swap(
+        _review_config(
+            dataset,
+            manifest,
+            tmp_path / "review",
+            palette_swap_require_explicit_caption_color=True,
+            palette_swap_require_explicit_semantic_color=True,
+            palette_swap_allow_colorless_caption_if_semantic_color=True,
+            palette_swap_no_caption_prepend=True,
+        )
+    )
+    metrics = result.report["metrics"]
+    assert metrics["applied_count"] == 8
+    assert metrics["caption_color_prepended_count"] == 0
+    assert metrics["colorless_caption_structured_only_count"] == 8
 
 
 # --- Part F: conservative mode skips samples without explicit color -----------
@@ -482,13 +645,19 @@ def test_summarize_dataset_palette_swap_stats(tmp_path: Path) -> None:
         "eligible_count",
         "ineligible_count",
         "applied_count",
+        "swapped_count",
+        "kept_original_count",
+        "effective_eligible_rate_total_before_keep_original",
         "applied_rate_total",
         "applied_rate_eligible",
+        "effective_swapped_rate_total",
+        "effective_kept_original_rate_total",
         "ineligibility_reason_counts",
         "target_family_counts",
         "source_to_target_matrix",
         "fallback_heuristic_rate",
         "material_conflict_drop_count",
+        "colorless_caption_structured_only_count",
     ):
         assert key in stats
     assert stats["applied_count"] == 8

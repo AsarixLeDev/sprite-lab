@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from spritelab.training.conditioning import CONDITIONING_MODES, DEFAULT_CONDITIONING_MODE
 from spritelab.training.palette_swap import DEFAULT_SWAP_FAMILIES_TEXT
+
+# Kept as a literal (rather than importing spritelab.training.v1_gallery at module scope) so
+# that `spritelab train <subcommand>` argument parsing stays free of heavy sampling imports
+# for subcommands that never touch the v1 gallery. Must match v1_gallery.DEFAULT_V1_CHECKPOINT.
+DEFAULT_V1_GALLERY_CHECKPOINT = Path("experiments/challenger_full_v4_phase1/train_25k/checkpoint_last_ema.pt")
 
 
 def _parsed_config_kwargs(parsed: argparse.Namespace) -> dict[str, object]:
@@ -32,6 +38,20 @@ def _add_palette_swap_arguments(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_SWAP_FAMILIES_TEXT,
         dest="palette_swap_families",
         help="Comma-separated target color families for augmentation.",
+    )
+    parser.add_argument(
+        "--palette-swap-stochastic",
+        action="store_true",
+        default=False,
+        dest="palette_swap_stochastic",
+        help="Include a draw-level index in the palette-swap seed so repeated visits can choose different targets.",
+    )
+    parser.add_argument(
+        "--palette-swap-keep-original-prob",
+        type=float,
+        default=0.0,
+        dest="palette_swap_keep_original_prob",
+        help="With stochastic palette swap, keep eligible samples unchanged with this probability.",
     )
     parser.add_argument(
         "--palette-swap-preserve-outline",
@@ -117,6 +137,13 @@ def _add_palette_swap_conservative_arguments(parser: argparse.ArgumentParser) ->
         help="Only augment samples whose structured color fields contain a known color token.",
     )
     parser.add_argument(
+        "--palette-swap-allow-colorless-caption-if-semantic-color",
+        action="store_true",
+        default=False,
+        dest="palette_swap_allow_colorless_caption_if_semantic_color",
+        help="Allow colorless captions when structured color is explicit; structured fields update but captions are not prepended.",
+    )
+    parser.add_argument(
         "--palette-swap-no-caption-prepend",
         action="store_true",
         default=False,
@@ -131,7 +158,81 @@ def _add_palette_swap_conservative_arguments(parser: argparse.ArgumentParser) ->
     )
 
 
+def _add_palette_projection_sampling_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--project-palette", action="store_true", default=False)
+    parser.add_argument("--no-project-palette", action="store_false", dest="project_palette")
+    parser.add_argument("--project-palette-target-colors", type=int, default=16)
+    parser.add_argument("--project-palette-min-pixel-share", type=float, default=0.01)
+    parser.add_argument("--project-palette-method", choices=["deterministic_kmeans"], default="deterministic_kmeans")
+
+
+def _add_export_preset_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--export-preset",
+        "--preset",
+        choices=["v1", "phase1_v1"],
+        default=None,
+        dest="export_preset",
+        help="Named export/sampling preset. v1 uses Phase 1 EMA if available, CFG 3.0, 30 steps, and k16 projection.",
+    )
+
+
+def _argv_has_option(argv: Sequence[str], *names: str) -> bool:
+    option_names = tuple(str(name) for name in names)
+    for item in argv:
+        text = str(item)
+        if text in option_names or any(text.startswith(f"{name}=") for name in option_names):
+            return True
+    return False
+
+
+def _apply_export_preset_defaults(parsed: argparse.Namespace, argv: Sequence[str]) -> None:
+    preset = str(getattr(parsed, "export_preset", "") or "").lower()
+    if preset not in {"v1", "phase1_v1"}:
+        return
+    if parsed.subcommand == "sample-generator-challenger":
+        if not _argv_has_option(argv, "--steps"):
+            parsed.steps = 30
+        if not _argv_has_option(argv, "--cfg-scale"):
+            parsed.cfg_scale = 3.0
+        if not _argv_has_option(argv, "--max-colors"):
+            parsed.max_colors = 32
+        if not _argv_has_option(argv, "--alpha-threshold"):
+            parsed.alpha_threshold = 0.5
+        if not _argv_has_option(argv, "--dither", "--no-dither"):
+            parsed.dither = False
+        if not _argv_has_option(argv, "--write-raw-rgba", "--no-write-raw-rgba"):
+            parsed.write_raw_rgba = True
+        if not _argv_has_option(argv, "--write-hard-rgba", "--no-write-hard-rgba"):
+            parsed.write_hard_rgba = True
+        _apply_projection_preset_defaults(parsed, argv)
+    elif parsed.subcommand == "audit-challenger-full-v4":
+        if not _argv_has_option(argv, "--sample-ema", "--no-sample-ema"):
+            parsed.sample_ema = True
+        if not _argv_has_option(argv, "--sample-steps"):
+            parsed.sample_steps = 30
+        if not _argv_has_option(argv, "--cfg-scale"):
+            parsed.cfg_scale = 3.0
+        if not _argv_has_option(argv, "--max-colors"):
+            parsed.max_colors = 32
+        if not _argv_has_option(argv, "--alpha-threshold"):
+            parsed.alpha_threshold = 0.5
+        _apply_projection_preset_defaults(parsed, argv)
+
+
+def _apply_projection_preset_defaults(parsed: argparse.Namespace, argv: Sequence[str]) -> None:
+    if not _argv_has_option(argv, "--project-palette", "--no-project-palette"):
+        parsed.project_palette = True
+    if not _argv_has_option(argv, "--project-palette-target-colors"):
+        parsed.project_palette_target_colors = 16
+    if not _argv_has_option(argv, "--project-palette-min-pixel-share"):
+        parsed.project_palette_min_pixel_share = 0.01
+    if not _argv_has_option(argv, "--project-palette-method"):
+        parsed.project_palette_method = "deterministic_kmeans"
+
+
 def main(argv: Sequence[str] | None = None) -> None:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         prog="python -m spritelab train",
         description="Semantic-manifest training inspection, baseline training, generator training, and evaluation.",
@@ -250,6 +351,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=["prompt", "prompt_and_seed", "prompt_and_nearest_source"],
         default="prompt",
     )
+    _add_palette_projection_sampling_arguments(sample_generator)
+
+    project_palette = subparsers.add_parser(
+        "project-generated-palette",
+        help="Project an existing generated folder to cleaner per-image palettes.",
+    )
+    project_palette.add_argument("--generated", required=True, type=Path)
+    project_palette.add_argument("--out", required=True, type=Path)
+    project_palette.add_argument("--target-colors", type=int, default=16)
+    project_palette.add_argument("--min-pixel-share", type=float, default=0.01)
+    project_palette.add_argument("--alpha-threshold", type=float, default=0.5)
+    project_palette.add_argument("--method", choices=["deterministic_kmeans"], default="deterministic_kmeans")
 
     challenger = subparsers.add_parser("generator-challenger", help="Train a conditional generator challenger.")
     challenger.add_argument("--dataset", required=True, type=Path, dest="dataset_dir")
@@ -298,16 +411,27 @@ def main(argv: Sequence[str] | None = None) -> None:
     palette_swap_review.add_argument("--out-dir", required=True, type=Path)
     palette_swap_review.add_argument("--seed", type=int, default=20260706)
     palette_swap_review.add_argument("--max-samples", type=int, default=256)
+    palette_swap_review.add_argument("--draws-per-sprite", type=int, default=1)
+    palette_swap_review.add_argument(
+        "--review-selection",
+        choices=["first", "random", "balanced", "all"],
+        default="first",
+    )
     palette_swap_review.add_argument("--palette-swap-prob", type=float, default=0.5)
     palette_swap_review.add_argument("--palette-swap-families", default=DEFAULT_SWAP_FAMILIES_TEXT)
     palette_swap_review.add_argument("--palette-swap-target-families", default=None)
     palette_swap_review.add_argument("--palette-swap-source-families", default=None)
     palette_swap_review.add_argument("--palette-swap-category-filter", default=None)
     palette_swap_review.add_argument("--palette-swap-min-color-confidence", type=float, default=0.0)
+    palette_swap_review.add_argument("--palette-swap-stochastic", action="store_true", default=False)
+    palette_swap_review.add_argument("--palette-swap-keep-original-prob", type=float, default=0.0)
     palette_swap_review.add_argument("--palette-swap-require-role-map", action="store_true", default=False)
     palette_swap_review.add_argument("--palette-swap-require-explicit-color", action="store_true", default=False)
     palette_swap_review.add_argument("--palette-swap-require-explicit-caption-color", action="store_true", default=False)
     palette_swap_review.add_argument("--palette-swap-require-explicit-semantic-color", action="store_true", default=False)
+    palette_swap_review.add_argument(
+        "--palette-swap-allow-colorless-caption-if-semantic-color", action="store_true", default=False
+    )
     palette_swap_review.add_argument("--palette-swap-no-caption-prepend", action="store_true", default=False)
     palette_swap_review.add_argument("--palette-swap-allow-material-colors", type=_bool_str, default=True)
     palette_swap_review.add_argument(
@@ -326,16 +450,37 @@ def main(argv: Sequence[str] | None = None) -> None:
     sample_challenger = subparsers.add_parser(
         "sample-generator-challenger",
         help="Sample and canonicalize a generator challenger.",
+        description=(
+            "Sample and canonicalize a generator_challenger checkpoint. "
+            "Pass --export-preset v1 to reproduce the official v1 release settings "
+            "(Phase 1 EMA checkpoint resolution, CFG 3.0, 30 steps, k16 deterministic "
+            "palette projection) -- see docs/v1_default.md."
+        ),
     )
-    sample_challenger.add_argument("--checkpoint", required=True, type=Path)
-    sample_challenger.add_argument("--prompts", required=True, type=Path)
-    sample_challenger.add_argument("--out", required=True, type=Path, dest="out_dir")
+    _add_export_preset_argument(sample_challenger)
+    sample_challenger.add_argument(
+        "--checkpoint",
+        required=True,
+        type=Path,
+        help=(
+            "Path to a generator_challenger checkpoint (.pt). Official v1 path: "
+            "experiments/challenger_full_v4_phase1/train_25k/checkpoint_last_ema.pt "
+            "(--export-preset v1 will also resolve a *_last.pt path to its EMA sibling "
+            "when present)."
+        ),
+    )
+    sample_challenger.add_argument(
+        "--prompts", required=True, type=Path, help="JSONL prompt file, one record per line (see docs/v1_default.md)."
+    )
+    sample_challenger.add_argument(
+        "--out", required=True, type=Path, dest="out_dir", help="Output directory for samples, manifest, and reports."
+    )
     sample_challenger.add_argument("--max-samples", type=int, default=64)
     sample_challenger.add_argument("--steps", type=int, default=30)
     sample_challenger.add_argument("--cfg-scale", type=float, default=2.0)
     sample_challenger.add_argument("--max-colors", type=int, default=32)
     sample_challenger.add_argument("--alpha-threshold", type=float, default=0.5)
-    sample_challenger.add_argument("--device", default="cpu")
+    sample_challenger.add_argument("--device", default="cpu", help="'cpu' or 'cuda'.")
     sample_challenger.add_argument("--seed", type=int, default=123)
     sample_challenger.add_argument("--noise-seed", type=int)
     sample_challenger.add_argument("--batch-size", type=int, default=16)
@@ -350,6 +495,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=["prompt", "prompt_and_seed", "prompt_and_nearest_source"],
         default="prompt",
     )
+    _add_palette_projection_sampling_arguments(sample_challenger)
 
     generated_qa = subparsers.add_parser("generated-qa", help="QA generated sprite sample folders.")
     generated_qa.add_argument("--generated", required=True, type=Path)
@@ -445,6 +591,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "audit-challenger-full-v4",
         help="Run the reproducible full-v4 challenger train/sample/diagnostic audit.",
     )
+    _add_export_preset_argument(audit_challenger_full)
     audit_challenger_full.add_argument("--dataset", required=True, type=Path)
     audit_challenger_full.add_argument("--training-manifest", required=True, type=Path)
     audit_challenger_full.add_argument("--out", required=True, type=Path, dest="out_dir")
@@ -460,6 +607,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     audit_challenger_full.add_argument("--structured-field-dropout", type=float, default=0.0)
     audit_challenger_full.add_argument("--ema-decay", type=float, default=0.999)
     audit_challenger_full.add_argument("--sample-ema", action="store_true", default=False)
+    audit_challenger_full.add_argument("--no-sample-ema", action="store_false", dest="sample_ema")
     audit_challenger_full.add_argument("--foreground-rgb-loss-weight", type=float, default=1.0)
     audit_challenger_full.add_argument("--background-rgb-loss-weight", type=float, default=1.0)
     _add_palette_swap_arguments(audit_challenger_full)
@@ -469,6 +617,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     audit_challenger_full.add_argument("--cfg-scale", type=float, default=2.0)
     audit_challenger_full.add_argument("--max-colors", type=int, default=32)
     audit_challenger_full.add_argument("--alpha-threshold", type=float, default=0.5)
+    _add_palette_projection_sampling_arguments(audit_challenger_full)
     audit_challenger_full.add_argument("--max-eval-prompts", type=int, default=128)
     audit_challenger_full.add_argument("--max-sensitivity-prompts", type=int, default=32)
     audit_challenger_full.add_argument(
@@ -486,6 +635,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     audit_challenger_full.add_argument("--eval-checkpoints", action="store_true", default=False)
     audit_challenger_full.add_argument("--eval-checkpoint-every", type=int, default=5000)
     audit_challenger_full.add_argument("--eval-checkpoint-steps")
+    audit_challenger_full.add_argument("--checkpoint-eval-max-samples", type=int)
     audit_challenger_full.add_argument("--amp", action="store_true", default=True)
     audit_challenger_full.add_argument("--no-amp", action="store_false", dest="amp")
     audit_challenger_full.add_argument("--lr-schedule", choices=["none", "cosine"], default="cosine")
@@ -497,6 +647,64 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     build_ood.add_argument("--out", required=True, type=Path)
     build_ood.add_argument("--max-prompts", type=int)
+
+    build_v1_gallery = subparsers.add_parser(
+        "build-v1-gallery",
+        help="Build the deterministic v1 demo/release gallery: prompts -> v1 preset sampling -> QA/review -> contact sheets -> report.",
+        description=(
+            "Build the official v1 demo/release gallery end to end: builds (or reads) a "
+            "prompt set, samples it with the v1 export preset (Phase 1 EMA checkpoint, "
+            "CFG 3.0, 30 steps, k16 deterministic palette projection), runs QA and "
+            "structural review, writes contact sheets, and writes a Markdown/JSON report. "
+            "Never trains a model. See docs/v1_default.md."
+        ),
+    )
+    build_v1_gallery.add_argument(
+        "--out", required=True, type=Path, dest="out_dir", help="Output directory (see docs/v1_default.md for layout)."
+    )
+    build_v1_gallery.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=DEFAULT_V1_GALLERY_CHECKPOINT,
+        help=f"Phase 1 checkpoint to sample. Defaults to the official v1 checkpoint: {DEFAULT_V1_GALLERY_CHECKPOINT}",
+    )
+    build_v1_gallery.add_argument(
+        "--prompts",
+        type=Path,
+        help="Optional custom JSONL prompt file. Defaults to the built-in deterministic v1 gallery prompt set.",
+    )
+    build_v1_gallery.add_argument("--device", default="cpu", help="'cpu' or 'cuda'. Use 'cuda' to match the validated release gallery.")
+    build_v1_gallery.add_argument("--seed", type=int, default=20260723)
+    build_v1_gallery.add_argument("--batch-size", type=int, default=32)
+    build_v1_gallery.add_argument("--num-samples", type=int, help="Cap the number of prompts/samples.")
+    build_v1_gallery.add_argument(
+        "--categories", help="Comma-separated category filter for the built-in prompt set."
+    )
+    build_v1_gallery.add_argument("--contact-sheet-columns", type=int, default=8)
+    build_v1_gallery.add_argument(
+        "--include-ood", action="store_true", default=True, help="Include a trimmed OOD compositional prompt slice (default on)."
+    )
+    build_v1_gallery.add_argument("--no-include-ood", action="store_false", dest="include_ood")
+    build_v1_gallery.add_argument("--include-grounded", action="store_true", default=True)
+    build_v1_gallery.add_argument("--no-include-grounded", action="store_false", dest="include_grounded")
+    build_v1_gallery.add_argument("--include-stress-prompts", action="store_true", default=True)
+    build_v1_gallery.add_argument(
+        "--no-include-stress-prompts", action="store_false", dest="include_stress_prompts"
+    )
+
+    v1_gallery_gui = subparsers.add_parser(
+        "v1-gallery-gui",
+        help="Launch the local v1 gallery GUI (requires the 'gradio' extra).",
+        description=(
+            "Launch a local Gradio GUI to build the v1 demo gallery: pick an output "
+            "directory and (optionally) a custom prompt file, sample with the official "
+            "v1 export preset, and preview the resulting contact sheets. Never trains a "
+            "model."
+        ),
+    )
+    v1_gallery_gui.add_argument("--out", default="experiments/v1_gallery_gui", dest="out_dir")
+    v1_gallery_gui.add_argument("--host", default="127.0.0.1")
+    v1_gallery_gui.add_argument("--port", type=int)
 
     compare_conditioning = subparsers.add_parser(
         "compare-challenger-conditioning-audits",
@@ -528,7 +736,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     compare_families.add_argument("--prompts", required=True, type=Path)
     compare_families.add_argument("--out", required=True, type=Path, dest="out_dir")
 
-    parsed = parser.parse_args(argv)
+    parsed = parser.parse_args(raw_argv)
+    _apply_export_preset_defaults(parsed, raw_argv)
     try:
         if parsed.subcommand == "inspect-data":
             from spritelab.training.train_baseline import inspect_training_data, print_inspection
@@ -687,11 +896,26 @@ def main(argv: Sequence[str] | None = None) -> None:
                     write_hard_rgba=parsed.write_hard_rgba,
                     batch_size=parsed.batch_size,
                     contact_sheet_labels=parsed.contact_sheet_labels,
+                    project_palette=parsed.project_palette,
+                    project_palette_target_colors=parsed.project_palette_target_colors,
+                    project_palette_min_pixel_share=parsed.project_palette_min_pixel_share,
+                    project_palette_method=parsed.project_palette_method,
                 )
             )
             print(f"Generated samples: {report['sample_count']}")
             print(f"Max visible colors: {report['max_visible_color_count']}")
             print(f"Outputs written to {parsed.out_dir}")
+        elif parsed.subcommand == "project-generated-palette":
+            from spritelab.training.palette_projection import PaletteProjectionConfig, project_generated_palette
+
+            report = project_generated_palette(PaletteProjectionConfig(**_parsed_config_kwargs(parsed)))
+            print(f"Projected samples: {report['sample_count']}")
+            print(
+                "Median visible colors: "
+                f"{report['median_visible_color_count_before']} -> {report['median_visible_color_count_after']}"
+            )
+            print(f"Mean RGB MAE visible: {report['mean_rgb_mae_visible']}")
+            print(f"Outputs written to {parsed.out}")
         elif parsed.subcommand == "generator-challenger":
             from spritelab.training.generator_challenger import ChallengerTrainConfig, run_challenger_training
 
@@ -868,6 +1092,44 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
             print(f"Prompts written: {report['prompt_count']}")
             print(f"Output written to {parsed.out}")
+        elif parsed.subcommand == "build-v1-gallery":
+            from spritelab.training.v1_gallery import BuildV1GalleryConfig, build_v1_gallery_demo
+
+            categories = None
+            if parsed.categories:
+                categories = tuple(token.strip() for token in str(parsed.categories).split(",") if token.strip())
+
+            report = build_v1_gallery_demo(
+                BuildV1GalleryConfig(
+                    out_dir=parsed.out_dir,
+                    checkpoint=parsed.checkpoint,
+                    prompts=parsed.prompts,
+                    device=parsed.device,
+                    seed=parsed.seed,
+                    batch_size=parsed.batch_size,
+                    num_samples=parsed.num_samples,
+                    categories=categories,
+                    contact_sheet_columns=parsed.contact_sheet_columns,
+                    include_ood=parsed.include_ood,
+                    include_grounded=parsed.include_grounded,
+                    include_stress_prompts=parsed.include_stress_prompts,
+                )
+            )
+            print(f"Prompt count: {report['prompt_set']['prompt_count']}")
+            print(f"Sample count: {report['sample_count']}")
+            print(f"Samples written to {parsed.out_dir / 'samples'}")
+            print(f"Contact sheets written to {parsed.out_dir / 'contact_sheets'}")
+            print(f"Report written to {parsed.out_dir / 'v1_gallery_report.md'}")
+        elif parsed.subcommand == "v1-gallery-gui":
+            from spritelab.training.v1_gallery_gui import launch_v1_gallery_gui
+
+            try:
+                launch_v1_gallery_gui(out_dir=parsed.out_dir, host=parsed.host, port=parsed.port)
+            except RuntimeError as exc:
+                if "requires gradio" not in str(exc):
+                    raise
+                print(str(exc))
+                raise SystemExit(1)
         elif parsed.subcommand == "compare-challenger-conditioning-audits":
             from spritelab.training.generator_audits import compare_challenger_conditioning_audits
 

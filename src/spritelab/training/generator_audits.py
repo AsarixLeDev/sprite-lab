@@ -57,6 +57,7 @@ class FullV4ChallengerAuditConfig:
     dataset: Path
     training_manifest: Path
     out_dir: Path
+    export_preset: str | None = None
     architecture: str = "rectified_flow"
     device: str = "cpu"
     seed: int = 20260706
@@ -76,6 +77,8 @@ class FullV4ChallengerAuditConfig:
     palette_swap_augmentation: bool = False
     palette_swap_prob: float = 0.0
     palette_swap_families: str = PALETTE_SWAP_DEFAULT_FAMILIES
+    palette_swap_stochastic: bool = False
+    palette_swap_keep_original_prob: float = 0.0
     palette_swap_preserve_outline: bool = True
     palette_swap_update_prompts: bool = True
     palette_swap_target_families: str | None = None
@@ -86,12 +89,17 @@ class FullV4ChallengerAuditConfig:
     palette_swap_require_explicit_color: bool = False
     palette_swap_require_explicit_caption_color: bool = False
     palette_swap_require_explicit_semantic_color: bool = False
+    palette_swap_allow_colorless_caption_if_semantic_color: bool = False
     palette_swap_no_caption_prepend: bool = False
     palette_swap_allow_material_colors: bool = True
     sample_steps: int = 30
     cfg_scale: float = 2.0
     max_colors: int = 32
     alpha_threshold: float = 0.5
+    project_palette: bool = False
+    project_palette_target_colors: int = 16
+    project_palette_min_pixel_share: float = 0.01
+    project_palette_method: str = "deterministic_kmeans"
     max_eval_prompts: int = 128
     max_sensitivity_prompts: int = 32
     faithfulness_max_sources: int = 0
@@ -104,6 +112,7 @@ class FullV4ChallengerAuditConfig:
     eval_checkpoints: bool = False
     eval_checkpoint_every: int = 5000
     eval_checkpoint_steps: str | None = None
+    checkpoint_eval_max_samples: int | None = None
     amp: bool = True
     lr_schedule: str = "cosine"
     lr_warmup_steps: int = 500
@@ -130,6 +139,10 @@ OOD_SELECTION_GUARDRAILS: dict[str, float] = {
     "color_min": 0.80,
     "rare_color_max": 0.35,
     "blob_max": 0.35,
+}
+GROUNDED_SELECTION_GUARDRAILS: dict[str, float] = {
+    "category_min": 0.92,
+    "color_min": 0.72,
 }
 
 
@@ -592,6 +605,8 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
             palette_swap_augmentation=bool(config.palette_swap_augmentation),
             palette_swap_prob=float(config.palette_swap_prob),
             palette_swap_families=str(config.palette_swap_families),
+            palette_swap_stochastic=bool(config.palette_swap_stochastic),
+            palette_swap_keep_original_prob=float(config.palette_swap_keep_original_prob),
             palette_swap_preserve_outline=bool(config.palette_swap_preserve_outline),
             palette_swap_update_prompts=bool(config.palette_swap_update_prompts),
             palette_swap_target_families=config.palette_swap_target_families,
@@ -602,6 +617,9 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
             palette_swap_require_explicit_color=bool(config.palette_swap_require_explicit_color),
             palette_swap_require_explicit_caption_color=bool(config.palette_swap_require_explicit_caption_color),
             palette_swap_require_explicit_semantic_color=bool(config.palette_swap_require_explicit_semantic_color),
+            palette_swap_allow_colorless_caption_if_semantic_color=bool(
+                config.palette_swap_allow_colorless_caption_if_semantic_color
+            ),
             palette_swap_no_caption_prepend=bool(config.palette_swap_no_caption_prepend),
             palette_swap_allow_material_colors=bool(config.palette_swap_allow_material_colors),
             sample_every=0,
@@ -615,7 +633,10 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
     )
     final_sample_checkpoint = train_dir / ("checkpoint_last_ema.pt" if config.sample_ema else "checkpoint_last.pt")
     if config.sample_ema and not final_sample_checkpoint.is_file():
-        raise FileNotFoundError(f"--sample-ema requested but EMA checkpoint is missing: {final_sample_checkpoint}")
+        if str(config.export_preset or "").lower() in {"v1", "phase1_v1"}:
+            final_sample_checkpoint = train_dir / "checkpoint_last.pt"
+        else:
+            raise FileNotFoundError(f"--sample-ema requested but EMA checkpoint is missing: {final_sample_checkpoint}")
     sample_checkpoint = final_sample_checkpoint
     checkpoint_evaluation: dict[str, Any] | None = None
     ood_prompt_file: Path | None = None
@@ -626,6 +647,8 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
             config,
             train_dir=train_dir,
             checkpoint_steps=checkpoint_steps,
+            grounded_prompt_file=prompt_file,
+            grounded_prompt_summary=prompt_summary,
             ood_prompt_file=ood_prompt_file,
             ood_prompt_summary=ood_prompt_summary,
         )
@@ -637,6 +660,7 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
             checkpoint=sample_checkpoint,
             prompts=prompt_file,
             out_dir=generated_dir,
+            export_preset=config.export_preset,
             max_samples=int(prompt_summary["prompt_count"]),
             steps=int(config.sample_steps),
             cfg_scale=float(config.cfg_scale),
@@ -649,6 +673,10 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
             write_raw_rgba=True,
             write_hard_rgba=True,
             contact_sheet_labels="prompt_and_seed",
+            project_palette=bool(config.project_palette),
+            project_palette_target_colors=int(config.project_palette_target_colors),
+            project_palette_min_pixel_share=float(config.project_palette_min_pixel_share),
+            project_palette_method=str(config.project_palette_method),
         )
     )
     qa = qa_generated_sprites(generated_dir).to_json_dict()
@@ -697,6 +725,7 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
         "palette_swap": _full_v4_palette_swap_summary(train_report, config),
         "prompt_set": prompt_summary,
         "generation": _full_v4_generation_summary(sample_report, generated_dir=generated_dir),
+        "palette_projection": _full_v4_palette_projection_summary(generated_dir, sample_report),
         "generated_qa": _full_v4_qa_summary(qa),
         "generated_review": _full_v4_generated_review_summary(review_result.report, max_colors=int(config.max_colors)),
         "prompt_faithfulness": _full_v4_faithfulness_summary(faithfulness),
@@ -753,13 +782,19 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
             "checkpoint": str(train_dir / "checkpoint_last.pt"),
             "final_step_sample_checkpoint": str(final_sample_checkpoint),
             "sample_checkpoint": str(sample_checkpoint),
-            "sampled_ema": bool(config.sample_ema),
+            "sampled_ema": str(sample_checkpoint).endswith("_ema.pt"),
             "checkpoint_selection_enabled": bool(config.eval_checkpoints),
             "eval_prompts": str(prompt_file),
             "generated_dir": str(generated_dir),
             "generated_contact_sheet": None
             if sample_report.get("contact_sheet") is None
             else str(generated_dir / str(sample_report.get("contact_sheet"))),
+            "palette_projection_report": str(generated_dir / "palette_projection_report.json")
+            if (generated_dir / "palette_projection_report.json").is_file()
+            else None,
+            "palette_projection_contact_sheet": str(generated_dir / "contact_sheet_projected.png")
+            if (generated_dir / "contact_sheet_projected.png").is_file()
+            else None,
             "review_contact_sheets": review_result.report.get("contact_sheets", {}),
             **ood_artifacts,
         },
@@ -935,9 +970,11 @@ def compare_challenger_conditioning_audits(
     structured_report = _report_with_computed_source_deltas(_load_full_v4_report(structured))
     source_selection_comparison = _source_selection_comparison(baseline_report, structured_report)
     checkpoint_selection_comparison = _checkpoint_selection_comparison(baseline_report, structured_report)
+    projection_comparison = _palette_projection_comparison(baseline_report, structured_report)
     warnings = [
         *source_selection_comparison["warnings"],
         *checkpoint_selection_comparison["warnings"],
+        *projection_comparison["warnings"],
         *_cfg_scale_comparison_warnings(baseline_report, structured_report),
     ]
     grounded_baseline_metrics = _comparison_metrics_for_eval(baseline_report, eval_key="grounded")
@@ -965,14 +1002,16 @@ def compare_challenger_conditioning_audits(
         "micro_overfit_preserved": "not_assessed_by_full_v4_comparison",
     }
     report = {
-        "schema_version": "challenger_conditioning_comparison_v1.3",
+        "schema_version": "challenger_conditioning_comparison_v1.4",
         "warnings": warnings,
         "source_selection_comparison": source_selection_comparison,
         "checkpoint_selection_comparison": checkpoint_selection_comparison,
+        "projection_comparison": projection_comparison,
         "baseline": {
             "conditioning_mode": baseline_report.get("conditioning_mode"),
             "source_selection": source_selection_comparison["baseline"],
             "checkpoint_selection": checkpoint_selection_comparison["baseline"],
+            "palette_projection": projection_comparison["baseline"],
             "selected_checkpoint": checkpoint_selection_comparison["baseline"].get("selected_checkpoint"),
             "selected_step": checkpoint_selection_comparison["baseline"].get("selected_step"),
             "selection_score": checkpoint_selection_comparison["baseline"].get("selection_score"),
@@ -983,6 +1022,7 @@ def compare_challenger_conditioning_audits(
             "conditioning_mode": structured_report.get("conditioning_mode"),
             "source_selection": source_selection_comparison["structured"],
             "checkpoint_selection": checkpoint_selection_comparison["structured"],
+            "palette_projection": projection_comparison["structured"],
             "selected_checkpoint": checkpoint_selection_comparison["structured"].get("selected_checkpoint"),
             "selected_step": checkpoint_selection_comparison["structured"].get("selected_step"),
             "selection_score": checkpoint_selection_comparison["structured"].get("selection_score"),
@@ -1061,23 +1101,35 @@ def _prepare_full_v4_ood_prompts(config: FullV4ChallengerAuditConfig) -> tuple[P
     return ood_prompt_file, ood_prompt_summary
 
 
-def _run_full_v4_ood_evaluation(
+def _checkpoint_eval_sample_count(
+    config: FullV4ChallengerAuditConfig,
+    prompt_summary: Mapping[str, Any],
+) -> int:
+    prompt_count = int(prompt_summary.get("prompt_count") or 0)
+    if config.checkpoint_eval_max_samples is None:
+        return prompt_count
+    return max(0, min(prompt_count, int(config.checkpoint_eval_max_samples)))
+
+
+def _run_full_v4_grounded_evaluation(
     config: FullV4ChallengerAuditConfig,
     *,
     checkpoint: Path,
-    ood_prompt_file: Path,
-    ood_prompt_summary: Mapping[str, Any],
+    prompt_file: Path,
+    prompt_summary: Mapping[str, Any],
     generated_dir: Path,
     seed: int,
-    include_sensitivity: bool,
     faithfulness_max_sources: int,
+    max_samples: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    ood_sample_report = run_sample_generator_challenger(
+    sample_count = int(prompt_summary.get("prompt_count") or 0) if max_samples is None else int(max_samples)
+    sample_report = run_sample_generator_challenger(
         ChallengerSampleConfig(
             checkpoint=checkpoint,
-            prompts=ood_prompt_file,
+            prompts=prompt_file,
             out_dir=generated_dir,
-            max_samples=int(ood_prompt_summary["prompt_count"]),
+            export_preset=config.export_preset,
+            max_samples=sample_count,
             steps=int(config.sample_steps),
             cfg_scale=float(config.cfg_scale),
             max_colors=int(config.max_colors),
@@ -1089,6 +1141,97 @@ def _run_full_v4_ood_evaluation(
             write_raw_rgba=True,
             write_hard_rgba=True,
             contact_sheet_labels="prompt_and_seed",
+            project_palette=bool(config.project_palette),
+            project_palette_target_colors=int(config.project_palette_target_colors),
+            project_palette_min_pixel_share=float(config.project_palette_min_pixel_share),
+            project_palette_method=str(config.project_palette_method),
+        )
+    )
+    qa = qa_generated_sprites(generated_dir).to_json_dict()
+    review_result = review_generated_sprites(
+        GeneratedReviewConfig(
+            generated_dir=generated_dir,
+            out=generated_dir / "generated_review_report.md",
+            out_json=generated_dir / "generated_review_report.json",
+            out_dir=generated_dir / "review",
+            group_by="category",
+            max_samples_per_sheet=sample_count,
+            compare_raw_indexed=True,
+        )
+    )
+    faithfulness_json = generated_dir / "prompt_faithfulness_report.json"
+    faithfulness = run_prompt_faithfulness(
+        PromptFaithfulnessConfig(
+            generated=generated_dir,
+            prompts=prompt_file,
+            dataset=config.dataset,
+            out=generated_dir / "prompt_faithfulness_report.md",
+            out_json=faithfulness_json,
+            max_sources=int(faithfulness_max_sources),
+            source_selection="auto",
+        )
+    )
+    _verify_faithfulness_matches_disk(faithfulness, faithfulness_json)
+    section = {
+        "prompt_set": {**dict(prompt_summary), "evaluated_prompt_count": sample_count},
+        "generation": _full_v4_generation_summary(sample_report, generated_dir=generated_dir),
+        "palette_projection": _full_v4_palette_projection_summary(generated_dir, sample_report),
+        "generated_qa": _full_v4_qa_summary(qa),
+        "generated_review": _full_v4_generated_review_summary(review_result.report, max_colors=int(config.max_colors)),
+        "prompt_faithfulness": _full_v4_faithfulness_summary(faithfulness),
+    }
+    artifacts = {
+        "grounded_prompts": str(prompt_file),
+        "grounded_generated_dir": str(generated_dir),
+        "grounded_generated_contact_sheet": None
+        if sample_report.get("contact_sheet") is None
+        else str(generated_dir / str(sample_report.get("contact_sheet"))),
+        "grounded_review_contact_sheets": review_result.report.get("contact_sheets", {}),
+        "grounded_palette_projection_report": str(generated_dir / "palette_projection_report.json")
+        if (generated_dir / "palette_projection_report.json").is_file()
+        else None,
+        "grounded_palette_projection_contact_sheet": str(generated_dir / "contact_sheet_projected.png")
+        if (generated_dir / "contact_sheet_projected.png").is_file()
+        else None,
+    }
+    return section, artifacts
+
+
+def _run_full_v4_ood_evaluation(
+    config: FullV4ChallengerAuditConfig,
+    *,
+    checkpoint: Path,
+    ood_prompt_file: Path,
+    ood_prompt_summary: Mapping[str, Any],
+    generated_dir: Path,
+    seed: int,
+    include_sensitivity: bool,
+    faithfulness_max_sources: int,
+    max_samples: int | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    sample_count = int(ood_prompt_summary["prompt_count"]) if max_samples is None else int(max_samples)
+    ood_sample_report = run_sample_generator_challenger(
+        ChallengerSampleConfig(
+            checkpoint=checkpoint,
+            prompts=ood_prompt_file,
+            out_dir=generated_dir,
+            export_preset=config.export_preset,
+            max_samples=sample_count,
+            steps=int(config.sample_steps),
+            cfg_scale=float(config.cfg_scale),
+            max_colors=int(config.max_colors),
+            alpha_threshold=float(config.alpha_threshold),
+            device=config.device,
+            seed=int(seed),
+            batch_size=int(config.sample_batch_size),
+            dither=False,
+            write_raw_rgba=True,
+            write_hard_rgba=True,
+            contact_sheet_labels="prompt_and_seed",
+            project_palette=bool(config.project_palette),
+            project_palette_target_colors=int(config.project_palette_target_colors),
+            project_palette_min_pixel_share=float(config.project_palette_min_pixel_share),
+            project_palette_method=str(config.project_palette_method),
         )
     )
     ood_qa = qa_generated_sprites(generated_dir).to_json_dict()
@@ -1099,7 +1242,7 @@ def _run_full_v4_ood_evaluation(
             out_json=generated_dir / "generated_review_report.json",
             out_dir=generated_dir / "review",
             group_by="category",
-            max_samples_per_sheet=int(ood_prompt_summary["prompt_count"]),
+            max_samples_per_sheet=sample_count,
             compare_raw_indexed=True,
         )
     )
@@ -1117,8 +1260,9 @@ def _run_full_v4_ood_evaluation(
     )
     _verify_faithfulness_matches_disk(ood_faithfulness, ood_faithfulness_json)
     section = {
-        "prompt_set": dict(ood_prompt_summary),
+        "prompt_set": {**dict(ood_prompt_summary), "evaluated_prompt_count": sample_count},
         "generation": _full_v4_generation_summary(ood_sample_report, generated_dir=generated_dir),
+        "palette_projection": _full_v4_palette_projection_summary(generated_dir, ood_sample_report),
         "generated_qa": _full_v4_qa_summary(ood_qa),
         "generated_review": _full_v4_generated_review_summary(ood_review_result.report, max_colors=int(config.max_colors)),
         "prompt_faithfulness": _full_v4_faithfulness_summary(ood_faithfulness),
@@ -1131,7 +1275,7 @@ def _run_full_v4_ood_evaluation(
                 out_dir=generated_dir / "prompt_sensitivity",
                 device=config.device,
                 seed=int(seed),
-                max_prompts=int(min(config.max_sensitivity_prompts, int(ood_prompt_summary["prompt_count"]))),
+                max_prompts=int(min(config.max_sensitivity_prompts, sample_count)),
                 noise_samples=int(config.noise_samples),
                 max_pairs=8,
                 max_colors=int(config.max_colors),
@@ -1147,6 +1291,12 @@ def _run_full_v4_ood_evaluation(
         if ood_sample_report.get("contact_sheet") is None
         else str(generated_dir / str(ood_sample_report.get("contact_sheet"))),
         "ood_review_contact_sheets": ood_review_result.report.get("contact_sheets", {}),
+        "ood_palette_projection_report": str(generated_dir / "palette_projection_report.json")
+        if (generated_dir / "palette_projection_report.json").is_file()
+        else None,
+        "ood_palette_projection_contact_sheet": str(generated_dir / "contact_sheet_projected.png")
+        if (generated_dir / "contact_sheet_projected.png").is_file()
+        else None,
     }
     return section, artifacts
 
@@ -1156,6 +1306,8 @@ def _evaluate_full_v4_checkpoint_candidates(
     *,
     train_dir: Path,
     checkpoint_steps: Sequence[int],
+    grounded_prompt_file: Path,
+    grounded_prompt_summary: Mapping[str, Any],
     ood_prompt_file: Path,
     ood_prompt_summary: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -1165,7 +1317,20 @@ def _evaluate_full_v4_checkpoint_candidates(
         prefer_ema=bool(config.sample_ema),
     )
     leaderboard: list[dict[str, Any]] = []
+    grounded_eval_samples = _checkpoint_eval_sample_count(config, grounded_prompt_summary)
+    ood_eval_samples = _checkpoint_eval_sample_count(config, ood_prompt_summary)
     for candidate in candidates:
+        grounded_dir = Path(config.out_dir) / "checkpoint_grounded_eval" / _checkpoint_eval_dir_name(candidate)
+        grounded_section, _grounded_artifacts = _run_full_v4_grounded_evaluation(
+            config,
+            checkpoint=Path(str(candidate["checkpoint_path"])),
+            prompt_file=grounded_prompt_file,
+            prompt_summary=grounded_prompt_summary,
+            generated_dir=grounded_dir,
+            seed=int(config.seed),
+            faithfulness_max_sources=0,
+            max_samples=grounded_eval_samples,
+        )
         generated_dir = Path(config.out_dir) / "checkpoint_ood_eval" / _checkpoint_eval_dir_name(candidate)
         ood_section, _artifacts = _run_full_v4_ood_evaluation(
             config,
@@ -1176,8 +1341,9 @@ def _evaluate_full_v4_checkpoint_candidates(
             seed=int(config.seed) + 17,
             include_sensitivity=False,
             faithfulness_max_sources=0,
+            max_samples=ood_eval_samples,
         )
-        leaderboard.append(_checkpoint_ood_leaderboard_entry(candidate, ood_section))
+        leaderboard.append(_checkpoint_ood_leaderboard_entry(candidate, ood_section, grounded_section=grounded_section))
     if not leaderboard:
         raise ValueError("--eval-checkpoints produced no checkpoint candidates")
     selected = _select_ood_checkpoint_entry(leaderboard)
@@ -1204,9 +1370,14 @@ def _evaluate_full_v4_checkpoint_candidates(
         "selected_metrics": _checkpoint_metric_snapshot(selected),
         "leaderboard": ranked,
         "guardrails": {
-            "qa_errors": 0,
-            **dict(OOD_SELECTION_GUARDRAILS),
+            "grounded": {"qa_errors": 0, **dict(GROUNDED_SELECTION_GUARDRAILS)},
+            "ood": {"qa_errors": 0, **dict(OOD_SELECTION_GUARDRAILS)},
         },
+        "checkpoint_eval_max_samples": None
+        if config.checkpoint_eval_max_samples is None
+        else int(config.checkpoint_eval_max_samples),
+        "grounded_eval_samples": int(grounded_eval_samples),
+        "ood_eval_samples": int(ood_eval_samples),
     }
 
 
@@ -1241,25 +1412,49 @@ def _checkpoint_eval_dir_name(candidate: Mapping[str, Any]) -> str:
 def _checkpoint_ood_leaderboard_entry(
     candidate: Mapping[str, Any],
     ood_section: Mapping[str, Any],
+    *,
+    grounded_section: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     metrics = _checkpoint_ood_metrics(ood_section)
+    grounded_metrics = _checkpoint_grounded_metrics(grounded_section or {})
     score = _ood_control_score_v1(metrics)
-    failures = _ood_guardrail_failures(metrics)
+    grounded_failures = _grounded_guardrail_failures(grounded_metrics)
+    ood_failures = _ood_guardrail_failures(metrics)
+    failures = [*grounded_failures, *ood_failures]
+    guardrails_passed = not failures
     return {
         **dict(candidate),
+        "score": score,
         "ood_score": score,
+        "grounded_qa_errors": int(grounded_metrics.get("qa_errors") or 0),
+        "grounded_qa_error_rate": grounded_metrics.get("qa_error_rate"),
+        "grounded_category": grounded_metrics.get("category"),
+        "grounded_color": grounded_metrics.get("color"),
+        "grounded_guardrails_passed": not grounded_failures,
+        "grounded_guardrail_failures": grounded_failures,
+        "ood_qa_errors": int(metrics.get("qa_errors") or 0),
+        "ood_qa_error_rate": metrics.get("qa_error_rate"),
+        "ood_category": metrics.get("category"),
+        "ood_color": metrics.get("color"),
+        "ood_rare_color_rate": metrics.get("rare_color_rate"),
+        "ood_blob_collapse_rate": metrics.get("blob_collapse_rate"),
+        "ood_guardrails_passed": not ood_failures,
+        "ood_guardrail_failures": ood_failures,
         "qa_errors": int(metrics.get("qa_errors") or 0),
         "qa_error_rate": metrics.get("qa_error_rate"),
         "category": metrics.get("category"),
         "color": metrics.get("color"),
         "rare_color_rate": metrics.get("rare_color_rate"),
         "repeated_silhouette_rate": metrics.get("repeated_silhouette_rate"),
+        "blob_rate": metrics.get("blob_collapse_rate"),
         "blob_collapse_rate": metrics.get("blob_collapse_rate"),
+        "potion_rate": metrics.get("potion_collapse_rate"),
         "potion_collapse_rate": metrics.get("potion_collapse_rate"),
         "touches_border_rate": metrics.get("touches_border_rate"),
-        "guardrails_passed": not failures,
+        "passes_guardrails": guardrails_passed,
+        "guardrails_passed": guardrails_passed,
         "guardrail_failures": failures,
-        "deployable": not failures,
+        "deployable": guardrails_passed,
         "selected": False,
     }
 
@@ -1284,6 +1479,23 @@ def _checkpoint_ood_metrics(ood_section: Mapping[str, Any]) -> dict[str, Any]:
         "blob_collapse_rate": _optional_float(faithfulness.get("generic_blob_collapse_rate")),
         "potion_collapse_rate": _optional_float(faithfulness.get("generic_potion_collapse_rate")),
         "touches_border_rate": _optional_float(review.get("touches_border_rate")),
+    }
+
+
+def _checkpoint_grounded_metrics(grounded_section: Mapping[str, Any]) -> dict[str, Any]:
+    qa = _section(grounded_section, "generated_qa")
+    faithfulness = _section(grounded_section, "prompt_faithfulness")
+    prompts = _section(grounded_section, "prompt_set")
+    qa_errors = int(qa.get("errors") or 0)
+    sample_count = _optional_int(qa.get("sample_count")) or _optional_int(prompts.get("evaluated_prompt_count")) or 0
+    return {
+        "qa_errors": qa_errors,
+        "qa_error_rate": float(qa_errors) / float(max(1, sample_count)),
+        "category": _first_float(
+            faithfulness.get("category_consistency_rate"),
+            faithfulness.get("nearest_source_category_consistency_rate"),
+        ),
+        "color": _optional_float(faithfulness.get("color_consistency_rate")),
     }
 
 
@@ -1333,6 +1545,19 @@ def _ood_guardrail_failures(metrics: Mapping[str, Any]) -> list[str]:
     return failures
 
 
+def _grounded_guardrail_failures(metrics: Mapping[str, Any]) -> list[str]:
+    failures: list[str] = []
+    if int(metrics.get("qa_errors") or 0) != 0:
+        failures.append("grounded_qa_errors")
+    category = _optional_float(metrics.get("category"))
+    if category is None or category < GROUNDED_SELECTION_GUARDRAILS["category_min"]:
+        failures.append("grounded_category")
+    color = _optional_float(metrics.get("color"))
+    if color is None or color < GROUNDED_SELECTION_GUARDRAILS["color_min"]:
+        failures.append("grounded_color")
+    return failures
+
+
 def _checkpoint_selection_rank_key(entry: Mapping[str, Any]) -> tuple[int, float, int]:
     passed = 1 if bool(entry.get("guardrails_passed")) else 0
     score = _optional_float(entry.get("ood_score"))
@@ -1349,16 +1574,34 @@ def _checkpoint_metric_snapshot(entry: Mapping[str, Any]) -> dict[str, Any]:
         "step",
         "checkpoint_path",
         "ema",
+        "score",
         "ood_score",
+        "grounded_qa_errors",
+        "grounded_qa_error_rate",
+        "grounded_category",
+        "grounded_color",
+        "grounded_guardrails_passed",
+        "grounded_guardrail_failures",
+        "ood_qa_errors",
+        "ood_qa_error_rate",
+        "ood_category",
+        "ood_color",
+        "ood_rare_color_rate",
+        "ood_blob_collapse_rate",
+        "ood_guardrails_passed",
+        "ood_guardrail_failures",
         "qa_errors",
         "qa_error_rate",
         "category",
         "color",
         "rare_color_rate",
         "repeated_silhouette_rate",
+        "blob_rate",
         "blob_collapse_rate",
+        "potion_rate",
         "potion_collapse_rate",
         "touches_border_rate",
+        "passes_guardrails",
         "guardrails_passed",
         "guardrail_failures",
         "deployable",
@@ -1412,6 +1655,8 @@ def _full_v4_palette_swap_summary(
         "palette_swap_augmentation": bool(config.palette_swap_augmentation),
         "palette_swap_prob": float(config.palette_swap_prob),
         "palette_swap_families": str(config.palette_swap_families),
+        "palette_swap_stochastic": bool(config.palette_swap_stochastic),
+        "palette_swap_keep_original_prob": float(config.palette_swap_keep_original_prob),
         "palette_swap_target_families": config.palette_swap_target_families,
         "palette_swap_source_families": config.palette_swap_source_families,
         "palette_swap_category_filter": config.palette_swap_category_filter,
@@ -1420,6 +1665,9 @@ def _full_v4_palette_swap_summary(
         "palette_swap_require_explicit_color": bool(config.palette_swap_require_explicit_color),
         "palette_swap_require_explicit_caption_color": bool(config.palette_swap_require_explicit_caption_color),
         "palette_swap_require_explicit_semantic_color": bool(config.palette_swap_require_explicit_semantic_color),
+        "palette_swap_allow_colorless_caption_if_semantic_color": bool(
+            config.palette_swap_allow_colorless_caption_if_semantic_color
+        ),
         "palette_swap_no_caption_prepend": bool(config.palette_swap_no_caption_prepend),
         "palette_swap_allow_material_colors": bool(config.palette_swap_allow_material_colors),
         "palette_swap_preserve_outline": bool(config.palette_swap_preserve_outline),
@@ -1427,8 +1675,18 @@ def _full_v4_palette_swap_summary(
     }
     for key in (
         "applied_count",
+        "swapped_count",
+        "kept_original_count",
+        "effective_eligible_count_before_keep_original",
+        "unchanged_ineligible_count",
+        "unchanged_not_triggered_count",
         "applied_rate_total",
         "applied_rate_eligible",
+        "effective_swapped_rate_total",
+        "effective_kept_original_rate_total",
+        "effective_eligible_rate_total_before_keep_original",
+        "effective_swapped_rate_eligible",
+        "effective_kept_original_rate_eligible",
         "eligible_count",
         "ineligible_count",
         "sample_count",
@@ -1437,6 +1695,7 @@ def _full_v4_palette_swap_summary(
         "source_to_target_matrix",
         "fallback_heuristic_rate",
         "material_conflict_drop_count",
+        "colorless_caption_structured_only_count",
         "applied_rate",
     ):
         if key in reported:
@@ -1486,6 +1745,43 @@ def _full_v4_generation_summary(sample_report: Mapping[str, Any], *, generated_d
         "max_visible_color_count": _optional_int(sample_report.get("max_visible_color_count")),
         "contact_sheet": None if contact_sheet is None else str(generated_dir / str(contact_sheet)),
     }
+
+
+def _full_v4_palette_projection_summary(generated_dir: Path, sample_report: Mapping[str, Any]) -> dict[str, Any]:
+    report_path = Path(generated_dir) / "palette_projection_report.json"
+    projection = sample_report.get("palette_projection") if isinstance(sample_report.get("palette_projection"), Mapping) else {}
+    report: dict[str, Any] = {}
+    if report_path.is_file():
+        try:
+            loaded = json.loads(report_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                report = loaded
+        except json.JSONDecodeError:
+            report = {}
+    applied = bool(report) or bool(projection.get("applied"))
+    contact_sheet = Path(generated_dir) / "contact_sheet_projected.png"
+    summary = {
+        "applied": bool(applied),
+        "method": report.get("method") or projection.get("method"),
+        "target_colors": _optional_int(report.get("target_colors") or projection.get("target_colors")),
+        "min_pixel_share": _optional_float(report.get("min_pixel_share") or projection.get("min_pixel_share")),
+        "median_visible_color_count_before": _optional_float(report.get("median_visible_color_count_before")),
+        "median_visible_color_count_after": _optional_float(report.get("median_visible_color_count_after")),
+        "mean_visible_color_count_before": _optional_float(report.get("mean_visible_color_count_before")),
+        "mean_visible_color_count_after": _optional_float(report.get("mean_visible_color_count_after")),
+        "rare_color_rate_before": _optional_float(report.get("rare_color_rate_before")),
+        "rare_color_rate_after": _optional_float(report.get("rare_color_rate_after")),
+        "mean_rgb_mae_visible": _optional_float(report.get("mean_rgb_mae_visible") or projection.get("mean_rgb_mae_visible")),
+        "destructive_rate": _optional_float(report.get("destructive_rate") or projection.get("destructive_rate")),
+        "safe_count": _optional_int(report.get("safe_count")),
+        "moderate_count": _optional_int(report.get("moderate_count")),
+        "destructive_count": _optional_int(report.get("destructive_count")),
+        "report": str(report_path) if report_path.is_file() else projection.get("report"),
+        "contact_sheet": str(contact_sheet) if contact_sheet.is_file() else projection.get("contact_sheet"),
+    }
+    if report.get("sample_count") is not None:
+        summary["sample_count"] = _optional_int(report.get("sample_count"))
+    return summary
 
 
 def _full_v4_qa_summary(qa: Mapping[str, Any]) -> dict[str, Any]:
@@ -1948,6 +2244,7 @@ def _format_full_v4_markdown(report: Mapping[str, Any]) -> str:
     training = _section(report, "training")
     prompts = _section(report, "prompt_set")
     generation = _section(report, "generation")
+    palette_projection = _section(report, "palette_projection")
     qa = _section(report, "generated_qa")
     review = _section(report, "generated_review")
     faithfulness = _section(report, "prompt_faithfulness")
@@ -1968,6 +2265,9 @@ def _format_full_v4_markdown(report: Mapping[str, Any]) -> str:
         f"Sampled EMA checkpoint: {bool(artifacts.get('sampled_ema'))}",
         f"Sample checkpoint: `{artifacts.get('sample_checkpoint', '')}`",
         f"Decision: **{decision.get('code', 'F')}. {decision.get('label', 'Unknown.')}**",
+        "",
+        "Current v1 default: Phase 1 EMA, CFG 3.0, k16 deterministic palette projection.",
+        "Palette-swap branches are experimental and not adopted.",
         "",
         "## Training",
         "",
@@ -2004,6 +2304,17 @@ def _format_full_v4_markdown(report: Mapping[str, Any]) -> str:
         f"- Structured fields present: {bool(prompts.get('structured_fields_present'))}",
         f"- Structured present count: {_fmt_int(prompts.get('structured_present_count'))}",
         f"- Structured field counts: `{json.dumps(_jsonable(prompts.get('structured_field_counts', {})), sort_keys=True)}`",
+        "",
+        "## Generation",
+        "",
+        f"- Sample count: {_fmt_int(generation.get('sample_count'))}",
+        f"- Max visible colors: {_fmt_int(generation.get('max_visible_color_count'))}",
+        f"- Fully transparent count: {_fmt_int(generation.get('fully_transparent_count'))}",
+        f"- Contact sheet: `{generation.get('contact_sheet') or ''}`",
+        "",
+        "## Palette Projection",
+        "",
+        *_format_palette_projection_summary_lines(palette_projection),
         "",
         "## Generated QA",
         "",
@@ -2091,6 +2402,25 @@ def _format_full_v4_markdown(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_palette_projection_summary_lines(summary: Mapping[str, Any]) -> list[str]:
+    if not bool(summary.get("applied")):
+        return ["- Applied: false"]
+    return [
+        "- Applied: true",
+        f"- Method: `{summary.get('method') or ''}`",
+        f"- Target colors: {_fmt_int(summary.get('target_colors'))}",
+        f"- Min pixel share: {_fmt(summary.get('min_pixel_share'))}",
+        f"- Median visible colors: {_fmt(summary.get('median_visible_color_count_before'))} -> {_fmt(summary.get('median_visible_color_count_after'))}",
+        f"- Mean visible colors: {_fmt(summary.get('mean_visible_color_count_before'))} -> {_fmt(summary.get('mean_visible_color_count_after'))}",
+        f"- Rare-color rate: {_fmt(summary.get('rare_color_rate_before'))} -> {_fmt(summary.get('rare_color_rate_after'))}",
+        f"- Mean RGB MAE visible: {_fmt(summary.get('mean_rgb_mae_visible'))}",
+        f"- Destructive rate: {_fmt(summary.get('destructive_rate'))}",
+        f"- Safe / moderate / destructive: {_fmt_int(summary.get('safe_count'))} / {_fmt_int(summary.get('moderate_count'))} / {_fmt_int(summary.get('destructive_count'))}",
+        f"- Report: `{summary.get('report') or ''}`",
+        f"- Before/after contact sheet: `{summary.get('contact_sheet') or ''}`",
+    ]
+
+
 def _format_source_baseline_lines(
     source_distribution: Mapping[str, Any],
     generated_vs_source: Mapping[str, Any],
@@ -2119,6 +2449,7 @@ def _format_full_v4_ood_markdown(
     prompts = _section(ood, "prompt_set")
     qa = _section(ood, "generated_qa")
     review = _section(ood, "generated_review")
+    palette_projection = _section(ood, "palette_projection")
     faithfulness = _section(ood, "prompt_faithfulness")
     sensitivity = _section(ood, "prompt_sensitivity")
     return [
@@ -2129,6 +2460,11 @@ def _format_full_v4_ood_markdown(
         f"- Category counts: `{json.dumps(_jsonable(prompts.get('category_counts', {})), sort_keys=True)}`",
         f"- Structured fields present: {bool(prompts.get('structured_fields_present'))}",
         f"- QA errors: {_fmt_int(qa.get('errors'))}",
+        f"- Projection applied: {bool(palette_projection.get('applied'))}",
+        f"- Projection method/target: `{palette_projection.get('method') or ''}` / {_fmt_int(palette_projection.get('target_colors'))}",
+        f"- Projection visible colors: {_fmt(palette_projection.get('median_visible_color_count_before'))} -> {_fmt(palette_projection.get('median_visible_color_count_after'))}",
+        f"- Projection mean RGB MAE visible: {_fmt(palette_projection.get('mean_rgb_mae_visible'))}",
+        f"- Projection destructive rate: {_fmt(palette_projection.get('destructive_rate'))}",
         f"- Touches-border rate: {_fmt(review.get('touches_border_rate'))}",
         f"- Too-many-rare-colors rate: {_fmt(review.get('too_many_rare_colors_rate'))}",
         f"- Source selection: `{json.dumps(_jsonable(faithfulness.get('source_selection', {})), sort_keys=True)}`",
@@ -2158,8 +2494,8 @@ def _format_checkpoint_ood_leaderboard_markdown(checkpoint_evaluation: Mapping[s
         f"- Selected step: {_fmt_int(checkpoint_evaluation.get('selected_step'))}",
         f"- Selected deployable: {bool(checkpoint_evaluation.get('selected_deployable'))}",
         "",
-        "| Rank | Step | Checkpoint | EMA | OOD score | QA errors | Category | Color | Rare-color rate | Repeated silhouette | Blob collapse | Potion collapse | Touches-border | Deployable | Selected |",
-        "|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        "| Rank | Step | Checkpoint | EMA | OOD score | Grounded pass | Grounded category | Grounded color | OOD pass | OOD QA errors | OOD category | OOD color | Rare-color rate | Repeated silhouette | Blob collapse | Potion collapse | Touches-border | Deployable | Selected |",
+        "|---:|---:|---|---|---:|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for entry in leaderboard:
         if not isinstance(entry, Mapping):
@@ -2173,6 +2509,10 @@ def _format_checkpoint_ood_leaderboard_markdown(checkpoint_evaluation: Mapping[s
                     f"`{entry.get('checkpoint_path') or entry.get('checkpoint') or ''}`",
                     str(bool(entry.get("ema"))),
                     _fmt(entry.get("ood_score")),
+                    str(bool(entry.get("grounded_guardrails_passed"))),
+                    _fmt(entry.get("grounded_category")),
+                    _fmt(entry.get("grounded_color")),
+                    str(bool(entry.get("ood_guardrails_passed"))),
                     _fmt_int(entry.get("qa_errors")),
                     _fmt(entry.get("category")),
                     _fmt(entry.get("color")),
@@ -2246,6 +2586,7 @@ def _checkpoint_selection_summary(report: Mapping[str, Any]) -> dict[str, Any]:
     if selection_score is None:
         selected_metrics = _section(checkpoint_evaluation, "selected_metrics")
         selection_score = _optional_float(selected_metrics.get("ood_score"))
+    selected_metrics = _section(checkpoint_evaluation, "selected_metrics")
     sample_checkpoint = artifacts.get("sample_checkpoint")
     final_step_checkpoint = (
         checkpoint_evaluation.get("final_step_checkpoint")
@@ -2259,6 +2600,14 @@ def _checkpoint_selection_summary(report: Mapping[str, Any]) -> dict[str, Any]:
         "selected_step": _optional_int(selected_step),
         "selection_score": selection_score,
         "selected_deployable": checkpoint_evaluation.get("selected_deployable") if enabled else None,
+        "guardrails_passed": selected_metrics.get("guardrails_passed") if enabled else None,
+        "grounded_guardrails_passed": selected_metrics.get("grounded_guardrails_passed") if enabled else None,
+        "ood_guardrails_passed": selected_metrics.get("ood_guardrails_passed") if enabled else None,
+        "grounded_guardrail_failures": list(selected_metrics.get("grounded_guardrail_failures") or [])
+        if enabled
+        else [],
+        "ood_guardrail_failures": list(selected_metrics.get("ood_guardrail_failures") or []) if enabled else [],
+        "guardrail_failures": list(selected_metrics.get("guardrail_failures") or []) if enabled else [],
         "sample_checkpoint": sample_checkpoint,
         "final_step_checkpoint": final_step_checkpoint,
         "sampled_selected_checkpoint": bool(enabled and selected_checkpoint and str(sample_checkpoint) == str(selected_checkpoint)),
@@ -2282,6 +2631,63 @@ def _checkpoint_selection_comparison(
         "baseline": baseline,
         "structured": structured,
         "both_used_checkpoint_selection": bool(baseline["enabled"] and structured["enabled"]),
+        "warnings": warnings,
+    }
+
+
+def _palette_projection_summary(report: Mapping[str, Any]) -> dict[str, Any]:
+    projection = _section(report, "palette_projection")
+    config = _section(report, "config")
+    applied = bool(projection.get("applied"))
+    if not projection and config.get("project_palette") is not None:
+        applied = bool(config.get("project_palette"))
+    return {
+        "applied": bool(applied),
+        "method": projection.get("method") or config.get("project_palette_method"),
+        "target_colors": _optional_int(projection.get("target_colors") or config.get("project_palette_target_colors")),
+        "min_pixel_share": _optional_float(
+            projection.get("min_pixel_share") or config.get("project_palette_min_pixel_share")
+        ),
+        "median_visible_color_count_before": _optional_float(projection.get("median_visible_color_count_before")),
+        "median_visible_color_count_after": _optional_float(projection.get("median_visible_color_count_after")),
+        "mean_rgb_mae_visible": _optional_float(projection.get("mean_rgb_mae_visible")),
+        "destructive_rate": _optional_float(projection.get("destructive_rate")),
+    }
+
+
+def _palette_projection_comparison(
+    baseline_report: Mapping[str, Any],
+    structured_report: Mapping[str, Any],
+) -> dict[str, Any]:
+    baseline = _palette_projection_summary(baseline_report)
+    structured = _palette_projection_summary(structured_report)
+    warnings: list[str] = []
+    if bool(baseline["applied"]) != bool(structured["applied"]):
+        warnings.append("projection differs: comparing projected vs non-projected runs")
+    if baseline.get("method") and structured.get("method") and baseline.get("method") != structured.get("method"):
+        warnings.append(
+            f"projection methods differ: baseline={baseline.get('method')}, structured={structured.get('method')}"
+        )
+    if (
+        baseline.get("target_colors") is not None
+        and structured.get("target_colors") is not None
+        and baseline.get("target_colors") != structured.get("target_colors")
+    ):
+        warnings.append(
+            f"projection target colors differ: baseline={baseline.get('target_colors')}, structured={structured.get('target_colors')}"
+        )
+    if (
+        baseline.get("min_pixel_share") is not None
+        and structured.get("min_pixel_share") is not None
+        and baseline.get("min_pixel_share") != structured.get("min_pixel_share")
+    ):
+        warnings.append(
+            "projection min pixel share differs: "
+            f"baseline={_fmt(baseline.get('min_pixel_share'))}, structured={_fmt(structured.get('min_pixel_share'))}"
+        )
+    return {
+        "baseline": baseline,
+        "structured": structured,
         "warnings": warnings,
     }
 
@@ -2515,8 +2921,8 @@ def _format_challenger_conditioning_comparison_markdown(report: Mapping[str, Any
     lines += [
         "## Checkpoint selection",
         "",
-        "| Run | Enabled | Selected step | Selection score | Selected checkpoint |",
-        "|---|---|---:|---:|---|",
+        "| Run | Enabled | Selected step | Selection score | Guardrails | Grounded | OOD | Selected checkpoint |",
+        "|---|---|---:|---:|---|---|---|---|",
         (
             "| Baseline | "
             + " | ".join(
@@ -2524,6 +2930,9 @@ def _format_challenger_conditioning_comparison_markdown(report: Mapping[str, Any
                     str(bool(_section(baseline, "checkpoint_selection").get("enabled"))),
                     _fmt_int(baseline.get("selected_step")),
                     _fmt(baseline.get("selection_score")),
+                    str(_section(baseline, "checkpoint_selection").get("guardrails_passed")),
+                    str(_section(baseline, "checkpoint_selection").get("grounded_guardrails_passed")),
+                    str(_section(baseline, "checkpoint_selection").get("ood_guardrails_passed")),
                     f"`{baseline.get('selected_checkpoint') or ''}`",
                 ]
             )
@@ -2536,11 +2945,21 @@ def _format_challenger_conditioning_comparison_markdown(report: Mapping[str, Any
                     str(bool(_section(structured, "checkpoint_selection").get("enabled"))),
                     _fmt_int(structured.get("selected_step")),
                     _fmt(structured.get("selection_score")),
+                    str(_section(structured, "checkpoint_selection").get("guardrails_passed")),
+                    str(_section(structured, "checkpoint_selection").get("grounded_guardrails_passed")),
+                    str(_section(structured, "checkpoint_selection").get("ood_guardrails_passed")),
                     f"`{structured.get('selected_checkpoint') or ''}`",
                 ]
             )
             + " |"
         ),
+        "",
+        "## Palette projection",
+        "",
+        "| Run | Applied | Method | Target colors | Min pixel share | Median colors | Mean RGB MAE | Destructive rate |",
+        "|---|---|---|---:|---:|---|---:|---:|",
+        _format_projection_comparison_row("Baseline", _section(baseline, "palette_projection")),
+        _format_projection_comparison_row("Structured", _section(structured, "palette_projection")),
         "",
         "## Answers",
         "",
@@ -2612,6 +3031,27 @@ def _format_challenger_conditioning_comparison_markdown(report: Mapping[str, Any
     )
     lines.append("")
     return "\n".join(lines)
+
+
+def _format_projection_comparison_row(label: str, summary: Mapping[str, Any]) -> str:
+    before = _fmt(summary.get("median_visible_color_count_before"))
+    after = _fmt(summary.get("median_visible_color_count_after"))
+    colors = f"{before} -> {after}" if before != "NA" or after != "NA" else "NA"
+    return (
+        f"| {label} | "
+        + " | ".join(
+            [
+                str(bool(summary.get("applied"))),
+                f"`{summary.get('method') or ''}`",
+                _fmt_int(summary.get("target_colors")),
+                _fmt(summary.get("min_pixel_share")),
+                colors,
+                _fmt(summary.get("mean_rgb_mae_visible")),
+                _fmt(summary.get("destructive_rate")),
+            ]
+        )
+        + " |"
+    )
 
 
 def _section(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:

@@ -4,6 +4,38 @@
 This first milestone does not train a model. It only creates the clean
 representation needed for the future generator.
 
+## v1 Sprite Generator: Quickstart
+
+Sprite Lab has a validated v1 release path (Phase 1 EMA checkpoint, CFG 3.0, 30
+steps, k16 deterministic palette projection). Full details, including where
+the validated metrics came from, live in [`docs/v1_default.md`](docs/v1_default.md).
+
+Build the deterministic v1 demo gallery (never trains a model):
+
+```powershell
+cd C:\Users\Mathieu\Documents\sprite-lab
+$env:PYTHONPATH = "src"
+$py = "C:\Users\Mathieu\anaconda3\python.exe"
+
+& $py -m spritelab train build-v1-gallery `
+  --out experiments\v1_gallery `
+  --device cuda `
+  --seed 20260723 `
+  --batch-size 32
+```
+
+Or launch the local v1 gallery GUI (requires `pip install gradio`, or the `ui`
+extra: `pip install -e ".[ui]"`) to pick an output directory and preview
+contact sheets interactively:
+
+```powershell
+& $py -m spritelab train v1-gallery-gui --out experiments\v1_gallery_gui
+```
+
+See [`docs/v1_default.md`](docs/v1_default.md) for sampling custom prompts
+with the same official settings, output layout, and why palette-swap
+augmentation is not part of v1.
+
 ## SpriteBundle
 
 A `SpriteBundle` stores one sprite as structured data:

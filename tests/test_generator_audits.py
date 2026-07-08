@@ -270,6 +270,17 @@ def test_ood_control_guardrails_pass_and_fail() -> None:
     }
 
 
+def test_grounded_guardrails_pass_and_fail() -> None:
+    passing = {"qa_errors": 0, "category": 0.92, "color": 0.72}
+    failing = {"qa_errors": 1, "category": 0.91, "color": 0.71}
+    assert generator_audits._grounded_guardrail_failures(passing) == []
+    assert set(generator_audits._grounded_guardrail_failures(failing)) == {
+        "grounded_qa_errors",
+        "grounded_category",
+        "grounded_color",
+    }
+
+
 def test_full_v4_audit_summary_schema_with_patched_stages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     manifest = tmp_path / "training_manifest.jsonl"
     _write_manifest(manifest, count=6)
@@ -414,6 +425,203 @@ def test_full_v4_audit_summary_schema_with_patched_stages(tmp_path: Path, monkey
         generator_audits._verify_faithfulness_matches_disk(on_disk, report_path)
 
 
+def test_full_v4_audit_projection_enabled_summarizes_projected_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = tmp_path / "training_manifest.jsonl"
+    _write_manifest(manifest, count=2)
+    sample_calls: list[Any] = []
+    review_dirs: list[Path] = []
+    faithfulness_dirs: list[Path] = []
+
+    def fake_train(config: Any) -> dict[str, Any]:
+        config.out_dir.mkdir(parents=True, exist_ok=True)
+        (config.out_dir / "checkpoint_last.pt").write_text("checkpoint\n", encoding="utf-8")
+        return {
+            "train_records": 2,
+            "val_records": 0,
+            "initial_train_loss": 1.0,
+            "final_train_loss": 0.2,
+            "last_step_loss": 0.2,
+            "val_loss": None,
+            "steps_completed": config.max_steps,
+            "batch_size": config.batch_size,
+            "model_config": {},
+            "ema_enabled": False,
+            "ema_decay": config.ema_decay,
+        }
+
+    def fake_sample(config: Any) -> dict[str, Any]:
+        sample_calls.append(config)
+        config.out_dir.mkdir(parents=True, exist_ok=True)
+        records = []
+        for index in range(int(config.max_samples)):
+            records.append(
+                {
+                    "sample_id": f"sample_{index:06d}",
+                    "prompt_id": f"sprite_{index}",
+                    "prompt": f"sprite {index}",
+                    "category": "weapon",
+                    "checkpoint": str(config.checkpoint),
+                    "max_colors": int(config.project_palette_target_colors),
+                    "visible_color_count": 12,
+                    "alpha_opaque_count": 1,
+                    "palette_projection_applied": True,
+                    "palette_projection_method": config.project_palette_method,
+                    "palette_projection_target_colors": int(config.project_palette_target_colors),
+                    "palette_projection_min_pixel_share": float(config.project_palette_min_pixel_share),
+                    "visible_color_count_before_projection": 32,
+                    "visible_color_count_after_projection": 12,
+                    "rgb_mae_visible_projection": 0.0206,
+                    "projection_destructiveness": "safe",
+                    "paths": {
+                        "raw_rgba": f"raw_rgba/sample_{index:06d}.png",
+                        "hard_rgba": f"hard_rgba/sample_{index:06d}.png",
+                        "pre_projection_indexed_png": f"indexed_png/sample_{index:06d}.png",
+                        "projected_png": f"projected/sample_{index:06d}.png",
+                        "indexed_png": f"projected/sample_{index:06d}.png",
+                    },
+                    "warnings": [],
+                }
+            )
+        (config.out_dir / "generated_manifest.jsonl").write_text(
+            "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        projection_report = {
+            "sample_count": len(records),
+            "method": config.project_palette_method,
+            "target_colors": int(config.project_palette_target_colors),
+            "min_pixel_share": float(config.project_palette_min_pixel_share),
+            "median_visible_color_count_before": 32,
+            "median_visible_color_count_after": 12,
+            "mean_visible_color_count_before": 32,
+            "mean_visible_color_count_after": 12,
+            "rare_color_rate_before": 0.3,
+            "rare_color_rate_after": 0.0,
+            "mean_rgb_mae_visible": 0.0206,
+            "destructive_rate": 0.0,
+            "safe_count": len(records),
+            "moderate_count": 0,
+            "destructive_count": 0,
+            "samples": [],
+        }
+        (config.out_dir / "palette_projection_report.json").write_text(
+            json.dumps(projection_report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        (config.out_dir / "contact_sheet_projected.png").write_bytes(b"placeholder")
+        return {
+            "sample_count": len(records),
+            "warnings": 0,
+            "fully_transparent_count": 0,
+            "max_visible_color_count": 12,
+            "contact_sheet": "generation_contact_sheet.png",
+            "palette_projection": {
+                "applied": True,
+                "method": config.project_palette_method,
+                "target_colors": int(config.project_palette_target_colors),
+                "min_pixel_share": float(config.project_palette_min_pixel_share),
+                "mean_rgb_mae_visible": 0.0206,
+                "destructive_rate": 0.0,
+            },
+        }
+
+    def fake_review(config: Any) -> SimpleNamespace:
+        review_dirs.append(Path(config.generated_dir))
+        return SimpleNamespace(
+            report={
+                "sample_count": 2,
+                "overall": {
+                    "median_visible_color_count": 12,
+                    "warning_counts": {},
+                    "touches_border_rate": 0.0,
+                    "too_many_rare_colors_rate": 0.0,
+                },
+                "contact_sheets": {},
+            }
+        )
+
+    def fake_faithfulness(config: Any) -> dict[str, Any]:
+        faithfulness_dirs.append(Path(config.generated))
+        first = json.loads((Path(config.generated) / "generated_manifest.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        assert first["paths"]["indexed_png"].startswith("projected/")
+        report = {
+            "sample_count": 2,
+            "source_selection": {"source_candidate_hash": "same"},
+            "nearest_source_summary": {"mean_distance": 0.1},
+            "category_consistency_rate": 0.9,
+            "nearest_source_category_consistency_rate": 0.9,
+            "color_consistency_rate": 0.8,
+            "shape_bbox_consistency_rate": 1.0,
+            "repeated_silhouette_rate": 0.0,
+            "nearest_neighbor_duplicate_rate": 0.0,
+            "generic_potion_collapse_rate": 0.0,
+            "generic_flame_collapse_rate": 0.0,
+            "generic_blob_collapse_rate": 0.0,
+            "object_families_worst_faithfulness": [],
+            "color_prompts_failed": [],
+        }
+        Path(config.out_json).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return report
+
+    monkeypatch.setattr(generator_audits, "run_challenger_training", fake_train)
+    monkeypatch.setattr(generator_audits, "run_sample_generator_challenger", fake_sample)
+    monkeypatch.setattr(
+        generator_audits,
+        "qa_generated_sprites",
+        lambda generated_dir: SimpleNamespace(
+            to_json_dict=lambda: {"sample_count": 2, "errors": [], "warnings": [], "ok": True, "checks": {}}
+        ),
+    )
+    monkeypatch.setattr(generator_audits, "review_generated_sprites", fake_review)
+    monkeypatch.setattr(generator_audits, "run_prompt_faithfulness", fake_faithfulness)
+    monkeypatch.setattr(
+        generator_audits,
+        "run_prompt_sensitivity",
+        lambda config: {
+            "sets": {
+                "same_noise_different_prompts": {"metrics": {"mean_pairwise_difference": 0.4, "near_duplicate_rate": 0.0}},
+                "same_prompt_different_noise": {"metrics": {"diversity_score": 0.2}},
+                "prompt_pairs": {"metrics": {"near_duplicate_rate": 0.0, "pairs": []}},
+            },
+            "warnings": [],
+        },
+    )
+
+    report = run_full_v4_challenger_audit(
+        FullV4ChallengerAuditConfig(
+            dataset=tmp_path / "dataset",
+            training_manifest=manifest,
+            out_dir=tmp_path / "audit_projected",
+            max_steps=2,
+            max_eval_prompts=2,
+            max_sensitivity_prompts=1,
+            noise_samples=1,
+            device="cpu",
+            project_palette=True,
+            project_palette_target_colors=16,
+            project_palette_min_pixel_share=0.01,
+            amp=False,
+            lr_schedule="none",
+            lr_warmup_steps=0,
+        )
+    )
+
+    assert sample_calls
+    assert sample_calls[0].project_palette is True
+    assert sample_calls[0].write_raw_rgba is True
+    assert sample_calls[0].write_hard_rgba is True
+    assert review_dirs == [tmp_path / "audit_projected" / "generated_eval"]
+    assert faithfulness_dirs == [tmp_path / "audit_projected" / "generated_eval"]
+    assert report["palette_projection"]["applied"] is True
+    assert report["palette_projection"]["target_colors"] == 16
+    assert report["palette_projection"]["mean_rgb_mae_visible"] == pytest.approx(0.0206)
+    assert report["generated_review"]["median_visible_color_count"] == 12
+    assert report["artifacts"]["palette_projection_report"].endswith("palette_projection_report.json")
+
+
 def test_full_v4_checkpoint_evaluation_leaderboard_and_selected_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -498,13 +706,16 @@ def test_full_v4_checkpoint_evaluation_leaderboard_and_selected_generation(
     def fake_faithfulness(config: Any) -> dict[str, Any]:
         checkpoint = checkpoint_text(config.generated)
         good = "000001_ema" in checkpoint
+        grounded = "checkpoint_grounded_eval" in str(config.generated)
+        category = 0.95 if grounded else (0.85 if good else 0.90)
+        color = 0.78 if grounded else (0.90 if good else 0.70)
         report = {
             "sample_count": 2,
             "source_selection": {"mode": "all", "source_candidate_hash": "same"},
             "nearest_source_summary": {"mean_distance": 0.2},
-            "category_consistency_rate": 0.85 if good else 0.90,
-            "nearest_source_category_consistency_rate": 0.85 if good else 0.90,
-            "color_consistency_rate": 0.90 if good else 0.70,
+            "category_consistency_rate": category,
+            "nearest_source_category_consistency_rate": category,
+            "color_consistency_rate": color,
             "shape_bbox_consistency_rate": 1.0,
             "repeated_silhouette_rate": 0.05 if good else 0.30,
             "nearest_neighbor_duplicate_rate": 0.0,
@@ -553,6 +764,7 @@ def test_full_v4_checkpoint_evaluation_leaderboard_and_selected_generation(
             sample_ema=True,
             eval_checkpoints=True,
             eval_checkpoint_steps="1,2",
+            checkpoint_eval_max_samples=1,
             ood_prompts=ood_prompts,
             device="cpu",
             amp=False,
@@ -565,13 +777,38 @@ def test_full_v4_checkpoint_evaluation_leaderboard_and_selected_generation(
     assert checkpoint_eval["enabled"] is True
     assert checkpoint_eval["selection_metric"] == "ood_control_score_v1"
     assert checkpoint_eval["selected_step"] == 1
+    assert checkpoint_eval["checkpoint_eval_max_samples"] == 1
+    assert checkpoint_eval["grounded_eval_samples"] == 1
+    assert checkpoint_eval["ood_eval_samples"] == 1
     assert checkpoint_eval["selected_checkpoint"].endswith("checkpoint_step_000001_ema.pt")
     assert checkpoint_eval["selected_metrics"]["guardrails_passed"] is True
+    assert checkpoint_eval["selected_metrics"]["grounded_guardrails_passed"] is True
+    assert checkpoint_eval["selected_metrics"]["ood_guardrails_passed"] is True
     assert checkpoint_eval["final_step_metrics"]["step"] == 2
     assert all(entry["ema"] is True for entry in checkpoint_eval["leaderboard"])
-    assert {"step", "checkpoint_path", "ood_score", "qa_errors", "category", "color", "rare_color_rate", "selected"} <= set(
+    assert {
+        "step",
+        "checkpoint_path",
+        "score",
+        "ood_score",
+        "passes_guardrails",
+        "guardrails_passed",
+        "qa_errors",
+        "category",
+        "color",
+        "rare_color_rate",
+        "blob_rate",
+        "blob_collapse_rate",
+        "potion_rate",
+        "potion_collapse_rate",
+        "grounded_category",
+        "grounded_color",
+        "grounded_guardrails_passed",
+        "selected",
+    } <= set(
         checkpoint_eval["leaderboard"][0]
     )
+    assert checkpoint_eval["leaderboard"][0]["score"] == checkpoint_eval["leaderboard"][0]["ood_score"]
     final_generation_call = next(call for call in sample_calls if Path(call.out_dir).name == "generated_eval")
     assert str(final_generation_call.checkpoint).endswith("checkpoint_step_000001_ema.pt")
     assert report["artifacts"]["sample_checkpoint"].endswith("checkpoint_step_000001_ema.pt")
@@ -593,6 +830,8 @@ def test_full_v4_audit_cli_accepts_options(tmp_path: Path, monkeypatch: pytest.M
     train_cli(
         [
             "audit-challenger-full-v4",
+            "--export-preset",
+            "v1",
             "--dataset",
             str(tmp_path / "dataset"),
             "--training-manifest",
@@ -654,15 +893,28 @@ def test_full_v4_audit_cli_accepts_options(tmp_path: Path, monkeypatch: pytest.M
             "5",
             "--eval-checkpoint-steps",
             "1,2",
+            "--checkpoint-eval-max-samples",
+            "288",
             "--palette-swap-augmentation",
             "--palette-swap-prob",
             "0.5",
             "--palette-swap-families",
             "red,blue,green",
+            "--palette-swap-stochastic",
+            "--palette-swap-keep-original-prob",
+            "0.3",
             "--palette-swap-require-explicit-caption-color",
             "--palette-swap-require-explicit-semantic-color",
+            "--palette-swap-allow-colorless-caption-if-semantic-color",
             "--palette-swap-no-caption-prepend",
             "--no-palette-swap-update-prompts",
+            "--project-palette",
+            "--project-palette-target-colors",
+            "12",
+            "--project-palette-min-pixel-share",
+            "0.02",
+            "--project-palette-method",
+            "deterministic_kmeans",
             "--no-amp",
             "--lr-schedule",
             "none",
@@ -672,14 +924,18 @@ def test_full_v4_audit_cli_accepts_options(tmp_path: Path, monkeypatch: pytest.M
     )
 
     assert captured
+    assert captured[0].export_preset == "v1"
     assert captured[0].max_steps == 2
     assert captured[0].max_eval_prompts == 4
     assert captured[0].conditioning_mode == "caption_semantic_structured"
     assert captured[0].palette_swap_augmentation is True
     assert captured[0].palette_swap_prob == 0.5
     assert captured[0].palette_swap_families == "red,blue,green"
+    assert captured[0].palette_swap_stochastic is True
+    assert captured[0].palette_swap_keep_original_prob == 0.3
     assert captured[0].palette_swap_require_explicit_caption_color is True
     assert captured[0].palette_swap_require_explicit_semantic_color is True
+    assert captured[0].palette_swap_allow_colorless_caption_if_semantic_color is True
     assert captured[0].palette_swap_no_caption_prepend is True
     assert captured[0].palette_swap_preserve_outline is True
     assert captured[0].palette_swap_update_prompts is False
@@ -690,6 +946,13 @@ def test_full_v4_audit_cli_accepts_options(tmp_path: Path, monkeypatch: pytest.M
     assert captured[0].background_rgb_loss_weight == 0.25
     assert captured[0].palette_loss_weight == 0.1
     assert captured[0].palette_loss_temperature == 0.07
+    assert captured[0].sample_steps == 2
+    assert captured[0].cfg_scale == 2.0
+    assert captured[0].max_colors == 8
+    assert captured[0].project_palette is True
+    assert captured[0].project_palette_target_colors == 12
+    assert captured[0].project_palette_min_pixel_share == 0.02
+    assert captured[0].project_palette_method == "deterministic_kmeans"
     assert captured[0].num_workers == 2
     assert captured[0].sample_batch_size == 8
     assert captured[0].run_ood_compositional is True
@@ -697,6 +960,7 @@ def test_full_v4_audit_cli_accepts_options(tmp_path: Path, monkeypatch: pytest.M
     assert captured[0].eval_checkpoints is True
     assert captured[0].eval_checkpoint_every == 5
     assert captured[0].eval_checkpoint_steps == "1,2"
+    assert captured[0].checkpoint_eval_max_samples == 288
     assert captured[0].amp is False
 
 
@@ -743,6 +1007,99 @@ def test_challenger_conditioning_comparison_reports_improvements(tmp_path: Path)
     assert "Category improved:" not in markdown
     assert (tmp_path / "comparison" / "challenger_conditioning_comparison.json").is_file()
     assert (tmp_path / "comparison" / "challenger_conditioning_comparison.md").is_file()
+
+
+def test_challenger_conditioning_comparison_displays_checkpoint_guardrails(tmp_path: Path) -> None:
+    def report(mode: str, *, grounded_passed: bool) -> dict[str, Any]:
+        return {
+            "conditioning_mode": mode,
+            "training": {"final_train_loss": 0.1, "val_loss": 0.5},
+            "generated_qa": {"errors": 0},
+            "generated_review": {"touches_border_rate": 0.1, "too_many_rare_colors_rate": 0.1},
+            "prompt_faithfulness": {
+                "category_consistency_rate": 0.95,
+                "color_consistency_rate": 0.8,
+                "repeated_silhouette_rate": 0.1,
+                "generic_potion_collapse_rate": 0.0,
+                "generic_blob_collapse_rate": 0.1,
+            },
+            "prompt_sensitivity": {},
+            "artifacts": {"sample_checkpoint": "run/checkpoint_step_000001_ema.pt"},
+            "checkpoint_evaluation": {
+                "enabled": True,
+                "selection_metric": "ood_control_score_v1",
+                "selected_checkpoint": "run/checkpoint_step_000001_ema.pt",
+                "selected_step": 1,
+                "selected_score": 2.5,
+                "selected_deployable": grounded_passed,
+                "selected_metrics": {
+                    "ood_score": 2.5,
+                    "guardrails_passed": grounded_passed,
+                    "grounded_guardrails_passed": grounded_passed,
+                    "ood_guardrails_passed": True,
+                    "grounded_guardrail_failures": [] if grounded_passed else ["grounded_category"],
+                    "ood_guardrail_failures": [],
+                    "guardrail_failures": [] if grounded_passed else ["grounded_category"],
+                },
+            },
+        }
+
+    comparison = compare_challenger_conditioning_audits(
+        baseline=report("caption_semantic", grounded_passed=False),
+        structured=report("caption_semantic_structured", grounded_passed=True),
+        out_dir=tmp_path / "comparison",
+    )
+    assert comparison["baseline"]["checkpoint_selection"]["grounded_guardrails_passed"] is False
+    assert comparison["structured"]["checkpoint_selection"]["grounded_guardrails_passed"] is True
+    markdown = (tmp_path / "comparison" / "challenger_conditioning_comparison.md").read_text(encoding="utf-8")
+    assert "| Run | Enabled | Selected step | Selection score | Guardrails | Grounded | OOD | Selected checkpoint |" in markdown
+    assert "grounded_category" in json.dumps(comparison)
+
+
+def test_challenger_conditioning_comparison_warns_on_projection_mismatch(tmp_path: Path) -> None:
+    def report(mode: str, *, applied: bool, target_colors: int) -> dict[str, Any]:
+        return {
+            "conditioning_mode": mode,
+            "config": {
+                "project_palette": applied,
+                "project_palette_target_colors": target_colors,
+                "project_palette_method": "deterministic_kmeans",
+            },
+            "palette_projection": {
+                "applied": applied,
+                "method": "deterministic_kmeans",
+                "target_colors": target_colors,
+                "min_pixel_share": 0.01,
+                "median_visible_color_count_before": 32,
+                "median_visible_color_count_after": 12 if applied else None,
+                "mean_rgb_mae_visible": 0.0206 if applied else None,
+                "destructive_rate": 0.0 if applied else None,
+            },
+            "training": {"final_train_loss": 0.1, "val_loss": 0.5},
+            "generated_qa": {"errors": 0},
+            "generated_review": {"touches_border_rate": 0.1, "too_many_rare_colors_rate": 0.1},
+            "prompt_faithfulness": {
+                "category_consistency_rate": 0.95,
+                "color_consistency_rate": 0.8,
+                "repeated_silhouette_rate": 0.1,
+                "generic_potion_collapse_rate": 0.0,
+                "generic_blob_collapse_rate": 0.1,
+            },
+            "prompt_sensitivity": {},
+        }
+
+    comparison = compare_challenger_conditioning_audits(
+        baseline=report("caption_semantic", applied=False, target_colors=32),
+        structured=report("caption_semantic_structured", applied=True, target_colors=16),
+        out_dir=tmp_path / "comparison_projection",
+    )
+
+    assert any("projected vs non-projected" in warning for warning in comparison["warnings"])
+    assert any("projection target colors differ" in warning for warning in comparison["warnings"])
+    assert comparison["structured"]["palette_projection"]["applied"] is True
+    markdown = (tmp_path / "comparison_projection" / "challenger_conditioning_comparison.md").read_text(encoding="utf-8")
+    assert "Palette projection" in markdown
+    assert "deterministic_kmeans" in markdown
 
 
 def test_challenger_conditioning_comparison_warns_on_source_hash_mismatch(tmp_path: Path) -> None:

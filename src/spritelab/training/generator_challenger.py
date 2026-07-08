@@ -112,6 +112,8 @@ class ChallengerTrainConfig:
     palette_swap_augmentation: bool = False
     palette_swap_prob: float = 0.0
     palette_swap_families: str = DEFAULT_SWAP_FAMILIES_TEXT
+    palette_swap_stochastic: bool = False
+    palette_swap_keep_original_prob: float = 0.0
     palette_swap_preserve_outline: bool = True
     palette_swap_update_prompts: bool = True
     palette_swap_target_families: str | None = None
@@ -122,6 +124,7 @@ class ChallengerTrainConfig:
     palette_swap_require_explicit_color: bool = False
     palette_swap_require_explicit_caption_color: bool = False
     palette_swap_require_explicit_semantic_color: bool = False
+    palette_swap_allow_colorless_caption_if_semantic_color: bool = False
     palette_swap_no_caption_prepend: bool = False
     palette_swap_allow_material_colors: bool = True
     base_channels: int = 64
@@ -151,6 +154,7 @@ class ChallengerSampleConfig:
     checkpoint: Path
     prompts: Path
     out_dir: Path
+    export_preset: str | None = None
     max_samples: int = 64
     steps: int = 30
     cfg_scale: float = 2.0
@@ -164,6 +168,10 @@ class ChallengerSampleConfig:
     write_raw_rgba: bool = True
     write_hard_rgba: bool = True
     contact_sheet_labels: str = "prompt"
+    project_palette: bool = False
+    project_palette_target_colors: int = 16
+    project_palette_min_pixel_share: float = 0.01
+    project_palette_method: str = "deterministic_kmeans"
 
 
 class RectifiedFlowUNet(_ModuleBase):
@@ -859,6 +867,37 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
     return report
 
 
+def _resolve_sample_export_checkpoint(checkpoint: Path, export_preset: str | None) -> Path:
+    preset = str(export_preset or "").strip().lower()
+    if preset not in {"v1", "phase1_v1"}:
+        return Path(checkpoint)
+
+    path = Path(checkpoint)
+    if path.is_dir():
+        for name in (
+            "checkpoint_last_ema.pt",
+            "checkpoint_best_ema.pt",
+            "checkpoint_last.pt",
+            "checkpoint_best.pt",
+        ):
+            candidate = path / name
+            if candidate.is_file():
+                return candidate
+        return path
+
+    candidates: list[Path] = []
+    if path.name == "checkpoint_last.pt":
+        candidates.append(path.with_name("checkpoint_last_ema.pt"))
+    if path.name == "checkpoint_best.pt":
+        candidates.append(path.with_name("checkpoint_best_ema.pt"))
+    if path.suffix == ".pt" and not path.stem.endswith("_ema"):
+        candidates.append(path.with_name(f"{path.stem}_ema{path.suffix}"))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return path
+
+
 def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str, Any]:
     th, _nn_mod = _require_torch()
     started = time.perf_counter()
@@ -866,7 +905,17 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
     out_dir = Path(config.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = resolve_device(config.device)
-    ckpt = _load_checkpoint(config.checkpoint)
+    checkpoint = _resolve_sample_export_checkpoint(Path(config.checkpoint), config.export_preset)
+    if not checkpoint.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint not found: {checkpoint}\n"
+            f"Requested: {config.checkpoint} (export-preset={config.export_preset or 'none'})\n"
+            "The official v1 checkpoint path is "
+            "experiments/challenger_full_v4_phase1/train_25k/checkpoint_last_ema.pt "
+            "(see docs/v1_default.md). Pass --checkpoint to point at a different file, "
+            "or train the Phase 1 challenger first."
+        )
+    ckpt = _load_checkpoint(checkpoint)
     model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(ckpt, device=device)
     structured_vocab = structured_vocab_from_checkpoint(ckpt)
     prompts = read_prompt_records(config.prompts, max_records=config.max_samples)
@@ -926,7 +975,8 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
             )
             metadata = {
                 **prompt_record,
-                "checkpoint": str(config.checkpoint),
+                "checkpoint": str(checkpoint),
+                "requested_checkpoint": str(config.checkpoint),
                 "seed": int(config.seed),
                 "noise_seed": int(noise_seeds[item_index]),
                 "conditioning_mode": conditioning_mode,
@@ -938,16 +988,27 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
                 "max_colors": int(config.max_colors),
                 "dither": bool(config.dither),
             }
-            manifest_records.append(
-                write_generated_sprite_artifacts(
+            record = write_generated_sprite_artifacts(
+                sprite,
+                out_dir,
+                sample_id,
+                metadata,
+                write_raw_rgba=config.write_raw_rgba,
+                write_hard_rgba=config.write_hard_rgba,
+            )
+            if config.project_palette:
+                from spritelab.training.palette_projection import project_generated_sprite_record
+
+                record = project_generated_sprite_record(
                     sprite,
                     out_dir,
-                    sample_id,
-                    metadata,
-                    write_raw_rgba=config.write_raw_rgba,
-                    write_hard_rgba=config.write_hard_rgba,
+                    record,
+                    target_colors=config.project_palette_target_colors,
+                    min_pixel_share=config.project_palette_min_pixel_share,
+                    alpha_threshold=config.alpha_threshold,
+                    method=config.project_palette_method,
                 )
-            )
+            manifest_records.append(record)
     contact_sheet_path = build_generation_contact_sheet(
         out_dir,
         manifest_records,
@@ -955,7 +1016,28 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
         include_raw=config.write_raw_rgba,
     )
     _write_contact_sheet_label_mapping(out_dir, manifest_records, label_mode=config.contact_sheet_labels)
+    projection_report = None
+    if config.project_palette:
+        from spritelab.training.palette_projection import write_runtime_projection_report
+
+        projection_report = write_runtime_projection_report(
+            out_dir,
+            manifest_records,
+            target_colors=config.project_palette_target_colors,
+            min_pixel_share=config.project_palette_min_pixel_share,
+            alpha_threshold=config.alpha_threshold,
+            method=config.project_palette_method,
+        )
     config_json = {key: _jsonable(value) for key, value in asdict(config).items()}
+    if not config.project_palette:
+        for key in (
+            "project_palette",
+            "project_palette_target_colors",
+            "project_palette_min_pixel_share",
+            "project_palette_method",
+        ):
+            config_json.pop(key, None)
+    config_json["checkpoint_resolved"] = str(checkpoint)
     report = write_generation_reports(
         out_dir=out_dir,
         records=manifest_records,
@@ -971,6 +1053,23 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
         },
         contact_sheet=None if contact_sheet_path is None else contact_sheet_path.name,
     )
+    if projection_report is not None:
+        report["palette_projection"] = {
+            "applied": True,
+            "report": "palette_projection_report.json",
+            "contact_sheet": "contact_sheet_projected.png"
+            if (out_dir / "contact_sheet_projected.png").is_file()
+            else None,
+            "method": str(config.project_palette_method),
+            "target_colors": int(config.project_palette_target_colors),
+            "min_pixel_share": float(config.project_palette_min_pixel_share),
+            "mean_rgb_mae_visible": projection_report.get("mean_rgb_mae_visible"),
+            "destructive_rate": projection_report.get("destructive_rate"),
+        }
+        (out_dir / "generation_report.json").write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     return report
 
 
@@ -1731,6 +1830,10 @@ def main_sample(argv: list[str] | None = None) -> None:
     parser.add_argument("--alpha-threshold", type=float, default=0.5)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--project-palette", action="store_true", default=False)
+    parser.add_argument("--project-palette-target-colors", type=int, default=16)
+    parser.add_argument("--project-palette-min-pixel-share", type=float, default=0.01)
+    parser.add_argument("--project-palette-method", choices=["deterministic_kmeans"], default="deterministic_kmeans")
     parsed = parser.parse_args(argv)
     report = run_sample_generator_challenger(ChallengerSampleConfig(**vars(parsed)))
     print(f"Generated samples: {report['sample_count']}")

@@ -287,6 +287,98 @@ def test_same_seed_produces_identical_augmentation() -> None:
     assert np.array_equal(first.palette_rgb, second.palette_rgb)
 
 
+def test_deterministic_mode_ignores_draw_index() -> None:
+    config = PaletteSwapConfig(enabled=True, prob=1.0, families=("red", "blue", "gold"), seed=99)
+    first = _apply(config)
+    second = apply_palette_swap(
+        index_map=_sprite()["index"],
+        alpha=_sprite()["alpha"],
+        role_map=_sprite()["role"],
+        palette_rgb=_sprite()["palette"],
+        palette_mask=_sprite()["mask"],
+        record=_record(),
+        caption="green sword",
+        sprite_id="t_green_sword",
+        config=config,
+        draw_index=999,
+    )
+    assert first.applied == second.applied
+    assert first.target_color_family == second.target_color_family
+    assert np.array_equal(first.palette_rgb, second.palette_rgb)
+
+
+def test_stochastic_mode_varies_targets_for_same_sprite_across_draws() -> None:
+    config = PaletteSwapConfig(
+        enabled=True,
+        prob=1.0,
+        families=("red", "blue", "yellow", "purple"),
+        stochastic=True,
+        seed=99,
+    )
+    targets = {
+        _apply(config, record={**_record(), "sprite_id": "same_sprite"}).target_color_family
+        for _ in range(1)
+    }
+    targets |= {
+        apply_palette_swap(
+            index_map=_sprite()["index"],
+            alpha=_sprite()["alpha"],
+            role_map=_sprite()["role"],
+            palette_rgb=_sprite()["palette"],
+            palette_mask=_sprite()["mask"],
+            record={**_record(), "sprite_id": "same_sprite"},
+            caption="green sword",
+            sprite_id="same_sprite",
+            config=config,
+            draw_index=draw_index,
+        ).target_color_family
+        for draw_index in range(20)
+    }
+    assert len(targets) > 1
+
+
+def test_stochastic_keep_original_probability_keeps_prompt_and_palette() -> None:
+    sprite = _sprite()
+    config = PaletteSwapConfig(
+        enabled=True,
+        prob=1.0,
+        families=("blue",),
+        stochastic=True,
+        keep_original_prob=1.0,
+        seed=3,
+    )
+    result = _apply(config, sprite=sprite)
+    assert result.eligible is True
+    assert result.kept_original is True
+    assert result.applied is False
+    assert result.caption == "green sword"
+    assert result.record["colors"] == ["green"]
+    assert np.array_equal(result.palette_rgb, sprite["palette"])
+    meta = result.metadata()
+    assert meta["palette_swap_stochastic"] is True
+    assert meta["palette_swap_draw_index"] == 0
+
+
+def test_colorless_caption_structured_only_mode_does_not_prepend() -> None:
+    record = _record()
+    record["caption"] = "a sword"
+    config = PaletteSwapConfig(
+        enabled=True,
+        prob=1.0,
+        families=("blue",),
+        require_explicit_caption_color=True,
+        require_explicit_semantic_color=True,
+        allow_colorless_caption_if_semantic_color=True,
+        no_caption_prepend=True,
+        seed=3,
+    )
+    result = _apply(config, record=record)
+    assert result.applied is True
+    assert result.caption == "a sword"
+    assert result.caption_change_kind == "none"
+    assert result.record["colors"] == ["blue"]
+
+
 def test_sample_seed_is_worker_order_independent() -> None:
     # Same (base_seed, sprite_id) -> identical seed regardless of call order.
     seeds_a = [sample_seed(7, sid) for sid in ("a", "b", "c")]
@@ -404,6 +496,23 @@ def test_dataset_augmentation_is_deterministic_across_instances(tmp_path: Path) 
         assert torch.equal(a[i]["rgba"], b[i]["rgba"])
         assert a[i]["caption"] == b[i]["caption"]
         assert a[i]["palette_swap"] == b[i]["palette_swap"]
+
+
+def test_dataset_stochastic_repeated_access_varies_same_sprite(tmp_path: Path) -> None:
+    dataset_dir, manifest = _build_dataset_dir(tmp_path)
+    swap = PaletteSwapConfig(
+        enabled=True,
+        prob=1.0,
+        families=("red", "blue", "yellow", "purple"),
+        stochastic=True,
+        seed=123,
+    )
+    dataset = SpriteTrainingDataset(dataset_dir, manifest, split="train", palette_swap=swap, cache_samples=True)
+    samples = [dataset[0] for _ in range(20)]
+    targets = {sample["palette_swap"]["target_color_family"] for sample in samples if sample["palette_swap"]["palette_swap_applied"]}
+    draw_indices = [sample["palette_swap"]["palette_swap_draw_index"] for sample in samples]
+    assert len(targets) > 1
+    assert draw_indices == list(range(20))
 
 
 def test_batch_carries_updated_structured_colors(tmp_path: Path) -> None:

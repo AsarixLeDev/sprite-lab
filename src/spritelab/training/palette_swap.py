@@ -105,6 +105,8 @@ class PaletteSwapConfig:
     preserve_outline: bool = True
     update_prompts: bool = True
     seed: int = 0
+    stochastic: bool = False
+    keep_original_prob: float = 0.0
     # Conservative controls (defaults preserve original permissive behavior).
     source_families: tuple[str, ...] | None = None
     category_filter: tuple[str, ...] | None = None
@@ -113,6 +115,7 @@ class PaletteSwapConfig:
     require_explicit_color: bool = False
     require_explicit_caption_color: bool = False
     require_explicit_semantic_color: bool = False
+    allow_colorless_caption_if_semantic_color: bool = False
     no_caption_prepend: bool = False
     allow_material_colors: bool = True
 
@@ -130,6 +133,8 @@ class PaletteSwapConfig:
             preserve_outline=bool(getattr(config, "palette_swap_preserve_outline", True)),
             update_prompts=bool(getattr(config, "palette_swap_update_prompts", True)),
             seed=int(getattr(config, "seed", 0)),
+            stochastic=bool(getattr(config, "palette_swap_stochastic", False)),
+            keep_original_prob=float(getattr(config, "palette_swap_keep_original_prob", 0.0)),
             source_families=parse_family_filter(getattr(config, "palette_swap_source_families", None)),
             category_filter=parse_category_filter(getattr(config, "palette_swap_category_filter", None)),
             min_color_confidence=float(getattr(config, "palette_swap_min_color_confidence", 0.0)),
@@ -140,6 +145,9 @@ class PaletteSwapConfig:
             ),
             require_explicit_semantic_color=bool(
                 getattr(config, "palette_swap_require_explicit_semantic_color", False)
+            ),
+            allow_colorless_caption_if_semantic_color=bool(
+                getattr(config, "palette_swap_allow_colorless_caption_if_semantic_color", False)
             ),
             no_caption_prepend=bool(getattr(config, "palette_swap_no_caption_prepend", False)),
             allow_material_colors=bool(getattr(config, "palette_swap_allow_material_colors", True)),
@@ -167,11 +175,16 @@ class PaletteSwapConfig:
             "palette_swap_source_families": None if self.source_families is None else list(self.source_families),
             "palette_swap_category_filter": None if self.category_filter is None else list(self.category_filter),
             "palette_swap_min_color_confidence": float(self.min_color_confidence),
+            "palette_swap_stochastic": bool(self.stochastic),
+            "palette_swap_keep_original_prob": float(self.keep_original_prob),
             "palette_swap_require_role_map": bool(self.require_role_map),
             "palette_swap_require_explicit_color": bool(self.require_explicit_color),
             "palette_swap_require_explicit_color_maps_to": "caption_and_semantic",
             "palette_swap_require_explicit_caption_color": self.require_caption_color(),
             "palette_swap_require_explicit_semantic_color": self.require_semantic_color(),
+            "palette_swap_allow_colorless_caption_if_semantic_color": bool(
+                self.allow_colorless_caption_if_semantic_color
+            ),
             "palette_swap_no_caption_prepend": bool(self.no_caption_prepend),
             "palette_swap_allow_material_colors": bool(self.allow_material_colors),
             "palette_swap_preserve_outline": bool(self.preserve_outline),
@@ -200,11 +213,15 @@ class PaletteSwapResult:
     materials_dropped: list[str] = field(default_factory=list)
     target_resampled_from_same_family: bool = False
     same_family_skip: bool = False
+    kept_original: bool = False
+    stochastic: bool = False
+    draw_index: int | None = None
 
     def metadata(self) -> dict[str, Any]:
         return {
             "palette_swap_applied": bool(self.applied),
             "palette_swap_triggered": bool(self.triggered),
+            "palette_swap_kept_original": bool(self.kept_original),
             "eligible_for_palette_swap": bool(self.eligible),
             "ineligibility_reason": self.ineligibility_reason,
             "source_color_family": self.source_color_family,
@@ -218,6 +235,8 @@ class PaletteSwapResult:
             "material_conflict_drop_count": len(self.materials_dropped),
             "target_resampled_from_same_family": bool(self.target_resampled_from_same_family),
             "same_family_skip": bool(self.same_family_skip),
+            "palette_swap_stochastic": bool(self.stochastic),
+            "palette_swap_draw_index": None if self.draw_index is None else int(self.draw_index),
             "palette_swap_seed": int(self.seed),
         }
 
@@ -261,10 +280,11 @@ def _parse_family_tokens(text: str | Sequence[str] | None) -> tuple[str, ...]:
     return tuple(token for token in tokens if token in FAMILY_ANCHORS)
 
 
-def sample_seed(base_seed: int, sprite_id: str) -> int:
+def sample_seed(base_seed: int, sprite_id: str, draw_index: int | None = None) -> int:
     """Stable per-sample seed independent of process/worker/hash randomization."""
 
-    digest = hashlib.sha256(f"{int(base_seed)}:{sprite_id}".encode("utf-8")).hexdigest()
+    key = f"{int(base_seed)}:{sprite_id}" if draw_index is None else f"{int(base_seed)}:{sprite_id}:{int(draw_index)}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
     return int(digest[:16], 16)
 
 
@@ -288,6 +308,7 @@ def apply_palette_swap(
     caption: str,
     sprite_id: str,
     config: PaletteSwapConfig,
+    draw_index: int | None = None,
 ) -> PaletteSwapResult:
     """Evaluate eligibility and recolor visible fill entries into a target family.
 
@@ -298,8 +319,17 @@ def apply_palette_swap(
     """
 
     palette = np.array(palette_rgb, dtype=np.float32, copy=True)
-    seed = sample_seed(config.seed, sprite_id)
-    result = PaletteSwapResult(applied=False, palette_rgb=palette, record=record, caption=caption, seed=seed)
+    resolved_draw_index = (0 if draw_index is None else int(draw_index)) if config.stochastic else None
+    seed = sample_seed(config.seed, sprite_id, resolved_draw_index)
+    result = PaletteSwapResult(
+        applied=False,
+        palette_rgb=palette,
+        record=record,
+        caption=caption,
+        seed=seed,
+        stochastic=bool(config.stochastic),
+        draw_index=resolved_draw_index,
+    )
     if not config.active():
         return result
 
@@ -356,6 +386,12 @@ def apply_palette_swap(
 
     if not (triggered and eligible):
         return result
+
+    if config.stochastic and float(config.keep_original_prob) > 0.0:
+        keep_original_prob = float(np.clip(config.keep_original_prob, 0.0, 1.0))
+        if bool(rng.random() < keep_original_prob):
+            result.kept_original = True
+            return result
 
     # Guarantee the augmentation actually changes the dominant hue.
     if target_family == source_family:
@@ -437,7 +473,13 @@ def _evaluate_eligibility(
         return False, "low_color_confidence"
     caption_colors = _explicit_caption_colors(record, caption)
     semantic_colors = _explicit_semantic_colors(record)
-    if config.require_caption_color() and not caption_colors:
+    colorless_structured_only = bool(
+        config.allow_colorless_caption_if_semantic_color
+        and config.no_caption_prepend
+        and semantic_colors
+        and not caption_colors
+    )
+    if config.require_caption_color() and not caption_colors and not colorless_structured_only:
         return False, "no_explicit_caption_color"
     if config.require_semantic_color() and not semantic_colors:
         return False, "no_explicit_semantic_color"

@@ -88,8 +88,11 @@ class SpriteTrainingDataset(_DatasetBase):
         self.caption_policy_filter = caption_policy_filter
         self.sprite_ids = None if sprite_ids is None else tuple(str(sprite_id) for sprite_id in sprite_ids)
         self.structured_vocab = structured_vocab
-        self.cache_samples = bool(cache_samples)
         self.palette_swap = palette_swap if (palette_swap is not None and palette_swap.active()) else None
+        self.cache_samples = bool(cache_samples) and not (
+            self.palette_swap is not None and bool(self.palette_swap.stochastic)
+        )
+        self._palette_swap_draw_counter = 0
 
         all_records = read_jsonl(self.training_manifest)
         self.all_records = list(all_records)
@@ -110,8 +113,8 @@ class SpriteTrainingDataset(_DatasetBase):
         )
         # ``npz_cache`` may be shared across split datasets so each ``.npz`` file
         # is decompressed at most once per run. ``_sample_cache`` memoizes the
-        # fully-built per-sample dict: ``__getitem__`` has no randomness, so a
-        # cached sample is byte-for-byte identical to a freshly built one.
+        # fully-built per-sample dict for deterministic datasets; stochastic
+        # palette swap disables it so repeated draws can vary.
         self._npz_cache: dict[str, dict[str, np.ndarray]] = npz_cache if npz_cache is not None else {}
         self._sample_cache: dict[int, dict[str, Any]] = {}
 
@@ -153,6 +156,7 @@ class SpriteTrainingDataset(_DatasetBase):
 
         palette_swap_meta: dict[str, Any] | None = None
         if self.palette_swap is not None:
+            draw_index = self._next_palette_swap_draw_index() if self.palette_swap.stochastic else None
             swap = apply_palette_swap(
                 index_map=index_np,
                 alpha=alpha_np,
@@ -163,6 +167,7 @@ class SpriteTrainingDataset(_DatasetBase):
                 caption=caption,
                 sprite_id=sprite_id,
                 config=self.palette_swap,
+                draw_index=draw_index,
             )
             palette_swap_meta = swap.metadata()
             if swap.applied:
@@ -215,6 +220,15 @@ class SpriteTrainingDataset(_DatasetBase):
         if self.cache_samples:
             self._sample_cache[index] = sample
         return sample
+
+    def _next_palette_swap_draw_index(self) -> int:
+        counter = int(self._palette_swap_draw_counter)
+        self._palette_swap_draw_counter = counter + 1
+        if torch is not None:
+            worker_info = torch.utils.data.get_worker_info()
+            if worker_info is not None:
+                return int(worker_info.seed) * 1_000_000_000 + counter
+        return counter
 
     def split_counts(self) -> dict[str, int]:
         return dict(Counter(str(record.get("split", "")) for record in self.all_records))
