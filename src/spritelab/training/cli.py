@@ -818,6 +818,118 @@ def main(argv: Sequence[str] | None = None) -> None:
     v1_gallery_gui.add_argument("--host", default="127.0.0.1")
     v1_gallery_gui.add_argument("--port", type=int)
 
+    v2_phase0 = subparsers.add_parser(
+        "run-v2-phase0-eval",
+        help="Run the reproducible v2 Phase 0 no-training evaluation harness.",
+        description=(
+            "Orchestrates sampling, QA, structural review, and prompt-faithfulness "
+            "diagnostics for preset and ablation comparison cells across multiple seeds. "
+            "Collects metrics, aggregates across seeds, applies decision rules, and writes "
+            "summary JSON/CSV/Markdown reports. Never trains a model. "
+            "See docs/v2_phase0_diagnostics.md."
+        ),
+    )
+    v2_phase0.add_argument(
+        "--out", required=True, type=Path, help="Output directory for runs and summaries."
+    )
+    v2_phase0.add_argument(
+        "--checkpoint", required=True, type=Path,
+        help="Path to a generator_challenger checkpoint (.pt or directory)."
+    )
+    v2_phase0.add_argument(
+        "--prompts", type=Path,
+        help="JSONL prompt file (e.g. OOD compositional prompts). Required unless --build-prompts is used."
+    )
+    v2_phase0.add_argument(
+        "--dataset", required=True, type=Path,
+        help="Training dataset directory (must contain training_manifest.jsonl)."
+    )
+    v2_phase0.add_argument(
+        "--presets", default="v1,v1.1",
+        help="Comma-separated presets, e.g. 'v1,v1.1'. Default: v1,v1.1."
+    )
+    v2_phase0.add_argument(
+        "--seeds", default="20260723,20260724,20260725",
+        help="Comma-separated integer seeds. Default: 20260723,20260724,20260725."
+    )
+    v2_phase0.add_argument("--max-samples", type=int, default=96)
+    v2_phase0.add_argument("--device", default="cpu")
+    v2_phase0.add_argument("--batch-size", type=int, default=16)
+    v2_phase0.add_argument(
+        "--include-ablations", action="store_true", default=False,
+        help="Include null-field ablation cells."
+    )
+    v2_phase0.add_argument(
+        "--null-field-sets", default="",
+        help="Comma-separated null-field groups, e.g. 'colors,object_id,category'."
+    )
+    v2_phase0.add_argument(
+        "--factored-grid", default="",
+        help="Grid string, e.g. 'base=1.5,2.0,2.5;color=2.0,3.0,4.5,6.0'."
+    )
+    v2_phase0.add_argument(
+        "--skip-sampling-if-exists", action="store_true", default=False,
+        help="Skip cells whose output directories already exist."
+    )
+    v2_phase0.add_argument(
+        "--faithfulness-max-sources", type=int, default=0,
+        help="Source sprites for prompt-faithfulness. 0 uses all."
+    )
+    v2_phase0.add_argument(
+        "--no-contact-sheets", action="store_true", default=False,
+        help="Skip contact sheet generation for faster evaluation."
+    )
+    v2_phase0.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="Print planned run cells without executing."
+    )
+    v2_phase0.add_argument(
+        "--report-only", action="store_true", default=False,
+        help="Harvest existing run outputs and write summary reports without sampling."
+    )
+    v2_phase0.add_argument(
+        "--allow-partial-report", action="store_true", default=False,
+        help="When --report-only, allow reports from partial/missing run outputs."
+    )
+    v2_phase0.add_argument(
+        "--build-prompts", action="store_true", default=False,
+        help="Build eval prompts from the dataset manifest instead of using --prompts."
+    )
+    v2_phase0.add_argument(
+        "--prompt-count", type=int, default=384,
+        help="Target prompt count when --build-prompts is used. Default: 384."
+    )
+    v2_phase0.add_argument(
+        "--prompt-seed", type=int, default=20260706,
+        help="Seed for prompt building when --build-prompts is used. Default: 20260706."
+    )
+
+    build_eval_prompts = subparsers.add_parser(
+        "build-v2-eval-prompts",
+        help="Build a larger deterministic OOD/eval prompt suite for v2 Phase 0.",
+        description=(
+            "Reads the training manifest vocab and builds a JSONL prompt file "
+            "covering category-color grids, object-color pairs, rare combos, "
+            "style stress, and in-distribution anchors. Deterministic given the "
+            "same dataset/manifest/seed/target-count."
+        ),
+    )
+    build_eval_prompts.add_argument("--dataset", required=True, type=Path)
+    build_eval_prompts.add_argument("--training-manifest", required=True, type=Path)
+    build_eval_prompts.add_argument("--out", required=True, type=Path)
+    build_eval_prompts.add_argument("--target-count", type=int, default=384)
+    build_eval_prompts.add_argument("--seed", type=int, default=20260706)
+    build_eval_prompts.add_argument("--include-grounded-grid", action="store_true", default=True)
+    build_eval_prompts.add_argument("--no-include-grounded-grid", action="store_false", dest="include_grounded_grid")
+    build_eval_prompts.add_argument("--include-compositional", action="store_true", default=True)
+    build_eval_prompts.add_argument("--no-include-compositional", action="store_false", dest="include_compositional")
+    build_eval_prompts.add_argument("--include-rare-combos", action="store_true", default=True)
+    build_eval_prompts.add_argument("--no-include-rare-combos", action="store_false", dest="include_rare_combos")
+    build_eval_prompts.add_argument("--include-style-stress", action="store_true", default=True)
+    build_eval_prompts.add_argument("--no-include-style-stress", action="store_false", dest="include_style_stress")
+    build_eval_prompts.add_argument("--out-report", action="store_true", default=True)
+    build_eval_prompts.add_argument("--no-out-report", action="store_false", dest="out_report")
+
     compare_conditioning = subparsers.add_parser(
         "compare-challenger-conditioning-audits",
         help="Compare baseline and structured full-v4 challenger audit reports.",
@@ -1243,6 +1355,75 @@ def main(argv: Sequence[str] | None = None) -> None:
                     raise
                 print(str(exc))
                 raise SystemExit(1)
+        elif parsed.subcommand == "run-v2-phase0-eval":
+            from spritelab.training.v2_phase0_eval import (
+                V2Phase0EvalConfig,
+                parse_factored_grid,
+                parse_null_field_sets,
+                parse_presets,
+                parse_seeds,
+                run_v2_phase0_eval,
+            )
+
+            if parsed.build_prompts and parsed.prompts:
+                raise SystemExit(
+                    "Cannot use both --prompts and --build-prompts. "
+                    "Use --build-prompts to generate prompts from the dataset, "
+                    "or --prompts to provide a pre-existing prompt file."
+                )
+            if not parsed.build_prompts and not parsed.prompts:
+                raise SystemExit(
+                    "Either --prompts or --build-prompts is required. "
+                    "Use --build-prompts to generate prompts from the dataset, "
+                    "or --prompts to provide a pre-existing prompt file."
+                )
+
+            summary = run_v2_phase0_eval(
+                V2Phase0EvalConfig(
+                    out=parsed.out,
+                    checkpoint=parsed.checkpoint,
+                    prompts=parsed.prompts,
+                    dataset=parsed.dataset,
+                    presets=parse_presets(parsed.presets),
+                    seeds=parse_seeds(parsed.seeds),
+                    max_samples=parsed.max_samples,
+                    device=parsed.device,
+                    batch_size=parsed.batch_size,
+                    include_ablations=parsed.include_ablations,
+                    null_field_sets=parse_null_field_sets(parsed.null_field_sets),
+                    factored_grid=parsed.factored_grid,
+                    skip_sampling_if_exists=parsed.skip_sampling_if_exists,
+                    faithfulness_max_sources=parsed.faithfulness_max_sources,
+                    no_contact_sheets=parsed.no_contact_sheets,
+                    dry_run=parsed.dry_run,
+                    build_prompts=parsed.build_prompts,
+                    prompt_count=parsed.prompt_count,
+                    prompt_seed=parsed.prompt_seed,
+                    report_only=parsed.report_only,
+                    allow_partial_report=parsed.allow_partial_report,
+                )
+            )
+            if not parsed.dry_run:
+                print(f"Summary reports: {parsed.out / 'summaries'}")
+        elif parsed.subcommand == "build-v2-eval-prompts":
+            from spritelab.training.v2_eval_prompts import V2EvalPromptsConfig, build_v2_eval_prompts
+
+            report = build_v2_eval_prompts(
+                V2EvalPromptsConfig(
+                    dataset=parsed.dataset,
+                    training_manifest=parsed.training_manifest,
+                    out=parsed.out,
+                    target_count=parsed.target_count,
+                    seed=parsed.seed,
+                    include_grounded_grid=parsed.include_grounded_grid,
+                    include_compositional=parsed.include_compositional,
+                    include_rare_combos=parsed.include_rare_combos,
+                    include_style_stress=parsed.include_style_stress,
+                    out_report=parsed.out_report,
+                )
+            )
+            print(f"Prompts written: {report['prompt_count']} (target: {parsed.target_count})")
+            print(f"Families: {report['families']}")
         elif parsed.subcommand == "compare-challenger-conditioning-audits":
             from spritelab.training.generator_audits import compare_challenger_conditioning_audits
 
