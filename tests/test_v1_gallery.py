@@ -220,6 +220,60 @@ def test_report_json_contains_v1_preset_and_projection_metadata(
 
     on_disk = json.loads((out_dir / "v1_gallery_report.json").read_text(encoding="utf-8"))
     assert on_disk["preset"]["name"] == "v1"
+    assert on_disk["preset"]["factored_cfg"] is False
+    assert on_disk["validated_v1_1_factored_cfg_reference"] is None
+
+
+@pytest.mark.parametrize("preset_flag", ["v1.1", "v1_1", "phase1_v1_1"])
+def test_report_json_contains_v1_1_preset_and_factored_cfg_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, preset_flag: str
+) -> None:
+    monkeypatch.setattr(v1_gallery, "run_sample_generator_challenger", _fake_run_sample_generator_challenger)
+
+    out_dir = tmp_path / f"gallery_{preset_flag.replace('.', '_')}"
+    report = build_v1_gallery_demo(
+        BuildV1GalleryConfig(
+            out_dir=out_dir,
+            checkpoint=tmp_path / "checkpoint_last_ema.pt",
+            device="cpu",
+            num_samples=4,
+            export_preset=preset_flag,
+        )
+    )
+
+    assert report["preset"]["name"] == "v1.1"
+    assert report["preset"]["cfg_scale"] == pytest.approx(3.0)
+    assert report["preset"]["steps"] == 30
+    assert report["preset"]["factored_cfg"] is True
+    assert report["preset"]["cfg_base_scale"] == pytest.approx(2.5)
+    assert report["preset"]["cfg_color_scale"] == pytest.approx(3.0)
+
+    reference = report["validated_v1_1_factored_cfg_reference"]
+    assert reference is not None
+    assert reference["deltas_v1_1_minus_v1"]["color_consistency"] == pytest.approx(0.0312)
+
+    markdown = (out_dir / "v1_gallery_report.md").read_text(encoding="utf-8")
+    assert markdown.startswith("# v1.1 Gallery Report")
+    assert "Factored CFG: base=2.5, color=3.0" in markdown
+
+    on_disk = json.loads((out_dir / "v1_gallery_report.json").read_text(encoding="utf-8"))
+    assert on_disk["preset"]["name"] == "v1.1"
+    assert on_disk["preset"]["factored_cfg"] is True
+
+
+def test_v1_gallery_rejects_unknown_export_preset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(v1_gallery, "run_sample_generator_challenger", _fake_run_sample_generator_challenger)
+
+    with pytest.raises(ValueError):
+        build_v1_gallery_demo(
+            BuildV1GalleryConfig(
+                out_dir=tmp_path / "gallery_bad_preset",
+                checkpoint=tmp_path / "checkpoint_last_ema.pt",
+                device="cpu",
+                num_samples=2,
+                export_preset="not_a_real_preset",
+            )
+        )
 
 
 def test_custom_prompt_file_is_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -295,6 +349,35 @@ def test_build_v1_gallery_cli_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert (out_dir / "v1_gallery_report.json").is_file()
     report = json.loads((out_dir / "v1_gallery_report.json").read_text(encoding="utf-8"))
     assert report["sample_count"] == 5
+    assert report["preset"]["name"] == "v1"
+
+
+def test_build_v1_gallery_cli_accepts_export_preset_v1_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(v1_gallery, "run_sample_generator_challenger", _fake_run_sample_generator_challenger)
+
+    out_dir = tmp_path / "cli_gallery_v1_1"
+    train_cli(
+        [
+            "build-v1-gallery",
+            "--out",
+            str(out_dir),
+            "--checkpoint",
+            str(tmp_path / "checkpoint_last_ema.pt"),
+            "--export-preset",
+            "v1.1",
+            "--device",
+            "cpu",
+            "--num-samples",
+            "5",
+        ]
+    )
+    assert (out_dir / "v1_gallery_report.json").is_file()
+    report = json.loads((out_dir / "v1_gallery_report.json").read_text(encoding="utf-8"))
+    assert report["sample_count"] == 5
+    assert report["preset"]["name"] == "v1.1"
+    assert report["preset"]["factored_cfg"] is True
+    assert report["preset"]["cfg_base_scale"] == pytest.approx(2.5)
+    assert report["preset"]["cfg_color_scale"] == pytest.approx(3.0)
 
 
 def test_docs_mention_official_v1_default() -> None:

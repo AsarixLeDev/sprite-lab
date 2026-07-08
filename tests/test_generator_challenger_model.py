@@ -12,17 +12,26 @@ from _semantic_dataset import default_specs, make_semantic_dataset
 from spritelab.dataset_maker.training_manifest import build_training_manifest, write_training_manifest
 from spritelab.training.conditioning import apply_conditioning_mode
 from spritelab.training.generator_challenger import (
+    NULL_FIELD_CHOICES,
+    V1_1_CFG_BASE_SCALE,
+    V1_1_CFG_COLOR_SCALE,
     ChallengerSampleConfig,
     ChallengerTrainConfig,
     RectifiedFlowUNet,
     _apply_cfg_dropout,
     _apply_structured_field_dropout,
     _velocity_loss_components,
+    apply_conditioning_field_ablations,
+    color_token_ids_for_tokenizer,
+    integrate_rectified_flow,
+    normalize_export_preset,
     palette_soft_min_auxiliary_loss,
     run_challenger_training,
     run_sample_generator_challenger,
+    strip_color_conditioning,
 )
 from spritelab.training.generated_qa import qa_generated_sprites
+from spritelab.training.tokenization import SpriteTextTokenizer
 
 
 def _dataset_with_manifest(tmp_path: Path) -> tuple[Path, Path]:
@@ -415,3 +424,393 @@ def test_structured_challenger_cpu_smoke_train_checkpoint_sample_and_qa(tmp_path
     assert rows[0]["conditioning_mode"] == "caption_semantic_structured"
     assert (out / rows[0]["paths"]["indexed_png"]).is_file()
     assert qa_generated_sprites(out).ok
+
+
+def test_challenger_sample_config_factored_cfg_and_null_fields_default_off() -> None:
+    config = ChallengerSampleConfig(
+        checkpoint=Path("checkpoint.pt"),
+        prompts=Path("prompts.jsonl"),
+        out_dir=Path("out"),
+    )
+    assert config.factored_cfg is False
+    assert config.cfg_base_scale is None
+    assert config.cfg_color_scale is None
+    assert config.null_fields == ""
+
+
+def _tiny_model_and_inputs() -> tuple[RectifiedFlowUNet, "torch.Tensor", "torch.Tensor", "torch.Tensor"]:
+    torch.manual_seed(0)
+    model = RectifiedFlowUNet(
+        vocab_size=12,
+        embed_dim=8,
+        base_channels=8,
+        channel_mults=(1, 2),
+        res_blocks_per_level=1,
+        pad_token_id=0,
+    ).eval()
+    initial = torch.randn(2, 4, 32, 32)
+    caption = torch.tensor([[2, 4, 3, 0], [2, 5, 3, 0]], dtype=torch.long)
+    semantic = torch.tensor([[2, 6, 3, 0], [2, 7, 3, 0]], dtype=torch.long)
+    return model, initial, caption, semantic
+
+
+def test_integrate_rectified_flow_normal_cfg_path_still_callable_without_factored_args() -> None:
+    model, initial, caption, semantic = _tiny_model_and_inputs()
+    out = integrate_rectified_flow(
+        model,
+        initial,
+        caption_tokens=caption,
+        semantic_tokens=semantic,
+        steps=3,
+        cfg_scale=2.0,
+        pad_token_id=0,
+    )
+    assert out.shape == (2, 4, 32, 32)
+    assert torch.isfinite(out).all()
+
+
+def test_factored_cfg_reduces_to_uncond_and_cond_at_boundary_scales() -> None:
+    """factored CFG's base/color decomposition telescopes back to the plain CFG formula
+    at base=color=0 (pure v_uncond) and base=color=1 (pure v_cond), independent of what
+    the color-stripped branch predicts -- a strong regression check on the combination
+    math itself, not just shapes."""
+
+    model, initial, caption, semantic = _tiny_model_and_inputs()
+
+    uncond_only = integrate_rectified_flow(
+        model, initial.clone(), caption_tokens=caption, semantic_tokens=semantic, steps=3, cfg_scale=0.0, pad_token_id=0
+    )
+    factored_zero = integrate_rectified_flow(
+        model,
+        initial.clone(),
+        caption_tokens=caption,
+        semantic_tokens=semantic,
+        steps=3,
+        cfg_scale=2.0,
+        pad_token_id=0,
+        factored_cfg=True,
+        cfg_base_scale=0.0,
+        cfg_color_scale=0.0,
+        color_token_ids=(4,),
+    )
+    assert torch.allclose(uncond_only, factored_zero, atol=1e-6)
+
+    cond_only = integrate_rectified_flow(
+        model, initial.clone(), caption_tokens=caption, semantic_tokens=semantic, steps=3, cfg_scale=1.0, pad_token_id=0
+    )
+    factored_one = integrate_rectified_flow(
+        model,
+        initial.clone(),
+        caption_tokens=caption,
+        semantic_tokens=semantic,
+        steps=3,
+        cfg_scale=2.0,
+        pad_token_id=0,
+        factored_cfg=True,
+        cfg_base_scale=1.0,
+        cfg_color_scale=1.0,
+        color_token_ids=(4,),
+    )
+    assert torch.allclose(cond_only, factored_one, atol=1e-6)
+
+
+def test_factored_cfg_defaults_base_color_scale_from_cfg_scale_at_call_site(tmp_path: Path) -> None:
+    """run_sample_generator_challenger resolves cfg_base_scale/cfg_color_scale from
+    cfg_scale when the factored-only flags are omitted; exercised end to end via a CPU
+    smoke sample so the resolution + wiring both get covered."""
+
+    dataset, manifest = _dataset_with_manifest(tmp_path)
+    run_dir = dataset.parent / "factored_run"
+    run_challenger_training(
+        ChallengerTrainConfig(
+            dataset_dir=dataset,
+            training_manifest=manifest,
+            out_dir=run_dir,
+            batch_size=2,
+            max_steps=1,
+            device="cpu",
+            seed=7,
+            base_channels=8,
+            channel_mults="1,2",
+            res_blocks_per_level=1,
+            embed_dim=8,
+            sample_every=0,
+            save_every=0,
+            validation_mode="none",
+        )
+    )
+    out = dataset.parent / "factored_generated"
+    sample_report = run_sample_generator_challenger(
+        ChallengerSampleConfig(
+            checkpoint=run_dir / "checkpoint_last.pt",
+            prompts=_prompts(dataset.parent / "factored_prompts.jsonl"),
+            out_dir=out,
+            max_samples=2,
+            steps=2,
+            cfg_scale=2.0,
+            max_colors=8,
+            device="cpu",
+            seed=9,
+            batch_size=2,
+            factored_cfg=True,
+        )
+    )
+    assert sample_report["sample_count"] == 2
+    rows = [json.loads(line) for line in (out / "generated_manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["factored_cfg"] is True
+    assert rows[0]["cfg_base_scale"] is None
+    assert rows[0]["cfg_color_scale"] is None
+    assert qa_generated_sprites(out).ok
+
+
+def test_strip_color_conditioning_removes_color_without_mutating_inputs() -> None:
+    tokenizer = SpriteTextTokenizer.build(["red potion", "gold sword", "category item_icon"], max_length=8)
+    color_ids = color_token_ids_for_tokenizer(tokenizer)
+    assert tokenizer.token_to_id["red"] in color_ids
+    assert tokenizer.token_to_id["gold"] in color_ids
+
+    caption = torch.as_tensor([tokenizer.encode("red potion", max_length=8)], dtype=torch.long)
+    caption_before = caption.clone()
+    structured = {
+        "category_id": torch.tensor([1]),
+        "primary_color_id": torch.tensor([2]),
+        "color_multi_hot": torch.tensor([[1.0, 0.0]]),
+    }
+    structured_before = {key: value.clone() for key, value in structured.items()}
+
+    stripped = strip_color_conditioning(
+        caption_tokens=caption,
+        semantic_tokens=None,
+        structured_conditioning=structured,
+        color_token_ids=color_ids,
+        pad_token_id=tokenizer.pad_id,
+    )
+
+    decoded = tokenizer.decode(stripped["caption_tokens"][0].tolist())
+    assert "red" not in decoded.split()
+    assert "potion" in decoded.split()
+    assert torch.count_nonzero(stripped["structured_conditioning"]["primary_color_id"]).item() == 0
+    assert torch.count_nonzero(stripped["structured_conditioning"]["color_multi_hot"]).item() == 0
+    assert torch.equal(stripped["structured_conditioning"]["category_id"], structured["category_id"])
+
+    # inputs must not be mutated
+    assert torch.equal(caption, caption_before)
+    for key, value in structured.items():
+        assert torch.equal(value, structured_before[key])
+
+
+def test_apply_conditioning_field_ablations_colors_only_affects_color_fields() -> None:
+    structured = {
+        "category_id": torch.ones(2, dtype=torch.long),
+        "object_id": torch.ones(2, dtype=torch.long),
+        "primary_color_id": torch.ones(2, dtype=torch.long),
+        "color_multi_hot": torch.ones(2, 3),
+        "material_multi_hot": torch.ones(2, 2),
+    }
+    structured_before = {key: value.clone() for key, value in structured.items()}
+    caption = torch.ones(2, 4, dtype=torch.long)
+    semantic = torch.ones(2, 4, dtype=torch.long)
+
+    result = apply_conditioning_field_ablations(
+        caption_tokens=caption,
+        semantic_tokens=semantic,
+        structured_conditioning=structured,
+        fields=("colors",),
+        pad_token_id=0,
+    )
+    out_structured = result["structured_conditioning"]
+    assert torch.count_nonzero(out_structured["primary_color_id"]).item() == 0
+    assert torch.count_nonzero(out_structured["color_multi_hot"]).item() == 0
+    assert torch.count_nonzero(out_structured["category_id"]).item() == 2
+    assert torch.count_nonzero(out_structured["object_id"]).item() == 2
+    assert torch.count_nonzero(out_structured["material_multi_hot"]).item() == 4
+    assert torch.equal(result["caption_tokens"], caption)
+    assert torch.equal(result["semantic_tokens"], semantic)
+    for key, value in structured.items():
+        assert torch.equal(value, structured_before[key])
+
+
+def test_apply_conditioning_field_ablations_object_id_only_affects_object_id() -> None:
+    structured = {
+        "category_id": torch.ones(2, dtype=torch.long),
+        "object_id": torch.ones(2, dtype=torch.long),
+        "base_object_id": torch.ones(2, dtype=torch.long),
+        "primary_color_id": torch.ones(2, dtype=torch.long),
+        "color_multi_hot": torch.ones(2, 3),
+    }
+    result = apply_conditioning_field_ablations(
+        caption_tokens=torch.ones(2, 4, dtype=torch.long),
+        semantic_tokens=torch.ones(2, 4, dtype=torch.long),
+        structured_conditioning=structured,
+        fields=("object_id",),
+        pad_token_id=0,
+    )
+    out_structured = result["structured_conditioning"]
+    assert torch.count_nonzero(out_structured["object_id"]).item() == 0
+    assert torch.count_nonzero(out_structured["category_id"]).item() == 2
+    assert torch.count_nonzero(out_structured["base_object_id"]).item() == 2
+    assert torch.count_nonzero(out_structured["primary_color_id"]).item() == 2
+    assert torch.count_nonzero(out_structured["color_multi_hot"]).item() == 6
+
+
+def test_apply_conditioning_field_ablations_caption_and_structured_whole_null() -> None:
+    structured = {"category_id": torch.ones(2, dtype=torch.long), "primary_color_id": torch.ones(2, dtype=torch.long)}
+    caption = torch.ones(2, 4, dtype=torch.long)
+    semantic = torch.ones(2, 4, dtype=torch.long)
+    result = apply_conditioning_field_ablations(
+        caption_tokens=caption,
+        semantic_tokens=semantic,
+        structured_conditioning=structured,
+        fields=("caption", "structured"),
+        pad_token_id=5,
+    )
+    assert bool(torch.all(result["caption_tokens"] == 5))
+    assert torch.equal(result["semantic_tokens"], semantic)
+    for value in result["structured_conditioning"].values():
+        assert torch.count_nonzero(value).item() == 0
+
+
+def test_apply_conditioning_field_ablations_empty_fields_is_noop_identity() -> None:
+    caption = torch.ones(2, 4, dtype=torch.long)
+    semantic = torch.ones(2, 4, dtype=torch.long)
+    structured = {"category_id": torch.ones(2, dtype=torch.long)}
+    result = apply_conditioning_field_ablations(
+        caption_tokens=caption,
+        semantic_tokens=semantic,
+        structured_conditioning=structured,
+        fields=(),
+        pad_token_id=0,
+    )
+    assert result["caption_tokens"] is caption
+    assert result["semantic_tokens"] is semantic
+    assert result["structured_conditioning"] is structured
+
+
+def test_apply_conditioning_field_ablations_rejects_unknown_field() -> None:
+    with pytest.raises(ValueError):
+        apply_conditioning_field_ablations(
+            caption_tokens=torch.ones(1, 2, dtype=torch.long),
+            semantic_tokens=None,
+            structured_conditioning=None,
+            fields=("not_a_real_field",),
+            pad_token_id=0,
+        )
+
+
+@pytest.mark.parametrize("alias", ["v1.1", "v1_1", "phase1_v1_1", "V1.1", " v1_1 "])
+def test_normalize_export_preset_v1_1_aliases_all_resolve(alias: str) -> None:
+    assert normalize_export_preset(alias) == "v1.1"
+
+
+@pytest.mark.parametrize("alias", ["v1", "phase1_v1", "V1", " v1 "])
+def test_normalize_export_preset_v1_aliases_all_resolve(alias: str) -> None:
+    assert normalize_export_preset(alias) == "v1"
+
+
+def test_normalize_export_preset_unknown_returns_none() -> None:
+    assert normalize_export_preset("not_a_preset") is None
+    assert normalize_export_preset(None) is None
+    assert normalize_export_preset("") is None
+
+
+def test_v1_1_cfg_scale_constants_match_validated_confirmation() -> None:
+    assert V1_1_CFG_BASE_SCALE == pytest.approx(2.5)
+    assert V1_1_CFG_COLOR_SCALE == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize("preset", ["v1.1", "v1_1", "phase1_v1_1"])
+def test_sample_manifest_records_v1_1_factored_cfg_metadata(tmp_path: Path, preset: str) -> None:
+    """End-to-end (real run_sample_generator_challenger, CPU): the v1.1 preset's
+    factored-CFG fields and export_preset must show up on every generated manifest row,
+    not just in the in-memory config, so a v1.1 run is unambiguous after the fact."""
+
+    dataset, manifest = _dataset_with_manifest(tmp_path)
+    run_dir = tmp_path / "v1_1_manifest_run"
+    run_challenger_training(
+        ChallengerTrainConfig(
+            dataset_dir=dataset,
+            training_manifest=manifest,
+            out_dir=run_dir,
+            batch_size=2,
+            max_steps=1,
+            device="cpu",
+            seed=7,
+            base_channels=8,
+            channel_mults="1,2",
+            res_blocks_per_level=1,
+            embed_dim=8,
+            sample_every=0,
+            save_every=0,
+            validation_mode="none",
+        )
+    )
+    out = tmp_path / "v1_1_manifest_generated"
+    sample_report = run_sample_generator_challenger(
+        ChallengerSampleConfig(
+            checkpoint=run_dir / "checkpoint_last.pt",
+            prompts=_prompts(tmp_path / "v1_1_manifest_prompts.jsonl"),
+            out_dir=out,
+            export_preset=preset,
+            max_samples=2,
+            steps=2,
+            cfg_scale=3.0,
+            max_colors=8,
+            device="cpu",
+            seed=9,
+            batch_size=2,
+            factored_cfg=True,
+            cfg_base_scale=V1_1_CFG_BASE_SCALE,
+            cfg_color_scale=V1_1_CFG_COLOR_SCALE,
+        )
+    )
+    assert sample_report["sample_count"] == 2
+    rows = [json.loads(line) for line in (out / "generated_manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    for row in rows:
+        assert row["export_preset"] == preset
+        assert row["factored_cfg"] is True
+        assert row["cfg_base_scale"] == pytest.approx(2.5)
+        assert row["cfg_color_scale"] == pytest.approx(3.0)
+    assert qa_generated_sprites(out).ok
+
+    # v1 (no factored CFG) must remain unaffected by these new fields' presence/values.
+    v1_out = tmp_path / "v1_manifest_generated"
+    run_sample_generator_challenger(
+        ChallengerSampleConfig(
+            checkpoint=run_dir / "checkpoint_last.pt",
+            prompts=_prompts(tmp_path / "v1_manifest_prompts.jsonl"),
+            out_dir=v1_out,
+            export_preset="v1",
+            max_samples=2,
+            steps=2,
+            cfg_scale=3.0,
+            max_colors=8,
+            device="cpu",
+            seed=9,
+            batch_size=2,
+        )
+    )
+    v1_rows = [
+        json.loads(line) for line in (v1_out / "generated_manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    for row in v1_rows:
+        assert row["export_preset"] == "v1"
+        assert row["factored_cfg"] is False
+        assert row["cfg_base_scale"] is None
+        assert row["cfg_color_scale"] is None
+
+
+def test_null_field_choices_are_stable() -> None:
+    assert set(NULL_FIELD_CHOICES) == {
+        "caption",
+        "semantic",
+        "category",
+        "object_id",
+        "base_object",
+        "colors",
+        "materials",
+        "shapes",
+        "function",
+        "style",
+        "structured",
+    }

@@ -51,6 +51,18 @@ to its EMA sibling when available and fills in CFG scale, steps, and
 projection defaults automatically (see `_apply_export_preset_defaults` in
 `src/spritelab/training/cli.py`).
 
+## Optional v1.1 preset
+
+`v1` above remains the official, safest default. An optional `v1.1` export
+preset (aliases `v1_1`, `phase1_v1_1`) is also available: it is the same v1
+base settings (Phase 1 EMA checkpoint, 30 steps, k16 deterministic palette
+projection) plus factored CFG (base=2.5, color=3.0) layered on top, trading a
+small amount of category consistency for improved color consistency. No
+retraining is involved. `v1.1` is never the default and must be requested
+explicitly via `--export-preset v1.1`. See
+[`docs/v1_1_factored_cfg.md`](v1_1_factored_cfg.md) for the full validated
+comparison and when to reach for it.
+
 ## Building a v1 demo gallery
 
 `build-v1-gallery` generates a deterministic gallery end to end: it builds (or
@@ -85,9 +97,12 @@ Outputs are written to `<out>`:
 ```
 
 Optional arguments: `--checkpoint`, `--prompts` (use a custom prompt file
-instead of the built-in set), `--num-samples` (cap the prompt/sample count),
-`--categories` (comma-separated filter over the built-in categories),
-`--contact-sheet-columns`, and `--include-ood` / `--include-grounded` /
+instead of the built-in set), `--export-preset` (`v1`, default; or `v1.1` /
+`v1_1` / `phase1_v1_1` for the optional factored-CFG color-strong preset, see
+[`docs/v1_1_factored_cfg.md`](v1_1_factored_cfg.md)), `--num-samples` (cap the
+prompt/sample count), `--categories` (comma-separated filter over the
+built-in categories), `--contact-sheet-columns`, and `--include-ood` /
+`--include-grounded` /
 `--include-stress-prompts` (toggle the built-in prompt families).
 
 ### Built-in prompt set

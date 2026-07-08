@@ -49,6 +49,7 @@ from spritelab.training.optim_utils import (
     dataloader_perf_kwargs,
     device_type,
 )
+from spritelab.training.prompt_sensitivity import COLOR_WORDS
 from spritelab.training.overfit_subset import (
     OverfitSubsetSelection,
     read_sprite_id_list,
@@ -79,6 +80,33 @@ STRUCTURED_DROPOUT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("function", ("function_multi_hot",)),
     ("style", ("style_multi_hot",)),
 )
+
+# v2 Phase 0 diagnostics: sampling-time field ablation choices (see docs/v2_phase0_diagnostics.md).
+NULL_FIELD_CHOICES: tuple[str, ...] = (
+    "caption",
+    "semantic",
+    "category",
+    "object_id",
+    "base_object",
+    "colors",
+    "materials",
+    "shapes",
+    "function",
+    "style",
+    "structured",
+)
+_NULL_FIELD_STRUCTURED_KEYS: dict[str, tuple[str, ...]] = {
+    "category": ("category_id",),
+    "object_id": ("object_id",),
+    "base_object": ("base_object_id",),
+    "colors": ("primary_color_id", "color_multi_hot"),
+    "materials": ("material_multi_hot",),
+    "shapes": ("shape_multi_hot",),
+    "function": ("function_multi_hot",),
+    "style": ("style_multi_hot",),
+}
+_COLOR_STRUCTURED_KEYS: tuple[str, ...] = ("primary_color_id", "color_multi_hot")
+
 _ModuleBase = nn.Module if nn is not None else object
 
 
@@ -172,6 +200,15 @@ class ChallengerSampleConfig:
     project_palette_target_colors: int = 16
     project_palette_min_pixel_share: float = 0.01
     project_palette_method: str = "deterministic_kmeans"
+    # v2 Phase 0 diagnostics (no-training sampling-time knobs; off by default, see
+    # docs/v2_phase0_diagnostics.md). factored_cfg replaces the scalar cfg_scale
+    # guidance term with independent base/color guidance axes; null_fields zeroes
+    # selected conditioning fields at sample time to probe which fields the model
+    # actually uses.
+    factored_cfg: bool = False
+    cfg_base_scale: float | None = None
+    cfg_color_scale: float | None = None
+    null_fields: str = ""
 
 
 class RectifiedFlowUNet(_ModuleBase):
@@ -867,9 +904,30 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
     return report
 
 
+# Optional v1.1 export preset (see docs/v1_1_factored_cfg.md): v1 base settings (Phase 1
+# EMA checkpoint, CFG 3.0, 30 steps, k16 projection) plus factored CFG at the base/color
+# scales validated by the 3-seed Phase 0 factored-CFG confirmation. v1 remains the default;
+# v1.1 must be requested explicitly via --export-preset v1.1 (or the v1_1 / phase1_v1_1
+# aliases) and never changes v1/phase1_v1 behavior.
+V1_PRESET_ALIASES: tuple[str, ...] = ("v1", "phase1_v1")
+V1_1_PRESET_ALIASES: tuple[str, ...] = ("v1.1", "v1_1", "phase1_v1_1")
+V1_1_CFG_BASE_SCALE = 2.5
+V1_1_CFG_COLOR_SCALE = 3.0
+
+
+def normalize_export_preset(export_preset: str | None) -> str | None:
+    """Return the canonical preset name ("v1" or "v1.1") for a preset alias, or None."""
+
+    normalized = str(export_preset or "").strip().lower()
+    if normalized in V1_PRESET_ALIASES:
+        return "v1"
+    if normalized in V1_1_PRESET_ALIASES:
+        return "v1.1"
+    return None
+
+
 def _resolve_sample_export_checkpoint(checkpoint: Path, export_preset: str | None) -> Path:
-    preset = str(export_preset or "").strip().lower()
-    if preset not in {"v1", "phase1_v1"}:
+    if normalize_export_preset(export_preset) is None:
         return Path(checkpoint)
 
     path = Path(checkpoint)
@@ -921,6 +979,8 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
     prompts = read_prompt_records(config.prompts, max_records=config.max_samples)
     manifest_records: list[dict[str, Any]] = []
     base_noise_seed = int(config.noise_seed) if config.noise_seed is not None else int(config.seed) * 100000
+    null_fields = _parse_null_fields(config.null_fields)
+    color_token_ids = color_token_ids_for_tokenizer(tokenizer) if config.factored_cfg else ()
     for batch_start in range(0, len(prompts), max(1, int(config.batch_size))):
         batch_records = prompts[batch_start : batch_start + max(1, int(config.batch_size))]
         if not batch_records:
@@ -948,6 +1008,14 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
             pad_token_id=tokenizer.pad_id,
             structured_conditioning=structured_conditioning,
         )
+        if null_fields:
+            inputs = apply_conditioning_field_ablations(
+                caption_tokens=inputs["caption_tokens"],
+                semantic_tokens=inputs["semantic_tokens"],
+                structured_conditioning=inputs.get("structured_conditioning"),
+                fields=null_fields,
+                pad_token_id=tokenizer.pad_id,
+            )
         initial = th.cat(
             [_sample_initial_noise(1, device=device, seed=noise_seed) for noise_seed in noise_seeds],
             dim=0,
@@ -962,6 +1030,10 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
                 steps=config.steps,
                 cfg_scale=config.cfg_scale,
                 pad_token_id=tokenizer.pad_id,
+                factored_cfg=config.factored_cfg,
+                cfg_base_scale=config.cfg_base_scale,
+                cfg_color_scale=config.cfg_color_scale,
+                color_token_ids=color_token_ids,
             )
         rgba_np = np.moveaxis(rgba_batch.detach().cpu().numpy().astype(np.float32), 1, -1)
         for item_index, prompt_record in enumerate(batch_records):
@@ -977,6 +1049,7 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
                 **prompt_record,
                 "checkpoint": str(checkpoint),
                 "requested_checkpoint": str(config.checkpoint),
+                "export_preset": str(config.export_preset or ""),
                 "seed": int(config.seed),
                 "noise_seed": int(noise_seeds[item_index]),
                 "conditioning_mode": conditioning_mode,
@@ -987,6 +1060,10 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
                 "alpha_threshold": float(config.alpha_threshold),
                 "max_colors": int(config.max_colors),
                 "dither": bool(config.dither),
+                "factored_cfg": bool(config.factored_cfg),
+                "cfg_base_scale": None if config.cfg_base_scale is None else float(config.cfg_base_scale),
+                "cfg_color_scale": None if config.cfg_color_scale is None else float(config.cfg_color_scale),
+                "null_fields": list(null_fields),
             }
             record = write_generated_sprite_artifacts(
                 sprite,
@@ -1319,16 +1396,47 @@ def integrate_rectified_flow(
     steps: int,
     cfg_scale: float,
     pad_token_id: int,
+    factored_cfg: bool = False,
+    cfg_base_scale: float | None = None,
+    cfg_color_scale: float | None = None,
+    color_token_ids: Sequence[int] | None = None,
 ) -> Any:
+    """Integrate the rectified-flow ODE, optionally with factored (base/color) CFG.
+
+    ``factored_cfg`` defaults to False and, when off, this reproduces the original
+    all-or-nothing CFG path (``v_uncond + cfg_scale * (v_cond - v_uncond)``) exactly.
+    When ``factored_cfg`` is True, guidance is split into a base term (uncond -> color-
+    stripped conditioning) and a color term (color-stripped -> full conditioning), each
+    with its own scale; see docs/v2_phase0_diagnostics.md.
+    """
     th, _nn_mod = _require_torch()
     model.eval()
     x = initial
     total_steps = max(1, int(steps))
     dt = 1.0 / float(total_steps)
-    use_cfg = abs(float(cfg_scale) - 1.0) > 1e-6
     uncond_caption = caption_tokens.new_full(caption_tokens.shape, int(pad_token_id))
     uncond_semantic = None if semantic_tokens is None else semantic_tokens.new_full(semantic_tokens.shape, int(pad_token_id))
     uncond_structured = _null_structured_conditioning(structured_conditioning)
+
+    no_color_caption = no_color_semantic = no_color_structured = None
+    base_scale = color_scale = 0.0
+    if factored_cfg:
+        base_scale = float(cfg_scale if cfg_base_scale is None else cfg_base_scale)
+        color_scale = float(cfg_scale if cfg_color_scale is None else cfg_color_scale)
+        no_color = strip_color_conditioning(
+            caption_tokens=caption_tokens,
+            semantic_tokens=semantic_tokens,
+            structured_conditioning=structured_conditioning,
+            color_token_ids=color_token_ids or (),
+            pad_token_id=pad_token_id,
+        )
+        no_color_caption = no_color["caption_tokens"]
+        no_color_semantic = no_color["semantic_tokens"]
+        no_color_structured = no_color.get("structured_conditioning")
+        use_cfg = True
+    else:
+        use_cfg = abs(float(cfg_scale) - 1.0) > 1e-6
+
     for index in range(total_steps):
         t_value = (index + 0.5) / float(total_steps)
         t = th.full((int(x.shape[0]),), float(t_value), device=x.device, dtype=x.dtype)
@@ -1339,7 +1447,23 @@ def integrate_rectified_flow(
             semantic_tokens=semantic_tokens,
             structured_conditioning=structured_conditioning,
         )
-        if use_cfg:
+        if factored_cfg:
+            v_uncond = model(
+                x,
+                t,
+                caption_tokens=uncond_caption,
+                semantic_tokens=uncond_semantic,
+                structured_conditioning=uncond_structured,
+            )
+            v_no_color = model(
+                x,
+                t,
+                caption_tokens=no_color_caption,
+                semantic_tokens=no_color_semantic,
+                structured_conditioning=no_color_structured,
+            )
+            velocity = v_uncond + base_scale * (v_no_color - v_uncond) + color_scale * (v_cond - v_no_color)
+        elif use_cfg:
             v_uncond = model(
                 x,
                 t,
@@ -1352,6 +1476,117 @@ def integrate_rectified_flow(
             velocity = v_cond
         x = x + dt * velocity
     return ((x + 1.0) * 0.5).clamp(0.0, 1.0)
+
+
+def color_token_ids_for_tokenizer(tokenizer: SpriteTextTokenizer) -> tuple[int, ...]:
+    """Token ids whose text form is a known color word (see COLOR_WORDS)."""
+
+    return tuple(sorted(tokenizer.token_to_id[word] for word in COLOR_WORDS if word in tokenizer.token_to_id))
+
+
+def strip_color_conditioning(
+    *,
+    caption_tokens: Any,
+    semantic_tokens: Any | None,
+    structured_conditioning: Mapping[str, Any] | None,
+    color_token_ids: Sequence[int],
+    pad_token_id: int,
+) -> dict[str, Any]:
+    """Return conditioning inputs with color signal removed, without mutating inputs.
+
+    Removes color from every color channel the model consumes: caption/semantic color
+    tokens (matched against ``color_token_ids``, typically from
+    :func:`color_token_ids_for_tokenizer`) and the structured ``primary_color_id`` /
+    ``color_multi_hot`` fields. Category, object, base_object, material, shape,
+    function, and style signal are left untouched.
+    """
+
+    th, _nn_mod = _require_torch()
+    ids = {int(value) for value in color_token_ids}
+
+    def _strip_tokens(tokens: Any) -> Any:
+        if tokens is None or not ids:
+            return tokens
+        cloned = tokens.clone()
+        mask = th.zeros_like(cloned, dtype=th.bool)
+        for token_id in ids:
+            mask = mask | cloned.eq(token_id)
+        cloned[mask] = int(pad_token_id)
+        return cloned
+
+    stripped_structured: dict[str, Any] | None = None
+    if isinstance(structured_conditioning, Mapping):
+        stripped_structured = dict(structured_conditioning)
+        for key in _COLOR_STRUCTURED_KEYS:
+            value = stripped_structured.get(key)
+            if isinstance(value, th.Tensor):
+                stripped_structured[key] = th.zeros_like(value)
+
+    result: dict[str, Any] = {
+        "caption_tokens": _strip_tokens(caption_tokens),
+        "semantic_tokens": None if semantic_tokens is None else _strip_tokens(semantic_tokens),
+    }
+    if stripped_structured is not None:
+        result["structured_conditioning"] = stripped_structured
+    return result
+
+
+def apply_conditioning_field_ablations(
+    *,
+    caption_tokens: Any,
+    semantic_tokens: Any | None,
+    structured_conditioning: Mapping[str, Any] | None,
+    fields: Sequence[str],
+    pad_token_id: int,
+) -> dict[str, Any]:
+    """Null selected conditioning fields at sample time, without mutating inputs.
+
+    ``fields`` is a subset of :data:`NULL_FIELD_CHOICES`. ``caption``/``semantic``
+    null the whole caption/semantic token stream; ``structured`` nulls every
+    structured field; the remaining names null one structured field group each
+    (see :data:`_NULL_FIELD_STRUCTURED_KEYS`). No-op when ``fields`` is empty.
+    """
+
+    th, _nn_mod = _require_torch()
+    normalized = {str(field).strip().lower() for field in fields if str(field).strip()}
+    if not normalized:
+        return {
+            "caption_tokens": caption_tokens,
+            "semantic_tokens": semantic_tokens,
+            **({"structured_conditioning": structured_conditioning} if structured_conditioning is not None else {}),
+        }
+    unknown = normalized - set(NULL_FIELD_CHOICES)
+    if unknown:
+        raise ValueError(f"Unknown --null-fields values: {sorted(unknown)}; expected one of {NULL_FIELD_CHOICES}")
+
+    result_caption = caption_tokens
+    if "caption" in normalized and caption_tokens is not None:
+        result_caption = caption_tokens.new_full(caption_tokens.shape, int(pad_token_id))
+
+    result_semantic = semantic_tokens
+    if "semantic" in normalized and semantic_tokens is not None:
+        result_semantic = semantic_tokens.new_full(semantic_tokens.shape, int(pad_token_id))
+
+    result_structured = structured_conditioning
+    if isinstance(structured_conditioning, Mapping):
+        if "structured" in normalized:
+            result_structured = _null_structured_conditioning(structured_conditioning)
+        else:
+            keys_to_zero: set[str] = set()
+            for field in normalized:
+                keys_to_zero.update(_NULL_FIELD_STRUCTURED_KEYS.get(field, ()))
+            if keys_to_zero:
+                cloned = dict(structured_conditioning)
+                for key in keys_to_zero:
+                    value = cloned.get(key)
+                    if isinstance(value, th.Tensor):
+                        cloned[key] = th.zeros_like(value)
+                result_structured = cloned
+
+    result: dict[str, Any] = {"caption_tokens": result_caption, "semantic_tokens": result_semantic}
+    if result_structured is not None:
+        result["structured_conditioning"] = result_structured
+    return result
 
 
 def load_challenger_from_checkpoint(ckpt: dict[str, Any], *, device: Any) -> tuple[RectifiedFlowUNet, SpriteTextTokenizer, str, int]:
@@ -1655,6 +1890,19 @@ def _masked_structured_conditioning(structured: Mapping[str, Any], mask: Any) ->
         else:
             result[str(key)] = value
     return result
+
+
+def _parse_null_fields(value: str | Sequence[str] | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        parts = [part.strip().lower() for part in value.split(",") if part.strip()]
+    else:
+        parts = [str(part).strip().lower() for part in value if str(part).strip()]
+    unknown = sorted(set(parts) - set(NULL_FIELD_CHOICES))
+    if unknown:
+        raise ValueError(f"Unknown --null-fields values: {unknown}; expected one of {NULL_FIELD_CHOICES}")
+    return tuple(parts)
 
 
 def _parse_channel_mults(value: str | Sequence[int]) -> tuple[int, ...]:

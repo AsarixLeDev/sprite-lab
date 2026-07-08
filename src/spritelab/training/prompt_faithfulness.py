@@ -20,6 +20,7 @@ from spritelab.codec.color_names import color_name
 from spritelab.training.data import read_jsonl
 from spritelab.training.prompt_sensitivity import COLOR_WORDS, discover_prompt_pairs, pairwise_image_metrics
 from spritelab.training.source_match_review import compute_source_match_metrics, load_source_sprite_index
+from spritelab.training.stats import wilson_ci_from_rate
 
 SCHEMA_VERSION = "prompt_faithfulness_v1.0"
 SPRITE_SIZE = 32
@@ -82,26 +83,51 @@ def run_prompt_faithfulness(config: PromptFaithfulnessConfig) -> dict[str, Any]:
     color_prompt_summary = _color_prompt_summary(samples)
     object_summary = _object_family_summary(samples)
     collapse_summary = _collapse_summary(samples)
+    sample_count = len(samples)
+
+    category_rate, category_n = _rate_and_count(samples, "category_consistent")
+    color_rate, color_n = _rate_and_count(samples, "color_consistent")
+    shape_bbox_rate, _shape_bbox_n = _rate_and_count(samples, "shape_bbox_consistent")
+    repeated_rate, repeated_n = _cluster_member_rate_and_count(silhouette_clusters)
+    duplicate_rate = _nearest_neighbor_duplicate_rate(samples)
 
     report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "generated": str(generated_dir),
         "prompts": None if config.prompts is None else str(config.prompts),
         "dataset": str(config.dataset),
-        "sample_count": len(samples),
+        "sample_count": sample_count,
         "source_selection": source_selection,
         "nearest_source_summary": _nearest_source_summary(samples),
         # Retrieval-based: category of the nearest source sprite, not a trained classifier.
-        "nearest_source_category_consistency_rate": _rate(samples, "category_consistent"),
+        "nearest_source_category_consistency_rate": category_rate,
+        "nearest_source_category_consistency_ci95": wilson_ci_from_rate(category_rate, category_n),
         # Kept as a backwards-compatible alias of the nearest-source metric above.
-        "category_consistency_rate": _rate(samples, "category_consistent"),
-        "color_consistency_rate": _rate(samples, "color_consistent"),
-        "shape_bbox_consistency_rate": _rate(samples, "shape_bbox_consistent"),
-        "repeated_silhouette_rate": _cluster_member_rate(silhouette_clusters),
-        "nearest_neighbor_duplicate_rate": _nearest_neighbor_duplicate_rate(samples),
+        "category_consistency_rate": category_rate,
+        "category_consistency_ci95": wilson_ci_from_rate(category_rate, category_n),
+        "color_consistency_rate": color_rate,
+        "color_consistency_ci95": wilson_ci_from_rate(color_rate, color_n),
+        "shape_bbox_consistency_rate": shape_bbox_rate,
+        "repeated_silhouette_rate": repeated_rate,
+        "repeated_silhouette_rate_ci95": wilson_ci_from_rate(repeated_rate, repeated_n),
+        "nearest_neighbor_duplicate_rate": duplicate_rate,
+        "nearest_neighbor_duplicate_rate_ci95": wilson_ci_from_rate(duplicate_rate, sample_count),
+        # Near-copy/retrieval-collapse alias for the metric above (see docs/v2_phase0_diagnostics.md):
+        # makes it obvious in reports when a model appears to score well by retrieving a near-exact
+        # copy of a source sprite rather than by generalizing.
+        "near_copy_rate": duplicate_rate,
+        "near_copy_rate_ci95": wilson_ci_from_rate(duplicate_rate, sample_count),
+        "near_copy_criterion": "exact_match_of_alpha_silhouette_hash_and_color_histogram_signature",
+        "near_copy_distance_threshold": None,
         "generic_potion_collapse_rate": collapse_summary["generic_potion_collapse_rate"],
+        "generic_potion_collapse_rate_ci95": wilson_ci_from_rate(
+            collapse_summary["generic_potion_collapse_rate"], sample_count
+        ),
         "generic_flame_collapse_rate": collapse_summary["generic_flame_collapse_rate"],
         "generic_blob_collapse_rate": collapse_summary["generic_blob_collapse_rate"],
+        "generic_blob_collapse_rate_ci95": wilson_ci_from_rate(
+            collapse_summary["generic_blob_collapse_rate"], sample_count
+        ),
         "top_repeated_generated_silhouettes": silhouette_clusters[:10],
         "top_repeated_structural_hashes": structural_clusters[:10],
         "top_color_histogram_clusters": color_clusters[:10],
@@ -156,15 +182,18 @@ def format_prompt_faithfulness_markdown(report: Mapping[str, Any]) -> str:
         "",
         "## Summary",
         "",
-        f"- Mean nearest-source distance: {_fmt(nearest.get('mean_distance'))}",
-        f"- Nearest-source category consistency: {_fmt(report.get('nearest_source_category_consistency_rate', report.get('category_consistency_rate')))}",
-        f"- Color consistency heuristic: {_fmt(report.get('color_consistency_rate'))}",
+        f"- Mean / median / p10 nearest-source distance: {_fmt(nearest.get('mean_distance'))} / "
+        f"{_fmt(nearest.get('median_distance'))} / {_fmt(nearest.get('p10_distance'))}",
+        f"- Nearest-source category consistency: {_fmt(report.get('nearest_source_category_consistency_rate', report.get('category_consistency_rate')))}"
+        f" {_fmt_ci(report.get('nearest_source_category_consistency_ci95'))}",
+        f"- Color consistency heuristic: {_fmt(report.get('color_consistency_rate'))} {_fmt_ci(report.get('color_consistency_ci95'))}",
         f"- Shape/bbox consistency heuristic: {_fmt(report.get('shape_bbox_consistency_rate'))}",
-        f"- Repeated silhouette rate: {_fmt(report.get('repeated_silhouette_rate'))}",
-        f"- Nearest-neighbor duplicate rate: {_fmt(report.get('nearest_neighbor_duplicate_rate'))}",
-        f"- Generic potion collapse rate: {_fmt(report.get('generic_potion_collapse_rate'))}",
+        f"- Repeated silhouette rate: {_fmt(report.get('repeated_silhouette_rate'))} {_fmt_ci(report.get('repeated_silhouette_rate_ci95'))}",
+        f"- Near-copy / nearest-neighbor duplicate rate: {_fmt(report.get('near_copy_rate'))} {_fmt_ci(report.get('near_copy_rate_ci95'))}"
+        f" (criterion: `{report.get('near_copy_criterion', '')}`)",
+        f"- Generic potion collapse rate: {_fmt(report.get('generic_potion_collapse_rate'))} {_fmt_ci(report.get('generic_potion_collapse_rate_ci95'))}",
         f"- Generic flame collapse rate: {_fmt(report.get('generic_flame_collapse_rate'))}",
-        f"- Generic blob collapse rate: {_fmt(report.get('generic_blob_collapse_rate'))}",
+        f"- Generic blob collapse rate: {_fmt(report.get('generic_blob_collapse_rate'))} {_fmt_ci(report.get('generic_blob_collapse_rate_ci95'))}",
         "",
         "## Top Repeated Generated Silhouettes",
         "",
@@ -681,6 +710,10 @@ def _nearest_source_summary(samples: Sequence[Mapping[str, Any]]) -> dict[str, A
     return {
         "mean_distance": float(statistics.fmean(distances)) if distances else None,
         "median_distance": float(statistics.median(distances)) if distances else None,
+        # 10th percentile: how close the closest-matching tail of samples sits to a source
+        # sprite, i.e. a near-copy/retrieval-collapse early-warning signal (see
+        # docs/v2_phase0_diagnostics.md). Uses numpy's default linear interpolation.
+        "p10_distance": float(np.percentile(np.asarray(distances, dtype=np.float64), 10)) if distances else None,
         "top_nearest_source_objects": dict(nearest_objects.most_common(20)),
     }
 
@@ -707,14 +740,27 @@ def _source_categories_by_object(rows: Sequence[Mapping[str, Any]]) -> dict[str,
 
 
 def _cluster_member_rate(clusters: Sequence[Mapping[str, Any]]) -> float:
+    rate, _n = _cluster_member_rate_and_count(clusters)
+    return rate
+
+
+def _cluster_member_rate_and_count(clusters: Sequence[Mapping[str, Any]]) -> tuple[float, int]:
     total = sum(int(cluster.get("count") or 0) for cluster in clusters)
     repeated = sum(int(cluster.get("count") or 0) for cluster in clusters if int(cluster.get("count") or 0) > 1)
-    return repeated / float(total) if total else 0.0
+    return (repeated / float(total) if total else 0.0), total
 
 
 def _rate(samples: Sequence[Mapping[str, Any]], key: str) -> float | None:
+    rate, _n = _rate_and_count(samples, key)
+    return rate
+
+
+def _rate_and_count(samples: Sequence[Mapping[str, Any]], key: str) -> tuple[float | None, int]:
     values = [bool(sample.get(key)) for sample in samples if sample.get(key) is not None]
-    return sum(1 for value in values if value) / float(len(values)) if values else None
+    n = len(values)
+    if n == 0:
+        return None, 0
+    return sum(1 for value in values if value) / float(n), n
 
 
 def _sample_mapping(sample: Mapping[str, Any]) -> dict[str, Any]:
@@ -811,6 +857,12 @@ def _fmt(value: Any) -> str:
         return f"{float(value):.4f}"
     except (TypeError, ValueError):
         return "n/a"
+
+
+def _fmt_ci(value: Any) -> str:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return ""
+    return f"(95% CI {_fmt(value[0])}-{_fmt(value[1])})"
 
 
 def _md_escape(text: str) -> str:

@@ -211,3 +211,210 @@ def test_sample_generator_challenger_v1_preset_expands_expected_values(
     assert config.project_palette_target_colors == 16
     assert config.project_palette_min_pixel_share == pytest.approx(0.01)
     assert config.project_palette_method == "deterministic_kmeans"
+
+
+def test_sample_generator_challenger_v2_phase0_flags_default_off(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from spritelab.training import generator_challenger
+
+    prompts = _prompts(tmp_path / "prompts.jsonl")
+    captured = []
+
+    def fake_sample(config: object) -> dict[str, object]:
+        captured.append(config)
+        Path(config.out_dir).mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
+        return {"sample_count": 0, "max_visible_color_count": 0}
+
+    monkeypatch.setattr(generator_challenger, "run_sample_generator_challenger", fake_sample)
+
+    train_cli(
+        [
+            "sample-generator-challenger",
+            "--checkpoint",
+            str(tmp_path / "checkpoint_last.pt"),
+            "--prompts",
+            str(prompts),
+            "--out",
+            str(tmp_path / "challenger_out"),
+            "--device",
+            "cpu",
+        ]
+    )
+
+    config = captured[0]
+    assert config.factored_cfg is False
+    assert config.cfg_base_scale is None
+    assert config.cfg_color_scale is None
+    assert config.null_fields == ""
+
+
+def test_sample_generator_challenger_v2_phase0_flags_parse_from_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from spritelab.training import generator_challenger
+
+    prompts = _prompts(tmp_path / "prompts.jsonl")
+    captured = []
+
+    def fake_sample(config: object) -> dict[str, object]:
+        captured.append(config)
+        Path(config.out_dir).mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
+        return {"sample_count": 0, "max_visible_color_count": 0}
+
+    monkeypatch.setattr(generator_challenger, "run_sample_generator_challenger", fake_sample)
+
+    train_cli(
+        [
+            "sample-generator-challenger",
+            "--checkpoint",
+            str(tmp_path / "checkpoint_last.pt"),
+            "--prompts",
+            str(prompts),
+            "--out",
+            str(tmp_path / "challenger_out2"),
+            "--device",
+            "cpu",
+            "--factored-cfg",
+            "--cfg-base-scale",
+            "2.0",
+            "--cfg-color-scale",
+            "4.5",
+            "--null-fields",
+            "colors,object_id",
+        ]
+    )
+
+    config = captured[0]
+    assert config.factored_cfg is True
+    assert config.cfg_base_scale == pytest.approx(2.0)
+    assert config.cfg_color_scale == pytest.approx(4.5)
+    assert config.null_fields == "colors,object_id"
+
+
+@pytest.mark.parametrize("preset_flag", ["v1.1", "v1_1", "phase1_v1_1"])
+def test_sample_generator_challenger_v1_1_preset_aliases_enable_factored_cfg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preset_flag: str,
+) -> None:
+    from spritelab.training import generator_challenger
+
+    prompts = _prompts(tmp_path / "prompts.jsonl")
+    captured = []
+
+    def fake_sample(config: object) -> dict[str, object]:
+        captured.append(config)
+        Path(config.out_dir).mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
+        return {"sample_count": 0, "max_visible_color_count": 0}
+
+    monkeypatch.setattr(generator_challenger, "run_sample_generator_challenger", fake_sample)
+
+    train_cli(
+        [
+            "sample-generator-challenger",
+            "--checkpoint",
+            str(tmp_path / "checkpoint_last.pt"),
+            "--prompts",
+            str(prompts),
+            "--out",
+            str(tmp_path / f"challenger_out_{preset_flag.replace('.', '_')}"),
+            "--device",
+            "cpu",
+            "--export-preset",
+            preset_flag,
+        ]
+    )
+
+    config = captured[0]
+    assert config.export_preset == preset_flag
+    assert config.factored_cfg is True
+    assert config.cfg_base_scale == pytest.approx(2.5)
+    assert config.cfg_color_scale == pytest.approx(3.0)
+    # v1.1 still carries the v1 base defaults.
+    assert config.steps == 30
+    assert config.cfg_scale == pytest.approx(3.0)
+    assert config.project_palette is True
+    assert config.project_palette_target_colors == 16
+
+
+def test_sample_generator_challenger_v1_1_preset_explicit_scales_take_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from spritelab.training import generator_challenger
+
+    prompts = _prompts(tmp_path / "prompts.jsonl")
+    captured = []
+
+    def fake_sample(config: object) -> dict[str, object]:
+        captured.append(config)
+        Path(config.out_dir).mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
+        return {"sample_count": 0, "max_visible_color_count": 0}
+
+    monkeypatch.setattr(generator_challenger, "run_sample_generator_challenger", fake_sample)
+
+    train_cli(
+        [
+            "sample-generator-challenger",
+            "--checkpoint",
+            str(tmp_path / "checkpoint_last.pt"),
+            "--prompts",
+            str(prompts),
+            "--out",
+            str(tmp_path / "challenger_out_explicit"),
+            "--device",
+            "cpu",
+            "--export-preset",
+            "v1.1",
+            "--cfg-base-scale",
+            "1.0",
+        ]
+    )
+
+    config = captured[0]
+    assert config.factored_cfg is True
+    assert config.cfg_base_scale == pytest.approx(1.0)  # explicit flag beats preset default
+    assert config.cfg_color_scale == pytest.approx(3.0)  # preset default still applies
+
+
+def test_sample_generator_challenger_v1_preset_does_not_enable_factored_cfg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from spritelab.training import generator_challenger
+
+    prompts = _prompts(tmp_path / "prompts.jsonl")
+    captured = []
+
+    def fake_sample(config: object) -> dict[str, object]:
+        captured.append(config)
+        Path(config.out_dir).mkdir(parents=True, exist_ok=True)  # type: ignore[attr-defined]
+        return {"sample_count": 0, "max_visible_color_count": 0}
+
+    monkeypatch.setattr(generator_challenger, "run_sample_generator_challenger", fake_sample)
+
+    train_cli(
+        [
+            "sample-generator-challenger",
+            "--checkpoint",
+            str(tmp_path / "checkpoint_last.pt"),
+            "--prompts",
+            str(prompts),
+            "--out",
+            str(tmp_path / "challenger_out_v1_unchanged"),
+            "--device",
+            "cpu",
+            "--export-preset",
+            "v1",
+        ]
+    )
+
+    config = captured[0]
+    assert config.factored_cfg is False
+    assert config.cfg_base_scale is None
+    assert config.cfg_color_scale is None
+    assert config.cfg_scale == pytest.approx(3.0)
+    assert config.steps == 30

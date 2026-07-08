@@ -229,3 +229,68 @@ def test_prompt_faithfulness_handles_missing_prompt_metadata(tmp_path: Path) -> 
     )
     assert report["sample_count"] == 2
     assert (generated / "missing_prompt_report.json").is_file()
+
+
+_PRE_EXISTING_SCALAR_KEYS = (
+    "schema_version",
+    "generated",
+    "sample_count",
+    "source_selection",
+    "nearest_source_category_consistency_rate",
+    "category_consistency_rate",
+    "color_consistency_rate",
+    "shape_bbox_consistency_rate",
+    "repeated_silhouette_rate",
+    "nearest_neighbor_duplicate_rate",
+    "generic_potion_collapse_rate",
+    "generic_flame_collapse_rate",
+    "generic_blob_collapse_rate",
+)
+
+_NEW_CI_KEYS = (
+    "nearest_source_category_consistency_ci95",
+    "category_consistency_ci95",
+    "color_consistency_ci95",
+    "repeated_silhouette_rate_ci95",
+    "nearest_neighbor_duplicate_rate_ci95",
+    "generic_potion_collapse_rate_ci95",
+    "generic_blob_collapse_rate_ci95",
+    "near_copy_rate",
+    "near_copy_rate_ci95",
+    "near_copy_criterion",
+    "near_copy_distance_threshold",
+)
+
+
+def test_prompt_faithfulness_json_preserves_old_scalar_fields_and_adds_ci_fields(tmp_path: Path) -> None:
+    report = _run(tmp_path, "ci_fields", max_sources=0)
+
+    for key in _PRE_EXISTING_SCALAR_KEYS:
+        assert key in report
+
+    for key in _NEW_CI_KEYS:
+        assert key in report
+
+    assert report["category_consistency_ci95"] == report["nearest_source_category_consistency_ci95"]
+    assert report["near_copy_rate"] == report["nearest_neighbor_duplicate_rate"]
+    assert report["near_copy_distance_threshold"] is None
+
+    for ci_key, rate_key in (
+        ("category_consistency_ci95", "category_consistency_rate"),
+        ("color_consistency_ci95", "color_consistency_rate"),
+    ):
+        ci = report[ci_key]
+        rate = report[rate_key]
+        if rate is None:
+            assert ci is None
+        else:
+            assert isinstance(ci, list) and len(ci) == 2
+            assert 0.0 <= ci[0] <= rate <= ci[1] <= 1.0
+
+    nearest_summary = report["nearest_source_summary"]
+    assert "p10_distance" in nearest_summary
+    assert "mean_distance" in nearest_summary and "median_distance" in nearest_summary
+
+    on_disk = json.loads((tmp_path / "generated" / "ci_fields.json").read_text(encoding="utf-8"))
+    for key in (*_PRE_EXISTING_SCALAR_KEYS, *_NEW_CI_KEYS):
+        assert key in on_disk

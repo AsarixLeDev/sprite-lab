@@ -18,7 +18,13 @@ from typing import Any
 from spritelab.training.generated_qa import qa_generated_sprites
 from spritelab.training.generated_review import GeneratedReviewConfig, review_generated_sprites
 from spritelab.training.generated_canonicalizer import build_generation_contact_sheet
-from spritelab.training.generator_challenger import ChallengerSampleConfig, run_sample_generator_challenger
+from spritelab.training.generator_challenger import (
+    V1_1_CFG_BASE_SCALE,
+    V1_1_CFG_COLOR_SCALE,
+    ChallengerSampleConfig,
+    normalize_export_preset,
+    run_sample_generator_challenger,
+)
 from spritelab.training.ood_prompts import OodCompositionalPromptConfig, build_ood_compositional_prompts
 from spritelab.training.sample_generator import read_prompt_records
 
@@ -51,6 +57,62 @@ VALIDATED_V1_OOD_REFERENCE: dict[str, Any] = {
     "destructive_rate": 0.0,
     "source_count_used": 928,
     "source_hash": "083d55be9803",
+}
+
+# Optional v1.1 export preset: v1 base settings (Phase 1 EMA, CFG 3.0, 30 steps, k16
+# projection) plus factored CFG at base=2.5/color=3.0. v1 remains the official default;
+# v1.1 is documented as a color-strong preset with a small category tradeoff. See
+# docs/v1_1_factored_cfg.md for the full write-up.
+OPTIONAL_V1_1_STATEMENT = (
+    "Optional v1.1 preset: v1 base settings plus factored CFG "
+    f"(base={V1_1_CFG_BASE_SCALE}, color={V1_1_CFG_COLOR_SCALE}). v1 remains the official, "
+    "safest default; v1.1 trades a small amount of category consistency for improved color "
+    "consistency and must be requested explicitly via --export-preset v1.1. No retraining is "
+    "involved -- same Phase 1 EMA checkpoint and k16 deterministic palette projection as v1."
+)
+
+# 3-seed Phase 0 factored-CFG confirmation (v1 vs. factored_b2_5_c3_0), aggregated as
+# mean +/- stdev over seeds. See docs/v1_1_factored_cfg.md for provenance.
+VALIDATED_V1_1_FACTORED_CFG_REFERENCE: dict[str, Any] = {
+    "description": (
+        "3-seed Phase 0 confirmation of v1.1 (factored_cfg base=2.5, color=3.0) against v1, "
+        "same v1 k16 export projection; not recomputed by this gallery run."
+    ),
+    "cfg_base_scale": V1_1_CFG_BASE_SCALE,
+    "cfg_color_scale": V1_1_CFG_COLOR_SCALE,
+    "v1": {
+        "rare_color_warning_rate": {"mean": 0.0000, "stdev": 0.0000},
+        "category_consistency": {"mean": 0.8106, "stdev": 0.0142},
+        "color_consistency": {"mean": 0.8368, "stdev": 0.0049},
+        "repeated_silhouette_rate": {"mean": 0.0139, "stdev": 0.0098},
+        "blob_collapse_rate": {"mean": 0.3021, "stdev": 0.0340},
+        "potion_collapse_rate": {"mean": 0.0312, "stdev": 0.0170},
+        "near_copy_rate": {"mean": 0.0000, "stdev": 0.0000},
+        "border_touch_rate": {"mean": 0.4965, "stdev": 0.0196},
+        "median_visible_colors": {"mean": 12.0000, "stdev": 0.0000},
+    },
+    "v1_1": {
+        "rare_color_warning_rate": {"mean": 0.0035, "stdev": 0.0049},
+        "category_consistency": {"mean": 0.7917, "stdev": 0.0283},
+        "color_consistency": {"mean": 0.8681, "stdev": 0.0260},
+        "repeated_silhouette_rate": {"mean": 0.0208, "stdev": 0.0000},
+        "blob_collapse_rate": {"mean": 0.2951, "stdev": 0.0130},
+        "potion_collapse_rate": {"mean": 0.0278, "stdev": 0.0130},
+        "near_copy_rate": {"mean": 0.0000, "stdev": 0.0000},
+        "border_touch_rate": {"mean": 0.4896, "stdev": 0.0085},
+        "median_visible_colors": {"mean": 12.0000, "stdev": 0.0000},
+    },
+    "deltas_v1_1_minus_v1": {
+        "color_consistency": 0.0312,
+        "category_consistency": -0.0189,
+        "rare_color_warning_rate": 0.0035,
+        "blob_collapse_rate": -0.0069,
+        "near_copy_rate": 0.0000,
+    },
+    "decision": (
+        "Passes the v1.1 promotion rule, but narrowly. v1 remains the safest default. "
+        "v1.1 is documented as a color-strong preset with a small category tradeoff."
+    ),
 }
 
 V1_GALLERY_CATEGORY_OBJECTS: dict[str, tuple[str, ...]] = {
@@ -145,6 +207,9 @@ class BuildV1GalleryConfig:
     out_dir: Path
     checkpoint: Path = DEFAULT_V1_CHECKPOINT
     prompts: Path | None = None
+    # "v1" (default, safest) or "v1.1"/"v1_1"/"phase1_v1_1" (optional color-strong
+    # factored-CFG preset, see docs/v1_1_factored_cfg.md). Never changes v1 behavior.
+    export_preset: str = "v1"
     device: str = "cpu"
     seed: int = 20260723
     batch_size: int = 32
@@ -168,11 +233,19 @@ def build_v1_gallery_demo(config: BuildV1GalleryConfig) -> dict[str, Any]:
         raise ValueError("v1 gallery prompt set is empty")
     _write_prompt_rows(prompts_path, rows)
 
+    preset_name = normalize_export_preset(config.export_preset)
+    if preset_name is None:
+        raise ValueError(
+            f"Unknown --export-preset {config.export_preset!r}; expected v1 (default) or "
+            "v1.1 (aliases v1_1, phase1_v1_1)."
+        )
+    is_v1_1 = preset_name == "v1.1"
+
     sample_config = ChallengerSampleConfig(
         checkpoint=Path(config.checkpoint),
         prompts=prompts_path,
         out_dir=samples_dir,
-        export_preset="v1",
+        export_preset=str(config.export_preset),
         max_samples=len(rows),
         steps=30,
         cfg_scale=3.0,
@@ -189,6 +262,9 @@ def build_v1_gallery_demo(config: BuildV1GalleryConfig) -> dict[str, Any]:
         project_palette_target_colors=16,
         project_palette_min_pixel_share=0.01,
         project_palette_method="deterministic_kmeans",
+        factored_cfg=is_v1_1,
+        cfg_base_scale=V1_1_CFG_BASE_SCALE if is_v1_1 else None,
+        cfg_color_scale=V1_1_CFG_COLOR_SCALE if is_v1_1 else None,
     )
     generation_report = run_sample_generator_challenger(sample_config)
 
@@ -214,6 +290,7 @@ def build_v1_gallery_demo(config: BuildV1GalleryConfig) -> dict[str, Any]:
         contact_sheets_dir=contact_sheets_dir,
         prompts_path=prompts_path,
         sample_config=sample_config,
+        preset_name=preset_name,
         prompt_count=len(rows),
         category_counts=category_counts,
         color_counts=color_counts,
@@ -450,6 +527,7 @@ def _assemble_report(
     contact_sheets_dir: Path,
     prompts_path: Path,
     sample_config: ChallengerSampleConfig,
+    preset_name: str,
     prompt_count: int,
     category_counts: Counter[str],
     color_counts: Counter[str],
@@ -493,12 +571,15 @@ def _assemble_report(
             "checkpoint_resolved": checkpoint_resolved,
         },
         "preset": {
-            "name": "v1",
+            "name": preset_name,
             "cfg_scale": sample_config.cfg_scale,
             "steps": sample_config.steps,
             "projection_method": sample_config.project_palette_method,
             "projection_target_colors": sample_config.project_palette_target_colors,
             "projection_min_pixel_share": sample_config.project_palette_min_pixel_share,
+            "factored_cfg": sample_config.factored_cfg,
+            "cfg_base_scale": sample_config.cfg_base_scale,
+            "cfg_color_scale": sample_config.cfg_color_scale,
         },
         "seed": sample_config.seed,
         "prompt_set": {
@@ -531,7 +612,11 @@ def _assemble_report(
             "warning_counts": dict(warning_counts),
         },
         "validated_v1_ood_reference": dict(VALIDATED_V1_OOD_REFERENCE),
+        "validated_v1_1_factored_cfg_reference": (
+            dict(VALIDATED_V1_1_FACTORED_CFG_REFERENCE) if preset_name == "v1.1" else None
+        ),
         "official_statement": OFFICIAL_V1_STATEMENT,
+        "optional_v1_1_statement": OPTIONAL_V1_1_STATEMENT,
     }
 
 
@@ -544,27 +629,42 @@ def _format_markdown(report: Mapping[str, Any]) -> str:
     review = report.get("generated_review", {})
     output_paths = report.get("output_paths", {})
 
+    preset_name = str(preset.get("name") or "v1")
+    is_v1_1 = preset_name == "v1.1"
     lines = [
-        "# v1 Gallery Report",
+        f"# {preset_name} Gallery Report",
         "",
         f"- Checkpoint requested: `{model.get('checkpoint_requested')}`",
         f"- Checkpoint resolved: `{model.get('checkpoint_resolved')}`",
-        f"- Preset: `{preset.get('name')}` (CFG {preset.get('cfg_scale')}, {preset.get('steps')} steps)",
+        f"- Preset: `{preset_name}` (CFG {preset.get('cfg_scale')}, {preset.get('steps')} steps)",
         f"- Projection: `{preset.get('projection_method')}`, "
         f"target colors {preset.get('projection_target_colors')}, "
         f"min pixel share {preset.get('projection_min_pixel_share')}",
-        f"- Seed: {report.get('seed')}",
-        f"- Prompt count: {prompt_set.get('prompt_count')}",
-        f"- Sample count: {report.get('sample_count')}",
-        "",
-        "## Prompt Set",
-        "",
-        f"- Category counts: `{json.dumps(prompt_set.get('category_counts', {}), sort_keys=True)}`",
-        f"- Color counts: `{json.dumps(prompt_set.get('color_counts', {}), sort_keys=True)}`",
-        "",
-        "## Palette Projection",
-        "",
     ]
+    if is_v1_1:
+        lines.append(
+            f"- Factored CFG: base={preset.get('cfg_base_scale')}, color={preset.get('cfg_color_scale')} "
+            "(optional color-strong preset, see docs/v1_1_factored_cfg.md; v1 remains the default)"
+        )
+    lines.extend(
+        [
+            f"- Seed: {report.get('seed')}",
+            f"- Prompt count: {prompt_set.get('prompt_count')}",
+            f"- Sample count: {report.get('sample_count')}",
+            "",
+        ]
+    )
+    lines.extend(
+        [
+            "## Prompt Set",
+            "",
+            f"- Category counts: `{json.dumps(prompt_set.get('category_counts', {}), sort_keys=True)}`",
+            f"- Color counts: `{json.dumps(prompt_set.get('color_counts', {}), sort_keys=True)}`",
+            "",
+            "## Palette Projection",
+            "",
+        ]
+    )
     if projection:
         lines.extend(
             [
@@ -603,6 +703,24 @@ def _format_markdown(report: Mapping[str, Any]) -> str:
             f"- Contact sheets: `{output_paths.get('contact_sheets_dir')}`",
             f"- Prompts file: `{output_paths.get('prompts_file')}`",
             "",
+        ]
+    )
+    if is_v1_1:
+        v1_1_reference = report.get("validated_v1_1_factored_cfg_reference")
+        lines.extend(
+            [
+                "## v1.1 Factored-CFG Reference (3-Seed Phase 0 Confirmation)",
+                "",
+                str(report.get("optional_v1_1_statement", "")),
+                "",
+            ]
+        )
+        if isinstance(v1_1_reference, Mapping):
+            lines.append(f"- Deltas (v1.1 - v1): `{json.dumps(v1_1_reference.get('deltas_v1_1_minus_v1', {}), sort_keys=True)}`")
+            lines.append(f"- Decision: {v1_1_reference.get('decision', '')}")
+            lines.append("")
+    lines.extend(
+        [
             "## Official v1 Default",
             "",
             str(report.get("official_statement", "")),

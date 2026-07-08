@@ -15,6 +15,41 @@ from spritelab.training.palette_swap import DEFAULT_SWAP_FAMILIES_TEXT
 # for subcommands that never touch the v1 gallery. Must match v1_gallery.DEFAULT_V1_CHECKPOINT.
 DEFAULT_V1_GALLERY_CHECKPOINT = Path("experiments/challenger_full_v4_phase1/train_25k/checkpoint_last_ema.pt")
 
+# Kept as a literal (rather than importing spritelab.training.generator_challenger at module
+# scope) for the same reason as DEFAULT_V1_GALLERY_CHECKPOINT above. Must match
+# generator_challenger.NULL_FIELD_CHOICES.
+NULL_FIELD_CHOICES: tuple[str, ...] = (
+    "caption",
+    "semantic",
+    "category",
+    "object_id",
+    "base_object",
+    "colors",
+    "materials",
+    "shapes",
+    "function",
+    "style",
+    "structured",
+)
+
+# Kept as literals for the same reason as above. Must match
+# generator_challenger.V1_PRESET_ALIASES / V1_1_PRESET_ALIASES / V1_1_CFG_BASE_SCALE /
+# V1_1_CFG_COLOR_SCALE. v1.1 is an optional color-strong preset (see
+# docs/v1_1_factored_cfg.md); v1 remains the default everywhere.
+V1_PRESET_ALIASES: tuple[str, ...] = ("v1", "phase1_v1")
+V1_1_PRESET_ALIASES: tuple[str, ...] = ("v1.1", "v1_1", "phase1_v1_1")
+V1_1_CFG_BASE_SCALE = 2.5
+V1_1_CFG_COLOR_SCALE = 3.0
+
+
+def _normalize_export_preset(export_preset: str | None) -> str | None:
+    normalized = str(export_preset or "").strip().lower()
+    if normalized in V1_PRESET_ALIASES:
+        return "v1"
+    if normalized in V1_1_PRESET_ALIASES:
+        return "v1.1"
+    return None
+
 
 def _parsed_config_kwargs(parsed: argparse.Namespace) -> dict[str, object]:
     values = vars(parsed).copy()
@@ -166,14 +201,70 @@ def _add_palette_projection_sampling_arguments(parser: argparse.ArgumentParser) 
     parser.add_argument("--project-palette-method", choices=["deterministic_kmeans"], default="deterministic_kmeans")
 
 
-def _add_export_preset_argument(parser: argparse.ArgumentParser) -> None:
+def _add_v2_phase0_diagnostic_arguments(parser: argparse.ArgumentParser) -> None:
+    """No-training v2 Phase 0 diagnostic flags (see docs/v2_phase0_diagnostics.md).
+
+    All default to off/empty and reproduce the existing v1 sampling behavior exactly
+    unless explicitly used.
+    """
+
+    parser.add_argument(
+        "--factored-cfg",
+        action="store_true",
+        default=False,
+        dest="factored_cfg",
+        help=(
+            "Split CFG into independent base (uncond->no-color) and color (no-color->full) "
+            "guidance terms instead of the single --cfg-scale term. Off by default."
+        ),
+    )
+    parser.add_argument(
+        "--cfg-base-scale",
+        type=float,
+        default=None,
+        dest="cfg_base_scale",
+        help="Base guidance scale used when --factored-cfg is set. Defaults to --cfg-scale if omitted.",
+    )
+    parser.add_argument(
+        "--cfg-color-scale",
+        type=float,
+        default=None,
+        dest="cfg_color_scale",
+        help="Color guidance scale used when --factored-cfg is set. Defaults to --cfg-scale if omitted.",
+    )
+    parser.add_argument(
+        "--null-fields",
+        default="",
+        dest="null_fields",
+        help=(
+            "Comma-separated conditioning fields to null at sample time for diagnostics, "
+            f"e.g. 'colors,object_id'. Choices: {', '.join(NULL_FIELD_CHOICES)}. Empty (default) is a no-op."
+        ),
+    )
+
+
+def _add_export_preset_argument(
+    parser: argparse.ArgumentParser,
+    *,
+    include_v1_1: bool = False,
+    default: str | None = None,
+) -> None:
+    choices = [*V1_PRESET_ALIASES]
+    help_text = "Named export/sampling preset. v1 uses Phase 1 EMA if available, CFG 3.0, 30 steps, and k16 projection."
+    if include_v1_1:
+        choices = [*choices, *V1_1_PRESET_ALIASES]
+        help_text += (
+            " v1.1 (aliases v1_1, phase1_v1_1) is an optional color-strong preset: v1 base "
+            f"settings plus factored CFG (base={V1_1_CFG_BASE_SCALE}, color={V1_1_CFG_COLOR_SCALE}). "
+            "v1 remains the default; v1.1 must be requested explicitly. See docs/v1_1_factored_cfg.md."
+        )
     parser.add_argument(
         "--export-preset",
         "--preset",
-        choices=["v1", "phase1_v1"],
-        default=None,
+        choices=choices,
+        default=default,
         dest="export_preset",
-        help="Named export/sampling preset. v1 uses Phase 1 EMA if available, CFG 3.0, 30 steps, and k16 projection.",
+        help=help_text,
     )
 
 
@@ -187,8 +278,8 @@ def _argv_has_option(argv: Sequence[str], *names: str) -> bool:
 
 
 def _apply_export_preset_defaults(parsed: argparse.Namespace, argv: Sequence[str]) -> None:
-    preset = str(getattr(parsed, "export_preset", "") or "").lower()
-    if preset not in {"v1", "phase1_v1"}:
+    preset = _normalize_export_preset(getattr(parsed, "export_preset", None))
+    if preset is None:
         return
     if parsed.subcommand == "sample-generator-challenger":
         if not _argv_has_option(argv, "--steps"):
@@ -206,6 +297,8 @@ def _apply_export_preset_defaults(parsed: argparse.Namespace, argv: Sequence[str
         if not _argv_has_option(argv, "--write-hard-rgba", "--no-write-hard-rgba"):
             parsed.write_hard_rgba = True
         _apply_projection_preset_defaults(parsed, argv)
+        if preset == "v1.1":
+            _apply_v1_1_factored_cfg_defaults(parsed, argv)
     elif parsed.subcommand == "audit-challenger-full-v4":
         if not _argv_has_option(argv, "--sample-ema", "--no-sample-ema"):
             parsed.sample_ema = True
@@ -218,6 +311,23 @@ def _apply_export_preset_defaults(parsed: argparse.Namespace, argv: Sequence[str
         if not _argv_has_option(argv, "--alpha-threshold"):
             parsed.alpha_threshold = 0.5
         _apply_projection_preset_defaults(parsed, argv)
+
+
+def _apply_v1_1_factored_cfg_defaults(parsed: argparse.Namespace, argv: Sequence[str]) -> None:
+    """v1.1-only: layer factored CFG on top of the v1 base settings already applied.
+
+    Off-by-default flags (--factored-cfg/--cfg-base-scale/--cfg-color-scale, see
+    docs/v2_phase0_diagnostics.md) only get preset values here when the user did not
+    already pass them explicitly, so `--export-preset v1.1 --cfg-base-scale 1.0` still
+    honors the explicit override.
+    """
+
+    if not _argv_has_option(argv, "--factored-cfg"):
+        parsed.factored_cfg = True
+    if not _argv_has_option(argv, "--cfg-base-scale"):
+        parsed.cfg_base_scale = V1_1_CFG_BASE_SCALE
+    if not _argv_has_option(argv, "--cfg-color-scale"):
+        parsed.cfg_color_scale = V1_1_CFG_COLOR_SCALE
 
 
 def _apply_projection_preset_defaults(parsed: argparse.Namespace, argv: Sequence[str]) -> None:
@@ -457,7 +567,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "palette projection) -- see docs/v1_default.md."
         ),
     )
-    _add_export_preset_argument(sample_challenger)
+    _add_export_preset_argument(sample_challenger, include_v1_1=True)
     sample_challenger.add_argument(
         "--checkpoint",
         required=True,
@@ -496,6 +606,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         default="prompt",
     )
     _add_palette_projection_sampling_arguments(sample_challenger)
+    _add_v2_phase0_diagnostic_arguments(sample_challenger)
 
     generated_qa = subparsers.add_parser("generated-qa", help="QA generated sprite sample folders.")
     generated_qa.add_argument("--generated", required=True, type=Path)
@@ -673,6 +784,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=Path,
         help="Optional custom JSONL prompt file. Defaults to the built-in deterministic v1 gallery prompt set.",
     )
+    _add_export_preset_argument(build_v1_gallery, include_v1_1=True, default="v1")
     build_v1_gallery.add_argument("--device", default="cpu", help="'cpu' or 'cuda'. Use 'cuda' to match the validated release gallery.")
     build_v1_gallery.add_argument("--seed", type=int, default=20260723)
     build_v1_gallery.add_argument("--batch-size", type=int, default=32)
@@ -1104,6 +1216,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     out_dir=parsed.out_dir,
                     checkpoint=parsed.checkpoint,
                     prompts=parsed.prompts,
+                    export_preset=parsed.export_preset,
                     device=parsed.device,
                     seed=parsed.seed,
                     batch_size=parsed.batch_size,
