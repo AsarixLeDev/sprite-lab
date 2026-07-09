@@ -1,3 +1,8 @@
+# First Smoke Test Results
+
+> **Superseded** — v1 baseline autoencoder results (removed in Phase 3, 2026-07).
+> Retained as historical reference.
+
 baseline_496_smoke:
   train loss 4.699 -> 2.674 in 20 CPU steps
   val loss 2.653

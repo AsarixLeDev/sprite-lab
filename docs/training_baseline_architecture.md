@@ -1,5 +1,10 @@
 # Training Baseline Architecture
 
+> **Superseded** — The v1 baseline autoencoder and tiny generator described here
+> were removed in Phase 3 (2026-07). The current training stack is the challenger
+> rectified-flow UNet in `src/spritelab/training/generator_challenger.py`.
+> This document is retained as historical reference.
+
 This document defines the first model-training foundation for `sprite-lab`.
 The goal is a deterministic, CPU-safe diagnostic baseline that proves the
 semantic training manifest can be loaded, conditioned, reconstructed, trained,
