@@ -196,7 +196,7 @@ def build_semantic_dataset(
     )
 
     # 3. export accepted, license-checked sprites.
-    from spritelab.harvest.cli import _rehydrate_run  # reuse the canonical rehydrator
+    from spritelab.harvest.cli._args import _rehydrate_run  # reuse the canonical rehydrator
     from spritelab.harvest.pipeline import export_harvested_dataset
 
     _, harvested = _rehydrate_run(run_path)
