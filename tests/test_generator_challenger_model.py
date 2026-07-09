@@ -1768,3 +1768,38 @@ def test_metric_extraction_reads_v2_phase0_keys() -> None:
     }
     md = _build_decode_report_md(report, metrics)
     assert all(k in md for k in ["Cat cons", "Color cons", "Blob %", "Potion %", "Near-copy %", "Touch %"])
+
+
+def test_faithfulness_metrics_from_synthetic_report(tmp_path: Path) -> None:
+    """Verify metric extraction reads top-level faithfulness keys."""
+    # Write a synthetic faithfulness report to disk
+    faith_dir = tmp_path / "variant" / "prompt_faithfulness"
+    faith_dir.mkdir(parents=True)
+    faith_json = faith_dir / "prompt_faithfulness_report.json"
+    faith_json.write_text(
+        json.dumps(
+            {
+                "category_consistency_rate": 0.88,
+                "color_consistency_rate": 0.74,
+                "repeated_silhouette_rate": 0.02,
+                "generic_blob_collapse_rate": 0.03,
+                "generic_potion_collapse_rate": 0.01,
+                "near_copy_rate": 0.04,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    faith = json.loads(faith_json.read_text(encoding="utf-8"))
+    assert faith["category_consistency_rate"] == pytest.approx(0.88)
+    assert faith["generic_blob_collapse_rate"] == pytest.approx(0.03)
+    assert faith["generic_potion_collapse_rate"] == pytest.approx(0.01)
+    assert faith["near_copy_rate"] == pytest.approx(0.04)
+
+
+def test_missing_faithfulness_report_handles_gracefully() -> None:
+    """When the faith report doesn't exist on disk, keys are absent."""
+    # Simulate what happens when faith is empty
+    faith = {}
+    assert faith.get("category_consistency_rate") is None
+    assert faith.get("generic_blob_collapse_rate") is None

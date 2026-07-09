@@ -555,23 +555,48 @@ def _run_variant_metrics(vdir: Path, dataset: Path, prompts_path: Path) -> dict[
     )
     review = review_result.report if hasattr(review_result, "report") else {}
 
+    # Run faithfulness and capture result dict + debug info
+    faith_dir = vdir / "prompt_faithfulness"
+    faith_dir.mkdir(parents=True, exist_ok=True)
+    faith_json_path = faith_dir / "prompt_faithfulness_report.json"
+    faith_debug: dict[str, Any] = {
+        "faithfulness_report_path": str(faith_json_path),
+        "faithfulness_report_exists": False,
+        "faithfulness_keys": [],
+        "faithfulness_error": None,
+    }
     faith = {}
     try:
-        faith_dir = vdir / "prompt_faithfulness"
-        faith_dir.mkdir(parents=True, exist_ok=True)
         faith_result = run_prompt_faithfulness(
             PromptFaithfulnessConfig(
                 generated=vdir,
                 prompts=prompts_path,
                 dataset=dataset,
                 out=faith_dir,
-                out_json=faith_dir / "prompt_faithfulness_report.json",
+                out_json=faith_json_path,
             )
         )
         if isinstance(faith_result, dict):
             faith = faith_result
-    except Exception:
-        pass
+        else:
+            faith_debug["faithfulness_error"] = (
+                f"run_prompt_faithfulness returned {type(faith_result).__name__}, expected dict"
+            )
+    except Exception as exc:
+        faith_debug["faithfulness_error"] = str(exc)
+        # Fallback: try loading from disk if the function wrote the report file anyway
+        if faith_json_path.is_file():
+            try:
+                faith = json.loads(faith_json_path.read_text(encoding="utf-8"))
+                print(f"    faithfulness: loaded from disk fallback ({len(faith)} keys), error was: {exc}")
+            except Exception as exc2:
+                faith_debug["faithfulness_error"] = f"disk fallback failed: {exc2}"
+        else:
+            print(f"    faithfulness: FAILED — {exc}")
+
+    if isinstance(faith, dict):
+        faith_debug["faithfulness_keys"] = sorted(faith.keys())
+        faith_debug["faithfulness_report_exists"] = faith_json_path.is_file()
 
     overall = review.get("overall", {}) if isinstance(review, dict) else {}
     warning_counts = overall.get("warning_counts", {}) if isinstance(overall, dict) else {}
@@ -611,6 +636,7 @@ def _run_variant_metrics(vdir: Path, dataset: Path, prompts_path: Path) -> dict[
         "nearest_source_distance_p10": float(faith.get("p10_nearest_source_distance"))
         if faith.get("p10_nearest_source_distance") is not None
         else None,
+        "_faithfulness_debug": faith_debug,
     }
 
 
