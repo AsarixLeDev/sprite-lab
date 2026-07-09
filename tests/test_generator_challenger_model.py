@@ -1456,3 +1456,183 @@ def test_inspect_unsupported_for_model_without_heads(tmp_path: Path) -> None:
     )
 
     assert not _has_palette_index_heads(old)
+
+
+# ── v2 Phase 2: palette/index decode probe tests ─────────────────────────────
+
+
+def test_cli_accepts_probe_palette_index_decode() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="test")
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+    probe = sub.add_parser("probe-palette-index-decode")
+    probe.add_argument("--checkpoint", required=True, type=Path)
+    probe.add_argument("--prompts", required=True, type=Path)
+    probe.add_argument("--dataset", required=True, type=Path)
+    probe.add_argument("--out", required=True, type=Path)
+    probe.add_argument("--device", default="cpu")
+    probe.add_argument("--batch-size", type=int, default=32)
+    probe.add_argument("--max-samples", type=int, default=96)
+    probe.add_argument("--seed", type=int, default=20260723)
+    probe.add_argument("--sample-steps", type=int, default=30)
+    probe.add_argument("--cfg-scale", type=float, default=3.0)
+    probe.add_argument("--cudnn-benchmark", action="store_true", default=False)
+    probe.add_argument("--tf32", action="store_true", default=False)
+
+    parsed = parser.parse_args(
+        [
+            "probe-palette-index-decode",
+            "--checkpoint",
+            "ckpt.pt",
+            "--prompts",
+            "p.jsonl",
+            "--dataset",
+            "ds",
+            "--out",
+            "out",
+        ]
+    )
+    assert parsed.subcommand == "probe-palette-index-decode"
+    assert parsed.cudnn_benchmark is False
+    assert parsed.tf32 is False
+
+
+def test_cli_probe_accepts_speed_flags() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="test")
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+    probe = sub.add_parser("probe-palette-index-decode")
+    probe.add_argument("--checkpoint", required=True, type=Path)
+    probe.add_argument("--prompts", required=True, type=Path)
+    probe.add_argument("--dataset", required=True, type=Path)
+    probe.add_argument("--out", required=True, type=Path)
+    probe.add_argument("--device", default="cpu")
+    probe.add_argument("--batch-size", type=int, default=32)
+    probe.add_argument("--max-samples", type=int, default=96)
+    probe.add_argument("--seed", type=int, default=20260723)
+    probe.add_argument("--sample-steps", type=int, default=30)
+    probe.add_argument("--cfg-scale", type=float, default=3.0)
+    probe.add_argument("--cudnn-benchmark", action="store_true", default=False)
+    probe.add_argument("--tf32", action="store_true", default=False)
+
+    parsed = parser.parse_args(
+        [
+            "probe-palette-index-decode",
+            "--checkpoint",
+            "ckpt.pt",
+            "--prompts",
+            "p.jsonl",
+            "--dataset",
+            "ds",
+            "--out",
+            "out",
+            "--cudnn-benchmark",
+            "--tf32",
+        ]
+    )
+    assert parsed.cudnn_benchmark is True
+    assert parsed.tf32 is True
+
+
+def test_reconstruct_from_index_and_palette_shape() -> None:
+    from spritelab.training.palette_index_decode_probe import _reconstruct_from_index_and_palette
+
+    B, K, H, W = 2, 16, 32, 32
+    index_logits = torch.zeros(B, K, H, W)
+    index_logits[:, 1] = 10.0
+    palette_rgb = torch.rand(B, K, 3).clamp(0.0, 1.0)
+
+    rgba = _reconstruct_from_index_and_palette(index_logits, palette_rgb)
+    assert rgba.shape == (B, 4, H, W)
+    assert 0.0 <= float(rgba.min()) <= float(rgba.max()) <= 1.0
+
+
+def test_reconstruct_with_projected_palette_finite() -> None:
+    from spritelab.training.palette_index_decode_probe import _reconstruct_index_with_projected_palette
+
+    B, K, H, W = 2, 16, 32, 32
+    index_logits = torch.zeros(B, K, H, W)
+    for b in range(B):
+        idx = (b + 1) % K
+        index_logits[b, idx] = 10.0
+    continuous_rgba = torch.rand(B, 4, H, W).clamp(0.0, 1.0)
+
+    rgba = _reconstruct_index_with_projected_palette(index_logits, continuous_rgba)
+    assert rgba.shape == (B, 4, H, W)
+    assert torch.isfinite(rgba).all()
+
+
+def test_slot0_is_transparent() -> None:
+    from spritelab.training.palette_index_decode_probe import _reconstruct_from_index_and_palette
+
+    B, K, H, W = 2, 16, 32, 32
+    index_logits = torch.zeros(B, K, H, W)
+    # All pixels are slot 0
+    palette_rgb = torch.rand(B, K, 3)
+
+    rgba = _reconstruct_from_index_and_palette(index_logits, palette_rgb)
+    alpha = rgba[:, 3]
+    assert (alpha == 0.0).all()
+
+
+def test_reconstruction_delta_computes_metrics() -> None:
+    from spritelab.training.palette_index_decode_probe import _compute_reconstruction_delta
+
+    recon = torch.zeros(1, 4, 32, 32)
+    baseline = torch.zeros(1, 4, 32, 32)
+    baseline[:, :3] = 0.5
+    delta = _compute_reconstruction_delta(recon, baseline)
+    assert delta["rgb_mae"] > 0.0
+    assert 0.0 <= delta["alpha_disagreement"] <= 1.0
+    assert 0.0 <= delta["changed_pixel_rate"] <= 1.0
+
+    same = _compute_reconstruction_delta(baseline, baseline)
+    assert same["rgb_mae"] == pytest.approx(0.0)
+    assert same["alpha_disagreement"] == pytest.approx(0.0)
+
+
+def test_decode_index_stats_returns_finite() -> None:
+    from spritelab.training.palette_index_decode_probe import _decode_index_stats
+
+    B, K, H, W = 2, 16, 32, 32
+    index_logits = torch.zeros(B, K, H, W)
+    index_logits[:, 2] = 5.0
+    stats = _decode_index_stats(index_logits)
+    assert 0.0 <= stats["slot0_pixel_share"] <= 1.0
+    assert stats["used_index_count_mean"] > 0
+    assert torch.tensor(stats["index_entropy_mean"]).isfinite()
+
+
+def test_probe_report_writes_json_and_markdown(tmp_path: Path) -> None:
+    from spritelab.training.palette_index_decode_probe import (
+        _build_decode_report_md,
+    )
+
+    report = {
+        "checkpoint": "ckpt.pt",
+        "prompts": "p.jsonl",
+        "sample_count": 96,
+        "seed": 20260723,
+        "sample_steps": 30,
+        "cfg_scale": 3.0,
+        "elapsed_seconds": 12.3,
+    }
+    metrics = {
+        "continuous_v1_projected": {"qa_errors": 0, "blob_collapse_rate": 0.05},
+        "head_index_pred_palette": {"qa_errors": 2, "blob_collapse_rate": 0.10},
+    }
+
+    md = _build_decode_report_md(report, metrics)
+    assert "Palette / Index Decode Probe Report" in md
+    assert "ckpt.pt" in md
+    assert "0.0500" in md or "0.05" in md
+
+    out_dir = tmp_path / "out" / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = out_dir / "decode_probe_summary.json"
+    json_path.write_text(
+        json.dumps({**report, "metrics": metrics}, indent=2, default=lambda x: str(x)), encoding="utf-8"
+    )
+    assert json_path.exists()

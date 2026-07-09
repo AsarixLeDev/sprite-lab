@@ -21,6 +21,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     _register_generator_challenger(subparsers)
     _register_sample_generator_challenger(subparsers)
     _register_inspect_palette_index_heads(subparsers)
+    _register_probe_palette_index_decode(subparsers)
 
 
 def _register_generator_challenger(subparsers: argparse._SubParsersAction) -> None:
@@ -214,3 +215,34 @@ def _run_inspect_palette_index_heads(parsed: argparse.Namespace) -> None:
     )
 
     run_inspect_palette_index_heads(PaletteIndexHeadInspectConfig(**_parsed_config_kwargs(parsed)))
+
+
+def _register_probe_palette_index_decode(subparsers: argparse._SubParsersAction) -> None:
+    probe = subparsers.add_parser(
+        "probe-palette-index-decode",
+        help="Generate samples with palette/index head decode variants (experimental probe, no training).",
+    )
+    probe.add_argument("--checkpoint", required=True, type=Path)
+    probe.add_argument("--prompts", required=True, type=Path)
+    probe.add_argument("--dataset", required=True, type=Path)
+    probe.add_argument("--out", required=True, type=Path)
+    probe.add_argument("--device", default="cpu")
+    probe.add_argument("--batch-size", type=int, default=32)
+    probe.add_argument("--max-samples", type=int, default=96)
+    probe.add_argument("--seed", type=int, default=20260723)
+    probe.add_argument("--sample-steps", type=int, default=30)
+    probe.add_argument("--cfg-scale", type=float, default=3.0)
+    probe.add_argument("--max-colors", type=int, default=16)
+    probe.add_argument("--alpha-threshold", type=float, default=0.5)
+    probe.add_argument("--cudnn-benchmark", action="store_true", default=False)
+    probe.add_argument("--tf32", action="store_true", default=False)
+    probe.set_defaults(func=_run_probe_palette_index_decode)
+
+
+def _run_probe_palette_index_decode(parsed: argparse.Namespace) -> None:
+    from spritelab.training.palette_index_decode_probe import (
+        DecodeProbeConfig,
+        run_decode_probe,
+    )
+
+    run_decode_probe(DecodeProbeConfig(**_parsed_config_kwargs(parsed)))
