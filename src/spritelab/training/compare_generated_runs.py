@@ -11,7 +11,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from PIL import Image
 
 from spritelab.training.framing_metrics import checkerboard_rgba
@@ -421,27 +420,8 @@ def _qa_text(value: Any) -> str:
     return f"{status}, errors={int(value.get('errors') or 0)}, warnings={int(value.get('warnings') or 0)}"
 
 
-def _fmt(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    try:
-        return f"{float(value):.4f}"
-    except (TypeError, ValueError):
-        return "n/a"
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
+from spritelab.training.report_utils import fmt_float as _fmt
+from spritelab.training.report_utils import jsonable as _jsonable
 
 
 def main(argv: list[str] | None = None) -> None:

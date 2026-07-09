@@ -1160,13 +1160,7 @@ def _safe_name(text: str) -> str:
     return "".join(char if (char.isalnum() or char in "_-") else "_" for char in str(text)) or "unknown"
 
 
-def _fmt(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    try:
-        return f"{float(value):.4f}"
-    except (TypeError, ValueError):
-        return "n/a"
+from spritelab.training.report_utils import fmt_float as _fmt
 
 
 def main(argv: list[str] | None = None) -> None:

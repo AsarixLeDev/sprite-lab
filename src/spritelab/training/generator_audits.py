@@ -3383,29 +3383,6 @@ def _subset_match_label(value: Any) -> str:
     return "yes" if bool(value) else "no"
 
 
-def _fmt(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    try:
-        return f"{float(value):.4f}"
-    except (TypeError, ValueError):
-        return "n/a"
-
-
-def _fmt_int(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    try:
-        return str(int(value))
-    except (TypeError, ValueError):
-        return "n/a"
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
+from spritelab.training.report_utils import fmt_float as _fmt
+from spritelab.training.report_utils import fmt_int as _fmt_int
+from spritelab.training.report_utils import jsonable as _jsonable

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ from spritelab.harvest.sources import (
     source_record_to_dict,
     utc_timestamp,
 )
+from spritelab.utils.jsonl import read_jsonl, write_jsonl  # migrated, re-export
 
 RUN_FILES = (
     "sources.jsonl",
@@ -85,23 +86,6 @@ def harvested_to_record(sprite: HarvestedSprite) -> dict[str, Any]:
         "warnings": list(sprite.imported.warnings),
         "auto_metadata": _json_safe(sprite.auto_metadata),
     }
-
-
-def write_jsonl(path: str | Path, records: Iterable[Mapping[str, Any]]) -> Path:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(dict(record), sort_keys=True) + "\n")
-    return path
-
-
-def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
-    path = Path(path)
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle if line.strip()]
 
 
 def write_sources_jsonl(run_dir: str | Path, sources: Sequence[SourceRecord]) -> Path:

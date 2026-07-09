@@ -867,31 +867,12 @@ def _median(values: Sequence[float]) -> float:
     return float(statistics.median(data)) if data else 0.0
 
 
-def _fmt(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    try:
-        return f"{float(value):.4f}"
-    except (TypeError, ValueError):
-        return "n/a"
+from spritelab.training.report_utils import fmt_float as _fmt
+from spritelab.training.report_utils import jsonable as _jsonable
 
 
 def _md_escape(value: str) -> str:
     return value.replace("|", "\\|")
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
 
 
 def _require_torch() -> Any:

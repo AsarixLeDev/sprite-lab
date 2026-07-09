@@ -709,8 +709,7 @@ def _count_rows(counts: dict[str, int], *, empty_label: str) -> list[str]:
     return [f"| {key} | {value} |" for key, value in sorted(counts.items())]
 
 
-def _fmt_int(value: int | None) -> str:
-    return "n/a" if value is None else str(value)
+from spritelab.training.report_utils import fmt_int as _fmt_int
 
 
 def _fmt_float(value: float | None) -> str:

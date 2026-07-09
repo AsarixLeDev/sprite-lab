@@ -73,6 +73,26 @@ from spritelab.training.structured_conditioning import (
 from spritelab.training.tokenization import SpriteTextTokenizer
 
 SPRITE_SIZE = 32
+
+# Palette range cache: hoists per-step GPU→CPU sync out of the hot loop.
+# Training palettes are consistently either 0-1 or 0-255 for the entire
+# dataset; we check once on first encounter and cache the answer.
+_palette_scale_needs_normalize: bool | None = None
+
+
+def _ensure_palette_in_01(palette: Any) -> None:
+    """Normalize palette [0,255] to [0,1] in-place if needed (cached check)."""
+    global _palette_scale_needs_normalize
+    if _palette_scale_needs_normalize is None:
+        if palette.numel() and float(palette.detach().max().cpu()) > 1.0:
+            palette.div_(255.0)
+            _palette_scale_needs_normalize = True
+        else:
+            _palette_scale_needs_normalize = False
+    elif _palette_scale_needs_normalize:
+        palette.div_(255.0)
+
+
 STRUCTURED_DROPOUT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("category", ("category_id",)),
     ("object_id", ("object_id",)),
@@ -648,6 +668,8 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         raise ValueError("metrics_every must be >= 1")
     started = time.perf_counter()
     _set_seed(config.seed)
+    global _palette_scale_needs_normalize
+    _palette_scale_needs_normalize = None  # reset per-run palette scale cache
     device = resolve_device(config.device)
     out_dir = Path(config.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1388,14 +1410,19 @@ def rectified_flow_loss(
         foreground_rgb_loss_weight=foreground_rgb_loss_weight,
         background_rgb_loss_weight=background_rgb_loss_weight,
     )
-    palette_aux = palette_soft_min_auxiliary_loss(
-        x1_hat=xt + (1.0 - view_t) * pred,
-        target_rgba=target_rgba,
-        palette=batch.get("palette"),
-        palette_mask=batch.get("palette_mask"),
-        temperature=palette_loss_temperature,
-    )
+    # Palette soft-min auxiliary loss: skip when weight is zero to avoid the
+    # per-step GPU→CPU sync inside palette_soft_min_auxiliary_loss.
     palette_weight = float(palette_loss_weight)
+    if palette_weight > 0.0:
+        palette_aux = palette_soft_min_auxiliary_loss(
+            x1_hat=xt + (1.0 - view_t) * pred,
+            target_rgba=target_rgba,
+            palette=batch.get("palette"),
+            palette_mask=batch.get("palette_mask"),
+            temperature=palette_loss_temperature,
+        )
+    else:
+        palette_aux = pred.sum() * 0.0
     losses["loss_palette_aux"] = palette_aux
 
     # v2 Phase 2: palette and index head losses
@@ -1438,6 +1465,8 @@ def evaluate_challenger_loss(
     palette_loss_weight: float = 0.0,
     palette_loss_temperature: float = 0.05,
 ) -> float:
+    global _palette_scale_needs_normalize
+    _palette_scale_needs_normalize = None  # reset per-run palette scale cache
     return float(
         _evaluate_challenger_losses(
             model,
@@ -1582,8 +1611,7 @@ def _palette_head_loss(
         return {"loss_palette_head": zero, "loss_palette_presence": zero}
 
     gt_rgb = palette.to(dtype=pred_rgb.dtype, device=pred_rgb.device)
-    if gt_rgb.numel() and float(gt_rgb.detach().max().cpu()) > 1.0:
-        gt_rgb = gt_rgb / 255.0
+    _ensure_palette_in_01(gt_rgb)
     gt_rgb = gt_rgb.clamp(0.0, 1.0)
     gt_mask = palette_mask.to(device=pred_rgb.device, dtype=th.bool)
 
@@ -1681,8 +1709,7 @@ def palette_soft_min_auxiliary_loss(
     if palette_rgb.ndim != 3 or palette_rgb.shape[-1] < 3:
         return zero
     palette_rgb = palette_rgb[..., :3]
-    if palette_rgb.numel() and float(palette_rgb.detach().max().cpu()) > 1.0:
-        palette_rgb = palette_rgb / 255.0
+    _ensure_palette_in_01(palette_rgb)
     palette_rgb = palette_rgb.clamp(0.0, 1.0)
     valid = palette_mask.to(device=x1_hat.device, dtype=th.bool)
     if valid.ndim != 2 or valid.shape[:2] != palette_rgb.shape[:2]:
@@ -2408,18 +2435,7 @@ def _should_save_checkpoint_step(step: int, *, save_every: int, checkpoint_steps
     return (int(save_every) > 0 and int(step) % int(save_every) == 0) or int(step) in set(checkpoint_steps)
 
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
+from spritelab.training.report_utils import jsonable as _jsonable
 
 
 def main_train(argv: list[str] | None = None) -> None:

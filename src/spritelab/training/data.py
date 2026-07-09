@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -23,6 +22,13 @@ from spritelab.training.structured_conditioning import (
     encode_structured_conditioning,
 )
 from spritelab.training.tokenization import SpriteTextTokenizer
+from spritelab.utils.jsonl import read_jsonl as _canonical_read_jsonl
+
+
+def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    """Strict JSONL reader — raises on invalid JSON or non-dict rows (delegates to ``utils.jsonl``)."""
+    return _canonical_read_jsonl(path, validate=True)
+
 
 SPRITE_SIZE = 32
 REQUIRED_NPZ_KEYS = (
@@ -42,21 +48,6 @@ def _require_torch() -> Any:
     if torch is None:
         raise RuntimeError("PyTorch is required for spritelab training data loading.")
     return torch
-
-
-def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for line_no, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{path}:{line_no}: invalid JSON: {exc}") from exc
-        if not isinstance(value, dict):
-            raise ValueError(f"{path}:{line_no}: expected JSON object")
-        records.append(value)
-    return records
 
 
 class SpriteTrainingDataset(_DatasetBase):

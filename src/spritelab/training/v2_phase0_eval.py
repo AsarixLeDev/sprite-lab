@@ -1226,13 +1226,7 @@ def _write_breakdown_csv(
 # ── Report writers ──────────────────────────────────────────────────────────
 
 
-def _fmt(val: Any) -> str:
-    if val is None:
-        return "n/a"
-    try:
-        return f"{float(val):.4f}"
-    except (TypeError, ValueError):
-        return str(val)
+from spritelab.training.report_utils import fmt_float as _fmt
 
 
 def write_summary_json(summary: dict[str, Any], path: Path) -> None:

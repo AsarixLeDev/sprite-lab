@@ -55,15 +55,6 @@ def format_golden_lint_report(issues: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_jsonl(path: str | Path, rows: Sequence[Mapping[str, Any]]) -> Path:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(dict(row), sort_keys=True) + "\n")
-    return path
-
-
 def _lint_row(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     sprite_id = str(row.get("sprite_id", "")).strip()
     category = normalize_category(str(row.get("category", "unknown")))

@@ -319,13 +319,7 @@ def _rgba_chw_to_image(rgba: np.ndarray) -> Image.Image:
     return Image.fromarray(np.rint(hwc * 255.0).astype(np.uint8), mode="RGBA")
 
 
-def _fmt(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    try:
-        return f"{float(value):.4f}"
-    except (TypeError, ValueError):
-        return "n/a"
+from spritelab.training.report_utils import fmt_float as _fmt
 
 
 def _md_escape(text: str) -> str:

@@ -27,10 +27,10 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from spritelab.training.eval_baseline import move_batch_to_device, resolve_device
 
 from spritelab.training.conditioning import uses_structured_conditioning, validate_conditioning_mode
 from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch, read_jsonl
-from spritelab.training.eval_baseline import move_batch_to_device, resolve_device
 from spritelab.training.generator_challenger import (
     ChallengerTrainConfig,
     RectifiedFlowUNet,

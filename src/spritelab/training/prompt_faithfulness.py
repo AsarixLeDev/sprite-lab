@@ -883,13 +883,7 @@ def _edge_map(mask: np.ndarray) -> np.ndarray:
     return np.asarray(mask, dtype=bool) & ~full
 
 
-def _fmt(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    try:
-        return f"{float(value):.4f}"
-    except (TypeError, ValueError):
-        return "n/a"
+from spritelab.training.report_utils import fmt_float as _fmt
 
 
 def _fmt_ci(value: Any) -> str:

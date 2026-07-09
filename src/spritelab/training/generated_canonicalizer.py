@@ -317,18 +317,7 @@ def _safe_sample_id(sample_id: str) -> str:
     return cleaned
 
 
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    return value
+from spritelab.training.report_utils import jsonable as _jsonable
 
 
 def _generation_report_md(report: Mapping[str, Any], records: list[Mapping[str, Any]]) -> str:

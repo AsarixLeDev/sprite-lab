@@ -556,13 +556,7 @@ def _fmt_rate(value: Any) -> str:
         return "n/a"
 
 
-def _fmt_float(value: Any) -> str:
-    if value is None:
-        return "n/a"
-    try:
-        return f"{float(value):.4f}"
-    except (TypeError, ValueError):
-        return "n/a"
+from spritelab.training.report_utils import fmt_float as _fmt_float
 
 
 def main(argv: list[str] | None = None) -> None:
