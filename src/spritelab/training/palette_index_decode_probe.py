@@ -1,8 +1,9 @@
 """No-training experimental probe: compare palette/index head decode variants.
 
 Captures auxiliary head outputs during challenger sampling (final-step model call
-at t=0, clean image input) and reconstructs sprites using different decode paths
-to evaluate whether the v2 Phase 2 heads can become a future decode/export path.
+at t≈0.98, second-to-last integration timestep) and reconstructs sprites using
+different decode paths to evaluate whether the v2 Phase 2 heads can become a
+future decode/export path.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from spritelab.training.generated_canonicalizer import (
     build_generation_contact_sheet,
     canonicalize_generated_rgba,
     write_generated_sprite_artifacts,
+    write_generation_reports,
 )
 from spritelab.training.generated_qa import qa_generated_sprites
 from spritelab.training.generated_review import GeneratedReviewConfig, review_generated_sprites
@@ -63,35 +65,6 @@ class DecodeProbeConfig:
     project_palette_v1_target_colors: int = 16
 
 
-@dataclass
-class _SampleResult:
-    sample_id: str
-    rgba_batch: Any
-    aux: dict[str, Any] | None
-    record: dict[str, Any]
-    noise_seed: int
-
-
-@dataclass
-class _DecodeVariantMetrics:
-    qa_errors: int = 0
-    median_visible_colors: float = 0.0
-    rare_color_rate: float = 0.0
-    category_consistency: float = 0.0
-    color_consistency: float = 0.0
-    repeated_silhouette_rate: float = 0.0
-    blob_collapse_rate: float = 0.0
-    potion_collapse_rate: float = 0.0
-    near_copy_rate: float = 0.0
-    border_touch_rate: float = 0.0
-    nearest_source_distance_p10: float = 0.0
-    active_palette_slots_mean: float = 0.0
-    used_index_count_mean: float = 0.0
-    slot0_pixel_share: float = 0.0
-    palette_rgb_mean: float = 0.0
-    palette_rgb_std: float = 0.0
-
-
 def _require_torch() -> Any:
     if torch is None:
         raise RuntimeError("PyTorch is required for palette index decode probe.")
@@ -99,7 +72,7 @@ def _require_torch() -> Any:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Sampling helper — captures aux heads on final model call
+# Sampling helper — captures aux heads on final integration step
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
@@ -116,13 +89,12 @@ def _sample_with_aux(
 ) -> Any:
     """Run rectified-flow integration, capturing aux heads on the final step.
 
-    On the penultimate integration step (second-to-last), the model is called
-    with ``return_aux=True`` to extract palette/index head predictions at the
-    same noise level as the last velocity prediction. This avoids an extra
-    forward pass while still capturing head outputs from a nearly-clean image.
+    On the **last integration step** the conditioned model call uses
+    ``return_aux=True`` to extract palette/index head predictions at the same
+    noise level as the final velocity prediction (t ≈ 0.98 for 30 steps).
 
-    Returns ``(rgba, aux)`` where ``aux`` is the head output dict from
-    ``model(..., return_aux=True)``.
+    Returns ``(rgba, aux)`` where *rgba* is the clean generated image
+    ``(B, 4, 32, 32)`` in ``[0, 1]`` and *aux* is the head output dict.
     """
     th = _require_torch()
     model.eval()
@@ -198,9 +170,9 @@ def _reconstruct_from_index_and_palette(
     Returns (B, 4, 32, 32) float tensor in [0, 1].
     """
     th = _require_torch()
-    ind = index_logits.argmax(dim=1)  # (B, 32, 32)
+    ind = index_logits.argmax(dim=1)
     palette_clamped = palette_rgb.clamp(0.0, 1.0)
-    rgb = palette_clamped[th.arange(ind.shape[0])[:, None, None], ind]  # (B, 32, 32, 3)
+    rgb = palette_clamped[th.arange(ind.shape[0])[:, None, None], ind]
     rgb = rgb.permute(0, 3, 1, 2)
     alpha = (ind > 0).float().unsqueeze(1)
     return th.cat([rgb, alpha], dim=1)
@@ -210,20 +182,15 @@ def _reconstruct_index_with_projected_palette(
     index_logits: Any,
     continuous_rgba: Any,
 ) -> Any:
-    """Reconstruct using predicted index map + palette averaged from continuous image.
-
-    For each predicted index slot, average the continuous RGB values of pixels
-    assigned to that slot. Slot 0 is forced to black.
-    """
+    """Reconstruct using predicted index map + palette averaged from continuous image."""
     th = _require_torch()
-    B, _, _H, _W = continuous_rgba.shape
-    ind = index_logits.argmax(dim=1)  # (B, 32, 32)
-    cont_rgb = continuous_rgba[:, :3]  # (B, 3, 32, 32)
+    B = continuous_rgba.shape[0]
+    ind = index_logits.argmax(dim=1)
+    cont_rgb = continuous_rgba[:, :3]
 
     palette_list: list[Any] = []
     for b in range(B):
         slots = th.zeros(K, 3, device=ind.device)
-        counts = th.zeros(K, device=ind.device)
         ind_b = ind[b]
         for k in range(1, K):
             mask = ind_b == k
@@ -231,7 +198,6 @@ def _reconstruct_index_with_projected_palette(
             if cnt > 0:
                 for c in range(3):
                     slots[k, c] = cont_rgb[b, c][mask].mean()
-                counts[k] = cnt
         palette_list.append(slots)
 
     palette = th.stack(palette_list, dim=0)
@@ -275,7 +241,7 @@ def _decode_index_stats(index_logits: Any) -> dict[str, Any]:
 
     probs = th.nn.functional.softmax(index_logits, dim=1)
     log_probs = th.nn.functional.log_softmax(index_logits, dim=1)
-    entropy = -(probs * log_probs).sum(dim=1).mean(dim=(1, 2))  # mean over pixels
+    entropy = -(probs * log_probs).sum(dim=1).mean(dim=(1, 2))
     entropy_mean = float(entropy.mean().item())
 
     return {
@@ -285,19 +251,41 @@ def _decode_index_stats(index_logits: Any) -> dict[str, Any]:
     }
 
 
-def _palette_rgb_stats(palette_rgb: Any, presence_logits: Any) -> dict[str, Any]:
-    """Per-batch palette statistics."""
-    active = torch.sigmoid(presence_logits) > 0.5
-    active_mean = float(active.float().mean(dim=1).mean().item())
+def _validate_variant_images(vdir: Path, sample_count: int) -> list[str]:
+    """Validate every generated PNG before review. Returns list of error messages."""
+    errors: list[str] = []
+    manifest_path = vdir / "generated_manifest.jsonl"
+    if not manifest_path.is_file():
+        return [f"Missing manifest: {manifest_path}"]
+    try:
+        records = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except Exception as exc:
+        return [f"Failed to read manifest: {exc}"]
+    if len(records) != sample_count:
+        errors.append(f"Manifest has {len(records)} records, expected {sample_count}")
 
-    rgb_mean_all = float(palette_rgb.mean().item())
-    rgb_std_all = float(palette_rgb.std().item())
+    for record in records:
+        sid = record.get("sample_id", "?")
+        paths = record.get("paths") if isinstance(record.get("paths"), dict) else {}
+        raw_rel = paths.get("raw_rgba", "")
+        raw_path = vdir / raw_rel if raw_rel else None
+        if raw_path and raw_path.is_file():
+            try:
+                from PIL import Image
 
-    return {
-        "active_palette_slots_mean": active_mean,
-        "palette_rgb_mean": rgb_mean_all,
-        "palette_rgb_std": rgb_std_all,
-    }
+                img = Image.open(raw_path)
+                img.load()
+                if img.size != (32, 32):
+                    errors.append(f"{sid}: raw_rgba size {img.size}, expected 32x32")
+                alpha = np.asarray(img.convert("RGBA"), dtype=np.uint8)[..., 3]
+                if not np.any(alpha > 0):
+                    errors.append(f"{sid}: raw_rgba has zero visible pixels")
+            except Exception as exc:
+                errors.append(f"{sid}: raw_rgba unreadable: {exc}")
+        else:
+            errors.append(f"{sid}: raw_rgba missing at {raw_rel}")
+
+    return errors
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -314,7 +302,6 @@ def run_decode_probe(config: DecodeProbeConfig) -> Path:
     apply_backend_speed_flags(cudnn_benchmark=config.cudnn_benchmark, tf32=config.tf32)
     device = resolve_device(config.device)
 
-    # Load model
     ckpt = _load_checkpoint(config.checkpoint)
     model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(ckpt, device=device)
     structured_vocab = structured_vocab_from_checkpoint(ckpt)
@@ -331,13 +318,27 @@ def run_decode_probe(config: DecodeProbeConfig) -> Path:
     for d in variant_dirs.values():
         d.mkdir(parents=True, exist_ok=True)
 
-    variant_manifests: dict[str, list[dict[str, Any]]] = {key: [] for key in variant_dirs}
+    variant_records: dict[str, list[dict[str, Any]]] = {key: [] for key in variant_dirs}
     variant_deltas: dict[str, list[dict[str, float]]] = {
         key: [] for key in variant_dirs if key != "continuous_v1_projected"
     }
 
     base_noise_seed = int(config.seed) * 100000
     th.manual_seed(config.seed)
+
+    # Shared metadata fields (match what the normal v1 sampler writes)
+    shared_meta = {
+        "checkpoint": str(config.checkpoint),
+        "conditioning_mode": conditioning_mode,
+        "model_type": "generator_challenger",
+        "architecture": "rectified_flow",
+        "cfg_scale": float(config.cfg_scale),
+        "steps": int(config.sample_steps),
+        "alpha_threshold": float(config.alpha_threshold),
+        "max_colors": int(config.max_colors),
+        "seed": int(config.seed),
+        "export_preset": "",
+    }
 
     for batch_start in range(0, len(prompts), max(1, int(config.batch_size))):
         batch_records = prompts[batch_start : batch_start + max(1, int(config.batch_size))]
@@ -393,7 +394,6 @@ def run_decode_probe(config: DecodeProbeConfig) -> Path:
         if aux is not None:
             pred_rgba = _reconstruct_from_index_and_palette(aux["index_logits"], aux["palette_rgb"])
             pred_np = np.moveaxis(pred_rgba.detach().cpu().numpy().astype(np.float32), 1, -1)
-
             proj_rgba = _reconstruct_index_with_projected_palette(aux["index_logits"], rgba_batch)
             proj_np = np.moveaxis(proj_rgba.detach().cpu().numpy().astype(np.float32), 1, -1)
         else:
@@ -403,14 +403,14 @@ def run_decode_probe(config: DecodeProbeConfig) -> Path:
         for item_index, prompt_record in enumerate(batch_records):
             sample_idx = batch_start + item_index
             sample_id = f"sample_{sample_idx:06d}"
-
-            # Variant 1: continuous v1 projected
-            v1_metadata = {
+            per_sample_meta = {
+                **shared_meta,
                 **prompt_record,
-                "decode_variant": "continuous_v1_projected",
-                "seed": config.seed,
-                "noise_seed": noise_seeds[item_index],
+                "sample_id": sample_id,
+                "noise_seed": int(noise_seeds[item_index]),
             }
+
+            # ── Variant 1: continuous v1 projected (baseline) ──
             sprite_v1 = canonicalize_generated_rgba(
                 rgba_np[item_index],
                 max_colors=config.max_colors,
@@ -420,34 +420,24 @@ def run_decode_probe(config: DecodeProbeConfig) -> Path:
                 sprite_v1,
                 variant_dirs["continuous_v1_projected"],
                 sample_id,
-                v1_metadata,
+                {**per_sample_meta, "decode_variant": "continuous_v1_projected"},
                 write_raw_rgba=True,
-                write_hard_rgba=False,
+                write_hard_rgba=True,
             )
+            from spritelab.training.palette_projection import project_generated_sprite_record
 
-            # palette projection for v1 (continuous → projected for baseline comparison)
-            rec_v1_baseline = dict(rec_v1)
-            if True:
-                from spritelab.training.palette_projection import project_generated_sprite_record
+            rec_v1_projected = project_generated_sprite_record(
+                sprite_v1,
+                variant_dirs["continuous_v1_projected"],
+                rec_v1,
+                target_colors=config.project_palette_v1_target_colors,
+                min_pixel_share=0.01,
+                alpha_threshold=config.alpha_threshold,
+                method="deterministic_kmeans",
+            )
+            variant_records["continuous_v1_projected"].append(rec_v1_projected)
 
-                rec_v1_baseline = project_generated_sprite_record(
-                    sprite_v1,
-                    variant_dirs["continuous_v1_projected"],
-                    rec_v1,
-                    target_colors=config.project_palette_v1_target_colors,
-                    min_pixel_share=0.01,
-                    alpha_threshold=config.alpha_threshold,
-                    method="deterministic_kmeans",
-                )
-            variant_manifests["continuous_v1_projected"].append(rec_v1_baseline)
-
-            # Variant 2: head index + predicted palette
-            v2_metadata = {
-                **prompt_record,
-                "decode_variant": "head_index_pred_palette",
-                "seed": config.seed,
-                "noise_seed": noise_seeds[item_index],
-            }
+            # ── Variant 2: head index + predicted palette ──
             sprite_pred = canonicalize_generated_rgba(
                 pred_np[item_index],
                 max_colors=config.max_colors,
@@ -457,26 +447,19 @@ def run_decode_probe(config: DecodeProbeConfig) -> Path:
                 sprite_pred,
                 variant_dirs["head_index_pred_palette"],
                 sample_id,
-                v2_metadata,
+                {**per_sample_meta, "decode_variant": "head_index_pred_palette"},
                 write_raw_rgba=True,
-                write_hard_rgba=False,
+                write_hard_rgba=True,
             )
-            variant_manifests["head_index_pred_palette"].append(rec_pred)
+            variant_records["head_index_pred_palette"].append(rec_pred)
 
-            # Compute delta vs v1 baseline
             delta = _compute_reconstruction_delta(
                 pred_rgba[item_index : item_index + 1],
                 rgba_batch[item_index : item_index + 1],
             )
             variant_deltas.setdefault("head_index_pred_palette", []).append(delta)
 
-            # Variant 3: head index + projected palette
-            v3_metadata = {
-                **prompt_record,
-                "decode_variant": "head_index_projected_palette",
-                "seed": config.seed,
-                "noise_seed": noise_seeds[item_index],
-            }
+            # ── Variant 3: head index + projected palette ──
             sprite_proj = canonicalize_generated_rgba(
                 proj_np[item_index],
                 max_colors=config.max_colors,
@@ -486,11 +469,11 @@ def run_decode_probe(config: DecodeProbeConfig) -> Path:
                 sprite_proj,
                 variant_dirs["head_index_projected_palette"],
                 sample_id,
-                v3_metadata,
+                {**per_sample_meta, "decode_variant": "head_index_projected_palette"},
                 write_raw_rgba=True,
-                write_hard_rgba=False,
+                write_hard_rgba=True,
             )
-            variant_manifests["head_index_projected_palette"].append(rec_proj)
+            variant_records["head_index_projected_palette"].append(rec_proj)
 
             delta2 = _compute_reconstruction_delta(
                 proj_rgba[item_index : item_index + 1],
@@ -499,30 +482,43 @@ def run_decode_probe(config: DecodeProbeConfig) -> Path:
             variant_deltas.setdefault("head_index_projected_palette", []).append(delta2)
 
         print(
-            f"  batch {batch_start // config.batch_size + 1}/{(len(prompts) + config.batch_size - 1) // config.batch_size} done"
+            f"  batch {batch_start // config.batch_size + 1}/"
+            f"{(len(prompts) + config.batch_size - 1) // config.batch_size} done"
         )
 
-    # Write manifests
-    for key, records in variant_manifests.items():
-        (variant_dirs[key] / "generated_manifest.jsonl").write_text(
-            "".join(json.dumps(r, default=jsonable) + "\n" for r in records),
-            encoding="utf-8",
+    # Write manifests and generation reports
+    for key, records in variant_records.items():
+        write_generation_reports(
+            out_dir=variant_dirs[key],
+            records=records,
+            config={"archive": "challenger", "architecture": "rectified_flow", "conditioning_mode": conditioning_mode},
+            contact_sheet=None,
         )
+
+    # Validate images before running reviews
+    for key in variant_dirs:
+        errors = _validate_variant_images(variant_dirs[key], len(prompts))
+        if errors:
+            print(f"  WARNING: {key}: {len(errors)} image validation errors")
+            for e in errors[:5]:
+                print(f"    {e}")
+            if len(errors) > 5:
+                print(f"    ... and {len(errors) - 5} more")
 
     # Run review / QA / faithfulness on each variant
     variant_metrics: dict[str, dict[str, Any]] = {}
     for key, vdir in variant_dirs.items():
         print(f"  running review on {key}...")
-        metrics = _run_variant_metrics(vdir, config.dataset, config.prompts, config.max_samples)
+        metrics = _run_variant_metrics(vdir, config.dataset, config.prompts, len(prompts))
         variant_metrics[key] = metrics
 
-    # Aggregate decode stats
-    _collect_decode_stats(variant_metrics, variant_manifests, variant_dirs)
+    # Aggregate decode-specific stats
+    _collect_decode_stats(variant_metrics, variant_records)
 
     # Build contact sheets
     contact_sheet_dir = out / "contact_sheets"
     contact_sheet_dir.mkdir(parents=True, exist_ok=True)
-    _build_decode_contact_sheets(contact_sheet_dir, variant_manifests, variant_dirs, prompts)
+    _build_decode_contact_sheets(contact_sheet_dir, variant_records, variant_dirs, prompts)
 
     # Write reports
     reports_dir = out / "reports"
@@ -543,7 +539,7 @@ def run_decode_probe(config: DecodeProbeConfig) -> Path:
         encoding="utf-8",
     )
     (reports_dir / "decode_probe_report.md").write_text(
-        _build_decode_report_md(report, variant_metrics),
+        _build_decode_report_md(report, variant_metrics, variant_deltas),
         encoding="utf-8",
     )
 
@@ -551,81 +547,71 @@ def run_decode_probe(config: DecodeProbeConfig) -> Path:
     return reports_dir / "decode_probe_summary.json"
 
 
-def _run_variant_metrics(vdir: Path, dataset: Path, prompts_path: Path, max_samples: int) -> dict[str, Any]:
+def _run_variant_metrics(vdir: Path, dataset: Path, prompts_path: Path, sample_count: int) -> dict[str, Any]:
     qa_result = qa_generated_sprites(vdir, error_on_fully_transparent=False)
     qa_errors = len(qa_result.errors) if hasattr(qa_result, "errors") else 0
 
-    review_generated_sprites(
+    review_result = review_generated_sprites(
         GeneratedReviewConfig(
             generated_dir=vdir,
             out_dir=vdir / "review",
             group_by="none",
-            max_samples_per_sheet=0,
+            max_samples_per_sheet=64,
         )
     )
-    review_json = vdir / "review" / "generated_review_report.json"
-    review = {}
-    if review_json.is_file():
-        review = json.loads(review_json.read_text(encoding="utf-8"))
+    review = review_result.report if hasattr(review_result, "report") else {}
 
-    faithfulness_json = vdir / "prompt_faithfulness" / "prompt_faithfulness_report.json"
+    faith = {}
     try:
-        (vdir / "prompt_faithfulness").mkdir(parents=True, exist_ok=True)
-        run_prompt_faithfulness(
+        faith_dir = vdir / "prompt_faithfulness"
+        faith_dir.mkdir(parents=True, exist_ok=True)
+        faith_result = run_prompt_faithfulness(
             PromptFaithfulnessConfig(
                 generated=vdir,
                 prompts=prompts_path,
                 dataset=dataset,
-                out=vdir / "prompt_faithfulness",
-                out_json=vdir / "prompt_faithfulness" / "prompt_faithfulness_report.json",
+                out=faith_dir,
+                out_json=faith_dir / "prompt_faithfulness_report.json",
             )
         )
+        if isinstance(faith_result, dict):
+            faith = faith_result
     except Exception:
         pass
-    faith = {}
-    if faithfulness_json.is_file():
-        faith = json.loads(faithfulness_json.read_text(encoding="utf-8"))
 
+    overall = review.get("overall", {}) if isinstance(review, dict) else {}
     return {
         "qa_errors": qa_errors,
-        "median_visible_colors": review.get("overall", {}).get("median_visible_color_count_before", 0.0),
-        "rare_color_rate": review.get("overall", {}).get("rare_color_warning_rate", 0.0),
-        "category_consistency": review.get("overall", {}).get("category_consistency_mean", 0.0),
-        "color_consistency": review.get("overall", {}).get("color_consistency_mean", 0.0),
-        "repeated_silhouette_rate": review.get("overall", {}).get("repeated_silhouette_rate", 0.0),
-        "blob_collapse_rate": review.get("overall", {}).get("blob_collapse_rate", 0.0),
-        "potion_collapse_rate": review.get("overall", {}).get("potion_collapse_rate", 0.0),
-        "near_copy_rate": review.get("overall", {}).get("near_copy_rate", 0.0),
-        "border_touch_rate": review.get("overall", {}).get("touches_border_rate", 0.0),
-        "nearest_source_distance_p10": faith.get("p10_nearest_source_distance", 0.0),
+        "median_visible_colors": float(overall.get("median_visible_color_count_before", 0)),
+        "rare_color_rate": float(overall.get("rare_color_warning_rate", 0)),
+        "category_consistency": float(overall.get("category_consistency_mean", 0)),
+        "color_consistency": float(overall.get("color_consistency_mean", 0)),
+        "repeated_silhouette_rate": float(overall.get("repeated_silhouette_rate", 0)),
+        "blob_collapse_rate": float(overall.get("blob_collapse_rate", 0)),
+        "potion_collapse_rate": float(overall.get("potion_collapse_rate", 0)),
+        "near_copy_rate": float(overall.get("near_copy_rate", 0)),
+        "border_touch_rate": float(overall.get("touches_border_rate", 0)),
+        "nearest_source_distance_p10": float(faith.get("p10_nearest_source_distance", 0)),
     }
 
 
 def _collect_decode_stats(
     variant_metrics: dict[str, dict[str, Any]],
-    variant_manifests: dict[str, list[dict[str, Any]]],
-    variant_dirs: dict[str, Path],
+    variant_records: dict[str, list[dict[str, Any]]],
 ) -> None:
     for key in list(variant_metrics.keys()):
         if key == "continuous_v1_projected":
             continue
-        mdir = variant_dirs[key]
-        manifest_path = mdir / "generated_manifest.jsonl"
-        if not manifest_path.is_file():
-            continue
-        records = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        records = variant_records.get(key, [])
         if not records:
             continue
-
         active_slots = []
         used_indices = []
         slot0_shares = []
         for rec in records:
-            meta = rec.get("metadata", rec)
-            if isinstance(meta, dict):
-                active_slots.append(meta.get("active_palette_slots_mean", 0))
-                used_indices.append(meta.get("used_index_count_mean", 0))
-                slot0_shares.append(meta.get("slot0_pixel_share", 0))
+            active_slots.append(rec.get("active_palette_slots_mean", 0))
+            used_indices.append(rec.get("used_index_count_mean", 0))
+            slot0_shares.append(rec.get("slot0_pixel_share", 0))
         if active_slots:
             variant_metrics[key]["active_palette_slots_mean"] = float(np.mean(active_slots))
         if used_indices:
@@ -636,12 +622,12 @@ def _collect_decode_stats(
 
 def _build_decode_contact_sheets(
     contact_sheet_dir: Path,
-    variant_manifests: dict[str, list[dict[str, Any]]],
+    variant_records: dict[str, list[dict[str, Any]]],
     variant_dirs: dict[str, Path],
     prompts: list[dict[str, Any]],
 ) -> None:
     n = min(32, len(prompts))
-    for key, records in variant_manifests.items():
+    for key, records in variant_records.items():
         subset = records[:n]
         if not subset:
             continue
@@ -656,7 +642,11 @@ def _build_decode_contact_sheets(
             pass
 
 
-def _build_decode_report_md(report: dict[str, Any], metrics: dict[str, dict[str, Any]]) -> str:
+def _build_decode_report_md(
+    report: dict[str, Any],
+    metrics: dict[str, dict[str, Any]],
+    deltas: dict[str, list[dict[str, float]]] | None = None,
+) -> str:
     lines = [
         "# Palette / Index Decode Probe Report",
         "",
@@ -670,8 +660,8 @@ def _build_decode_report_md(report: dict[str, Any], metrics: dict[str, dict[str,
         "",
         "## Decode Variants",
         "",
-        "| Variant | QA errs | Median colors | Rare color % | Cat cons | Color cons | Silhouette % | Blob % | Potion % | Near-copy % | Touch % |",
-        "|---------|---------|--------------|-------------|----------|------------|-------------|--------|----------|-------------|---------|",
+        "| Variant | QA errs | Med colors | Rare color % | Cat cons | Color cons | Silhouette % | Blob % | Potion % | Near-copy % | Touch % |",
+        "|---------|---------|------------|-------------|----------|------------|-------------|--------|----------|-------------|---------|",
     ]
     for key, m in metrics.items():
         lines.append(
@@ -687,12 +677,29 @@ def _build_decode_report_md(report: dict[str, Any], metrics: dict[str, dict[str,
             f"{m.get('border_touch_rate', 0):.4f} |"
         )
 
+    # Reconstruction deltas vs baseline
+    if deltas:
+        lines += [
+            "",
+            "## Reconstruction Deltas vs Continuous v1 Projected",
+            "",
+            "| Variant | RGB MAE | Alpha disagreement | Changed pixel rate |",
+            "|---------|---------|-------------------|-------------------|",
+        ]
+        for key, dlist in deltas.items():
+            if dlist:
+                avg = {k: float(np.mean([d[k] for d in dlist])) for k in dlist[0]}
+                lines.append(
+                    f"| `{key}` | {avg['rgb_mae']:.6f} | {avg['alpha_disagreement']:.6f} | {avg['changed_pixel_rate']:.4f} |"
+                )
+
     lines += [
         "",
         "## Interpretation",
         "",
-        "Head decode captures aux outputs from the final rectified-flow integration step.",
-        "Index logits are argmaxed for per-pixel palette slot assignment.",
+        "Head decode captures aux outputs from the final rectified-flow integration step",
+        "(t ≈ 0.98 for 30 steps). Index logits are argmaxed for per-pixel palette slot",
+        "assignment.",
         "",
     ]
     return "\n".join(lines) + "\n"
