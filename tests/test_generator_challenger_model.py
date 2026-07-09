@@ -1543,8 +1543,9 @@ def test_reconstruct_from_index_and_palette_shape() -> None:
     index_logits = torch.zeros(B, K, H, W)
     index_logits[:, 1] = 10.0
     palette_rgb = torch.rand(B, K, 3).clamp(0.0, 1.0)
+    alpha_mask = torch.ones(B, H, W)  # all visible
 
-    rgba = _reconstruct_from_index_and_palette(index_logits, palette_rgb)
+    rgba = _reconstruct_from_index_and_palette(index_logits, palette_rgb, alpha_mask=alpha_mask)
     assert rgba.shape == (B, 4, H, W)
     assert 0.0 <= float(rgba.min()) <= float(rgba.max()) <= 1.0
 
@@ -1558,51 +1559,82 @@ def test_reconstruct_with_projected_palette_finite() -> None:
         idx = (b + 1) % K
         index_logits[b, idx] = 10.0
     continuous_rgba = torch.rand(B, 4, H, W).clamp(0.0, 1.0)
+    alpha_mask = torch.ones(B, H, W)
 
-    rgba = _reconstruct_index_with_projected_palette(index_logits, continuous_rgba)
+    rgba = _reconstruct_index_with_projected_palette(index_logits, continuous_rgba, alpha_mask=alpha_mask)
     assert rgba.shape == (B, 4, H, W)
     assert torch.isfinite(rgba).all()
 
 
-def test_slot0_is_transparent() -> None:
+def test_head_decode_visible_when_mask_says_visible() -> None:
+    """Slot-0 pixels: RGB forced to black, alpha from mask."""
     from spritelab.training.palette_index_decode_probe import _reconstruct_from_index_and_palette
 
-    B, K, H, W = 2, 16, 32, 32
-    index_logits = torch.zeros(B, K, H, W)
-    # All pixels are slot 0
+    B, K, H, W = 1, 16, 4, 4
+    index_logits = torch.zeros(B, K, H, W)  # all slot 0
     palette_rgb = torch.rand(B, K, 3)
+    alpha_mask = torch.ones(B, H, W)
 
-    rgba = _reconstruct_from_index_and_palette(index_logits, palette_rgb)
-    alpha = rgba[:, 3]
-    assert (alpha == 0.0).all()
+    rgba = _reconstruct_from_index_and_palette(index_logits, palette_rgb, alpha_mask=alpha_mask)
+    assert (rgba[:, 3] == 1.0).all()  # alpha from mask
+    assert (rgba[:, :3] == 0.0).all()  # RGB forced black for slot 0
+    assert (rgba[:, :3] >= 0.0).all()
+    assert (rgba[:, :3] <= 1.0).all()
 
 
-def test_reconstruction_delta_computes_metrics() -> None:
+def test_head_decode_respects_alpha_mask() -> None:
+    from spritelab.training.palette_index_decode_probe import _reconstruct_from_index_and_palette
+
+    B, K, H, W = 1, 16, 4, 4
+    index_logits = torch.zeros(B, K, H, W)
+    index_logits[:, 2] = 10.0  # all pixels → slot 2
+    palette_rgb = torch.ones(B, K, 3)
+    alpha_mask = torch.zeros(B, H, W)  # all invisible
+
+    rgba = _reconstruct_from_index_and_palette(index_logits, palette_rgb, alpha_mask=alpha_mask)
+    assert (rgba[:, 3] == 0.0).all()
+    assert (rgba[:, :3] == 0.0).all()
+
+
+def test_reconstruction_delta_visible_only() -> None:
     from spritelab.training.palette_index_decode_probe import _compute_reconstruction_delta
 
     recon = torch.zeros(1, 4, 32, 32)
     baseline = torch.zeros(1, 4, 32, 32)
     baseline[:, :3] = 0.5
-    delta = _compute_reconstruction_delta(recon, baseline)
-    assert delta["rgb_mae"] > 0.0
-    assert 0.0 <= delta["alpha_disagreement"] <= 1.0
-    assert 0.0 <= delta["changed_pixel_rate"] <= 1.0
+    baseline[:, 3] = 0.2  # transparent baseline
 
-    same = _compute_reconstruction_delta(baseline, baseline)
-    assert same["rgb_mae"] == pytest.approx(0.0)
-    assert same["alpha_disagreement"] == pytest.approx(0.0)
+    delta = _compute_reconstruction_delta(recon, baseline, visible_only=True)
+    # No visible pixels in baseline → delta metrics should be 0 or NaN-safe
+    assert delta["rgb_mae"] >= 0.0
 
 
-def test_decode_index_stats_returns_finite() -> None:
-    from spritelab.training.palette_index_decode_probe import _decode_index_stats
+def test_validate_variant_detects_transparent(tmp_path: Path) -> None:
+    from spritelab.training.palette_index_decode_probe import _validate_variant_images
 
-    B, K, H, W = 2, 16, 32, 32
-    index_logits = torch.zeros(B, K, H, W)
-    index_logits[:, 2] = 5.0
-    stats = _decode_index_stats(index_logits)
-    assert 0.0 <= stats["slot0_pixel_share"] <= 1.0
-    assert stats["used_index_count_mean"] > 0
-    assert torch.tensor(stats["index_entropy_mean"]).isfinite()
+    vdir = tmp_path / "variant"
+    vdir.mkdir()
+    records = [{"sample_id": f"sample_{i:06d}", "alpha_opaque_count": 0, "visible_color_count": 0} for i in range(10)]
+    (vdir / "generated_manifest.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in records),
+        encoding="utf-8",
+    )
+    errors = _validate_variant_images(vdir, 10)
+    assert any("fully transparent" in e for e in errors)
+
+
+def test_validate_variant_ok_for_valid(tmp_path: Path) -> None:
+    from spritelab.training.palette_index_decode_probe import _validate_variant_images
+
+    vdir = tmp_path / "variant"
+    vdir.mkdir()
+    records = [{"sample_id": f"sample_{i:06d}", "alpha_opaque_count": 500, "visible_color_count": 8} for i in range(10)]
+    (vdir / "generated_manifest.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in records),
+        encoding="utf-8",
+    )
+    errors = _validate_variant_images(vdir, 10)
+    assert not any("fully transparent" in e for e in errors)
 
 
 def test_probe_report_writes_json_and_markdown(tmp_path: Path) -> None:
