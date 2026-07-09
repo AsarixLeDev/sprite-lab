@@ -34,3 +34,11 @@ venv/
 /reports/
 /runs/
 .prefill_cache*/
+
+# Local scratch / one-off artifacts
+/.claude/
+/out/
+/notes/
+/*.csv
+/*.jsonl
+/scratch*/
