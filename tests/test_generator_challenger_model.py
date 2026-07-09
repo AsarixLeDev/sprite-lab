@@ -911,21 +911,21 @@ def test_old_default_config_has_features_off() -> None:
 
 
 def test_per_group_dropout_accepts_valid_string() -> None:
-    from spritelab.training.cli import _parse_dropout_rates
+    from spritelab.training.cli._args import _parse_dropout_rates
 
     rates = _parse_dropout_rates("category=0.10,object_id=0.35,colors=0.15")
     assert rates == {"category": 0.10, "object_id": 0.35, "colors": 0.15}
 
 
 def test_per_group_dropout_rejects_unknown_group() -> None:
-    from spritelab.training.cli import _parse_dropout_rates
+    from spritelab.training.cli._args import _parse_dropout_rates
 
     with pytest.raises(ValueError, match="Unknown"):
         _parse_dropout_rates("unknown=0.5")
 
 
 def test_per_group_dropout_rejects_invalid_rate() -> None:
-    from spritelab.training.cli import _parse_dropout_rates
+    from spritelab.training.cli._args import _parse_dropout_rates
 
     with pytest.raises(ValueError, match="must be in"):
         _parse_dropout_rates("category=1.5")
@@ -934,7 +934,7 @@ def test_per_group_dropout_rejects_invalid_rate() -> None:
 
 
 def test_per_group_dropout_returns_none_for_empty() -> None:
-    from spritelab.training.cli import _parse_dropout_rates
+    from spritelab.training.cli._args import _parse_dropout_rates
 
     assert _parse_dropout_rates(None) is None
     assert _parse_dropout_rates("") is None
