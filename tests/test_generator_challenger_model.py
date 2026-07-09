@@ -1803,3 +1803,18 @@ def test_missing_faithfulness_report_handles_gracefully() -> None:
     faith = {}
     assert faith.get("category_consistency_rate") is None
     assert faith.get("generic_blob_collapse_rate") is None
+
+
+def test_faithfulness_out_is_file_not_directory() -> None:
+    """PromptFaithfulnessConfig.out must be a file path (.md), not a directory."""
+    from spritelab.training.prompt_faithfulness import PromptFaithfulnessConfig
+
+    cfg = PromptFaithfulnessConfig(
+        generated=Path("."),
+        prompts=None,
+        dataset=Path("."),
+        out=Path("out.md"),
+        out_json=Path("out.json"),
+    )
+    assert cfg.out.suffix == ".md"
+    assert cfg.out_json.suffix == ".json"

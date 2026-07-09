@@ -572,8 +572,10 @@ def _run_variant_metrics(vdir: Path, dataset: Path, prompts_path: Path) -> dict[
                 generated=vdir,
                 prompts=prompts_path,
                 dataset=dataset,
-                out=faith_dir,
+                out=faith_dir / "prompt_faithfulness_report.md",
                 out_json=faith_json_path,
+                max_sources=0,
+                source_selection="auto",
             )
         )
         if isinstance(faith_result, dict):
