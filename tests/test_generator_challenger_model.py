@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1172,7 +1173,6 @@ def test_index_head_inactive_before_warmup() -> None:
 
 def test_cli_accepts_inspect_palette_index_heads() -> None:
     import argparse
-
 
     parser = argparse.ArgumentParser(prog="test")
     sub = parser.add_subparsers(dest="subcommand", required=True)

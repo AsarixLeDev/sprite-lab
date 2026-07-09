@@ -211,7 +211,7 @@ def run_baseline_evaluation(
                 sample["palette_mask"],
                 sample["loss_mask"],
             )
-            for sample, prediction in zip(samples, predictions)
+            for sample, prediction in zip(samples, predictions, strict=False)
         ]
         results["baselines"][name] = metrics_to_dict(average_reconstruction_metrics(metrics))
         if name in ("copy_visible", "palette_ramp"):

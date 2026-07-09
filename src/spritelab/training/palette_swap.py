@@ -771,7 +771,7 @@ def _drop_color_materials(value: Any, target_family: str, *, dropped: list[str])
 def _rewrite_caption(caption: str, target_family: str, *, no_caption_prepend: bool = False) -> tuple[str, str]:
     text = str(caption or "")
     replaced = False
-    for name, pattern in _COLOR_WORD_RE.items():
+    for _name, pattern in _COLOR_WORD_RE.items():
         if pattern.search(text):
             text = pattern.sub(target_family, text)
             replaced = True

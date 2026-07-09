@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 
 def _usage() -> str:
@@ -132,7 +133,7 @@ def _run_dataset_maker(args: list[str]) -> None:
         if "requires gradio" not in str(exc):
             raise
         print(str(exc))
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
 
 
 def _run_dataset_maker_import_export(args: list[str]) -> None:

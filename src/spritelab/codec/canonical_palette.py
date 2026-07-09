@@ -136,7 +136,7 @@ def canonicalize_bundle_palette(bundle: SpriteBundle) -> CanonicalizationResult:
 
     old_order = canonical_palette_order(bundle)
     old_to_new = {old_slot: new_slot for new_slot, old_slot in enumerate(old_order)}
-    new_to_old = {new_slot: old_slot for new_slot, old_slot in enumerate(old_order)}
+    new_to_old = dict(enumerate(old_order))
 
     new_palette = np.asarray(bundle.palette[old_order]).copy()
     new_index_map = remap_index_map(bundle.index_map, old_to_new)

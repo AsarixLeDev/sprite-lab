@@ -108,7 +108,7 @@ def compute_index_head_metrics(
     role_map: Any | None = None,
 ) -> _IndexMetrics:
     th = _require_torch()
-    B, C, H, W = predicted_logits.shape
+    _B, C, _H, _W = predicted_logits.shape
 
     visible_mask = alpha.squeeze(1) > VISIBLE_ALPHA_THRESHOLD
     target = target_index_map.long()
@@ -175,7 +175,7 @@ def compute_index_head_metrics(
 
 
 def _compute_topk_correct(logits: Any, target: Any, mask: Any, k: int) -> Any:
-    th = _require_torch()
+    _require_torch()
     topk = logits.topk(k, dim=1).indices
     correct = (topk == target.unsqueeze(1)).any(dim=1) & mask
     return correct
@@ -265,7 +265,7 @@ def _check_slot0_transparent(target_palette: Any, palette_mask: Any) -> bool:
     if not slot0_visible:
         return False
     slot0_avg_rgb = target_palette[:, 0].mean(dim=0)
-    slot0_bright = (slot0_avg_rgb > 0.95).all().item()
+    (slot0_avg_rgb > 0.95).all().item()
     slot0_dark = (slot0_avg_rgb < 0.05).all().item()
     return slot0_dark
 
@@ -327,7 +327,7 @@ def compute_palette_presence_metrics(
     target_active_mean = float(target_pos.item() / target.shape[0])
 
     false_pos = (pred_binary * (1 - target)).sum().float()
-    true_neg = ((1 - pred_binary) * (1 - target)).sum().float()
+    ((1 - pred_binary) * (1 - target)).sum().float()
     total_neg = (1 - target).sum().float()
     false_neg = ((1 - pred_binary) * target).sum().float()
     total_pos = target.sum().float()
@@ -424,7 +424,7 @@ def _aggregate_metrics(batches: list[_BatchMetrics]) -> _BatchMetrics:
     )
 
     # Palette RGB
-    rgb_batches = [b for b in batches]
+    rgb_batches = list(batches)
     active_total = sum(b.palette_rgb.active_slot_count_mean for b in rgb_batches)
     rgb_mae = sum(b.palette_rgb.mae * b.palette_rgb.active_slot_count_mean for b in rgb_batches)
     rgb_mse = sum(b.palette_rgb.mse * b.palette_rgb.active_slot_count_mean for b in rgb_batches)
@@ -451,7 +451,7 @@ def _aggregate_metrics(batches: list[_BatchMetrics]) -> _BatchMetrics:
     )
 
     # Palette presence
-    n = len([b for b in batches])
+    n = len(list(batches))
     pres_bce = sum(b.palette_presence.bce for b in batches) / max(n, 1)
     pres_acc = sum(b.palette_presence.accuracy for b in batches) / max(n, 1)
     pres_prec = sum(b.palette_presence.precision for b in batches) / max(n, 1)

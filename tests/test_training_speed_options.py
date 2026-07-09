@@ -112,22 +112,22 @@ def test_apply_backend_speed_flags_opt_in_sets_flags() -> None:
 
 
 def _base_train_config(dataset: Path, manifest: Path, out_dir: Path, **overrides: object) -> ChallengerTrainConfig:
-    kwargs = dict(
-        dataset_dir=dataset,
-        training_manifest=manifest,
-        out_dir=out_dir,
-        batch_size=2,
-        max_steps=5,
-        device="cpu",
-        seed=7,
-        base_channels=8,
-        channel_mults="1,2",
-        res_blocks_per_level=1,
-        embed_dim=8,
-        sample_every=0,
-        save_every=0,
-        validation_mode="none",
-    )
+    kwargs = {
+        "dataset_dir": dataset,
+        "training_manifest": manifest,
+        "out_dir": out_dir,
+        "batch_size": 2,
+        "max_steps": 5,
+        "device": "cpu",
+        "seed": 7,
+        "base_channels": 8,
+        "channel_mults": "1,2",
+        "res_blocks_per_level": 1,
+        "embed_dim": 8,
+        "sample_every": 0,
+        "save_every": 0,
+        "validation_mode": "none",
+    }
     kwargs.update(overrides)
     return ChallengerTrainConfig(**kwargs)
 
@@ -218,7 +218,7 @@ def test_speed_defaults_produce_bit_identical_train_metrics_jsonl(tmp_path: Path
     lines_a = [json.loads(line) for line in (run_a / "train_metrics.jsonl").read_text(encoding="utf-8").splitlines()]
     lines_b = [json.loads(line) for line in (run_b / "train_metrics.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(lines_a) == len(lines_b)
-    for row_a, row_b in zip(lines_a, lines_b):
+    for row_a, row_b in zip(lines_a, lines_b, strict=False):
         row_a.pop("elapsed_seconds")
         row_b.pop("elapsed_seconds")
         assert row_a == row_b

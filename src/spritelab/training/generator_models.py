@@ -119,7 +119,7 @@ class TinyCaptionSpriteGenerator(_ModuleBase):
         return th.randn(int(batch_size), self.latent_dim, device=device, generator=generator)
 
     def _mean_pool_tokens(self, tokens: Any) -> Any:
-        th, _nn_mod = _require_torch()
+        _th, _nn_mod = _require_torch()
         token_ids = tokens.long().clamp(min=0, max=self.vocab_size - 1)
         embedded = self.token_embedding(token_ids)
         mask = token_ids.ne(self.pad_token_id).float().unsqueeze(-1)

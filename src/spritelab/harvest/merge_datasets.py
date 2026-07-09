@@ -429,7 +429,7 @@ def _validate_merge(
         arrays = per_split_arrays[split]
         if len(records) != len(arrays):
             result.errors.append(f"{split}: record/array count mismatch ({len(records)} vs {len(arrays)})")
-        for record, row_arrays in zip(records, arrays):
+        for record, row_arrays in zip(records, arrays, strict=False):
             sprite_id = str(record.get("sprite_id", ""))
             for field_name in ("source_dataset", "source_pack", "source_sprite_id", "source_split"):
                 if not str(record.get(field_name, "")).strip():

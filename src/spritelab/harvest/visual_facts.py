@@ -33,7 +33,7 @@ def extract_visual_facts_from_png(path: Path) -> VisualFacts:
     alpha = pixels[:, :, 3]
     ys, xs = np.nonzero(alpha > 0)
     opaque_count = int(xs.size)
-    alpha_values = set(int(value) for value in np.unique(alpha))
+    alpha_values = {int(value) for value in np.unique(alpha)}
     alpha_hard = alpha_values <= {0, 255}
 
     if opaque_count == 0:
@@ -83,7 +83,7 @@ def dominant_color_names_from_rgba(path: Path, top_k: int = 4) -> tuple[str, ...
         return ()
     colors, counts = np.unique(opaque_rgb, axis=0, return_counts=True)
     name_counts: dict[str, int] = {}
-    for rgb, count in zip(colors, counts):
+    for rgb, count in zip(colors, counts, strict=False):
         name = color_name(rgb)
         name_counts[name] = name_counts.get(name, 0) + int(count)
     ranked = sorted(name_counts.items(), key=lambda item: (-item[1], item[0]))

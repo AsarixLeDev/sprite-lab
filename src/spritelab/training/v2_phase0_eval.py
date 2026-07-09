@@ -209,10 +209,10 @@ def parse_null_field_set_group(group: str) -> list[str]:
     # Deduplicate while preserving order
     seen: set[str] = set()
     result: list[str] = []
-    for field in parts:
-        if field not in seen:
-            seen.add(field)
-            result.append(field)
+    for f in parts:
+        if f not in seen:
+            seen.add(f)
+            result.append(f)
     return result
 
 
@@ -227,7 +227,7 @@ def parse_null_field_sets(null_field_sets: str) -> tuple[str, ...]:
     ("colors", "object_id+colors", "caption+semantic")
     """
     if not null_field_sets or not str(null_field_sets).strip():
-        return tuple()
+        return ()
     return tuple(token.strip() for token in str(null_field_sets).split(",") if token.strip())
 
 
@@ -396,9 +396,9 @@ def _count_manifest_records(cell_dir: Path) -> int:
 def _normalize_null_set(value: Any) -> set[str]:
     """Normalize null_fields from manifest (list or string) to a set."""
     if isinstance(value, list):
-        return set(str(v) for v in value if v)
+        return {str(v) for v in value if v}
     if isinstance(value, str):
-        return set(v.strip() for v in value.split(",") if v.strip())
+        return {v.strip() for v in value.split(",") if v.strip()}
     return set()
 
 
@@ -721,7 +721,7 @@ def decide_v1_1(v1_agg: dict[str, Any] | None, v1_1_agg: dict[str, Any] | None) 
 
     v1_color = v1_agg.get("color_consistency_mean")
     v1_cat = v1_agg.get("category_consistency_mean")
-    v1_rare = v1_agg.get("rare_color_warning_rate_mean")
+    v1_agg.get("rare_color_warning_rate_mean")
     v1_blob = v1_agg.get("blob_collapse_rate_mean")
     v1_near = v1_agg.get("near_copy_rate_mean")
 
@@ -798,7 +798,7 @@ def decide_v1_1(v1_agg: dict[str, Any] | None, v1_1_agg: dict[str, Any] | None) 
 def _profile_family_filter(families: tuple[str, ...]) -> tuple[str, ...]:
     """Return the effective family filter for an eval profile."""
     if not families:
-        return tuple()
+        return ()
     return families
 
 
@@ -1106,7 +1106,7 @@ def _compute_breakdowns(
         "base_object": "by_base_object",
     }
 
-    aggregate_scalars = {k: v for k, v in aggregates.items()}
+    aggregate_scalars = dict(aggregates.items())
 
     result: dict[str, Any] = {}
     for gk in group_keys:
@@ -1649,7 +1649,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
         try:
             import torch  # noqa: F401
         except ImportError:
-            raise RuntimeError("PyTorch is required for spritelab v2 Phase 0 eval sampling.")
+            raise RuntimeError("PyTorch is required for spritelab v2 Phase 0 eval sampling.") from None
 
         from spritelab.training.generated_qa import qa_generated_sprites
         from spritelab.training.generated_review import GeneratedReviewConfig, review_generated_sprites
@@ -1806,7 +1806,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
 
             # Review
             print("  Running review...")
-            review_result = review_generated_sprites(
+            review_generated_sprites(
                 GeneratedReviewConfig(
                     generated_dir=cell_dir,
                     out_dir=cell_dir / "review",
@@ -1817,7 +1817,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
 
             # Prompt faithfulness
             print("  Running prompt faithfulness...")
-            faith_report = run_prompt_faithfulness(
+            run_prompt_faithfulness(
                 PromptFaithfulnessConfig(
                     generated=cell_dir,
                     prompts=prompts_path,
@@ -1850,7 +1850,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
 
     # Decision (need v1_agg/v11_agg for profile decision too)
     v1_cells = [m for m in all_metrics if _base_mode(m.mode) == "preset_v1"]
-    v11_cells = [m for m in all_metrics if _base_mode(m.mode) == "preset_v1_1"]
+    [m for m in all_metrics if _base_mode(m.mode) == "preset_v1_1"]
     v1_agg = aggregates.get("preset_v1")
     v11_agg = aggregates.get("preset_v1_1")
 

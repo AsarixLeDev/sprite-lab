@@ -81,15 +81,15 @@ def _build_dataset(
 
 
 def _review_config(dataset: Path, manifest: Path, out: Path, **overrides) -> PaletteSwapReviewConfig:
-    params = dict(
-        dataset_dir=dataset,
-        training_manifest=manifest,
-        out_dir=out,
-        seed=20260706,
-        max_samples=8,
-        palette_swap_prob=1.0,
-        palette_swap_families="red,blue,green,yellow,purple",
-    )
+    params = {
+        "dataset_dir": dataset,
+        "training_manifest": manifest,
+        "out_dir": out,
+        "seed": 20260706,
+        "max_samples": 8,
+        "palette_swap_prob": 1.0,
+        "palette_swap_families": "red,blue,green,yellow,purple",
+    }
     params.update(overrides)
     return PaletteSwapReviewConfig(**params)
 

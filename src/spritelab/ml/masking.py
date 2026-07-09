@@ -55,7 +55,7 @@ def _mask_opaque_fraction(sample: dict[str, Any], fraction: float, mask_token: i
     masked = torch.zeros_like(opaque)
     count = opaque_positions.shape[0]
     if count:
-        num_masked = int(round(fraction * count))
+        num_masked = round(fraction * count)
         num_masked = max(0, min(count, num_masked))
         if num_masked:
             generator = _sample_seed_generator(seed, sample)

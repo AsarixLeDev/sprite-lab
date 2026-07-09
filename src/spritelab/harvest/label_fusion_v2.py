@@ -178,11 +178,11 @@ def fuse_label_v2(
     visual_facts: VisualFacts | None,
     *,
     profile: SourceProfile,
-    thresholds: FusionThresholds = FusionThresholds(),
+    thresholds: FusionThresholds = FusionThresholds(),  # noqa: B008
 ) -> SafeFusedLabel:
     """Fuse filename and VLM suggestions without letting VLM override trusted metadata."""
 
-    filename = filename if filename and filename.object_name else filename
+    filename = filename if filename and filename.object_name else None
     vlm = vlm if vlm and _has_signal(vlm) else None
     flags: list[str] = []
     conflict_reasons: list[str] = []

@@ -108,7 +108,7 @@ def test_dedupe_report_records_load_errors_and_can_fail_fast(tmp_path: Path) -> 
     assert report.summary.failed_records == 1
     assert report.failed[0].id == "broken"
 
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         create_dedupe_report(
             DedupeReportOptions(
                 dataset_path=dataset_dir,

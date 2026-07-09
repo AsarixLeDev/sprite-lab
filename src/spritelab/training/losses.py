@@ -19,7 +19,7 @@ def _require_torch() -> Any:
 
 
 def _masked_cross_entropy(logits: Any, targets: Any, mask: Any) -> Any:
-    th, nn_mod = _require_torch()
+    _th, nn_mod = _require_torch()
     mask = mask.bool()
     if not bool(mask.any()):
         return logits.sum() * 0.0

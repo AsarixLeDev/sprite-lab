@@ -91,8 +91,8 @@ def _assign_groups(
     if len(group_ids) == 2:
         return [group_ids[0]], [group_ids[1]], []
 
-    target_train = int(round(total_count * train_fraction))
-    target_val = int(round(total_count * val_fraction))
+    target_train = round(total_count * train_fraction)
+    target_val = round(total_count * val_fraction)
     target_test = total_count - target_train - target_val
 
     target_train = min(max(1, target_train), total_count - 2)

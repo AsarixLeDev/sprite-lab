@@ -765,7 +765,7 @@ def _write_duplicate_groups_file(path: Path, groups: list[DuplicateGroup]) -> No
     for group in groups:
         lines.append(f"# {group.kind} {group.key}")
         lines.append(f"splits: {', '.join(group.splits) if group.splits else 'none'}")
-        for sprite_id, bundle_dir in zip(group.ids, group.bundle_dirs):
+        for sprite_id, bundle_dir in zip(group.ids, group.bundle_dirs, strict=False):
             lines.append(f"{sprite_id}\t{bundle_dir}")
         lines.append("")
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -778,7 +778,7 @@ def _write_near_groups_file(path: Path, groups: list[NearDuplicateGroup]) -> Non
     for group in groups:
         lines.append(f"# {group.kind} max_distance={group.max_distance}")
         lines.append(f"splits: {', '.join(group.splits) if group.splits else 'none'}")
-        for sprite_id, bundle_dir in zip(group.ids, group.bundle_dirs):
+        for sprite_id, bundle_dir in zip(group.ids, group.bundle_dirs, strict=False):
             lines.append(f"{sprite_id}\t{bundle_dir}")
         for pair in group.pairs:
             lines.append(f"pair\t{pair['a']}\t{pair['b']}\tdistance={pair['distance']}")

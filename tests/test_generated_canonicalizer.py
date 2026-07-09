@@ -51,7 +51,7 @@ def test_hard_alpha_contains_only_zero_or_one_and_transparent_index_zero() -> No
     rgba = _rgba_hwc((0.5, 0.25, 0.0), alpha=1.0)
     rgba[:8, :8, 3] = 0.25
     sprite = canonicalize_generated_rgba(rgba, alpha_threshold=0.5)
-    assert set(float(value) for value in np.unique(sprite.rgba_hard[..., 3])) <= {0.0, 1.0}
+    assert {float(value) for value in np.unique(sprite.rgba_hard[..., 3])} <= {0.0, 1.0}
     assert np.all(sprite.index_map[:8, :8] == 0)
     assert np.allclose(sprite.rgba_hard[:8, :8, :3], 0.0)
 

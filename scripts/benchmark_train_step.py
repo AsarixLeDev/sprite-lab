@@ -146,8 +146,7 @@ def _build_loader(train_dataset: Any, *, batch_size: int, num_workers: int, devi
 
 def _infinite_batches(loader: Any):
     while True:
-        for batch in loader:
-            yield batch
+        yield from loader
 
 
 def _init_ema_fast(model: RectifiedFlowUNet) -> dict[str, Any]:
@@ -172,7 +171,7 @@ def _update_ema_fast(cache: dict[str, Any], decay: float) -> None:
         if cache["ema_float"]:
             torch._foreach_mul_(cache["ema_float"], clipped)
             torch._foreach_add_(cache["ema_float"], cache["src_float"], alpha=1.0 - clipped)
-        for key, source in zip(cache["nonfloat_keys"], cache["nonfloat_src"]):
+        for key, source in zip(cache["nonfloat_keys"], cache["nonfloat_src"], strict=False):
             cache["state"][key].copy_(source)
 
 
@@ -219,7 +218,7 @@ def _run_variant(
     model.train()
 
     def step_once() -> None:
-        batch = move_batch_to_device(next(batches), device, non_blocking=non_blocking)
+        batch = move_batch_to_device(next(batches), device, non_blocking=non_blocking)  # noqa: F821
         with amp_autocast(device, config.amp):
             losses = rectified_flow_loss(
                 model,

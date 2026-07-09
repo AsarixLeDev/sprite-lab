@@ -78,7 +78,7 @@ def main() -> None:
     quality_dir = demo_root / "quality"
 
     write_demo_inputs(raw_dir)
-    manifest = ingest_clean_png_folder(
+    ingest_clean_png_folder(
         IngestOptions(
             input_dir=raw_dir,
             output_dir=dataset_dir,

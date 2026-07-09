@@ -278,7 +278,6 @@ def _build_category_color_grid(
     for cat in categories:
         cat_colors = _color_for_category(cat, colors, rng.randint(0, 2**31 - 1), count=6)
         for color in cat_colors[:rows_per_cat]:
-            obj = cat  # use category as object placeholder
             prompt_id = f"eval_catcolor_{_safe_name(cat)}_{_safe_name(color)}"
             prompt = f"{color} {cat.replace('_', ' ')} 32x32 pixel art icon"
             rows.append(
@@ -303,7 +302,7 @@ def _build_object_color_pairs(
     rows: list[dict[str, Any]] = []
     objects = vocab["objects"]
     colors = vocab["colors"] or list(DEFAULT_COLORS)
-    seen_pairs = vocab.get("seen_object_color_pairs", set())
+    vocab.get("seen_object_color_pairs", set())
     category_objects = vocab.get("category_objects", {})
 
     # Prefer objects that come from diverse categories

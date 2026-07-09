@@ -115,7 +115,7 @@ def test_qwen_batch_merges_suggestions(tmp_path):
     backend = _FakeBackend()
     updated = batch_prefill_with_qwen(harvested, QwenBatchPrefillConfig(enabled=True), backend=backend)
     assert backend.calls == len(harvested)
-    for before, after in zip(harvested, updated):
+    for before, after in zip(harvested, updated, strict=False):
         assert "qwen_tag" in after.final_item.tags
         assert after.final_item.license == before.final_item.license
         assert after.final_item.status == before.final_item.status

@@ -635,15 +635,15 @@ def _center_for_cluster(
 
 def _compact_clusters(unique: np.ndarray, counts: np.ndarray, labels: np.ndarray) -> np.ndarray:
     centers = _centers_for_labels(unique, counts, labels)
-    old_ids = sorted(set(int(label) for label in labels))
+    old_ids = sorted({int(label) for label in labels})
     old_centers = {old_id: _center_for_cluster(unique, counts, labels, old_id, centers) for old_id in old_ids}
     ordered = sorted(
         old_ids,
         key=lambda old_id: (
             -sum(int(count) for label, count in zip(labels, counts, strict=False) if int(label) == old_id),
-            int(round(float(old_centers[old_id][0]))),
-            int(round(float(old_centers[old_id][1]))),
-            int(round(float(old_centers[old_id][2]))),
+            round(float(old_centers[old_id][0])),
+            round(float(old_centers[old_id][1])),
+            round(float(old_centers[old_id][2])),
             old_id,
         ),
     )
@@ -653,7 +653,7 @@ def _compact_clusters(unique: np.ndarray, counts: np.ndarray, labels: np.ndarray
 
 def _centers_for_labels(unique: np.ndarray, counts: np.ndarray, labels: np.ndarray) -> np.ndarray:
     centers: list[np.ndarray] = []
-    for cluster_id in sorted(set(int(label) for label in labels)):
+    for cluster_id in sorted({int(label) for label in labels}):
         mask = labels == cluster_id
         centers.append(np.average(unique[mask].astype(np.float64), axis=0, weights=counts[mask].astype(np.float64)))
     return np.stack(centers, axis=0) if centers else np.zeros((0, 3), dtype=np.float64)
@@ -1111,7 +1111,7 @@ def _visible_mask(rgba: np.ndarray, *, alpha_threshold: float) -> np.ndarray:
 
 
 def _alpha_threshold_byte(alpha_threshold: float) -> int:
-    return int(math.ceil(float(alpha_threshold) * 255.0))
+    return math.ceil(float(alpha_threshold) * 255.0)
 
 
 def _destructiveness_label(rgb_mae_visible: float) -> str:

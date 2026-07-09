@@ -98,7 +98,7 @@ class PromptSensitivityConfig:
 
 
 def run_prompt_sensitivity(config: PromptSensitivityConfig) -> dict[str, Any]:
-    th = _require_torch()
+    _require_torch()
     started = time.perf_counter()
     out_dir = Path(config.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -364,7 +364,7 @@ def discover_prompt_pairs(records: Sequence[Mapping[str, Any]], *, max_pairs: in
             skeleton = tuple(token for token in tokens if token not in token_set)
             if skeleton:
                 groups.setdefault(skeleton, []).append(record)
-        for skeleton, group in sorted(groups.items(), key=lambda item: (item[0], len(item[1]))):
+        for _, group in sorted(groups.items(), key=lambda item: (item[0], len(item[1]))):
             ordered = sorted(group, key=lambda record: str(record.get("prompt", "")))
             for a, b in itertools.combinations(ordered, 2):
                 a_tokens = _prompt_tokens(a.get("prompt", ""))
@@ -789,7 +789,7 @@ def _rgb_histogram(rgba: np.ndarray) -> np.ndarray:
 def _single_token_family_change(left: Sequence[str], right: Sequence[str], family: set[str]) -> bool:
     if len(left) != len(right):
         return False
-    diffs = [(a, b) for a, b in zip(left, right) if a != b]
+    diffs = [(a, b) for a, b in zip(left, right, strict=False) if a != b]
     return len(diffs) == 1 and diffs[0][0] in family and diffs[0][1] in family
 
 

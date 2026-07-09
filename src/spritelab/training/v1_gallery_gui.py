@@ -88,7 +88,7 @@ def launch_v1_gallery_gui(
         batch_size_value: float,
         num_samples_value: float | None,
         contact_columns_value: float,
-        progress: Any = gr.Progress(track_tqdm=False),
+        progress: Any = gr.Progress(track_tqdm=False),  # noqa: B008
     ) -> tuple[str, list[str], list[tuple[str, str]], str]:
         checkpoint = _resolve_v1_checkpoint(Path(checkpoint_value.strip() or str(DEFAULT_V1_CHECKPOINT)))
         if not checkpoint.is_file():

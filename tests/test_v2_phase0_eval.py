@@ -167,8 +167,8 @@ def test_build_run_plan_v1_and_v1_1_create_distinct_cells() -> None:
     )
     cells = build_run_plan(config)
     assert len(cells) == 2
-    v1_cell = [c for c in cells if c.export_preset == "v1"][0]
-    v11_cell = [c for c in cells if c.export_preset == "v1.1"][0]
+    v1_cell = next(c for c in cells if c.export_preset == "v1")
+    v11_cell = next(c for c in cells if c.export_preset == "v1.1")
     assert v1_cell.factored_cfg is False
     assert v11_cell.factored_cfg is True
     assert v1_cell.mode != v11_cell.mode  # distinct mode names
@@ -213,7 +213,7 @@ def test_build_run_plan_with_factored_grid() -> None:
         checkpoint=Path("ckpt.pt"),
         prompts=Path("p.jsonl"),
         dataset=Path("ds"),
-        presets=tuple(),
+        presets=(),
         seeds=(20260723,),
         factored_grid="base=2.5;color=3.0",
     )

@@ -94,7 +94,7 @@ def export_training_dataset(config: TrainingExportConfig) -> TrainingExportResul
             messages.append(f"{sprite_id}: {joined}")
         raise ValueError("bundle ID collision detected: " + "; ".join(messages))
     latest = load_latest_curation(config.curation_path)
-    curation_summary = summarize_curation(latest)
+    summarize_curation(latest)
     accepted_ids = tuple(sorted(sprite_id for sprite_id, decision in latest.items() if decision.status == "accepted"))
     missing_accepted = [sprite_id for sprite_id in accepted_ids if sprite_id not in bundle_ids]
     if missing_accepted:

@@ -155,7 +155,7 @@ class SpriteCondAutoencoder(_ModuleBase):
         return outputs
 
     def _mean_pool_tokens(self, tokens: Any) -> Any:
-        th, _nn_mod = _require_torch()
+        _th, _nn_mod = _require_torch()
         token_ids = tokens.long().clamp(min=0, max=self.vocab_size - 1)
         embedded = self.text_embedding(token_ids)
         mask = token_ids.ne(self.pad_token_id).float().unsqueeze(-1)

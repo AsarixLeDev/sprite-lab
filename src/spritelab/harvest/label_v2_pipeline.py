@@ -20,7 +20,7 @@ from spritelab.harvest.label_dedupe import duplicate_metadata_for_member, group_
 from spritelab.harvest.label_fusion_v2 import FusionThresholds, fuse_label_v2
 from spritelab.harvest.label_schema import LabelSuggestion, label_suggestion_from_json, label_suggestion_to_json
 from spritelab.harvest.label_taxonomy import normalize_tags
-from spritelab.harvest.source_profiles import source_profile_to_json
+from spritelab.harvest.source_profiles import SourceProfile, source_profile_to_json
 from spritelab.harvest.visual_facts import extract_visual_facts_from_png, visual_facts_to_json
 
 LABEL_V2_SUGGESTIONS = "label_v2_suggestions.jsonl"

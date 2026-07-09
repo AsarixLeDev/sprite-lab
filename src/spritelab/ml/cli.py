@@ -54,7 +54,7 @@ def _run_validate_dataset(parsed: argparse.Namespace) -> None:
         dataset = SpriteBundleDataset(parsed.dataset, parsed.split, validate=True)
     except (FileNotFoundError, ValueError) as exc:
         print(f"INVALID: {exc}")
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
 
     print(f"Dataset: {parsed.dataset}")
     print(f"Split: {parsed.split}")

@@ -92,7 +92,7 @@ def framing_regularization_loss(
     alpha_prob = th.sigmoid(outputs["alpha_logits"].float())
     if alpha_prob.ndim != 4 or alpha_prob.shape[1] != 1:
         raise ValueError(f"alpha_logits must have shape [B, 1, H, W], got {tuple(alpha_prob.shape)}")
-    batch_size, _channels, height, width = alpha_prob.shape
+    _batch_size, _channels, height, width = alpha_prob.shape
     device = alpha_prob.device
     total = alpha_prob.sum() * 0.0
     result: dict[str, Any] = {}

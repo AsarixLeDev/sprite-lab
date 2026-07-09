@@ -23,7 +23,7 @@ def test_slot_feature_spatial_and_local_values_are_sane() -> None:
     bundle = make_role_demo_bundle()
 
     features = compute_palette_slot_role_features(bundle.palette, bundle.index_map, bundle.alpha)
-    outline = features[1]
+    features[1]
     fill = features[2]
     detail = features[5]
 

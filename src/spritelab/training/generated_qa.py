@@ -237,7 +237,7 @@ def _check_png_size(path: Path, result: GeneratedQAResult, label: str) -> Image.
 
 def _check_hard_alpha(image: Image.Image, result: GeneratedQAResult, sample_id: str) -> None:
     alpha = np.asarray(image.convert("RGBA"))[..., 3]
-    values = set(int(value) for value in np.unique(alpha))
+    values = {int(value) for value in np.unique(alpha)}
     if not values <= {0, 255}:
         result.add_error(f"{sample_id}: hard_rgba alpha contains non-hard values {sorted(values)}")
 

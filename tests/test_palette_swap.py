@@ -405,8 +405,8 @@ def test_inactive_config_is_noop() -> None:
 
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
-from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch  # noqa: E402
-from spritelab.training.structured_conditioning import (  # noqa: E402
+from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch
+from spritelab.training.structured_conditioning import (
     build_structured_conditioning_vocab,
 )
 

@@ -227,7 +227,6 @@ RPG_496_CANDIDATES: dict[str, tuple[str, ...]] = {
     "yellow": ("yellow_potion", "yellow_vial", "potion", "vial", "bottle"),
     "pink": ("pink_vial", "pink_potion", "potion", "vial", "bottle"),
     "white": ("white_vial", "white_potion", "potion", "vial", "bottle"),
-    "orange": ("orange_potion", "orange_bottle", "potion", "bottle", "vial"),
     "purple": ("purple_vial", "purple_potion", "potion", "vial", "bottle"),
     "medicine": ("medicine", "medicine_bottle", "bottle", "vial", "flask"),
     "antidote": ("antidote", "antidote_vial", "vial", "potion", "bottle"),

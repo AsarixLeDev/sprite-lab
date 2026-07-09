@@ -209,7 +209,7 @@ def batch_prefill_with_qwen(
         if member_index != group.representative_index
     ]
     if member_tasks:
-        by_member = {member_index: group for member_index, group in member_tasks}
+        by_member = dict(member_tasks)
         _apply_indexed(
             results,
             [member_index for member_index, _ in member_tasks],

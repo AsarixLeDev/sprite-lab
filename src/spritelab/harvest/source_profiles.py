@@ -132,7 +132,7 @@ def detect_source_profile(record: Mapping[str, Any]) -> SourceProfile:
         normalize_tag(str(record.get(key, "")))
         for key in ("source_id", "source_name", "relative_path", "final_png_path")
     )
-    tokens = set(token for token in haystack.replace("\\", "_").replace("/", "_").split("_") if token)
+    tokens = {token for token in haystack.replace("\\", "_").replace("/", "_").split("_") if token}
 
     source_id = normalize_tag(str(record.get("source_id", "")))
     source_name = normalize_tag(str(record.get("source_name", "")))

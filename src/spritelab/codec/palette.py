@@ -58,7 +58,7 @@ def extract_exact_palette(
             "Quantization is not implemented in this strict encoder."
         )
 
-    rows = [DEFAULT_TRANSPARENT_RGB] + visible_colors
+    rows = [DEFAULT_TRANSPARENT_RGB, *visible_colors]
     return np.array(rows, dtype=np.uint8)
 
 

@@ -73,7 +73,7 @@ def test_quality_report_fail_on_load_error(tmp_path: Path) -> None:
         dataset_dir / "manifest.json",
     )
 
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         create_quality_report(
             QualityReportOptions(
                 dataset_path=dataset_dir,

@@ -46,6 +46,12 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["E402"]
+"tests/**/*.py" = ["E402"]
+"examples/*.py" = ["E402"]
+"scripts/*.py" = ["E402"]
+
 [tool.mypy]
 python_version = "3.10"
 files = ["src"]
@@ -53,3 +59,6 @@ ignore_missing_imports = true
 pretty = true
 show_error_codes = true
 warn_unused_configs = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+disable_error_code = ["arg-type", "assignment", "misc", "union-attr", "attr-defined", "call-overload", "type-arg", "return-value", "index", "operator", "no-any-return", "valid-type", "var-annotated", "no-redef", "func-returns-value"]

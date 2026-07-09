@@ -15,7 +15,7 @@ def test_build_multisource_selects_only_atomic_ready_and_passes_qa(tmp_path: Pat
     atomic = _write_ready_dataset(datasets / "atomic_pack_label_v2_semantic_v3")
     aggregate = _write_ready_dataset(datasets / "sprite_lab_multisource_v9")
     (aggregate / "merge_report.json").write_text(json.dumps({"total_records": 1}), encoding="utf-8")
-    legacy = _write_ready_dataset(datasets / "legacy_pack")
+    _write_ready_dataset(datasets / "legacy_pack")
 
     selected, excluded = select_atomic_ready_datasets(datasets, only_atomic_ready=True)
     assert selected == [atomic]

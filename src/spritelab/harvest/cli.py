@@ -626,7 +626,7 @@ def _run_qwen_prefill(parsed: argparse.Namespace) -> None:
     from spritelab.harvest.catalog import append_harvest_event, write_imported_jsonl, write_jsonl
 
     run_dir = Path(parsed.run)
-    sources, harvested = _rehydrate_run(run_dir)
+    _, harvested = _rehydrate_run(run_dir)
     config = QwenBatchPrefillConfig(
         enabled=True,
         model=parsed.model,
@@ -743,7 +743,7 @@ def _run_prefill_review(parsed: argparse.Namespace) -> None:
         if "requires gradio" not in str(exc):
             raise
         print(str(exc))
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
 
 
 def _run_fuse_prefill(parsed: argparse.Namespace) -> None:
@@ -1077,7 +1077,7 @@ def _run_golden_label(parsed: argparse.Namespace) -> None:
         if "requires gradio" not in str(exc):
             raise
         print(str(exc))
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
 
 
 def _run_golden_prefill_v2(parsed: argparse.Namespace) -> None:
@@ -1165,7 +1165,7 @@ def _run_assisted_golden(parsed: argparse.Namespace) -> None:
         if "requires gradio" not in str(exc):
             raise
         print(str(exc))
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
 
 
 def _run_prefill_eval(parsed: argparse.Namespace) -> None:
@@ -1495,7 +1495,6 @@ def _run_build_semantic_dataset(parsed: argparse.Namespace) -> None:
     from spritelab.harvest.build_semantic_dataset import (
         BuildError,
         build_semantic_dataset,
-        format_build_report,
     )
 
     try:
@@ -1514,16 +1513,14 @@ def _run_build_semantic_dataset(parsed: argparse.Namespace) -> None:
         )
     except BuildError as exc:
         print(f"Build failed: {exc}")
-        raise SystemExit(1)
-
-    print(format_build_report(report), end="")
+        raise SystemExit(1) from exc
     print(f"\nOutput: {report.output_dir}")
     if not report.ok:
         raise SystemExit(1)
 
 
 def _run_merge_datasets(parsed: argparse.Namespace) -> None:
-    from spritelab.harvest.merge_datasets import MergeError, format_merge_report, merge_datasets
+    from spritelab.harvest.merge_datasets import MergeError, merge_datasets
 
     try:
         result = merge_datasets(
@@ -1536,9 +1533,7 @@ def _run_merge_datasets(parsed: argparse.Namespace) -> None:
         )
     except MergeError as exc:
         print(f"Merge failed: {exc}")
-        raise SystemExit(1)
-
-    print(format_merge_report(result), end="")
+        raise SystemExit(1) from exc
     print(f"\nOutput: {result.output_dir}")
     print(f"Total records: {result.total_records}")
     print("Splits: " + " ".join(f"{s}={result.split_counts.get(s, 0)}" for s in ("train", "val", "test")))
@@ -1550,7 +1545,6 @@ def _run_build_multisource(parsed: argparse.Namespace) -> None:
     from spritelab.harvest.build_multisource import (
         BuildMultisourceError,
         build_multisource_dataset,
-        format_build_multisource_report,
     )
 
     try:
@@ -1567,9 +1561,7 @@ def _run_build_multisource(parsed: argparse.Namespace) -> None:
         )
     except BuildMultisourceError as exc:
         print(f"Build multisource failed: {exc}")
-        raise SystemExit(1)
-
-    print(format_build_multisource_report(report), end="")
+        raise SystemExit(1) from exc
     print(f"\nOutput: {report.output_dir}")
     print(f"Total records: {report.total_records}")
     if not report.ok:
@@ -1597,7 +1589,7 @@ def _run_export(parsed: argparse.Namespace) -> None:
         )
     except ValueError as exc:
         print(f"Export blocked: {exc}")
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
     append_harvest_event(run_dir, "export", {"dataset": str(result.output_dir)})
     print(f"Output: {result.output_dir}")
     print(f"Train: {result.train_count}")
@@ -1621,7 +1613,7 @@ def _run_gui(parsed: argparse.Namespace) -> None:
         if "requires gradio" not in str(exc):
             raise
         print(str(exc))
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
 
 
 def _rehydrate_run(run_dir: Path):

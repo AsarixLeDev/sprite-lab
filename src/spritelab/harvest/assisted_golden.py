@@ -543,13 +543,13 @@ def _changed_fields(
         corrections.append("category")
     if object_name != str(prefill.get("object_name", "")):
         corrections.append("object_name")
-    if set(tags) != set(tuple(prefill.get("tags") or ())):
+    if set(tags) != set(prefill.get("tags") or ()):
         corrections.append("tags")
     if short_description != str(prefill.get("short_description", "")):
         corrections.append("short_description")
-    if set(materials) != set(tuple(prefill.get("materials") or ())):
+    if set(materials) != set(prefill.get("materials") or ()):
         corrections.append("materials")
-    if set(mood) != set(tuple(prefill.get("mood") or ())):
+    if set(mood) != set(prefill.get("mood") or ()):
         corrections.append("mood")
     return corrections
 

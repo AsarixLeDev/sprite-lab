@@ -842,7 +842,7 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
 
 def decide_full_v4_challenger_audit(sections: Mapping[str, Any]) -> dict[str, Any]:
     warnings: list[dict[str, Any]] = []
-    training = _section(sections, "training")
+    _section(sections, "training")
     qa = _section(sections, "generated_qa")
     review = _section(sections, "generated_review")
     faithfulness = _section(sections, "prompt_faithfulness")

@@ -72,7 +72,7 @@ def sparkline(values: list[float], *, width: int = 24, ascii_only: bool = False)
         if span <= 0:
             idx = len(ramp) - 1
         else:
-            idx = int(round((value - lo) / span * (len(ramp) - 1)))
+            idx = round((value - lo) / span * (len(ramp) - 1))
         out.append(ramp[max(0, min(len(ramp) - 1, idx))])
     return "".join(out)
 
@@ -176,7 +176,7 @@ class StepProgressBar:
         if not self.total:
             return ""
         frac = max(0.0, min(1.0, step / self.total))
-        filled = int(round(frac * self.bar_width))
+        filled = round(frac * self.bar_width)
         if self._unicode:
             bar = "█" * filled + "░" * (self.bar_width - filled)
         else:
@@ -211,8 +211,8 @@ class StepProgressBar:
         loss = final_loss if final_loss is not None else self.ema_loss
         summary = (
             f"{self.desc} done | {self.total} steps | "
-            f"final loss {('%.4f' % loss) if loss is not None else 'n/a'} | "
-            f"best {('%.4f' % self.best_loss) if self.best_loss is not None else 'n/a'} | "
+            f"final loss {(f'{loss:.4f}') if loss is not None else 'n/a'} | "
+            f"best {(f'{self.best_loss:.4f}') if self.best_loss is not None else 'n/a'} | "
             f"{format_duration(elapsed)} | {(rate or 0.0):.1f} it/s"
         )
         if self._is_tty and self._line_len:

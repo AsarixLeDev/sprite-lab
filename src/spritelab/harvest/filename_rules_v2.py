@@ -626,7 +626,6 @@ def _alias_object(name: str) -> str:
         "case": "tool_case",
         "triangle_ruler": "ruler_triangle",
         "triangular_ruler": "ruler_triangle",
-        "wire_snips": "wiresnips",
         "wire_snip": "wiresnips",
         "secateurs": "secateur",
         "amethist": "amethyst",

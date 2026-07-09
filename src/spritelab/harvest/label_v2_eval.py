@@ -437,7 +437,7 @@ def _record_with_threshold_bucket(
     vlm = record.get("vlm_suggestion") or record.get("vlm_descriptor") or record.get("qwen_suggestion") or {}
     filename_conf = _confidence(filename)
     vlm_conf = _confidence(vlm)
-    flags = set(str(flag) for flag in quality.get("flags") or record.get("flags") or ())
+    flags = {str(flag) for flag in quality.get("flags") or record.get("flags") or ()}
     if "vlm_conflicts_with_filename" in flags and conflict_policy == "review_conflicts":
         bucket = "needs_review"
         quality["needs_review"] = True

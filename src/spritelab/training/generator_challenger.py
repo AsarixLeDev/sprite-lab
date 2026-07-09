@@ -442,7 +442,7 @@ class RectifiedFlowUNet(_ModuleBase):
         return self.time_mlp(time_emb) + cond
 
     def _mean_pool_tokens(self, tokens: Any) -> Any:
-        th, _nn_mod = _require_torch()
+        _th, _nn_mod = _require_torch()
         token_ids = tokens.long().clamp(min=0, max=self.vocab_size - 1)
         embedded = self.token_embedding(token_ids)
         mask = token_ids.ne(self.pad_token_id).float().unsqueeze(-1)
@@ -2044,7 +2044,7 @@ def _update_ema_state_fast(cache: dict[str, Any], *, decay: float) -> None:
         if cache["ema_float"]:
             th._foreach_mul_(cache["ema_float"], clipped_decay)
             th._foreach_add_(cache["ema_float"], cache["src_float"], alpha=1.0 - clipped_decay)
-        for target, source in zip(cache["ema_nonfloat"], cache["src_nonfloat"]):
+        for target, source in zip(cache["ema_nonfloat"], cache["src_nonfloat"], strict=False):
             target.copy_(source)
 
 
@@ -2228,7 +2228,7 @@ def _normalize_structured_vocab_sizes(value: Mapping[str, int] | None) -> dict[s
         "style_vocab_size",
     )
     result = {key: max(1, int(value.get(key) or 0)) for key in keys}
-    return result if any(size > 1 for size in result.values()) else result
+    return result
 
 
 def _structured_conditioning_from_batch(batch: Mapping[str, Any]) -> dict[str, Any] | None:

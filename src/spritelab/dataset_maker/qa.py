@@ -706,7 +706,7 @@ def _check_splits(
 
     total = sum(len(manifests.get(split, [])) for split in SPLIT_NAMES)
     fractions = {split: (len(manifests.get(split, [])) / total if total else 0.0) for split in SPLIT_NAMES}
-    expected = dict(zip(SPLIT_NAMES, expected_fractions))
+    expected = dict(zip(SPLIT_NAMES, expected_fractions, strict=False))
     ratio_warnings: list[str] = []
     tolerance = 0.08
     if total >= 20:

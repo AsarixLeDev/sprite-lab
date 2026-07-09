@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -145,7 +146,7 @@ def _calibration(pairs: Sequence[tuple[GoldenLabel, Mapping[str, Any]]]) -> dict
     edges = CALIBRATION_BIN_EDGES
     counted = 0
     ece_total = 0.0
-    for low, high in zip(edges, edges[1:]):
+    for low, high in itertools.pairwise(edges):
         members = []
         for label, suggestion in pairs:
             confidence = _confidence(suggestion)

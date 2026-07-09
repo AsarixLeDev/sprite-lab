@@ -87,7 +87,7 @@ def _parse_dropout_rates(raw: str | None) -> dict[str, float] | None:
         try:
             rate = float(rate_str)
         except ValueError:
-            raise ValueError(f"Invalid dropout rate {rate_str!r} for group {group!r}.")
+            raise ValueError(f"Invalid dropout rate {rate_str!r} for group {group!r}.") from None
         if rate < 0.0 or rate > 1.0:
             raise ValueError(f"Dropout rate for {group!r} must be in [0, 1], got {rate}.")
         result[group] = rate
@@ -1592,7 +1592,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 if "requires gradio" not in str(exc):
                     raise
                 print(str(exc))
-                raise SystemExit(1)
+                raise SystemExit(1) from exc
         elif parsed.subcommand == "run-v2-phase0-eval":
             from spritelab.training.v2_phase0_eval import (
                 V2Phase0EvalConfig,
@@ -1716,4 +1716,4 @@ def main(argv: Sequence[str] | None = None) -> None:
         if "PyTorch is required" not in str(exc):
             raise
         print(str(exc))
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
