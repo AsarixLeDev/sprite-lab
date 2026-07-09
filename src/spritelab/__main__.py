@@ -6,11 +6,18 @@ import sys
 from collections.abc import Sequence
 
 
+def _usage() -> str:
+    return "Usage: spritelab <curation|training|train|dataset-maker|harvest|ml> ..."
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args:
-        print("Usage: python -m spritelab <curation|training|train|dataset-maker|harvest|ml> ...")
+        print(_usage())
         raise SystemExit(2)
+    if args[0] in {"-h", "--help"}:
+        print(_usage())
+        raise SystemExit(0)
 
     command = args[0]
     if command == "curation":

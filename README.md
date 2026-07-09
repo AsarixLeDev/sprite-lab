@@ -14,22 +14,20 @@ Build the deterministic v1 demo gallery (never trains a model):
 
 ```powershell
 cd C:\Users\Mathieu\Documents\sprite-lab
-$env:PYTHONPATH = "src"
-$py = "C:\Users\Mathieu\anaconda3\python.exe"
+python -m pip install -e ".[dev,ml,ui]"
 
-& $py -m spritelab train build-v1-gallery `
+spritelab train build-v1-gallery `
   --out experiments\v1_gallery `
   --device cuda `
   --seed 20260723 `
   --batch-size 32
 ```
 
-Or launch the local v1 gallery GUI (requires `pip install gradio`, or the `ui`
-extra: `pip install -e ".[ui]"`) to pick an output directory and preview
+Or launch the local v1 gallery GUI to pick an output directory and preview
 contact sheets interactively:
 
 ```powershell
-& $py -m spritelab train v1-gallery-gui --out experiments\v1_gallery_gui
+spritelab train v1-gallery-gui --out experiments\v1_gallery_gui
 ```
 
 See [`docs/v1_default.md`](docs/v1_default.md) for sampling custom prompts
@@ -327,13 +325,16 @@ Hash meanings:
 ## Install
 
 ```bash
-python -m pip install -e .
+python -m pip install -e ".[dev,ml,ui]"
 ```
 
 ## Run Tests
 
 ```bash
-pytest
+python -m pytest -q
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy
 ```
 
 ## Run Demo

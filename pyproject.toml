@@ -9,12 +9,20 @@ description = "Native 32x32 palette-index pixel-art generator foundations."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "numpy",
-  "Pillow",
-  "pytest",
+  "numpy>=1.26",
+  "Pillow>=10",
 ]
 
+[project.scripts]
+spritelab = "spritelab.__main__:main"
+
 [project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff==0.15.20",
+  "mypy==2.2.0",
+  "pre-commit>=3",
+]
 ui = ["gradio>=4"]
 prefill = ["requests>=2.31"]
 prefill-transformers = ["torch>=2.0", "transformers>=4.56", "accelerate>=1.0", "pillow>=10"]
@@ -28,3 +36,20 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --basetemp=.pytest_tmp_spritelab -p no:cacheprovider"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+ignore_missing_imports = true
+pretty = true
+show_error_codes = true
+warn_unused_configs = true
