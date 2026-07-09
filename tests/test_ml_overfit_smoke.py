@@ -9,7 +9,6 @@ import pytest
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from _ml_testdata import write_synthetic_dataset
-
 from spritelab.codec.bundle import INDEX_MASK
 from spritelab.ml.overfit import (
     OverfitConfig,

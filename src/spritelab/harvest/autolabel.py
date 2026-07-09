@@ -91,11 +91,7 @@ def merge_auto_labels(
     category = base_item.category
     tags = list(base_item.tags)
     for suggestion in suggestions:
-        if (
-            suggestion.category != "unknown"
-            and category == "unknown"
-            and overwrite_category_if_unknown
-        ):
+        if suggestion.category != "unknown" and category == "unknown" and overwrite_category_if_unknown:
             category = suggestion.category
         for tag in suggestion.tags:
             normalized = normalize_tag(tag)
@@ -151,11 +147,11 @@ class QwenBatchPrefillConfig:
 
 
 def batch_prefill_with_qwen(
-    harvested: Sequence["HarvestedSprite"],
+    harvested: Sequence[HarvestedSprite],
     config: QwenBatchPrefillConfig,
     *,
     backend: Any | None = None,
-) -> list["HarvestedSprite"]:
+) -> list[HarvestedSprite]:
     """Run cached Qwen prefill over harvested sprites, merging safe fields only.
 
     License/author/source/status/split are never modified; the cache makes
@@ -232,7 +228,7 @@ def batch_prefill_with_qwen(
 
 
 def _prefill_groups(
-    harvested: Sequence["HarvestedSprite"],
+    harvested: Sequence[HarvestedSprite],
     selected_indices: Sequence[int],
     config: QwenBatchPrefillConfig,
 ) -> list[Any]:
@@ -250,7 +246,7 @@ def _prefill_groups(
 
 
 def _apply_indexed(
-    results: list["HarvestedSprite"],
+    results: list[HarvestedSprite],
     indices: Sequence[int],
     task: Any,
     config: QwenBatchPrefillConfig,
@@ -283,10 +279,10 @@ def _apply_indexed(
 
 
 def _prefill_harvested_sprite(
-    sprite: "HarvestedSprite",
+    sprite: HarvestedSprite,
     backend: Any,
     config: QwenBatchPrefillConfig,
-) -> "HarvestedSprite":
+) -> HarvestedSprite:
     from spritelab.codec.reconstruct import reconstruct_rgba
 
     if sprite.imported.bundle is None:
@@ -325,13 +321,13 @@ def _prefill_harvested_sprite(
 
 
 def _propagate_prefill(
-    sprite: "HarvestedSprite",
-    representative: "HarvestedSprite",
+    sprite: HarvestedSprite,
+    representative: HarvestedSprite,
     backend: Any,
     config: QwenBatchPrefillConfig,
     *,
     near: bool,
-) -> "HarvestedSprite":
+) -> HarvestedSprite:
     """Reuse the group representative's Qwen answer for a duplicate sprite."""
 
     from spritelab.codec.reconstruct import reconstruct_rgba
@@ -386,17 +382,17 @@ def _propagate_prefill(
 
 
 def _finalize_prefill(
-    sprite: "HarvestedSprite",
+    sprite: HarvestedSprite,
     qwen_dict: dict[str, Any],
     image_facts: dict[str, Any],
-    request: "PrefillRequest",
+    request: PrefillRequest,
     filename_suggestion: Any,
     filename_dict: dict[str, Any],
     backend: Any,
     config: QwenBatchPrefillConfig,
     *,
     extra_metadata: dict[str, Any] | None = None,
-) -> "HarvestedSprite":
+) -> HarvestedSprite:
     adjudication_dict = None
     if config.adjudicate and not config.include_filename_hint:
         adjudication_dict = _maybe_adjudicate(backend, request, filename_suggestion, qwen_dict, config)
@@ -411,7 +407,9 @@ def _finalize_prefill(
     # Colors come from the palette, never from the model.
     fused.fused_suggestion["dominant_colors"] = list(image_facts.get("dominant_colors") or ())
     if extra_metadata:
-        propagation_flag = "propagated_near_dup" if extra_metadata.get("prefill_propagated_near_dup") else "propagated_exact_dup"
+        propagation_flag = (
+            "propagated_near_dup" if extra_metadata.get("prefill_propagated_near_dup") else "propagated_exact_dup"
+        )
         fused.prefill_quality["flags"] = sorted({*fused.prefill_quality.get("flags", ()), propagation_flag})
     updated_item = apply_suggestion_to_item(
         sprite.final_item,
@@ -451,7 +449,7 @@ def _finalize_prefill(
 
 def _maybe_adjudicate(
     backend: Any,
-    request: "PrefillRequest",
+    request: PrefillRequest,
     filename_suggestion: Any,
     qwen_dict: dict[str, Any],
     config: QwenBatchPrefillConfig,
@@ -518,7 +516,7 @@ def _metadata_suggestion_from_dict(data: dict[str, Any]) -> MetadataSuggestion:
 
 
 def _qwen_prefill_indices(
-    harvested: Sequence["HarvestedSprite"],
+    harvested: Sequence[HarvestedSprite],
     *,
     max_items: int | None,
 ) -> list[int]:

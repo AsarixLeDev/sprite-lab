@@ -16,12 +16,26 @@ from PIL import Image
 
 from spritelab.training.framing_metrics import (
     alpha_mask_from_image as _shared_alpha_mask_from_image,
+)
+from spritelab.training.framing_metrics import (
     checkerboard_rgba as _shared_checkerboard_rgba,
+)
+from spritelab.training.framing_metrics import (
     compute_alpha_metrics as _shared_compute_alpha_metrics,
+)
+from spritelab.training.framing_metrics import (
     compute_color_metrics as _shared_compute_color_metrics,
+)
+from spritelab.training.framing_metrics import (
     compute_connected_components as _shared_compute_connected_components,
+)
+from spritelab.training.framing_metrics import (
     compute_edge_metrics as _shared_compute_edge_metrics,
+)
+from spritelab.training.framing_metrics import (
     image_to_rgba_array as _shared_image_to_rgba_array,
+)
+from spritelab.training.framing_metrics import (
     transparent_index_used as _shared_transparent_index_used,
 )
 
@@ -201,7 +215,10 @@ def warning_labels(metrics: Mapping[str, Any], *, compare_raw_indexed: bool = Fa
         warnings.append("touches_border")
     if center_offset is not None and float(center_offset) > 8.0:
         warnings.append("off_center")
-    if int(metrics.get("connected_components") or 0) >= 8 and float(metrics.get("largest_component_ratio") or 0.0) < 0.75:
+    if (
+        int(metrics.get("connected_components") or 0) >= 8
+        and float(metrics.get("largest_component_ratio") or 0.0) < 0.75
+    ):
         warnings.append("fragmented")
     if (
         alpha_coverage > 0.05
@@ -237,9 +254,13 @@ def _review_sample(
 
     sample_warnings: list[str] = []
     raw_image = _load_optional_png(raw_path, sample_id, "raw_rgba", strict=strict, errors=errors) if raw_path else None
-    hard_image = _load_optional_png(hard_path, sample_id, "hard_rgba", strict=strict, errors=errors) if hard_path else None
+    hard_image = (
+        _load_optional_png(hard_path, sample_id, "hard_rgba", strict=strict, errors=errors) if hard_path else None
+    )
     indexed_image = (
-        _load_optional_png(indexed_path, sample_id, "indexed_png", strict=strict, errors=errors) if indexed_path else None
+        _load_optional_png(indexed_path, sample_id, "indexed_png", strict=strict, errors=errors)
+        if indexed_path
+        else None
     )
 
     if compare_raw_indexed and raw_image is None:
@@ -355,7 +376,9 @@ def _resolve_generated_path(generated_dir: Path, value: str) -> Path:
     return generated_dir / Path(raw.replace("\\", "/"))
 
 
-def _load_optional_png(path: Path, sample_id: str, label: str, *, strict: bool, errors: list[str]) -> Image.Image | None:
+def _load_optional_png(
+    path: Path, sample_id: str, label: str, *, strict: bool, errors: list[str]
+) -> Image.Image | None:
     if not path.is_file():
         if strict:
             errors.append(f"{sample_id}: {label} PNG is missing: {path}")
@@ -458,7 +481,9 @@ def _write_contact_sheets(
 ) -> dict[str, Path]:
     contact_sheets: dict[str, Path] = {}
     overall = artifact_dir / "review_contact_sheet.png"
-    if _build_review_contact_sheet(generated_dir, samples, overall, compare_raw_indexed=compare_raw_indexed, max_samples=max_samples):
+    if _build_review_contact_sheet(
+        generated_dir, samples, overall, compare_raw_indexed=compare_raw_indexed, max_samples=max_samples
+    ):
         contact_sheets["overall"] = overall
 
     if group_by == "category":
@@ -619,14 +644,20 @@ def format_generated_review_markdown(report: Mapping[str, Any]) -> str:
                 + " |"
             )
     else:
-        lines.append("| all | " + str(int(overall.get("count", 0))) + " | " + " | ".join(
-            [
-                _fmt_float(overall.get("mean_alpha_coverage")),
-                _fmt_float(overall.get("mean_visible_color_count")),
-                _fmt_float(overall.get("mean_connected_components")),
-                str(int(overall.get("total_warnings", 0))),
-            ]
-        ) + " |")
+        lines.append(
+            "| all | "
+            + str(int(overall.get("count", 0)))
+            + " | "
+            + " | ".join(
+                [
+                    _fmt_float(overall.get("mean_alpha_coverage")),
+                    _fmt_float(overall.get("mean_visible_color_count")),
+                    _fmt_float(overall.get("mean_connected_components")),
+                    str(int(overall.get("total_warnings", 0))),
+                ]
+            )
+            + " |"
+        )
 
     lines.extend(
         [
@@ -637,7 +668,9 @@ def format_generated_review_markdown(report: Mapping[str, Any]) -> str:
             "|---|---|---|---|",
         ]
     )
-    worst = sorted(samples, key=lambda sample: (-len(sample.get("warnings", [])), str(sample.get("sample_id", ""))))[:10]
+    worst = sorted(samples, key=lambda sample: (-len(sample.get("warnings", [])), str(sample.get("sample_id", ""))))[
+        :10
+    ]
     if worst:
         for sample in worst:
             warnings = ", ".join(str(warning) for warning in sample.get("warnings", [])) or "(none)"
@@ -645,7 +678,7 @@ def format_generated_review_markdown(report: Mapping[str, Any]) -> str:
                 "| "
                 + " | ".join(
                     [
-                        f"`{_md_escape(str(sample.get('sample_id', '')) )}`",
+                        f"`{_md_escape(str(sample.get('sample_id', '')))}`",
                         _md_escape(_shorten(str(sample.get("prompt", "")), 72)),
                         _md_escape(str(sample.get("category", ""))),
                         _md_escape(warnings),
@@ -689,17 +722,27 @@ def _recommendations(report: Mapping[str, Any]) -> list[str]:
     recs: list[str] = []
 
     if int(warning_counts.get("fragmented", 0)) / sample_count >= 0.25:
-        recs.append("Many samples are fragmented; later model work should consider stronger alpha/silhouette loss or connectedness regularization.")
+        recs.append(
+            "Many samples are fragmented; later model work should consider stronger alpha/silhouette loss or connectedness regularization."
+        )
     if int(warning_counts.get("empty_or_nearly_empty", 0)) / sample_count >= 0.20:
         recs.append("Many samples are empty or nearly empty; later training should consider positive-alpha weighting.")
     if int(warning_counts.get("too_full_canvas", 0)) / sample_count >= 0.20:
-        recs.append("Many samples fill too much canvas; later training should strengthen framing and background separation.")
+        recs.append(
+            "Many samples fill too much canvas; later training should strengthen framing and background separation."
+        )
     if int(warning_counts.get("touches_border", 0)) / sample_count >= 0.30:
-        recs.append("Many samples touch the canvas border; later training or sampling should improve icon framing and sprite margins.")
+        recs.append(
+            "Many samples touch the canvas border; later training or sampling should improve icon framing and sprite margins."
+        )
     if int(warning_counts.get("quantization_destructive", 0)) / sample_count >= 0.10:
-        recs.append("Raw-vs-indexed differences are high; later training should consider quantization-aware or palette-aware losses.")
+        recs.append(
+            "Raw-vs-indexed differences are high; later training should consider quantization-aware or palette-aware losses."
+        )
     if int(warning_counts.get("too_many_rare_colors", 0)) / sample_count >= 0.25:
-        recs.append("Many samples contain rare colors; later training should reduce chroma noise or use palette-aware output constraints.")
+        recs.append(
+            "Many samples contain rare colors; later training should reduce chroma noise or use palette-aware output constraints."
+        )
 
     if groups and "seen_object" in groups:
         seen = groups.get("seen_object")
@@ -711,7 +754,9 @@ def _recommendations(report: Mapping[str, Any]) -> list[str]:
             unseen_total_warnings = sum(int(summary.get("total_warnings", 0)) for summary in unseen_summaries)
             unseen_rate = unseen_total_warnings / float(unseen_total_count) if unseen_total_count else 0.0
             if unseen_total_count and unseen_rate >= seen_rate + 0.5:
-                recs.append("Seen prompts are structurally cleaner than unseen or creative prompts; add broader source-pack coverage before escalating architecture.")
+                recs.append(
+                    "Seen prompts are structurally cleaner than unseen or creative prompts; add broader source-pack coverage before escalating architecture."
+                )
 
     if not recs:
         recs.append("No high-frequency structural warning crossed deterministic recommendation thresholds.")

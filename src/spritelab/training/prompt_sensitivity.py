@@ -151,7 +151,9 @@ def run_prompt_sensitivity(config: PromptSensitivityConfig) -> dict[str, Any]:
     same_noise_metrics["warnings"] = _same_noise_warnings(same_noise_metrics)
 
     repeated_prompt = prompts[0]
-    noise_prompt_records = [dict(repeated_prompt, noise_index=index) for index in range(max(1, int(config.noise_samples)))]
+    noise_prompt_records = [
+        dict(repeated_prompt, noise_index=index) for index in range(max(1, int(config.noise_samples)))
+    ]
     same_prompt_records = _generate_prompt_set(
         model=model,
         tokenizer=tokenizer,
@@ -258,9 +260,7 @@ def pairwise_image_metrics(image_a: Image.Image | np.ndarray, image_b: Image.Ima
     alpha_mae = float(np.mean(np.abs(a[..., 3].astype(np.float32) - b[..., 3].astype(np.float32)) / 255.0))
 
     if union_count:
-        rgb_mae = float(
-            np.mean(np.abs(a[..., :3].astype(np.float32) - b[..., :3].astype(np.float32))[union] / 255.0)
-        )
+        rgb_mae = float(np.mean(np.abs(a[..., :3].astype(np.float32) - b[..., :3].astype(np.float32))[union] / 255.0))
     else:
         rgb_mae = 0.0
 
@@ -336,7 +336,9 @@ def discover_prompt_pairs(records: Sequence[Mapping[str, Any]], *, max_pairs: in
     limit = max(0, int(max_pairs))
     if limit == 0:
         return []
-    by_prompt: dict[str, Mapping[str, Any]] = {_normalize_prompt(record.get("prompt", "")): record for record in records}
+    by_prompt: dict[str, Mapping[str, Any]] = {
+        _normalize_prompt(record.get("prompt", "")): record for record in records
+    }
     pairs: list[dict[str, Any]] = []
 
     def add_pair(a: Mapping[str, Any], b: Mapping[str, Any], pair_id: str, source: str) -> None:
@@ -368,7 +370,9 @@ def discover_prompt_pairs(records: Sequence[Mapping[str, Any]], *, max_pairs: in
                 a_tokens = _prompt_tokens(a.get("prompt", ""))
                 b_tokens = _prompt_tokens(b.get("prompt", ""))
                 if _single_token_family_change(a_tokens, b_tokens, token_set):
-                    add_pair(a, b, _pair_id(str(a.get("prompt", "")), str(b.get("prompt", ""))), f"{group_name}_heuristic")
+                    add_pair(
+                        a, b, _pair_id(str(a.get("prompt", "")), str(b.get("prompt", ""))), f"{group_name}_heuristic"
+                    )
                     break
             if len(pairs) >= limit:
                 break
@@ -651,7 +655,9 @@ def _sigmoid(value: np.ndarray) -> np.ndarray:
     return (1.0 / (1.0 + np.exp(-clipped))).astype(np.float32, copy=False)
 
 
-def _pairwise_image_metrics_for_records(generated_dir: Path, records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _pairwise_image_metrics_for_records(
+    generated_dir: Path, records: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
     metrics: list[dict[str, Any]] = []
     images = [_record_image(generated_dir, record) for record in records]
     for (index_a, image_a), (index_b, image_b) in itertools.combinations(enumerate(images), 2):
@@ -678,8 +684,7 @@ def _same_noise_warnings(metrics: Mapping[str, Any]) -> list[str]:
     warnings: list[str] = []
     if (
         int(metrics.get("pair_count") or 0) > 0
-        and float(metrics.get("mean_pairwise_difference") or 0.0)
-        < THRESHOLDS["prompt_insensitive_mean_difference_max"]
+        and float(metrics.get("mean_pairwise_difference") or 0.0) < THRESHOLDS["prompt_insensitive_mean_difference_max"]
     ):
         warnings.append("prompt_insensitive")
     return warnings
@@ -706,9 +711,10 @@ def _prompt_pair_warnings(pair: Mapping[str, Any], metrics: Mapping[str, Any]) -
         warnings.append("near_duplicate_pair")
     prompt_a = str(pair.get("a", {}).get("prompt", "") if isinstance(pair.get("a"), Mapping) else "")
     prompt_b = str(pair.get("b", {}).get("prompt", "") if isinstance(pair.get("b"), Mapping) else "")
-    if _color_token_changed(prompt_a, prompt_b) and float(metrics.get("rgb_histogram_distance") or 0.0) < THRESHOLDS[
-        "color_prompt_weak_histogram_max"
-    ]:
+    if (
+        _color_token_changed(prompt_a, prompt_b)
+        and float(metrics.get("rgb_histogram_distance") or 0.0) < THRESHOLDS["color_prompt_weak_histogram_max"]
+    ):
         warnings.append("color_prompt_weak")
     return warnings
 

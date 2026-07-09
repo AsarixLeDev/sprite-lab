@@ -45,7 +45,7 @@ def _supports_unicode(stream: TextIO) -> bool:
 
 def format_duration(seconds: float | None) -> str:
     """Human friendly ``H:MM:SS`` / ``MM:SS`` duration."""
-    if seconds is None or seconds != seconds or seconds < 0:  # noqa: PLR0124 - NaN guard
+    if seconds is None or seconds != seconds or seconds < 0:
         return "--:--"
     total = int(seconds)
     hours, rem = divmod(total, 3600)
@@ -134,8 +134,10 @@ class StepProgressBar:
             return
         now = time.perf_counter()
         rate = self._rate(now, step)
-        if loss is not None and loss == loss:  # noqa: PLR0124 - NaN guard
-            self.ema_loss = loss if self.ema_loss is None else (1 - self.ema_alpha) * self.ema_loss + self.ema_alpha * loss
+        if loss is not None and loss == loss:
+            self.ema_loss = (
+                loss if self.ema_loss is None else (1 - self.ema_alpha) * self.ema_loss + self.ema_alpha * loss
+            )
             self.best_loss = loss if self.best_loss is None else min(self.best_loss, loss)
             self._recent_loss.append(loss)
 
@@ -218,7 +220,7 @@ class StepProgressBar:
         self.stream.write(summary + "\n")
         self.stream.flush()
 
-    def __enter__(self) -> "StepProgressBar":
+    def __enter__(self) -> StepProgressBar:
         return self
 
     def __exit__(self, *exc: Any) -> None:

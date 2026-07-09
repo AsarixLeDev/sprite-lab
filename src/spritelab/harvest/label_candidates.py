@@ -126,7 +126,18 @@ FOOD_CANDIDATES: tuple[str, ...] = (
 )
 
 RPG_496_CANDIDATES: dict[str, tuple[str, ...]] = {
-    "armor": ("armor", "chestplate", "golden_chestplate", "breastplate", "cuirass", "armor_piece", "leather_armor", "leather_chestplate", "mail_armor", "plate_armor"),
+    "armor": (
+        "armor",
+        "chestplate",
+        "golden_chestplate",
+        "breastplate",
+        "cuirass",
+        "armor_piece",
+        "leather_armor",
+        "leather_chestplate",
+        "mail_armor",
+        "plate_armor",
+    ),
     "clothing": ("clothing", "robe", "shirt", "tunic", "garment", "cloak"),
     "shoes": ("shoes", "boots", "boot", "footwear"),
     "medal": ("medal", "badge", "star_medal", "cross_medal", "award"),
@@ -136,7 +147,18 @@ RPG_496_CANDIDATES: dict[str, tuple[str, ...]] = {
     "hat": ("hat", "wizard_hat", "cap", "hood", "headgear"),
     "bones": ("bones", "chest_bones", "bone", "skull", "rib", "fossil"),
     "bone": ("bone", "bones", "chest_bones", "skull", "rib", "fossil"),
-    "gold": ("gold", "gold_coin", "coin", "metal_coin", "gold_ingot", "gold_nugget", "golden_mace", "golden_sword", "gold_spear", "currency"),
+    "gold": (
+        "gold",
+        "gold_coin",
+        "coin",
+        "metal_coin",
+        "gold_ingot",
+        "gold_nugget",
+        "golden_mace",
+        "golden_sword",
+        "gold_spear",
+        "currency",
+    ),
     "metal": ("metal", "metal_coin", "metal_shield", "shield", "metal_ore", "ore", "stone", "ingot", "metal_chunk"),
     "wood": ("wood", "wooden_shield", "shield", "wood_plank", "log", "crafting_material"),
     "fabric": ("fabric", "cloth", "textile", "crafting_material"),
@@ -150,7 +172,22 @@ RPG_496_CANDIDATES: dict[str, tuple[str, ...]] = {
     "ingot": ("ingot", "metal_ingot", "bronze_bar", "gold_ingot"),
     "sword": ("sword", "short_sword", "long_sword", "bleeding_sword", "fire_sword", "golden_sword", "blade"),
     "axe": ("axe", "battle_axe", "hatchet"),
-    "bow": ("bow", "longbow", "shortbow", "gray_bow", "dark_bow", "air_bow", "metal_decorated_bow", "electric_arrow", "ice_arrow", "silver_arrow", "explosive_arrow", "poison_arrow", "two_arrows", "multiple_arrows"),
+    "bow": (
+        "bow",
+        "longbow",
+        "shortbow",
+        "gray_bow",
+        "dark_bow",
+        "air_bow",
+        "metal_decorated_bow",
+        "electric_arrow",
+        "ice_arrow",
+        "silver_arrow",
+        "explosive_arrow",
+        "poison_arrow",
+        "two_arrows",
+        "multiple_arrows",
+    ),
     "dagger": ("dagger", "electric_dagger", "knife", "blade"),
     "spear": ("spear", "gold_spear", "golden_spear", "lance", "polearm"),
     "mace": ("mace", "golden_mace", "club", "flail"),
@@ -158,9 +195,31 @@ RPG_496_CANDIDATES: dict[str, tuple[str, ...]] = {
     "fist": ("fist", "metal_fist", "knuckle_weapon"),
     "throw": ("throw", "throwing_star", "shuriken"),
     "shield": ("shield", "wooden_shield", "metal_shield", "buckler", "round_shield"),
-    "potion": ("potion", "red_potion", "blue_potion", "green_potion", "yellow_potion", "white_potion", "orange_potion", "bottle", "vial", "flask"),
+    "potion": (
+        "potion",
+        "red_potion",
+        "blue_potion",
+        "green_potion",
+        "yellow_potion",
+        "white_potion",
+        "orange_potion",
+        "bottle",
+        "vial",
+        "flask",
+    ),
     "bottle": ("bottle", "medicine_bottle", "orange_bottle", "potion", "vial", "flask"),
-    "vial": ("vial", "pink_vial", "red_vial", "white_vial", "yellow_vial", "purple_vial", "antidote_vial", "potion", "bottle", "flask"),
+    "vial": (
+        "vial",
+        "pink_vial",
+        "red_vial",
+        "white_vial",
+        "yellow_vial",
+        "purple_vial",
+        "antidote_vial",
+        "potion",
+        "bottle",
+        "flask",
+    ),
     "flask": ("flask", "potion", "bottle", "vial"),
     "red": ("red_potion", "red_vial", "potion", "vial", "bottle"),
     "blue": ("blue_potion", "potion", "vial", "bottle"),
@@ -297,7 +356,19 @@ _RPG_496_COLORS = frozenset({"red", "blue", "green", "yellow", "pink", "white", 
 _RPG_496_CONTAINER_WORDS = frozenset({"potion", "liquid", "bottle", "vial", "flask", "cork", "glass", "transparent"})
 _RPG_496_VIAL_WORDS = frozenset({"vial", "diagonal"})
 _RPG_496_SHIELD_WORDS = frozenset({"shield", "shield_shape", "shield_like", "bordered", "wood_grain", "wooden"})
-_RPG_496_CHEST_WORDS = frozenset({"chestplate", "breastplate", "cuirass", "chest_shape", "torso_shape", "torso_covering", "shoulder_coverage", "shoulder_guards", "shoulder_details"})
+_RPG_496_CHEST_WORDS = frozenset(
+    {
+        "chestplate",
+        "breastplate",
+        "cuirass",
+        "chest_shape",
+        "torso_shape",
+        "torso_covering",
+        "shoulder_coverage",
+        "shoulder_guards",
+        "shoulder_details",
+    }
+)
 _RPG_496_LEATHER_WORDS = frozenset({"leather", "leather_armor", "hide"})
 _RPG_496_GOLD_WORDS = frozenset({"gold", "golden", "yellow"})
 _RPG_496_TUNIC_WORDS = frozenset({"tunic", "shirt", "v_neck", "short_sleeve", "fabric_like", "garment"})
@@ -372,7 +443,7 @@ def specialize_496_rpg_object(
     parsed_tokens: Sequence[str] = (),
     candidate_object_names: Sequence[str] = (),
     vlm: LabelSuggestion | None = None,
-    visual_facts: "VisualFacts | None" = None,
+    visual_facts: VisualFacts | None = None,
 ) -> Rpg496ObjectSpecialization:
     """Return a conservative 496-RPG specific object/category refinement."""
 
@@ -409,7 +480,9 @@ def specialize_496_rpg_object(
 
     if prefix == "e" and family in {"metal", "wood"} and _has_any(evidence_terms, _RPG_496_SHIELD_WORDS):
         if family == "wood" or _has_any(evidence_terms, {"wood", "wooden", "wood_grain", "grain", "striped"}):
-            return build("wooden_shield", "armor", "rpg_496_shield_shape_override", extra_candidates=("shield", "wooden_shield"))
+            return build(
+                "wooden_shield", "armor", "rpg_496_shield_shape_override", extra_candidates=("shield", "wooden_shield")
+            )
         return build("shield", "armor", "rpg_496_shield_shape_override", extra_candidates=("shield", "metal_shield"))
 
     if prefix == "p":
@@ -420,32 +493,88 @@ def specialize_496_rpg_object(
             flag = "rpg_496_color_potion_promoted" if shape == "potion" else "rpg_496_filename_variant_promoted"
             return build(object_name, "item_icon", flag, extra_candidates=_rpg_496_container_candidates(color))
         if family == "medicine" or "medicine" in semantic:
-            shape = "vial" if _has_any(evidence_terms, _RPG_496_VIAL_WORDS) and not _has_any(evidence_terms, {"bottle", "tall"}) else "bottle"
-            return build(f"medicine_{shape}", "item_icon", "rpg_496_filename_variant_promoted", extra_candidates=("medicine_bottle", "bottle", "vial"))
+            shape = (
+                "vial"
+                if _has_any(evidence_terms, _RPG_496_VIAL_WORDS) and not _has_any(evidence_terms, {"bottle", "tall"})
+                else "bottle"
+            )
+            return build(
+                f"medicine_{shape}",
+                "item_icon",
+                "rpg_496_filename_variant_promoted",
+                extra_candidates=("medicine_bottle", "bottle", "vial"),
+            )
         if family == "antidote" or "antidote" in semantic:
-            return build("antidote_vial", "item_icon", "rpg_496_filename_variant_promoted", extra_candidates=("antidote_vial", "vial", "potion"))
+            return build(
+                "antidote_vial",
+                "item_icon",
+                "rpg_496_filename_variant_promoted",
+                extra_candidates=("antidote_vial", "vial", "potion"),
+            )
 
     if prefix in {"a", "c"}:
         if family in {"armor", "leather_armor"} and _has_any(evidence_terms, _RPG_496_CHEST_WORDS):
             if family == "leather_armor" or _has_any(evidence_terms, _RPG_496_LEATHER_WORDS | {"leather_chestplate"}):
-                return build("leather_chestplate", "armor", "rpg_496_vlm_alternative_promoted", extra_candidates=("leather_chestplate", "chestplate", "breastplate"))
+                return build(
+                    "leather_chestplate",
+                    "armor",
+                    "rpg_496_vlm_alternative_promoted",
+                    extra_candidates=("leather_chestplate", "chestplate", "breastplate"),
+                )
             if _rpg_496_gold_armor_evidence(evidence_terms | source_terms, visual_facts):
-                return build("golden_chestplate", "armor", "rpg_496_vlm_alternative_promoted", extra_candidates=("golden_chestplate", "chestplate", "breastplate"))
-            return build("chestplate", "armor", "rpg_496_vlm_alternative_promoted", extra_candidates=("chestplate", "breastplate", "cuirass"))
+                return build(
+                    "golden_chestplate",
+                    "armor",
+                    "rpg_496_vlm_alternative_promoted",
+                    extra_candidates=("golden_chestplate", "chestplate", "breastplate"),
+                )
+            return build(
+                "chestplate",
+                "armor",
+                "rpg_496_vlm_alternative_promoted",
+                extra_candidates=("chestplate", "breastplate", "cuirass"),
+            )
         if family == "clothing" and _has_any(evidence_terms, _RPG_496_TUNIC_WORDS):
-            return build("tunic", "armor", "rpg_496_vlm_alternative_promoted", extra_candidates=("tunic", "shirt", "garment"))
+            return build(
+                "tunic", "armor", "rpg_496_vlm_alternative_promoted", extra_candidates=("tunic", "shirt", "garment")
+            )
         if family == "hat" and _rpg_496_wizard_hat_evidence(vlm, evidence_terms):
-            return build("wizard_hat", "armor", "rpg_496_vlm_alternative_promoted", extra_candidates=("wizard_hat", "hat", "headgear"))
+            return build(
+                "wizard_hat",
+                "armor",
+                "rpg_496_vlm_alternative_promoted",
+                extra_candidates=("wizard_hat", "hat", "headgear"),
+            )
 
-    if prefix == "ac" and family == "ring" and _has_any(evidence_terms, {"metal", "metallic", "silver", "gray", "gold", "golden"}):
-        return build("metal_ring", "item_icon", "rpg_496_vlm_alternative_promoted", extra_candidates=("metal_ring", "ring", "jewelry_ring"))
+    if (
+        prefix == "ac"
+        and family == "ring"
+        and _has_any(evidence_terms, {"metal", "metallic", "silver", "gray", "gold", "golden"})
+    ):
+        return build(
+            "metal_ring",
+            "item_icon",
+            "rpg_496_vlm_alternative_promoted",
+            extra_candidates=("metal_ring", "ring", "jewelry_ring"),
+        )
 
     if family in {"bone", "bones"} and _has_any(evidence_terms, {"chest", "rib", "ribs", "ribcage", "chest_bones"}):
-        return build("chest_bones", "material", "rpg_496_vlm_alternative_promoted", extra_candidates=("chest_bones", "bones", "bone", "rib"))
+        return build(
+            "chest_bones",
+            "material",
+            "rpg_496_vlm_alternative_promoted",
+            extra_candidates=("chest_bones", "bones", "bone", "rib"),
+        )
 
-    if prefix in {"i", "e"} and family in {"metal", "gold"} and _has_any(evidence_terms, {"coin", "currency", "round_coin", "metal_coin"}):
+    if (
+        prefix in {"i", "e"}
+        and family in {"metal", "gold"}
+        and _has_any(evidence_terms, {"coin", "currency", "round_coin", "metal_coin"})
+    ):
         object_name = "metal_coin" if family == "metal" else "gold_coin"
-        return build(object_name, "material", "rpg_496_vlm_alternative_promoted", extra_candidates=(object_name, "coin", family))
+        return build(
+            object_name, "material", "rpg_496_vlm_alternative_promoted", extra_candidates=(object_name, "coin", family)
+        )
 
     if filename_key in _RPG_496_FILENAME_VARIANTS:
         object_name, category, flag = _RPG_496_FILENAME_VARIANTS[filename_key]
@@ -454,16 +583,32 @@ def specialize_496_rpg_object(
     if prefix == "i" and subtype == "c":
         if family == "mushroom":
             return build("", "item_icon", "rpg_496_material_category_override")
-        if family == "raw_meat" or "raw" in semantic and "meat" in semantic:
-            return build("raw_meat", "item_icon", "rpg_496_filename_variant_promoted", extra_candidates=("raw_meat", "meat"))
+        if family == "raw_meat" or ("raw" in semantic and "meat" in semantic):
+            return build(
+                "raw_meat", "item_icon", "rpg_496_filename_variant_promoted", extra_candidates=("raw_meat", "meat")
+            )
         if family == "pie" and _has_any(evidence_terms, {"slice", "wedge"}):
-            return build("pie_slice", "item_icon", "rpg_496_vlm_alternative_promoted", extra_candidates=("pie_slice", "pie"))
+            return build(
+                "pie_slice", "item_icon", "rpg_496_vlm_alternative_promoted", extra_candidates=("pie_slice", "pie")
+            )
         if family == "watermelon" and _has_any(evidence_terms, {"slice", "wedge", "red", "green"}):
-            return build("watermelon_slice", "item_icon", "rpg_496_vlm_alternative_promoted", extra_candidates=("watermelon_slice", "watermelon"))
+            return build(
+                "watermelon_slice",
+                "item_icon",
+                "rpg_496_vlm_alternative_promoted",
+                extra_candidates=("watermelon_slice", "watermelon"),
+            )
         if family == "fish" and _has_any(evidence_terms, {"skewer", "stick", "spear", "fish_skewer"}):
-            return build("fish_skewer", "item_icon", "rpg_496_vlm_alternative_promoted", extra_candidates=("fish_skewer", "fish"))
+            return build(
+                "fish_skewer", "item_icon", "rpg_496_vlm_alternative_promoted", extra_candidates=("fish_skewer", "fish")
+            )
         if family == "raw_fish" and _has_any(evidence_terms, {"skewer", "stick", "spear", "raw_fish_skewer"}):
-            return build("raw_fish_skewer", "item_icon", "rpg_496_vlm_alternative_promoted", extra_candidates=("raw_fish_skewer", "raw_fish"))
+            return build(
+                "raw_fish_skewer",
+                "item_icon",
+                "rpg_496_vlm_alternative_promoted",
+                extra_candidates=("raw_fish_skewer", "raw_fish"),
+            )
 
     if prefix == "i":
         item_object = _rpg_496_item_object(family, evidence_terms, filename_key)
@@ -473,7 +618,11 @@ def specialize_496_rpg_object(
     if prefix == "s":
         effect_object = _rpg_496_effect_object(family, evidence_terms, filename_key)
         if effect_object:
-            return build(effect_object, "effect_icon", "rpg_496_arrow_variant_promoted" if "arrow" in effect_object else "rpg_496_filename_variant_promoted")
+            return build(
+                effect_object,
+                "effect_icon",
+                "rpg_496_arrow_variant_promoted" if "arrow" in effect_object else "rpg_496_filename_variant_promoted",
+            )
 
     if prefix == "w":
         weapon_object = _rpg_496_weapon_object(semantic, family, evidence_terms, filename_key, visual_facts)
@@ -534,7 +683,9 @@ def _rpg_496_parts(record: Mapping[str, Any], parsed_tokens: Sequence[str]) -> t
 
 def _rpg_496_scoped_candidates(prefix: str, subtype: str, semantic: Sequence[str], family: str) -> tuple[str, ...]:
     if prefix == "p":
-        color = next((token for token in semantic if token in _RPG_496_COLORS), family if family in _RPG_496_COLORS else "")
+        color = next(
+            (token for token in semantic if token in _RPG_496_COLORS), family if family in _RPG_496_COLORS else ""
+        )
         if color:
             return _rpg_496_container_candidates(color)
         if family == "medicine" or "medicine" in semantic:
@@ -542,7 +693,16 @@ def _rpg_496_scoped_candidates(prefix: str, subtype: str, semantic: Sequence[str
         if family == "antidote" or "antidote" in semantic:
             return ("antidote_vial", "antidote", "vial", "potion", "bottle")
     if prefix == "s" and family == "bow":
-        return ("ice_arrow", "electric_arrow", "silver_arrow", "explosive_arrow", "poison_arrow", "two_arrows", "multiple_arrows", "bow")
+        return (
+            "ice_arrow",
+            "electric_arrow",
+            "silver_arrow",
+            "explosive_arrow",
+            "poison_arrow",
+            "two_arrows",
+            "multiple_arrows",
+            "bow",
+        )
     if prefix == "i" and subtype == "c":
         if family == "fish":
             return ("fish_skewer", "fish", "food")
@@ -629,7 +789,7 @@ def _rpg_496_filename_key(record: Mapping[str, Any]) -> str:
     return ""
 
 
-def _rpg_496_evidence_terms(vlm: LabelSuggestion | None, visual_facts: "VisualFacts | None") -> set[str]:
+def _rpg_496_evidence_terms(vlm: LabelSuggestion | None, visual_facts: VisualFacts | None) -> set[str]:
     values: list[str] = []
     if vlm is not None:
         values.extend(
@@ -670,17 +830,27 @@ def _rpg_496_potion_color(
     semantic: Sequence[str],
     family: str,
     terms: set[str],
-    visual_facts: "VisualFacts | None",
+    visual_facts: VisualFacts | None,
 ) -> str:
-    filename_color = next((token for token in semantic if token in _RPG_496_COLORS), family if family in _RPG_496_COLORS else "")
-    visual_colors = tuple(color for color in (visual_facts.dominant_colors if visual_facts is not None else ()) if color in _RPG_496_COLORS)
+    filename_color = next(
+        (token for token in semantic if token in _RPG_496_COLORS), family if family in _RPG_496_COLORS else ""
+    )
+    visual_colors = tuple(
+        color
+        for color in (visual_facts.dominant_colors if visual_facts is not None else ())
+        if color in _RPG_496_COLORS
+    )
     if filename_color == "pink" and "purple" in visual_colors and "pink" not in visual_colors:
         return "purple"
     if filename_color == "pink" and "purple" in terms and "pink" not in terms:
         return "purple"
     if visual_colors:
         primary = visual_colors[0]
-        if primary != filename_color and primary in {"purple", "yellow", "green", "blue", "red", "orange"} and filename_color in {"pink", "white", "orange"}:
+        if (
+            primary != filename_color
+            and primary in {"purple", "yellow", "green", "blue", "red", "orange"}
+            and filename_color in {"pink", "white", "orange"}
+        ):
             return primary
     return filename_color
 
@@ -698,14 +868,18 @@ def _rpg_496_container_shape(terms: set[str], color: str) -> str:
         return "vial"
     if color == "white" and _has_any(terms, {"compact", "diagonal", "small", "vial"}):
         return "vial"
-    if color == "orange" and _has_any(terms, {"bottle", "drink", "beverage"}) and not _has_any(terms, {"magic", "magical"}):
+    if (
+        color == "orange"
+        and _has_any(terms, {"bottle", "drink", "beverage"})
+        and not _has_any(terms, {"magic", "magical"})
+    ):
         return "bottle"
     if _has_any(terms, _RPG_496_CONTAINER_WORDS) or color in _RPG_496_COLORS:
         return "potion"
     return "potion"
 
 
-def _rpg_496_gold_armor_evidence(terms: set[str], visual_facts: "VisualFacts | None") -> bool:
+def _rpg_496_gold_armor_evidence(terms: set[str], visual_facts: VisualFacts | None) -> bool:
     dominant = tuple(visual_facts.dominant_colors if visual_facts is not None else ())
     if dominant and dominant[0] in {"yellow", "gold"}:
         return True
@@ -749,7 +923,11 @@ def _rpg_496_item_object(family: str, terms: set[str], filename_key: str) -> str
             return "nature_cannon"
     if family == "feather" and _has_any(terms, {"fire", "flame", "orange"}):
         return "fire_feather"
-    if family == "ink" and _has_any(terms, {"yellow"}) and _has_any(terms, {"bucket", "container", "container_like", "vial"}):
+    if (
+        family == "ink"
+        and _has_any(terms, {"yellow"})
+        and _has_any(terms, {"bucket", "container", "container_like", "vial"})
+    ):
         return "yellow_ink_bucket"
     return ""
 
@@ -759,9 +937,15 @@ def _rpg_496_effect_object(family: str, terms: set[str], filename_key: str) -> s
         object_name, category, _ = _RPG_496_FILENAME_VARIANTS[filename_key]
         if category == "effect_icon":
             return object_name
-    arrow_evidence = family == "bow" and _has_any(terms, {"arrow", "arrows", "shaft", "pointed", "fletching", "arrow_nock", "nock"})
+    arrow_evidence = family == "bow" and _has_any(
+        terms, {"arrow", "arrows", "shaft", "pointed", "fletching", "arrow_nock", "nock"}
+    )
     explosive_evidence = _has_any(terms, {"explosive", "explosion", "blast", "fire", "flame", "detonation", "burst"})
-    if family == "bow" and explosive_evidence and _has_any(terms, {"bow", "arrow", "weapon_shape", "projectile", "curved"}):
+    if (
+        family == "bow"
+        and explosive_evidence
+        and _has_any(terms, {"bow", "arrow", "weapon_shape", "projectile", "curved"})
+    ):
         return "explosive_arrow"
     if arrow_evidence:
         if _has_any(terms, {"electric", "lightning", "spark"}):
@@ -809,7 +993,7 @@ def _rpg_496_weapon_object(
     family: str,
     terms: set[str],
     filename_key: str,
-    visual_facts: "VisualFacts | None",
+    visual_facts: VisualFacts | None,
 ) -> str:
     if filename_key in _RPG_496_FILENAME_VARIANTS:
         object_name, category, _ = _RPG_496_FILENAME_VARIANTS[filename_key]
@@ -834,7 +1018,12 @@ def _rpg_496_weapon_object(
             return "air_bow"
         if dominant[:1] == ("dark_gray",):
             return "dark_bow"
-        if dominant[:1] and dominant[0] in {"light_gray", "gray"} and "light_brown" not in dominant and "brown" not in dominant:
+        if (
+            dominant[:1]
+            and dominant[0] in {"light_gray", "gray"}
+            and "light_brown" not in dominant
+            and "brown" not in dominant
+        ):
             return "gray_bow"
     return ""
 

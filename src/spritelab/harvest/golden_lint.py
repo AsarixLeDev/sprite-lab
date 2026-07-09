@@ -11,7 +11,6 @@ from typing import Any
 from spritelab.harvest.label_candidates import FOOD_CANDIDATES, GEM_CANDIDATES, GENERIC_OBJECT_NAMES, TOOL_CANDIDATES
 from spritelab.harvest.label_taxonomy import normalize_category, normalize_object_name, normalize_tags
 
-
 FOOD_OBJECTS = frozenset(FOOD_CANDIDATES)
 GEM_OBJECTS = frozenset((*GEM_CANDIDATES, "gem", "ruby", "sapphire", "emerald", "diamond", "amethyst", "crystal"))
 TOOL_OBJECTS = frozenset(TOOL_CANDIDATES)
@@ -74,13 +73,29 @@ def _lint_row(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw_object = str(row.get("object_name", "")).strip().lower()
     for typo in TYPO_OBJECTS:
         if typo in raw_object:
-            issues.append(_issue(sprite_id, "typo_object_name", f"object name contains likely typo {typo!r}", "warning"))
+            issues.append(
+                _issue(sprite_id, "typo_object_name", f"object name contains likely typo {typo!r}", "warning")
+            )
             break
     expected = _expected_category(object_name)
     if expected and category != expected:
-        issues.append(_issue(sprite_id, "category_object_mismatch", f"{object_name} usually belongs to {expected}, not {category}", "warning"))
+        issues.append(
+            _issue(
+                sprite_id,
+                "category_object_mismatch",
+                f"{object_name} usually belongs to {expected}, not {category}",
+                "warning",
+            )
+        )
     if object_name == "ice_cream_sandwich" and category == "effect_icon":
-        issues.append(_issue(sprite_id, "ice_cream_sandwich_effect_icon", "ice_cream_sandwich should probably be item_icon", "warning"))
+        issues.append(
+            _issue(
+                sprite_id,
+                "ice_cream_sandwich_effect_icon",
+                "ice_cream_sandwich should probably be item_icon",
+                "warning",
+            )
+        )
     if object_name in GENERIC_OBJECT_NAMES:
         issues.append(_issue(sprite_id, "generic_object_name", f"generic object name {object_name!r}", "warning"))
     if len(tags) <= 1 and (not tags or tags == (object_name,)):

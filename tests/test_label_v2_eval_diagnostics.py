@@ -2,7 +2,9 @@ from spritelab.harvest.golden import GoldenLabel
 from spritelab.harvest.label_v2_eval import evaluate_label_v2, label_v2_error_records
 
 
-def _record(sprite_id: str, category: str, object_name: str, tags=(), bucket: str = "auto_prefix_family_trusted") -> dict:
+def _record(
+    sprite_id: str, category: str, object_name: str, tags=(), bucket: str = "auto_prefix_family_trusted"
+) -> dict:
     return {
         "sprite_id": sprite_id,
         "safe_prefill": {"category": category, "object_name": object_name, "tags": list(tags)},

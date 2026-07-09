@@ -61,7 +61,9 @@ def _write_generated_dir(tmp_path: Path, specs: list[dict[str, Any]]) -> Path:
                 "visible_color_count": visible_colors,
                 "alpha_opaque_count": int(np.count_nonzero(rgba[..., 3] >= 128)),
                 "paths": paths,
-                "target_semantics": spec.get("target_semantics", {"base_object": "potion", "attributes": {"colors": ["red"]}}),
+                "target_semantics": spec.get(
+                    "target_semantics", {"base_object": "potion", "attributes": {"colors": ["red"]}}
+                ),
             }
         )
     (out / "generated_manifest.jsonl").write_text(

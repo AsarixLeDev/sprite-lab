@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from _harvest_testdata import make_sprite_png
-
 from spritelab.harvest.label_fusion_v2 import FusionThresholds
 from spritelab.harvest.label_v2_pipeline import build_label_v2_record
 

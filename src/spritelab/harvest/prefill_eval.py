@@ -25,11 +25,7 @@ def evaluate_prefill(
     in both the golden set and the records are scored.
     """
 
-    records_by_id = {
-        str(record.get("sprite_id", "")): record
-        for record in fused_records
-        if record.get("sprite_id")
-    }
+    records_by_id = {str(record.get("sprite_id", "")): record for record in fused_records if record.get("sprite_id")}
     matched_ids = sorted(set(golden) & set(records_by_id))
 
     qwen_pairs = []

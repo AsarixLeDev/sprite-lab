@@ -10,12 +10,12 @@ import torch
 from spritelab.codec.bundle import INDEX_MASK, INDEX_PAD, INDEX_TRANSPARENT
 
 __all__ = [
-    "INDEX_TRANSPARENT",
-    "INDEX_PAD",
     "INDEX_MASK",
-    "RandomOpaqueMask",
+    "INDEX_PAD",
+    "INDEX_TRANSPARENT",
     "FixedOpaqueMask",
     "FullOpaqueMask",
+    "RandomOpaqueMask",
 ]
 
 
@@ -48,9 +48,7 @@ def _sample_seed_generator(seed: int | None, sample: dict[str, Any]) -> torch.Ge
     return generator
 
 
-def _mask_opaque_fraction(
-    sample: dict[str, Any], fraction: float, mask_token: int, seed: int | None
-) -> dict[str, Any]:
+def _mask_opaque_fraction(sample: dict[str, Any], fraction: float, mask_token: int, seed: int | None) -> dict[str, Any]:
     alpha = sample["alpha"]
     opaque = alpha == 1
     opaque_positions = opaque.nonzero(as_tuple=False)
@@ -79,9 +77,7 @@ class RandomOpaqueMask:
     def __call__(self, sample: dict[str, Any]) -> dict[str, Any]:
         generator = _sample_seed_generator(self.seed, sample)
         span = self.mask_fraction_max - self.mask_fraction_min
-        fraction = self.mask_fraction_min + span * float(
-            torch.rand((), generator=generator)
-        )
+        fraction = self.mask_fraction_min + span * float(torch.rand((), generator=generator))
         return _mask_opaque_fraction(sample, fraction, self.mask_token, self.seed)
 
 

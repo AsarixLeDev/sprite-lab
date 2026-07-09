@@ -83,9 +83,15 @@ def format_import_diagnostics(report: Mapping[str, Any]) -> str:
         info = dict(info or {})
         lines.append(f"- {name}: exists={bool(info.get('exists'))} bytes={int(info.get('bytes', 0))}")
     lines.extend(["", "## Source"])
-    lines.append(f"- archive/path/url: `{report.get('source_archive_path') or report.get('source_root_path') or report.get('source_url') or ''}`")
+    lines.append(
+        f"- archive/path/url: `{report.get('source_archive_path') or report.get('source_root_path') or report.get('source_url') or ''}`"
+    )
     command = str(report.get("recommended_reimport_command") or "")
-    lines.append(f"- recommended re-import command: `{command}`" if command else "- recommended re-import command: (not inferable)")
+    lines.append(
+        f"- recommended re-import command: `{command}`"
+        if command
+        else "- recommended re-import command: (not inferable)"
+    )
     lines.extend(["", "## Rejection Reasons"])
     reasons = dict(report.get("top_rejection_reasons") or {})
     if reasons:
@@ -181,7 +187,9 @@ def _matching_reasons(counts: Mapping[str, int], terms: Sequence[str]) -> dict[s
     }
 
 
-def _slicing_diagnostics(candidates: Sequence[Mapping[str, Any]], rejection_counts: Mapping[str, int]) -> dict[str, Any]:
+def _slicing_diagnostics(
+    candidates: Sequence[Mapping[str, Any]], rejection_counts: Mapping[str, int]
+) -> dict[str, Any]:
     sheet_like = 0
     for record in candidates:
         width = int(record.get("width", 0) or 0)
@@ -210,7 +218,7 @@ def _infer_reimport_command(sources: Sequence[Mapping[str, Any]], run_path: Path
     source = dict(sources[0])
     common = (
         f"--run-name {run_path.name} --run-root {run_path.parent} "
-        f"--source-id {source.get('source_id', '')} --source-name \"{source.get('source_name', '')}\" "
+        f'--source-id {source.get("source_id", "")} --source-name "{source.get("source_name", "")}" '
         f"--license {dict(source.get('license') or {}).get('license', source.get('license', 'unknown'))} "
         "--user-confirmed-license"
     )
@@ -218,9 +226,9 @@ def _infer_reimport_command(sources: Sequence[Mapping[str, Any]], run_path: Path
     root = str(source.get("local_root_path", "")).strip()
     url = str(source.get("download_url") or source.get("source_url") or "").strip()
     if archive:
-        return f"python -m spritelab harvest import-zip --zip \"{archive}\" {common}"
+        return f'python -m spritelab harvest import-zip --zip "{archive}" {common}'
     if root:
-        return f"python -m spritelab harvest import-dir --dir \"{root}\" {common}"
+        return f'python -m spritelab harvest import-dir --dir "{root}" {common}'
     if url:
-        return f"python -m spritelab harvest download-zip --url \"{url}\" {common}"
+        return f'python -m spritelab harvest download-zip --url "{url}" {common}'
     return ""

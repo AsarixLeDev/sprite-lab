@@ -41,7 +41,9 @@ def _target_palette_valid(index_map: Any, palette_mask: Any) -> Any:
     return in_range & valid
 
 
-def sprite_reconstruction_loss(outputs: dict[str, Any], batch: dict[str, Any], *, weights: dict[str, float] | None = None) -> dict[str, Any]:
+def sprite_reconstruction_loss(
+    outputs: dict[str, Any], batch: dict[str, Any], *, weights: dict[str, float] | None = None
+) -> dict[str, Any]:
     """Compute alpha/index/optional-role reconstruction losses.
 
     Transparent pixels are ignored for index cross entropy. The alpha head is
@@ -61,7 +63,9 @@ def sprite_reconstruction_loss(outputs: dict[str, Any], batch: dict[str, Any], *
     alpha_mask = alpha_target.squeeze(1) > 0.5
     palette_valid = _target_palette_valid(index_target, batch["palette_mask"])
     index_mask = alpha_mask & palette_valid
-    loss_index = _masked_cross_entropy(index_logits, index_target.clamp(min=0, max=index_logits.shape[1] - 1), index_mask)
+    loss_index = _masked_cross_entropy(
+        index_logits, index_target.clamp(min=0, max=index_logits.shape[1] - 1), index_mask
+    )
 
     role_logits = outputs.get("role_logits")
     if role_logits is not None and "role_map" in batch and float(weights.get("role", 0.0)) != 0.0:

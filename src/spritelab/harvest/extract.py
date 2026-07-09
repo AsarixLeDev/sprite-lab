@@ -56,9 +56,7 @@ def discover_png_candidates(
         (
             path
             for path in iterator
-            if path.is_file()
-            and path.suffix.lower() == ".png"
-            and (include_hidden or not _is_hidden(path, root))
+            if path.is_file() and path.suffix.lower() == ".png" and (include_hidden or not _is_hidden(path, root))
         ),
         key=lambda path: path.relative_to(root).as_posix().lower(),
     )

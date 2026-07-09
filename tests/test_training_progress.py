@@ -4,7 +4,6 @@ import io
 
 import pytest
 
-from spritelab.training import progress
 from spritelab.training.progress import StepProgressBar, format_duration, progress_enabled, sparkline
 
 

@@ -6,7 +6,16 @@ from spritelab.harvest.golden import GoldenLabel
 from spritelab.harvest.prefill_eval import evaluate_prefill, format_eval_report
 
 
-def _record(sprite_id: str, *, category: str, object_name: str = "", tags=(), bucket: str = "fused_automatically", confidence=None, warnings=()) -> dict:
+def _record(
+    sprite_id: str,
+    *,
+    category: str,
+    object_name: str = "",
+    tags=(),
+    bucket: str = "fused_automatically",
+    confidence=None,
+    warnings=(),
+) -> dict:
     suggestion = {
         "category": category,
         "object_name": object_name,

@@ -97,7 +97,12 @@ def _record(sprite_id: str, split: str, *, object_name: str, base_object: str, c
 
 
 def _write_dataset(
-    root: Path, name: str, records_by_split: dict[str, list[dict]], *, palette_rows: int = 33, max_palette_slots: int = 32
+    root: Path,
+    name: str,
+    records_by_split: dict[str, list[dict]],
+    *,
+    palette_rows: int = 33,
+    max_palette_slots: int = 32,
 ) -> Path:
     dataset_dir = root / name
     dataset_dir.mkdir(parents=True, exist_ok=True)

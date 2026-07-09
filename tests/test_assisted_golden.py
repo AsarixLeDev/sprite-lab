@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 from _harvest_testdata import make_sprite_png
-
 from spritelab.harvest.assisted_golden import (
     AssistedGoldenCandidate,
     AssistedGoldenLabel,

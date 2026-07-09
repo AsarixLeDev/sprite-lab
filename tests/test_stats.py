@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from spritelab.training.stats import wilson_confidence_interval, wilson_ci_from_rate
+from spritelab.training.stats import wilson_ci_from_rate, wilson_confidence_interval
 
 
 def test_wilson_confidence_interval_returns_sane_bounds_and_contains_point_estimate() -> None:

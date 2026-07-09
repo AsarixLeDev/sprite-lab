@@ -30,7 +30,11 @@ import numpy as np
 
 from spritelab.harvest.semantic_v3 import (
     _CATEGORY_WORD as CATEGORY_WORD,
+)
+from spritelab.harvest.semantic_v3 import (
     _NEUTRAL_COLORS as NEUTRAL_COLORS,
+)
+from spritelab.harvest.semantic_v3 import (
     DEFAULT_NEGATIVE_TAGS,
     SemanticAttributes,
     SemanticV3Record,
@@ -117,15 +121,13 @@ def build_training_manifest(
 
     dataset_dir = Path(dataset_dir)
     if caption_policy not in POLICY_TYPES:
-        raise ValueError(
-            f"unknown caption policy {caption_policy!r}; expected one of {sorted(POLICY_TYPES)}"
-        )
+        raise ValueError(f"unknown caption policy {caption_policy!r}; expected one of {sorted(POLICY_TYPES)}")
     variants_per_sprite = max(1, int(variants_per_sprite))
 
     warnings: list[str] = []
     rows: list[dict[str, Any]] = []
     source_records = 0
-    split_rows: dict[str, int] = {split: 0 for split in SPLIT_NAMES}
+    split_rows: dict[str, int] = dict.fromkeys(SPLIT_NAMES, 0)
 
     for split in SPLIT_NAMES:
         manifest_path = dataset_dir / f"manifest_{split}.jsonl"
@@ -150,9 +152,7 @@ def build_training_manifest(
 
             semantic = _resolve_semantic_record(record)
             rng = random.Random(f"{seed}:{caption_policy}:{sprite_id}")
-            variants = sample_caption_variants(
-                semantic, policy=caption_policy, rng=rng, count=variants_per_sprite
-            )
+            variants = sample_caption_variants(semantic, policy=caption_policy, rng=rng, count=variants_per_sprite)
             for variant_index, variant in enumerate(variants):
                 rows.append(
                     _build_row(

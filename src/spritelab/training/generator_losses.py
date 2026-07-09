@@ -107,7 +107,9 @@ def framing_regularization_loss(
         result["loss_border_alpha"] = loss_border
         total = total + border_weight * loss_border
 
-    if coverage_weight != 0.0 and (cfg.get("alpha_coverage_min") is not None or cfg.get("alpha_coverage_max") is not None):
+    if coverage_weight != 0.0 and (
+        cfg.get("alpha_coverage_min") is not None or cfg.get("alpha_coverage_max") is not None
+    ):
         coverage = alpha_prob.mean(dim=(1, 2, 3))
         loss_coverage = coverage.sum() * 0.0
         if cfg.get("alpha_coverage_min") is not None:

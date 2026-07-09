@@ -151,9 +151,7 @@ def test_charged_token_maps_to_electric_and_charged() -> None:
 
 
 def test_generates_multiple_caption_styles() -> None:
-    record = build_semantic_v3_record(
-        _prediction("red_potion", "item_icon", dominant_colors=["red", "black"])
-    )
+    record = build_semantic_v3_record(_prediction("red_potion", "item_icon", dominant_colors=["red", "black"]))
     assert len(record.captions) >= 4
     assert "red potion" in record.captions
     assert any(caption.startswith("32x32 pixel art") for caption in record.captions)
@@ -170,19 +168,34 @@ def test_captions_include_32x32_pixel_art_style_phrase() -> None:
 
 
 def test_captions_do_not_invent_ungrounded_words() -> None:
-    record = build_semantic_v3_record(
-        _prediction("red_potion", "item_icon", dominant_colors=["red", "black", "white"])
-    )
+    record = build_semantic_v3_record(_prediction("red_potion", "item_icon", dominant_colors=["red", "black", "white"]))
     allowed = {
-        "32x32", "pixel", "art", "fantasy", "rpg", "icon", "centered", "made", "of",
-        "outline", "transparent", "background", "item",
+        "32x32",
+        "pixel",
+        "art",
+        "fantasy",
+        "rpg",
+        "icon",
+        "centered",
+        "made",
+        "of",
+        "outline",
+        "transparent",
+        "background",
+        "item",
     }
     allowed.update(record.open_name.split())
     allowed.update(record.base_object.split("_"))
     attributes = record.attributes
     for group in (
-        attributes.colors, attributes.materials, attributes.shapes, attributes.effects,
-        attributes.state, attributes.function, attributes.mood, attributes.parts,
+        attributes.colors,
+        attributes.materials,
+        attributes.shapes,
+        attributes.effects,
+        attributes.state,
+        attributes.function,
+        attributes.mood,
+        attributes.parts,
     ):
         for value in group:
             allowed.update(value.split("_"))

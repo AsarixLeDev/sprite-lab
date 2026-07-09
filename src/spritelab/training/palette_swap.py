@@ -68,18 +68,14 @@ ACHROMATIC_FAMILIES: frozenset[str] = frozenset({"gray", "black", "white"})
 MATERIAL_COLOR_FAMILIES: frozenset[str] = frozenset({"gold", "brown"})
 
 # Roles that are recolored (fill / highlight / accent surfaces).
-_RECOLOR_ROLES: frozenset[int] = frozenset(
-    {ROLE_MIDTONE, ROLE_LIGHT, ROLE_HIGHLIGHT, ROLE_ACCENT, ROLE_TEXTURE_DETAIL}
-)
+_RECOLOR_ROLES: frozenset[int] = frozenset({ROLE_MIDTONE, ROLE_LIGHT, ROLE_HIGHLIGHT, ROLE_ACCENT, ROLE_TEXTURE_DETAIL})
 # Roles that must never be recolored regardless of options.
 _ALWAYS_PRESERVE_ROLES: frozenset[int] = frozenset({ROLE_TRANSPARENT, ROLE_OUTLINE})
 # Extra roles preserved only when preserve_outline is set.
 _OUTLINE_PROTECTED_ROLES: frozenset[int] = frozenset({ROLE_DEEP_SHADOW, ROLE_SHADOW})
 _KNOWN_VISIBLE_ROLES: frozenset[int] = frozenset(range(ROLE_OUTLINE, ROLE_TEXTURE_DETAIL + 1))
 
-_COLOR_WORD_RE = {
-    name: re.compile(rf"\b{name}\b", re.IGNORECASE) for name in (*ALL_FAMILIES, "grey")
-}
+_COLOR_WORD_RE = {name: re.compile(rf"\b{name}\b", re.IGNORECASE) for name in (*ALL_FAMILIES, "grey")}
 
 # Precomputed anchor OKLab and hue direction/chroma.
 _ANCHOR_OKLAB = {name: rgb_u8_array_to_oklab(np.asarray(rgb, dtype=np.uint8)) for name, rgb in FAMILY_ANCHORS.items()}
@@ -120,7 +116,7 @@ class PaletteSwapConfig:
     allow_material_colors: bool = True
 
     @classmethod
-    def from_training_config(cls, config: Any) -> "PaletteSwapConfig":
+    def from_training_config(cls, config: Any) -> PaletteSwapConfig:
         target = getattr(config, "palette_swap_target_families", None)
         if target:
             families = parse_families(target)
@@ -140,9 +136,7 @@ class PaletteSwapConfig:
             min_color_confidence=float(getattr(config, "palette_swap_min_color_confidence", 0.0)),
             require_role_map=bool(getattr(config, "palette_swap_require_role_map", False)),
             require_explicit_color=bool(getattr(config, "palette_swap_require_explicit_color", False)),
-            require_explicit_caption_color=bool(
-                getattr(config, "palette_swap_require_explicit_caption_color", False)
-            ),
+            require_explicit_caption_color=bool(getattr(config, "palette_swap_require_explicit_caption_color", False)),
             require_explicit_semantic_color=bool(
                 getattr(config, "palette_swap_require_explicit_semantic_color", False)
             ),
@@ -556,7 +550,9 @@ def _explicit_semantic_colors(record: Mapping[str, Any]) -> set[str]:
     target_semantics = record.get("target_semantics") if isinstance(record.get("target_semantics"), Mapping) else {}
     if isinstance(target_semantics, Mapping):
         prompt_colors |= _families_in_value(target_semantics.get("colors"))
-        attributes = target_semantics.get("attributes") if isinstance(target_semantics.get("attributes"), Mapping) else {}
+        attributes = (
+            target_semantics.get("attributes") if isinstance(target_semantics.get("attributes"), Mapping) else {}
+        )
         prompt_colors |= _families_in_value(attributes.get("colors"))
     return prompt_colors
 

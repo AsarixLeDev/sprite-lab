@@ -38,7 +38,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     _add_import_args(download_zip)
     download_zip.add_argument("--url", required=True)
 
-    prefill = subparsers.add_parser("qwen-prefill", aliases=["qwen_prefill"], help="Batch Qwen metadata prefill for a run.")
+    prefill = subparsers.add_parser(
+        "qwen-prefill", aliases=["qwen_prefill"], help="Batch Qwen metadata prefill for a run."
+    )
     _add_qwen_prefill_args(prefill)
 
     filename_prefill = subparsers.add_parser("filename-prefill", help="Suggest metadata from sprite filenames.")
@@ -48,12 +50,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     filename_prefill.add_argument("--filename", default="")
     filename_prefill.add_argument("--out", type=Path)
 
-    prefill_review = subparsers.add_parser("prefill-review", help="Launch a tiny GUI to compare Qwen and filename suggestions.")
+    prefill_review = subparsers.add_parser(
+        "prefill-review", help="Launch a tiny GUI to compare Qwen and filename suggestions."
+    )
     prefill_review.add_argument("--run", required=True, type=Path)
     prefill_review.add_argument("--host", default="127.0.0.1")
     prefill_review.add_argument("--port", type=int)
 
-    fuse_prefill = subparsers.add_parser("fuse-prefill", help="Fuse filename-rule and Qwen prefill suggestions for a run.")
+    fuse_prefill = subparsers.add_parser(
+        "fuse-prefill", help="Fuse filename-rule and Qwen prefill suggestions for a run."
+    )
     fuse_prefill.add_argument("--run", required=True, type=Path)
     fuse_prefill.add_argument("--out", type=Path)
     fuse_prefill.add_argument("--min-qwen-confidence", type=float, default=0.55)
@@ -62,7 +68,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     label_v2 = subparsers.add_parser("label-v2", help="Run filename/source-first safe label v2 suggestions.")
     _add_label_v2_args(label_v2, include_vlm_args=True)
 
-    fuse_prefill_v2 = subparsers.add_parser("fuse-prefill-v2", help="Safely fuse existing Qwen suggestions through label v2.")
+    fuse_prefill_v2 = subparsers.add_parser(
+        "fuse-prefill-v2", help="Safely fuse existing Qwen suggestions through label v2."
+    )
     _add_label_v2_args(fuse_prefill_v2, include_vlm_args=False)
 
     label_v2_report = subparsers.add_parser("label-v2-report", help="Print/write a label-v2 run summary.")
@@ -81,19 +89,27 @@ def main(argv: Sequence[str] | None = None) -> None:
     apply_label_v2.add_argument("--dry-run", action="store_true")
     apply_label_v2.add_argument("--overwrite-human-labels", action="store_true")
 
-    semantic_v3 = subparsers.add_parser("semantic-v3", help="Add semantic-v3 compositional metadata to label-v2 predictions.")
+    semantic_v3 = subparsers.add_parser(
+        "semantic-v3", help="Add semantic-v3 compositional metadata to label-v2 predictions."
+    )
     semantic_v3.add_argument("--run", required=True, type=Path)
     semantic_v3.add_argument("--prediction-file", default="label_v2_suggestions.jsonl")
-    semantic_v3.add_argument("--out", type=Path, help="Defaults to <prediction-file stem>_semantic_v3.jsonl in the run directory.")
+    semantic_v3.add_argument(
+        "--out", type=Path, help="Defaults to <prediction-file stem>_semantic_v3.jsonl in the run directory."
+    )
     semantic_v3.add_argument("--max-captions", type=int, default=8)
 
-    semantic_v3_report = subparsers.add_parser("semantic-v3-report", help="Summarize semantic-v3 coverage for a prediction file.")
+    semantic_v3_report = subparsers.add_parser(
+        "semantic-v3-report", help="Summarize semantic-v3 coverage for a prediction file."
+    )
     semantic_v3_report.add_argument("--run", required=True, type=Path)
     semantic_v3_report.add_argument("--prediction-file", default="label_v2_suggestions_semantic_v3.jsonl")
     semantic_v3_report.add_argument("--out-json", type=Path)
     semantic_v3_report.add_argument("--out-md", type=Path)
 
-    prefill_eval_v2 = subparsers.add_parser("prefill-eval-v2", help="Evaluate label-v2 safe prefill against cross-run golden labels.")
+    prefill_eval_v2 = subparsers.add_parser(
+        "prefill-eval-v2", help="Evaluate label-v2 safe prefill against cross-run golden labels."
+    )
     prefill_eval_v2.add_argument("--golden", required=True, type=Path)
     prefill_eval_v2.add_argument("--runs", required=True, help="Comma-separated harvest run directories.")
     prefill_eval_v2.add_argument("--prediction-file", default="label_v2_suggestions.jsonl")
@@ -116,7 +132,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     golden_sample.add_argument("--run", required=True, type=Path)
     golden_sample.add_argument("--n", type=int, default=400)
     golden_sample.add_argument("--seed", type=int, default=0)
-    golden_sample.add_argument("--stratify-by", default="source_name", help="Comma-separated record fields to stratify on.")
+    golden_sample.add_argument(
+        "--stratify-by", default="source_name", help="Comma-separated record fields to stratify on."
+    )
     golden_sample.add_argument("--out", type=Path)
 
     golden_label = subparsers.add_parser("golden-label", help="Launch the golden-set labeling GUI.")
@@ -125,19 +143,29 @@ def main(argv: Sequence[str] | None = None) -> None:
     golden_label.add_argument("--port", type=int)
     golden_label.add_argument("--labeler", default="")
 
-    golden_prefill_v2 = subparsers.add_parser("golden-prefill-v2", help="Create assisted golden candidates prefilled from label-v2 suggestions.")
+    golden_prefill_v2 = subparsers.add_parser(
+        "golden-prefill-v2", help="Create assisted golden candidates prefilled from label-v2 suggestions."
+    )
     golden_prefill_v2.add_argument("--run", required=True, type=Path)
     golden_prefill_v2.add_argument("--prediction-file", default="label_v2_suggestions.jsonl")
     golden_prefill_v2.add_argument("--n", type=int, default=160)
     golden_prefill_v2.add_argument("--seed", type=int, default=496)
     golden_prefill_v2.add_argument("--stratify-by", default="source_profile.name,bucket,safe_prefill.object_name")
     golden_prefill_v2.add_argument("--out", type=Path)
-    golden_prefill_v2.add_argument("--overwrite", action="store_true", help="Initialize gold_* fields from label-v2 even when a human golden label already exists.")
+    golden_prefill_v2.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Initialize gold_* fields from label-v2 even when a human golden label already exists.",
+    )
 
-    golden_prefill_report = subparsers.add_parser("golden-prefill-report", help="Summarize correction rates for prefilled golden labels.")
+    golden_prefill_report = subparsers.add_parser(
+        "golden-prefill-report", help="Summarize correction rates for prefilled golden labels."
+    )
     golden_prefill_report.add_argument("--golden", required=True, type=Path)
 
-    assisted_sample = subparsers.add_parser("assisted-golden-sample", help="Write assisted golden correction candidates.")
+    assisted_sample = subparsers.add_parser(
+        "assisted-golden-sample", help="Write assisted golden correction candidates."
+    )
     assisted_sample.add_argument("--run", required=True, type=Path)
     assisted_sample.add_argument("--n", type=int)
     assisted_sample.add_argument("--seed", type=int, default=1337)
@@ -183,7 +211,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     dataset_qa.add_argument("--sample-limit", type=int, default=64)
     dataset_qa.add_argument("--strict", action="store_true", help="Escalate soft raster/tag warnings to errors.")
     dataset_qa.add_argument("--fail-on-warning", action="store_true", help="Exit non-zero if any warnings exist.")
-    dataset_qa.add_argument("--require-semantic-v3", action="store_true", help="Fail records that lack semantic_v3 metadata.")
+    dataset_qa.add_argument(
+        "--require-semantic-v3", action="store_true", help="Fail records that lack semantic_v3 metadata."
+    )
 
     build_training_manifest = subparsers.add_parser(
         "build-training-manifest", help="Expand a semantic-v3 dataset into training conditioning rows."
@@ -195,7 +225,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     build_training_manifest.add_argument("--variants-per-sprite", type=int, default=8)
     build_training_manifest.add_argument("--seed", type=int, default=4962026)
-    build_training_manifest.add_argument("--per-split", action="store_true", help="Also write training_manifest_{split}.jsonl.")
+    build_training_manifest.add_argument(
+        "--per-split", action="store_true", help="Also write training_manifest_{split}.jsonl."
+    )
 
     training_manifest_qa = subparsers.add_parser(
         "training-manifest-qa", help="Validate a generated training manifest against its source dataset."
@@ -258,7 +290,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     build_semantic_dataset.add_argument("--prediction-file", default="label_v2_suggestions.jsonl")
     build_semantic_dataset.add_argument("--max-palette-slots", type=int, default=32)
     build_semantic_dataset.add_argument("--max-captions", type=int, default=8)
-    build_semantic_dataset.add_argument("--caption-policy", default="mixed", choices=["object_only", "style_aware", "attribute", "minimal", "mixed"])
+    build_semantic_dataset.add_argument(
+        "--caption-policy", default="mixed", choices=["object_only", "style_aware", "attribute", "minimal", "mixed"]
+    )
     build_semantic_dataset.add_argument("--variants-per-sprite", type=int, default=8)
     build_semantic_dataset.add_argument("--seed", type=int, default=20260706)
     accept_auto = build_semantic_dataset.add_mutually_exclusive_group()
@@ -283,7 +317,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     build_multisource.add_argument("--out", required=True, type=Path)
     build_multisource.add_argument("--seed", type=int, default=20260706)
     build_multisource.add_argument("--split-policy", default="preserve", choices=["preserve", "reshuffle"])
-    build_multisource.add_argument("--caption-policy", default="mixed", choices=["object_only", "style_aware", "attribute", "minimal", "mixed"])
+    build_multisource.add_argument(
+        "--caption-policy", default="mixed", choices=["object_only", "style_aware", "attribute", "minimal", "mixed"]
+    )
     build_multisource.add_argument("--variants-per-sprite", type=int, default=8)
     build_multisource.add_argument("--max-palette-slots", type=int, default=32)
     build_multisource.add_argument("--only-atomic-ready", action="store_true", default=False)
@@ -497,8 +533,14 @@ def _add_label_v2_args(parser: argparse.ArgumentParser, *, include_vlm_args: boo
         vlm = parser.add_mutually_exclusive_group()
         vlm.add_argument("--use-vlm", action="store_true", dest="use_vlm", default=True)
         vlm.add_argument("--no-vlm", action="store_false", dest="use_vlm")
-        parser.add_argument("--refresh-vlm", action="store_true", help="Ignore existing qwen_suggestions.jsonl and call the configured VLM backend when enabled.")
-        parser.add_argument("--ignore-existing-vlm", action="store_true", help="Ignore qwen_suggestions.jsonl for this label-v2 run.")
+        parser.add_argument(
+            "--refresh-vlm",
+            action="store_true",
+            help="Ignore existing qwen_suggestions.jsonl and call the configured VLM backend when enabled.",
+        )
+        parser.add_argument(
+            "--ignore-existing-vlm", action="store_true", help="Ignore qwen_suggestions.jsonl for this label-v2 run."
+        )
         parser.add_argument("--vlm-only-when-needed", action="store_true")
         parser.add_argument("--vlm-role", default="descriptor", choices=["labeler", "descriptor", "verifier"])
         parser.add_argument("--backend", default="none", choices=["none", "openai_compatible", "ollama", "rule_based"])
@@ -720,9 +762,13 @@ def _run_fuse_prefill(parsed: argparse.Namespace) -> None:
         auto_metadata = record.get("auto_metadata") if isinstance(record.get("auto_metadata"), dict) else {}
         filename = Path(str(record.get("relative_path") or record.get("final_png_path", ""))).name
         filename_suggestion = parse_filename_metadata(sprite_id, filename=filename)
-        filename_dict = dict(auto_metadata.get("filename_suggestion") or filename_suggestion_to_dict(filename_suggestion))
+        filename_dict = dict(
+            auto_metadata.get("filename_suggestion") or filename_suggestion_to_dict(filename_suggestion)
+        )
         qwen_suggestion = dict(auto_metadata.get("qwen_suggestion") or qwen_by_id.get(sprite_id, {}))
-        adjudication = auto_metadata.get("adjudication") if isinstance(auto_metadata.get("adjudication"), dict) else None
+        adjudication = (
+            auto_metadata.get("adjudication") if isinstance(auto_metadata.get("adjudication"), dict) else None
+        )
         fused = fuse_prefill_suggestions(
             filename_suggestion,
             qwen_suggestion,
@@ -994,7 +1040,14 @@ def _run_label_v2_sweep(parsed: argparse.Namespace) -> None:
     parsed.out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     best = result.get("best") or {}
     print("Best operating point:")
-    for key in ("trusted_filename_threshold", "vlm_threshold", "conflict_policy", "auto_coverage", "auto_precision", "object_token_f1"):
+    for key in (
+        "trusted_filename_threshold",
+        "vlm_threshold",
+        "conflict_policy",
+        "auto_coverage",
+        "auto_precision",
+        "object_token_f1",
+    ):
         if key in best:
             print(f"{key}: {best[key]}")
     print(f"\nWrote: {parsed.out}")
@@ -1127,11 +1180,15 @@ def _run_prefill_eval(parsed: argparse.Namespace) -> None:
     fused_path = parsed.fused or (run_dir / "fused_suggestions.jsonl")
     golden = load_golden_labels(golden_path)
     if not golden:
-        print(f"No golden labels found at {golden_path}. Run `harvest golden-sample` then `harvest golden-label` first.")
+        print(
+            f"No golden labels found at {golden_path}. Run `harvest golden-sample` then `harvest golden-label` first."
+        )
         raise SystemExit(1)
     fused_records = read_jsonl(fused_path)
     if not fused_records:
-        print(f"No fused suggestions found at {fused_path}. Run `harvest qwen-prefill` or `harvest fuse-prefill` first.")
+        print(
+            f"No fused suggestions found at {fused_path}. Run `harvest qwen-prefill` or `harvest fuse-prefill` first."
+        )
         raise SystemExit(1)
 
     result = evaluate_prefill(golden, fused_records)
@@ -1201,10 +1258,7 @@ def _run_dataset_qa(parsed: argparse.Namespace) -> None:
     print(f"Dataset: {dataset_dir}")
     print(f"Records: {result.total_records}")
     print(f"Images: {result.total_images}")
-    print(
-        "Splits: "
-        + " ".join(f"{split}={result.splits.get(split, 0)}" for split in ("train", "val", "test"))
-    )
+    print("Splits: " + " ".join(f"{split}={result.splits.get(split, 0)}" for split in ("train", "val", "test")))
     print(f"Errors: {len(result.errors)}")
     print(f"Warnings: {len(result.warnings)}")
     print(f"Wrote: {out_json}")
@@ -1309,7 +1363,9 @@ def _run_training_manifest_report(parsed: argparse.Namespace) -> None:
     from collections import Counter
 
     split_rows = Counter(str(row.get("split", "")) for row in rows)
-    policies = {str(row.get("audit", {}).get("caption_policy", "")) for row in rows if isinstance(row.get("audit"), dict)}
+    policies = {
+        str(row.get("audit", {}).get("caption_policy", "")) for row in rows if isinstance(row.get("audit"), dict)
+    }
     seeds = {int(row.get("audit", {}).get("seed", 0)) for row in rows if isinstance(row.get("audit"), dict)}
     variants = Counter(str(row.get("sprite_id", "")) for row in rows)
     result = TrainingManifestResult(
@@ -1485,7 +1541,7 @@ def _run_merge_datasets(parsed: argparse.Namespace) -> None:
     print(format_merge_report(result), end="")
     print(f"\nOutput: {result.output_dir}")
     print(f"Total records: {result.total_records}")
-    print(f"Splits: " + " ".join(f"{s}={result.split_counts.get(s, 0)}" for s in ("train", "val", "test")))
+    print("Splits: " + " ".join(f"{s}={result.split_counts.get(s, 0)}" for s in ("train", "val", "test")))
     if result.errors:
         raise SystemExit(1)
 
@@ -1669,11 +1725,7 @@ def _parse_include_statuses(values: Sequence[str] | None) -> tuple[str, ...]:
     raw_values: list[str] = []
     for value in values or ("accepted",):
         raw_values.extend(str(value).split(","))
-    statuses = tuple(
-        status.strip().lower()
-        for status in raw_values
-        if status.strip()
-    )
+    statuses = tuple(status.strip().lower() for status in raw_values if status.strip())
     return statuses or ("accepted",)
 
 

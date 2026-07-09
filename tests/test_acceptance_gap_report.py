@@ -77,12 +77,18 @@ def test_acceptance_gap_report_reports_accepted_to_exported_gap(tmp_path: Path) 
     assert row["exported_count"] == 1
 
 
-def _prediction(sprite_id: str, object_name: str, *, bucket: str = "auto_filename_trusted", needs_review: bool = False) -> dict:
+def _prediction(
+    sprite_id: str, object_name: str, *, bucket: str = "auto_filename_trusted", needs_review: bool = False
+) -> dict:
     return {
         "sprite_id": sprite_id,
         "bucket": bucket,
         "needs_review": needs_review,
-        "safe_prefill": {"category": "item_icon", "object_name": object_name, "tags": [object_name] if object_name else []},
+        "safe_prefill": {
+            "category": "item_icon",
+            "object_name": object_name,
+            "tags": [object_name] if object_name else [],
+        },
         "label_quality": {"bucket": bucket, "needs_review": needs_review},
     }
 
@@ -100,4 +106,7 @@ def _manifest(sprite_id: str) -> dict:
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(json.dumps(record, sort_keys=True) for record in records) + ("\n" if records else ""), encoding="utf-8")
+    path.write_text(
+        "\n".join(json.dumps(record, sort_keys=True) for record in records) + ("\n" if records else ""),
+        encoding="utf-8",
+    )

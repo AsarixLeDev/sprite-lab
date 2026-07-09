@@ -8,7 +8,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from spritelab.harvest.apply_label_v2 import is_raw_auto_prediction, is_review_prediction, is_safe_auto_prediction, prediction_bucket
+from spritelab.harvest.apply_label_v2 import (
+    is_raw_auto_prediction,
+    is_review_prediction,
+    is_safe_auto_prediction,
+    prediction_bucket,
+)
 from spritelab.harvest.build_semantic_dataset import RAW_LABEL_V2_PREDICTION_PREFERENCE, is_raw_label_v2_prediction_file
 from spritelab.harvest.catalog import read_jsonl
 from spritelab.harvest.dataset_readiness import scan_readiness
@@ -66,15 +71,21 @@ def build_acceptance_gap_report(runs_root: str | Path, datasets_root: str | Path
                 "raw_auto_count": raw_auto_count,
                 "raw_safe_auto_count": len(safe_auto_predictions),
                 "raw_review_count": len(review_predictions),
-                "apply_applied_auto_count": int(apply_report.get("applied_auto_labels", pack.apply_report_applied_auto_labels) or 0),
+                "apply_applied_auto_count": int(
+                    apply_report.get("applied_auto_labels", pack.apply_report_applied_auto_labels) or 0
+                ),
                 "apply_accepted_auto_count": accepted_auto_count,
                 "exported_count": exported_count,
                 "dataset_qa_errors": len(dataset_qa.get("errors") or []) if dataset_qa else int(pack.dataset_qa_errors),
-                "training_manifest_qa_errors": len(tm_qa.get("errors") or []) if tm_qa else int(pack.training_manifest_qa_errors),
+                "training_manifest_qa_errors": len(tm_qa.get("errors") or [])
+                if tm_qa
+                else int(pack.training_manifest_qa_errors),
                 "gap_raw_auto_to_accepted": gap_raw_auto_to_accepted,
                 "gap_accepted_to_exported": gap_accepted_to_exported,
                 "top_object_names_in_raw_auto": _top_safe_objects(auto_predictions),
-                "top_object_names_in_accepted": dict(Counter(str(record.get("object_name") or "(empty)") for record in exported_records).most_common(20)),
+                "top_object_names_in_accepted": dict(
+                    Counter(str(record.get("object_name") or "(empty)") for record in exported_records).most_common(20)
+                ),
                 "top_missing_object_examples": missing_object_examples[:20],
                 "top_review_reasons": review_reasons,
                 "apply_auto_skip_reasons": dict(apply_report.get("auto_skip_reasons") or {}),
@@ -161,7 +172,9 @@ def format_acceptance_gap_report(report: Mapping[str, Any]) -> str:
 def _read_raw_predictions(run_path: Path | None) -> list[dict[str, Any]]:
     if run_path is None or not run_path.is_dir():
         return []
-    candidates = [path for path in run_path.glob("label_v2_suggestions*.jsonl") if is_raw_label_v2_prediction_file(path)]
+    candidates = [
+        path for path in run_path.glob("label_v2_suggestions*.jsonl") if is_raw_label_v2_prediction_file(path)
+    ]
     by_name = {path.name: path for path in candidates}
     ordered = [by_name[name] for name in RAW_LABEL_V2_PREDICTION_PREFERENCE if name in by_name]
     ordered.extend(path for path in sorted(candidates) if path.name not in set(RAW_LABEL_V2_PREDICTION_PREFERENCE))
@@ -178,9 +191,7 @@ def _read_dataset_records(dataset_dir: Path | None) -> list[dict[str, Any]]:
 
 
 def _top_safe_objects(records: Sequence[Mapping[str, Any]]) -> dict[str, int]:
-    return dict(
-        Counter(str(_safe(record).get("object_name") or "(empty)") for record in records).most_common(20)
-    )
+    return dict(Counter(str(_safe(record).get("object_name") or "(empty)") for record in records).most_common(20))
 
 
 def _top_review_reasons(records: Sequence[Mapping[str, Any]]) -> dict[str, int]:

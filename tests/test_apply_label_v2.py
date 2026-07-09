@@ -61,7 +61,9 @@ def test_apply_label_v2_cli_reads_prediction_file_applies_safe_and_writes_report
     assert review["status"] == "quarantine"
     assert "label_v2_applied" not in review.get("auto_metadata", {})
 
-    review_queue = [json.loads(line) for line in (run / "label_v2_review_queue.jsonl").read_text(encoding="utf-8").splitlines()]
+    review_queue = [
+        json.loads(line) for line in (run / "label_v2_review_queue.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     assert len(review_queue) == 1
     assert review_queue[0]["sprite_id"] == "review_sprite"
     assert review_queue[0]["bucket"] == "needs_review_candidate_conflict"
@@ -122,7 +124,9 @@ def test_apply_label_v2_dry_run_writes_no_mutated_imported_file(tmp_path: Path) 
 def test_apply_label_v2_review_only_mode_applies_review_without_accepting(tmp_path: Path) -> None:
     run = _write_apply_run(tmp_path)
 
-    report = apply_label_v2_predictions(run, prediction_file="custom_predictions.jsonl", mode="review-only", accept_auto=True)
+    report = apply_label_v2_predictions(
+        run, prediction_file="custom_predictions.jsonl", mode="review-only", accept_auto=True
+    )
 
     imported = _read_by_id(run / "imported.jsonl")
     review = imported["review_sprite"]
@@ -151,7 +155,9 @@ def _write_apply_run(tmp_path: Path, *, review_status: str = "quarantine") -> Pa
     run.mkdir()
     imported = [
         _imported_record("safe_sprite", category="old_auto", tags=["old"], notes="old note"),
-        _imported_record("review_sprite", status=review_status, category="old_review", tags=["review_old"], notes="review old"),
+        _imported_record(
+            "review_sprite", status=review_status, category="old_review", tags=["review_old"], notes="review old"
+        ),
         _imported_record(
             "human_sprite",
             category="weapon",
@@ -302,4 +308,7 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
 
 
 def _read_by_id(path: Path) -> dict[str, dict]:
-    return {record["sprite_id"]: record for record in (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())}
+    return {
+        record["sprite_id"]: record
+        for record in (json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
+    }

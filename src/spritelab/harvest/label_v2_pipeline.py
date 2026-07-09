@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -84,7 +84,11 @@ def build_label_v2_records(
         imported = imported[: max(0, int(max_items))]
 
     reuse_existing_vlm = bool(use_vlm) and not (refresh_vlm or ignore_existing_vlm)
-    qwen_by_id = dict(existing_vlm_by_id or _qwen_by_id(read_jsonl(run_path / "qwen_suggestions.jsonl"))) if reuse_existing_vlm else {}
+    qwen_by_id = (
+        dict(existing_vlm_by_id or _qwen_by_id(read_jsonl(run_path / "qwen_suggestions.jsonl")))
+        if reuse_existing_vlm
+        else {}
+    )
     thresholds = FusionThresholds(
         trusted_filename_threshold=trusted_filename_threshold,
         auto_vlm_threshold=auto_vlm_threshold,
@@ -94,7 +98,16 @@ def build_label_v2_records(
     groups = group_label_records_by_exact_rgba(imported, run_dir=run_path) if propagate_dups else []
     if not groups:
         groups = [
-            type("_SingleGroup", (), {"representative_index": index, "member_indices": (index,), "kind": "single", "representative_sprite_id": str(record.get("sprite_id", ""))})()
+            type(
+                "_SingleGroup",
+                (),
+                {
+                    "representative_index": index,
+                    "member_indices": (index,),
+                    "kind": "single",
+                    "representative_sprite_id": str(record.get("sprite_id", "")),
+                },
+            )()
             for index, record in enumerate(imported)
         ]
 
@@ -117,7 +130,11 @@ def build_label_v2_records(
         for index in group.member_indices:
             record = imported[index]
             sprite_id = str(record.get("sprite_id", ""))
-            duplicate_metadata = duplicate_metadata_for_member(group, sprite_id) if propagate_dups and hasattr(group, "member_sprite_ids") else {}
+            duplicate_metadata = (
+                duplicate_metadata_for_member(group, sprite_id)
+                if propagate_dups and hasattr(group, "member_sprite_ids")
+                else {}
+            )
             if duplicate_metadata:
                 selection = _VlmSelection(rep_selection.label, "propagated_duplicate", ("vlm_propagated_duplicate",))
             elif index == rep_index:
@@ -183,11 +200,7 @@ def normalize_include_statuses(values: Sequence[str] | None) -> tuple[str, ...]:
     raw_values: list[str] = []
     for value in values:
         raw_values.extend(str(value).split(","))
-    normalized = tuple(
-        str(value).strip().lower()
-        for value in raw_values
-        if str(value).strip()
-    )
+    normalized = tuple(str(value).strip().lower() for value in raw_values if str(value).strip())
     if not normalized or "all_valid" in normalized:
         return DEFAULT_LABEL_V2_INCLUDE_STATUSES
     if "all" in normalized:
@@ -284,11 +297,25 @@ def build_label_v2_record(
             filename_suggestion,
             category=specialization.category or filename_suggestion.category,
             object_name=specialization.object_name or filename_suggestion.object_name,
-            tags=_specialized_tags(filename_suggestion.tags, specialization.object_name or filename_suggestion.object_name, specialization.category or filename_suggestion.category),
-            confidence=max(filename_suggestion.confidence, 0.78 if specialization.object_name else filename_suggestion.confidence),
-            confidence_reason=_specialized_confidence_reason(filename_suggestion.confidence_reason, specialization.flags),
-            short_description=_specialized_description(specialization.object_name or filename_suggestion.object_name, specialization.category or filename_suggestion.category),
-            evidence=(*filename_suggestion.evidence, *(f"rpg_496_specialization:{flag}" for flag in specialization.flags)),
+            tags=_specialized_tags(
+                filename_suggestion.tags,
+                specialization.object_name or filename_suggestion.object_name,
+                specialization.category or filename_suggestion.category,
+            ),
+            confidence=max(
+                filename_suggestion.confidence, 0.78 if specialization.object_name else filename_suggestion.confidence
+            ),
+            confidence_reason=_specialized_confidence_reason(
+                filename_suggestion.confidence_reason, specialization.flags
+            ),
+            short_description=_specialized_description(
+                specialization.object_name or filename_suggestion.object_name,
+                specialization.category or filename_suggestion.category,
+            ),
+            evidence=(
+                *filename_suggestion.evidence,
+                *(f"rpg_496_specialization:{flag}" for flag in specialization.flags),
+            ),
             candidate_object_names=candidate_object_names,
         )
     if vlm is not None and candidate_object_names:
@@ -383,7 +410,7 @@ def summarize_label_v2_records(records: Sequence[Mapping[str, Any]]) -> dict[str
     tags: Counter[str] = Counter()
     conflicts: Counter[str] = Counter()
     candidate_families: Counter[str] = Counter()
-    vlm_stats: Counter[str] = Counter({key: 0 for key in VLM_STAT_KEYS})
+    vlm_stats: Counter[str] = Counter(dict.fromkeys(VLM_STAT_KEYS, 0))
     duplicate_count = 0
     needs_review = 0
     records_with_candidates = 0
@@ -459,7 +486,9 @@ def format_label_v2_run_report(summary: Mapping[str, Any]) -> str:
     selection = dict(summary.get("input_selection") or {})
     if selection:
         lines.append(f"- eligible_imported_records: {int(selection.get('eligible_imported_records', 0))}")
-        lines.append("- include_statuses: " + ", ".join(str(value) for value in selection.get("include_statuses") or ()))
+        lines.append(
+            "- include_statuses: " + ", ".join(str(value) for value in selection.get("include_statuses") or ())
+        )
         skipped = dict(selection.get("skipped_by_reason") or {})
         if skipped:
             for reason, count in skipped.items():
@@ -481,10 +510,12 @@ def format_label_v2_run_report(summary: Mapping[str, Any]) -> str:
         lines.append("- top_candidate_families:")
         for family, count in candidate_families.items():
             lines.append(f"  - {family}: {count}")
-    lines.extend([
-        "",
-        "## Buckets",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Buckets",
+        ]
+    )
     for bucket, count in dict(summary.get("buckets") or {}).items():
         lines.append(f"- {bucket}: {count}")
     lines.extend(["", "## Flags"])
@@ -678,7 +709,11 @@ def _specialized_tags(existing: Sequence[str], object_name: str, category: str) 
 def _specialized_confidence_reason(existing: str, flags: Sequence[str]) -> str:
     if not flags:
         return existing
-    return f"{existing}; 496 RPG specialization: {', '.join(flags)}" if existing else f"496 RPG specialization: {', '.join(flags)}"
+    return (
+        f"{existing}; 496 RPG specialization: {', '.join(flags)}"
+        if existing
+        else f"496 RPG specialization: {', '.join(flags)}"
+    )
 
 
 def _specialized_description(object_name: str, category: str) -> str:

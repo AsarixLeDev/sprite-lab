@@ -13,8 +13,6 @@ try:
 except ImportError:  # pragma: no cover - exercised when torch is absent or broken.
     torch = None  # type: ignore[assignment]
 
-from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch
-from spritelab.training.eval_baseline import move_batch_to_device, resolve_device
 from spritelab.training.conditioning import (
     DEFAULT_CONDITIONING_MODE,
     apply_conditioning_mode,
@@ -22,6 +20,8 @@ from spritelab.training.conditioning import (
     checkpoint_semantic_max_length,
     validate_conditioning_mode,
 )
+from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch
+from spritelab.training.eval_baseline import move_batch_to_device, resolve_device
 from spritelab.training.generator_losses import rgba_generator_loss
 from spritelab.training.generator_models import TinyCaptionSpriteGenerator
 from spritelab.training.rgba import save_rgba_contact_sheet
@@ -190,7 +190,7 @@ def evaluate_generator_model(
             count += batch_size
     model.train()
     if count == 0:
-        return {key: 0.0 for key in totals}
+        return dict.fromkeys(totals, 0.0)
     return {key: value / count for key, value in totals.items()}
 
 
@@ -309,7 +309,4 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Evaluated {report['records']} {report['split']} records.")
         print(f"Loss: {report['loss']:.6f}")
     if report["prompt_count"]:
-        print(
-            f"Generated {report['prompt_samples_written']} prompt samples "
-            f"from {report['prompt_count']} prompts."
-        )
+        print(f"Generated {report['prompt_samples_written']} prompt samples from {report['prompt_count']} prompts.")

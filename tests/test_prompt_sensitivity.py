@@ -96,7 +96,9 @@ def test_pairwise_metrics_and_near_duplicate_detection() -> None:
 
 
 def test_discovers_exact_prompt_pair_from_eval_prompts(tmp_path: Path) -> None:
-    records = [json.loads(line) for line in _prompts(tmp_path / "prompts.jsonl").read_text(encoding="utf-8").splitlines()]
+    records = [
+        json.loads(line) for line in _prompts(tmp_path / "prompts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     pairs = discover_prompt_pairs(records, max_pairs=2)
     assert pairs[0]["pair_id"] == "red_potion__blue_potion"
     assert pairs[0]["source"] == "exact_eval_prompt"
@@ -132,7 +134,9 @@ def test_prompt_sensitivity_writes_sets_reports_contact_sheets_and_metadata(tmp_
 
     rows = [
         json.loads(line)
-        for line in (out / "same_noise_different_prompts" / "generated_manifest.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (out / "same_noise_different_prompts" / "generated_manifest.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
     assert rows[0]["prompt_id"] == "red_potion"
     assert rows[0]["target_semantics"]["base_object"] == "potion"

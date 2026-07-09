@@ -136,7 +136,9 @@ def test_descriptor_image_views_sizes_edges_background_and_cache_key() -> None:
     assert compute_image_cache_key(full, model="m", prompt_version="p", image_view="full") != compute_image_cache_key(
         full, model="m", prompt_version="p", image_view="crop"
     )
-    assert compute_image_cache_key(full, model="m", prompt_version="p1") != compute_image_cache_key(full, model="m", prompt_version="p2")
+    assert compute_image_cache_key(full, model="m", prompt_version="p1") != compute_image_cache_key(
+        full, model="m", prompt_version="p2"
+    )
 
 
 def test_descriptor_parser_accepts_new_old_and_bad_enums() -> None:
@@ -209,19 +211,43 @@ def test_fusion_keeps_trusted_food_over_known_vlm_traps_and_preserves_alternativ
 
 def test_fusion_candidate_ranked_weak_gem_and_tool_cases() -> None:
     gem_profile = detect_source_profile(_record("gem-7soul1_r000_c001", "oga_cc0_gem_7soul1"))
-    weak_gem = LabelSuggestion("material", "gem", confidence=0.25, source="filename_rules_v2", candidate_object_names=("triangle_gem", "round_gem"))
-    vlm_gem = LabelSuggestion("material", "triangle_gem", tags=("triangle",), confidence=0.85, source="vlm_descriptor", candidate_object_names=("triangle_gem", "round_gem"))
+    weak_gem = LabelSuggestion(
+        "material",
+        "gem",
+        confidence=0.25,
+        source="filename_rules_v2",
+        candidate_object_names=("triangle_gem", "round_gem"),
+    )
+    vlm_gem = LabelSuggestion(
+        "material",
+        "triangle_gem",
+        tags=("triangle",),
+        confidence=0.85,
+        source="vlm_descriptor",
+        candidate_object_names=("triangle_gem", "round_gem"),
+    )
     fused = fuse_label_v2(weak_gem, vlm_gem, None, profile=gem_profile)
     assert fused.safe_prefill.object_name == "triangle_gem"
     assert fused.bucket == "auto_vlm_candidate_ranked"
 
-    generic_vlm = LabelSuggestion("material", "gem", confidence=0.9, source="vlm_descriptor", candidate_object_names=("triangle_gem", "round_gem"))
+    generic_vlm = LabelSuggestion(
+        "material", "gem", confidence=0.9, source="vlm_descriptor", candidate_object_names=("triangle_gem", "round_gem")
+    )
     fused_generic = fuse_label_v2(weak_gem, generic_vlm, None, profile=gem_profile)
     assert fused_generic.needs_review
 
     tool_profile = detect_source_profile(_record("tool-ocal_r000_c001", "oga_cc0_tool_ocal"))
-    weak_tool = LabelSuggestion("tool", "tool", confidence=0.25, source="filename_rules_v2", candidate_object_names=("compass", "ruler"))
-    vlm_tool = LabelSuggestion("tool", "compass", tags=("navigation",), confidence=0.85, source="vlm_descriptor", candidate_object_names=("compass", "ruler"))
+    weak_tool = LabelSuggestion(
+        "tool", "tool", confidence=0.25, source="filename_rules_v2", candidate_object_names=("compass", "ruler")
+    )
+    vlm_tool = LabelSuggestion(
+        "tool",
+        "compass",
+        tags=("navigation",),
+        confidence=0.85,
+        source="vlm_descriptor",
+        candidate_object_names=("compass", "ruler"),
+    )
     fused_tool = fuse_label_v2(weak_tool, vlm_tool, None, profile=tool_profile)
     assert fused_tool.safe_prefill.object_name == "compass"
     assert fused_tool.bucket == "auto_vlm_candidate_ranked"
@@ -229,14 +255,25 @@ def test_fusion_candidate_ranked_weak_gem_and_tool_cases() -> None:
 
 def test_deterministic_canonicalization_polish() -> None:
     assert suggest_from_filename_v2(_record("scissor", "oga_cc0_tool_ocal")).suggestion.object_name == "scissors"
-    assert suggest_from_filename_v2(_record("wiresnip_blue", "oga_cc0_tool_ocal")).suggestion.object_name == "wiresnips_blue"
+    assert (
+        suggest_from_filename_v2(_record("wiresnip_blue", "oga_cc0_tool_ocal")).suggestion.object_name
+        == "wiresnips_blue"
+    )
     assert suggest_from_filename_v2(_record("case", "oga_cc0_tool_ocal")).suggestion.object_name == "tool_case"
     assert suggest_from_filename_v2(_record("amethist", "oga_cc0_gem_7soul1")).suggestion.object_name == "amethyst"
     assert suggest_from_filename_v2(_record("saphire", "oga_cc0_gem_7soul1")).suggestion.object_name == "sapphire"
     assert suggest_from_filename_v2(_record("ovale_gem", "oga_cc0_gem_7soul1")).suggestion.object_name == "oval_gem"
-    assert suggest_from_filename_v2(_record("tomatoes_cherry", "oga_cc0_food_ocal")).suggestion.object_name == "cherry_tomatoes"
-    assert suggest_from_filename_v2(_record("cherry_tomatoes", "oga_cc0_food_ocal")).suggestion.object_name == "cherry_tomatoes"
-    assert suggest_from_filename_v2(_record("juice_orange", "oga_cc0_food_ocal")).suggestion.object_name == "orange_juice"
+    assert (
+        suggest_from_filename_v2(_record("tomatoes_cherry", "oga_cc0_food_ocal")).suggestion.object_name
+        == "cherry_tomatoes"
+    )
+    assert (
+        suggest_from_filename_v2(_record("cherry_tomatoes", "oga_cc0_food_ocal")).suggestion.object_name
+        == "cherry_tomatoes"
+    )
+    assert (
+        suggest_from_filename_v2(_record("juice_orange", "oga_cc0_food_ocal")).suggestion.object_name == "orange_juice"
+    )
     ice = suggest_from_filename_v2(_record("ice_cream_sandwich", "oga_cc0_food_ocal")).suggestion
     assert ice.category == "item_icon"
 
@@ -244,7 +281,12 @@ def test_deterministic_canonicalization_polish() -> None:
 def test_golden_lint_flags_and_writes_non_destructive_fixes(tmp_path) -> None:
     golden = tmp_path / "golden.jsonl"
     rows = [
-        {"sprite_id": "a", "category": "effect_icon", "object_name": "ice_cream_sandwich", "tags": ["ice_cream_sandwich"]},
+        {
+            "sprite_id": "a",
+            "category": "effect_icon",
+            "object_name": "ice_cream_sandwich",
+            "tags": ["ice_cream_sandwich"],
+        },
         {"sprite_id": "b", "category": "material", "object_name": "saphire", "tags": ["saphire"]},
         {"sprite_id": "c", "category": "material", "object_name": "gem", "tags": ["gem"]},
         {"sprite_id": "dup", "category": "item_icon", "object_name": "apple", "tags": ["apple"]},
@@ -275,13 +317,21 @@ def test_eval_errors_out_records_mismatches_missing_and_keeps_bucket_metrics() -
             "source_id": "food",
             "safe_prefill": {"category": "item_icon", "object_name": "orange", "tags": ["fruit"]},
             "vlm_descriptor": {"object_name": "orange", "alternative_object_names": ["apple"]},
-            "label_quality": {"bucket": "auto_filename_trusted", "needs_review": False, "flags": ["auto_filename_trusted"]},
+            "label_quality": {
+                "bucket": "auto_filename_trusted",
+                "needs_review": False,
+                "flags": ["auto_filename_trusted"],
+            },
         },
         {
             "sprite_id": "b",
             "source_id": "tool",
             "safe_prefill": {"category": "tool", "object_name": "compass", "tags": ["tool"]},
-            "label_quality": {"bucket": "auto_vlm_candidate_ranked", "needs_review": False, "flags": ["auto_vlm_candidate_ranked"]},
+            "label_quality": {
+                "bucket": "auto_vlm_candidate_ranked",
+                "needs_review": False,
+                "flags": ["auto_vlm_candidate_ranked"],
+            },
         },
     ]
 

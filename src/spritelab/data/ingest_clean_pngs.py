@@ -180,8 +180,7 @@ def _encode_png_for_ingestion(
             )
         except Exception as quantization_error:
             raise ValueError(
-                "strict encoder failed due to too many colors; "
-                f"quantization failed: {quantization_error}"
+                f"strict encoder failed due to too many colors; quantization failed: {quantization_error}"
             ) from quantization_error
 
 

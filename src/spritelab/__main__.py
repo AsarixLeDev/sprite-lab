@@ -208,14 +208,18 @@ def _run_dataset_maker_prefill(args: list[str]) -> None:
     source.add_argument("--png", type=Path)
     source.add_argument("--png-dir", type=Path)
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--backend", default="openai_compatible", choices=["openai_compatible", "ollama", "rule_based", "none"])
+    parser.add_argument(
+        "--backend", default="openai_compatible", choices=["openai_compatible", "ollama", "rule_based", "none"]
+    )
     parser.add_argument("--model", default="Qwen/Qwen3-VL-8B-Instruct")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key", default="not-needed")
     parser.add_argument("--runpod-token", default="")
     parser.add_argument("--timeout-seconds", type=float, default=60.0)
     parser.add_argument("--cache-dir", type=Path)
-    parser.add_argument("--workers", type=int, default=1, help="Number of concurrent prefill requests for directory mode.")
+    parser.add_argument(
+        "--workers", type=int, default=1, help="Number of concurrent prefill requests for directory mode."
+    )
     parsed = parser.parse_args(args)
 
     from spritelab.dataset_maker.model import normalize_sprite_id
@@ -271,8 +275,7 @@ def _run_dataset_maker_prefill(args: list[str]) -> None:
         line_by_index: dict[int, str] = {}
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             future_to_index = {
-                executor.submit(prefill_line, path): item_index
-                for item_index, path in enumerate(png_paths)
+                executor.submit(prefill_line, path): item_index for item_index, path in enumerate(png_paths)
             }
             for future in as_completed(future_to_index):
                 line_by_index[future_to_index[future]] = future.result()
@@ -286,7 +289,7 @@ def _run_dataset_maker_prefill(args: list[str]) -> None:
         parsed.out.write_text(output, encoding="utf-8")
 
 
-def _prefill_png_paths(root: "Path") -> list["Path"]:
+def _prefill_png_paths(root: Path) -> list[Path]:
     if root is None:
         return []
     return sorted(

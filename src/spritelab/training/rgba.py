@@ -46,9 +46,7 @@ def npz_row_to_rgba(
     if palette_mask is not None:
         mask = np.asarray(palette_mask, dtype=bool)
         if mask.ndim != 1 or mask.shape[0] != palette_rgb.shape[0]:
-            raise ValueError(
-                f"palette_mask must have shape [{palette_rgb.shape[0]}], got {mask.shape}"
-            )
+            raise ValueError(f"palette_mask must have shape [{palette_rgb.shape[0]}], got {mask.shape}")
         used = np.unique(index.astype(np.int64, copy=False))
         invalid_used = [int(value) for value in used if not bool(mask[int(value)])]
         if invalid_used:

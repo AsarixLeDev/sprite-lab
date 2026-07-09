@@ -17,7 +17,12 @@ except ImportError:  # pragma: no cover - exercised when torch is absent or brok
     torch = None  # type: ignore[assignment]
 
 from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch, describe_array, read_jsonl
-from spritelab.training.eval_baseline import evaluate_model, move_batch_to_device, resolve_device, save_reconstruction_sheet
+from spritelab.training.eval_baseline import (
+    evaluate_model,
+    move_batch_to_device,
+    resolve_device,
+    save_reconstruction_sheet,
+)
 from spritelab.training.losses import sprite_reconstruction_loss
 from spritelab.training.models import SpriteCondAutoencoder
 from spritelab.training.optim_utils import (
@@ -82,7 +87,9 @@ def run_baseline_training(config: BaselineTrainConfig) -> dict[str, Any]:
 
     manifest_rows = read_jsonl(config.training_manifest)
     train_rows = [row for row in manifest_rows if row.get("split") == "train"]
-    tokenizer = SpriteTextTokenizer.build_from_records(train_rows or manifest_rows, max_length=config.caption_max_length)
+    tokenizer = SpriteTextTokenizer.build_from_records(
+        train_rows or manifest_rows, max_length=config.caption_max_length
+    )
     tokenizer.save(out_dir / "vocab.json")
 
     shared_npz_cache: dict[str, Any] = {}
@@ -309,7 +316,9 @@ def inspect_training_data(
             max_records=max_records,
             tokenizer=tokenizer,
         )
-        loader = th.utils.data.DataLoader(dataset, batch_size=min(batch_size, len(dataset)), collate_fn=collate_sprite_batch)
+        loader = th.utils.data.DataLoader(
+            dataset, batch_size=min(batch_size, len(dataset)), collate_fn=collate_sprite_batch
+        )
         batch = next(iter(loader))
         for key, value in batch.items():
             if isinstance(value, th.Tensor):
@@ -367,7 +376,9 @@ def _overfit_subset(dataset: Any, batch_size: int, overfit_batches: int) -> Any:
 
 def _max_role_id(dataset: SpriteTrainingDataset) -> int:
     max_role = 0
-    for npz_file in sorted({str(record.get("npz_file") or f"{record.get('split', '')}.npz") for record in dataset.records}):
+    for npz_file in sorted(
+        {str(record.get("npz_file") or f"{record.get('split', '')}.npz") for record in dataset.records}
+    ):
         arrays = dataset._load_npz(npz_file)
         if arrays["role_map"].size:
             max_role = max(max_role, int(np.asarray(arrays["role_map"]).max()))
@@ -376,7 +387,9 @@ def _max_role_id(dataset: SpriteTrainingDataset) -> int:
 
 def _max_category_id(dataset: SpriteTrainingDataset) -> int:
     max_category = 0
-    for npz_file in sorted({str(record.get("npz_file") or f"{record.get('split', '')}.npz") for record in dataset.records}):
+    for npz_file in sorted(
+        {str(record.get("npz_file") or f"{record.get('split', '')}.npz") for record in dataset.records}
+    ):
         arrays = dataset._load_npz(npz_file)
         if arrays["category_id"].size:
             max_category = max(max_category, int(np.asarray(arrays["category_id"]).max()))

@@ -78,7 +78,9 @@ def format_compare_markdown(report: Mapping[str, Any]) -> str:
     a = report.get("a") if isinstance(report.get("a"), Mapping) else {}
     b = report.get("b") if isinstance(report.get("b"), Mapping) else {}
     deltas = report.get("deltas") if isinstance(report.get("deltas"), Mapping) else {}
-    image_summary = report.get("matched_image_summary") if isinstance(report.get("matched_image_summary"), Mapping) else {}
+    image_summary = (
+        report.get("matched_image_summary") if isinstance(report.get("matched_image_summary"), Mapping) else {}
+    )
     warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
 
     lines = [
@@ -323,7 +325,10 @@ def _write_compare_contact_sheet(
 
 
 def _sample_index(generated_dir: Path) -> dict[str, Mapping[str, Any]]:
-    return {str(record.get("sample_id", "")): record for record in _read_manifest(generated_dir / "generated_manifest.jsonl")}
+    return {
+        str(record.get("sample_id", "")): record
+        for record in _read_manifest(generated_dir / "generated_manifest.jsonl")
+    }
 
 
 def _open_sample_image(generated_dir: Path, sample: Mapping[str, Any] | None) -> Image.Image | None:

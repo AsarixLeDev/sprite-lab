@@ -26,9 +26,9 @@ from spritelab.training.palette_swap import (
     DEFAULT_SWAP_FAMILIES_TEXT,
     MATERIAL_COLOR_FAMILIES,
     PaletteSwapConfig,
-    apply_palette_swap,
     _explicit_caption_colors,
     _explicit_semantic_colors,
+    apply_palette_swap,
     nearest_family,
 )
 from spritelab.training.rgba import npz_row_to_rgba
@@ -369,10 +369,7 @@ def _evaluate_one(
         and original_semantic_colors
         and result.eligible
         and swap_config.no_caption_prepend
-        and (
-            swap_config.allow_colorless_caption_if_semantic_color
-            or swap_config.require_semantic_color()
-        )
+        and (swap_config.allow_colorless_caption_if_semantic_color or swap_config.require_semantic_color())
     )
     row = {
         "sprite_id": sprite_id,
@@ -460,7 +457,8 @@ def aggregate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     same_family_recolor_count = sum(
         1
         for row in applied_rows
-        if str(row.get("source_color_family") or "") and row.get("source_color_family") == row.get("target_color_family")
+        if str(row.get("source_color_family") or "")
+        and row.get("source_color_family") == row.get("target_color_family")
     )
     per_sprite_target_counters: dict[str, Counter] = {}
     per_sprite_draw_counts: Counter = Counter()
@@ -499,7 +497,11 @@ def aggregate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "effective_eligible_count_before_keep_original": applied_count + kept_original_count,
         "unchanged_ineligible_count": total - eligible_count,
         "unchanged_not_triggered_count": int(
-            sum(1 for row in eligible_rows if not row.get("triggered") and not row.get("applied") and not row.get("kept_original"))
+            sum(
+                1
+                for row in eligible_rows
+                if not row.get("triggered") and not row.get("applied") and not row.get("kept_original")
+            )
         ),
         "eligible_count": eligible_count,
         "eligible_rate": (eligible_count / float(total)) if total else 0.0,
@@ -508,16 +510,12 @@ def aggregate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "applied_rate_eligible": (applied_count / float(eligible_count)) if eligible_count else 0.0,
         "effective_swapped_rate_total": (applied_count / float(total)) if total else 0.0,
         "effective_kept_original_rate_total": (kept_original_count / float(total)) if total else 0.0,
-        "effective_eligible_rate_total_before_keep_original": (
-            (applied_count + kept_original_count) / float(total)
-        )
+        "effective_eligible_rate_total_before_keep_original": ((applied_count + kept_original_count) / float(total))
         if total
         else 0.0,
         "effective_eligible_rate_total": ((applied_count + kept_original_count) / float(total)) if total else 0.0,
         "effective_swapped_rate_eligible": (applied_count / float(eligible_count)) if eligible_count else 0.0,
-        "effective_kept_original_rate_eligible": (
-            kept_original_count / float(eligible_count)
-        )
+        "effective_kept_original_rate_eligible": (kept_original_count / float(eligible_count))
         if eligible_count
         else 0.0,
         "kept_original_rate_eligible": (kept_original_count / float(eligible_count)) if eligible_count else 0.0,
@@ -537,7 +535,9 @@ def aggregate_metrics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "mean_visible_color_count_after": _mean(applied_rows, "visible_color_count_after"),
         "ineligibility_reason_counts": dict(sorted(ineligibility_reason_counts.items())),
         "same_family_skip_count": int(sum(1 for row in rows if row.get("same_family_skip"))),
-        "same_family_resample_count": int(sum(1 for row in applied_rows if row.get("target_resampled_from_same_family"))),
+        "same_family_resample_count": int(
+            sum(1 for row in applied_rows if row.get("target_resampled_from_same_family"))
+        ),
         "same_family_recolor_count": int(same_family_recolor_count),
         "same_family_recolor_rate": (same_family_recolor_count / float(applied_count)) if applied_count else 0.0,
         "colorless_caption_structured_only_count": int(
@@ -615,47 +615,105 @@ def compute_red_flags(
     fallback_rate = float(metrics.get("fallback_heuristic_rate") or 0.0)
     fallback_warn = 0.0 if conservative_rate_context else FALLBACK_RATE_WARN
     if fallback_rate > fallback_warn:
-        flags.append(_flag("high_fallback_heuristic_rate", fallback_rate, fallback_warn,
-                           "Many recolors relied on the luminance fallback instead of a trusted role map."))
+        flags.append(
+            _flag(
+                "high_fallback_heuristic_rate",
+                fallback_rate,
+                fallback_warn,
+                "Many recolors relied on the luminance fallback instead of a trusted role map.",
+            )
+        )
 
-    target_counts = metrics.get("target_family_counts") if isinstance(metrics.get("target_family_counts"), Mapping) else {}
+    target_counts = (
+        metrics.get("target_family_counts") if isinstance(metrics.get("target_family_counts"), Mapping) else {}
+    )
     material_like = sum(int(count) for family, count in target_counts.items() if family in _MATERIAL_LIKE_TARGETS)
     material_like_rate = material_like / float(applied)
     if material_like_rate > MATERIAL_LIKE_TARGET_WARN:
-        flags.append(_flag("many_material_like_targets", material_like_rate, MATERIAL_LIKE_TARGET_WARN,
-                           "Many samples target gray/gold/brown families that are material-like or ambiguous."))
+        flags.append(
+            _flag(
+                "many_material_like_targets",
+                material_like_rate,
+                MATERIAL_LIKE_TARGET_WARN,
+                "Many samples target gray/gold/brown families that are material-like or ambiguous.",
+            )
+        )
 
     material_conflict_rate = int(metrics.get("material_conflict_drop_count") or 0) / float(applied)
     if material_conflict_rate > MATERIAL_CONFLICT_WARN:
-        flags.append(_flag("frequent_material_conflicts", material_conflict_rate, MATERIAL_CONFLICT_WARN,
-                           "Recolors frequently dropped conflicting material color tokens (noisy relabeling)."))
+        flags.append(
+            _flag(
+                "frequent_material_conflicts",
+                material_conflict_rate,
+                MATERIAL_CONFLICT_WARN,
+                "Recolors frequently dropped conflicting material color tokens (noisy relabeling).",
+            )
+        )
 
     prepended = int(metrics.get("caption_color_prepended_count") or 0)
     prepend_rate = prepended / float(applied)
     if _config_bool(config, "palette_swap_no_caption_prepend") and prepended != 0:
-        flags.append(_flag("caption_prepending_nonzero_when_disabled", prepended, 0.0,
-                           "Caption prepending is disabled but applied rows still prepended a color token."))
+        flags.append(
+            _flag(
+                "caption_prepending_nonzero_when_disabled",
+                prepended,
+                0.0,
+                "Caption prepending is disabled but applied rows still prepended a color token.",
+            )
+        )
     if _config_bool(config, "palette_swap_require_explicit_caption_color"):
-        missing_caption = sum(1 for row in rows if row.get("applied") and not row.get("original_caption_color_families"))
+        missing_caption = sum(
+            1 for row in rows if row.get("applied") and not row.get("original_caption_color_families")
+        )
         if missing_caption:
-            flags.append(_flag("explicit_caption_required_but_missing", missing_caption / float(applied), 0.0,
-                               "Caption-color gate is enabled but applied rows lacked a caption color token."))
+            flags.append(
+                _flag(
+                    "explicit_caption_required_but_missing",
+                    missing_caption / float(applied),
+                    0.0,
+                    "Caption-color gate is enabled but applied rows lacked a caption color token.",
+                )
+            )
     if prepend_rate > CAPTION_PREPEND_WARN:
-        flags.append(_flag("frequent_caption_prepending", prepend_rate, CAPTION_PREPEND_WARN,
-                           "Most captions had no explicit color, so a color was invented and prepended."))
+        flags.append(
+            _flag(
+                "frequent_caption_prepending",
+                prepend_rate,
+                CAPTION_PREPEND_WARN,
+                "Most captions had no explicit color, so a color was invented and prepended.",
+            )
+        )
 
     same_family_rate = float(metrics.get("same_family_recolor_rate") or 0.0)
     if same_family_rate > SAME_FAMILY_RECOLOR_WARN:
-        flags.append(_flag("same_family_recolor_rate_high", same_family_rate, SAME_FAMILY_RECOLOR_WARN,
-                           "Applied palette swaps include source and target colors from the same family."))
+        flags.append(
+            _flag(
+                "same_family_recolor_rate_high",
+                same_family_rate,
+                SAME_FAMILY_RECOLOR_WARN,
+                "Applied palette swaps include source and target colors from the same family.",
+            )
+        )
 
     mean_entries = float(metrics.get("mean_palette_entries_changed") or 0.0)
     if mean_entries < ROLE_RECOLOR_LOW_WARN:
-        flags.append(_flag("role_recolor_rate_too_low", mean_entries, ROLE_RECOLOR_LOW_WARN,
-                           "Very few palette entries changed per sample; augmentation is barely visible."))
+        flags.append(
+            _flag(
+                "role_recolor_rate_too_low",
+                mean_entries,
+                ROLE_RECOLOR_LOW_WARN,
+                "Very few palette entries changed per sample; augmentation is barely visible.",
+            )
+        )
     elif mean_entries > ROLE_RECOLOR_HIGH_WARN:
-        flags.append(_flag("role_recolor_rate_too_high", mean_entries, ROLE_RECOLOR_HIGH_WARN,
-                           "Many palette entries changed per sample; recolor may bleed past fill regions."))
+        flags.append(
+            _flag(
+                "role_recolor_rate_too_high",
+                mean_entries,
+                ROLE_RECOLOR_HIGH_WARN,
+                "Many palette entries changed per sample; recolor may bleed past fill regions.",
+            )
+        )
 
     target_family_count = len(target_counts)
     if target_counts:
@@ -665,18 +723,40 @@ def compute_red_flags(
         )
         max_share = max(int(count) for count in target_counts.values()) / float(applied)
         if applied >= expected_min_families and target_family_count < expected_min_families:
-            flags.append(_flag("target_family_imbalance", target_family_count, expected_min_families,
-                               "Applied swaps cover too few target families."))
+            flags.append(
+                _flag(
+                    "target_family_imbalance",
+                    target_family_count,
+                    expected_min_families,
+                    "Applied swaps cover too few target families.",
+                )
+            )
         elif applied >= expected_min_families and max_share > TARGET_IMBALANCE_SHARE_WARN:
-            flags.append(_flag("target_family_imbalance", max_share, TARGET_IMBALANCE_SHARE_WARN,
-                               "Applied swaps are concentrated in one target family."))
+            flags.append(
+                _flag(
+                    "target_family_imbalance",
+                    max_share,
+                    TARGET_IMBALANCE_SHARE_WARN,
+                    "Applied swaps are concentrated in one target family.",
+                )
+            )
     if target_family_count >= 2 and not _config_bool(config, "palette_swap_stochastic"):
         shares = [int(count) / float(applied) for count in target_counts.values()]
         if max(shares) < (1.5 / float(target_family_count)):
-            flags.append(_flag("target_distribution_too_uniform", max(shares), 1.5 / float(target_family_count),
-                               "Target family distribution is nearly uniform across all objects/materials."))
+            flags.append(
+                _flag(
+                    "target_distribution_too_uniform",
+                    max(shares),
+                    1.5 / float(target_family_count),
+                    "Target family distribution is nearly uniform across all objects/materials.",
+                )
+            )
 
-    category_matrix = metrics.get("category_to_target_matrix") if isinstance(metrics.get("category_to_target_matrix"), Mapping) else {}
+    category_matrix = (
+        metrics.get("category_to_target_matrix")
+        if isinstance(metrics.get("category_to_target_matrix"), Mapping)
+        else {}
+    )
     weird: list[str] = []
     for category, targets in category_matrix.items():
         category_total = sum(int(v) for v in targets.values())
@@ -760,7 +840,11 @@ def format_palette_swap_review_markdown(report: Mapping[str, Any]) -> str:
     else:
         lines.append("- none")
     lines.extend(["", "## Ineligibility Reasons", ""])
-    reasons = metrics.get("ineligibility_reason_counts") if isinstance(metrics.get("ineligibility_reason_counts"), Mapping) else {}
+    reasons = (
+        metrics.get("ineligibility_reason_counts")
+        if isinstance(metrics.get("ineligibility_reason_counts"), Mapping)
+        else {}
+    )
     if reasons:
         for reason, count in sorted(reasons.items(), key=lambda item: (-int(item[1]), str(item[0]))):
             lines.append(f"- {reason}: {count}")
@@ -768,7 +852,9 @@ def format_palette_swap_review_markdown(report: Mapping[str, Any]) -> str:
         lines.append("- none")
 
     lines.extend(["", "## Target Family Counts (applied)", ""])
-    for family, count in sorted((metrics.get("target_family_counts") or {}).items(), key=lambda item: (-int(item[1]), str(item[0]))):
+    for family, count in sorted(
+        (metrics.get("target_family_counts") or {}).items(), key=lambda item: (-int(item[1]), str(item[0]))
+    ):
         lines.append(f"- {family}: {count}")
 
     lines.extend(["", "## Target Diversity Per Sprite", ""])
@@ -794,9 +880,13 @@ def format_palette_swap_review_markdown(report: Mapping[str, Any]) -> str:
         lines.append("- none")
 
     lines.extend(["", "## Source -> Target Matrix (applied)", ""])
-    matrix = metrics.get("source_to_target_matrix") if isinstance(metrics.get("source_to_target_matrix"), Mapping) else {}
+    matrix = (
+        metrics.get("source_to_target_matrix") if isinstance(metrics.get("source_to_target_matrix"), Mapping) else {}
+    )
     for source, targets in sorted(matrix.items()):
-        rendered = ", ".join(f"{tgt}:{cnt}" for tgt, cnt in sorted(targets.items(), key=lambda item: (-int(item[1]), str(item[0]))))
+        rendered = ", ".join(
+            f"{tgt}:{cnt}" for tgt, cnt in sorted(targets.items(), key=lambda item: (-int(item[1]), str(item[0])))
+        )
         lines.append(f"- {source} -> {rendered}")
 
     contact_sheets = report.get("contact_sheets") if isinstance(report.get("contact_sheets"), Mapping) else {}
@@ -860,9 +950,7 @@ def _stable_top_level_fields(metrics: Mapping[str, Any], config: PaletteSwapConf
         {
             "require_explicit_caption_color": config.require_caption_color(),
             "require_explicit_semantic_color": config.require_semantic_color(),
-            "allow_colorless_caption_if_semantic_color": bool(
-                config.allow_colorless_caption_if_semantic_color
-            ),
+            "allow_colorless_caption_if_semantic_color": bool(config.allow_colorless_caption_if_semantic_color),
             "no_caption_prepend": bool(config.no_caption_prepend),
         }
     )
@@ -950,12 +1038,18 @@ def _write_contact_sheets(out_dir: Path, evaluations: Sequence[_SampleEvaluation
     if _build_pair_sheet(applied, overall):
         contact_sheets["pairs"] = overall
 
-    _write_grouped_sheets(out_dir / "by_source_category", applied, key="category", label="source_category", into=contact_sheets)
-    _write_grouped_sheets(out_dir / "by_target_family", applied, key="target_color_family", label="target_family", into=contact_sheets)
+    _write_grouped_sheets(
+        out_dir / "by_source_category", applied, key="category", label="source_category", into=contact_sheets
+    )
+    _write_grouped_sheets(
+        out_dir / "by_target_family", applied, key="target_color_family", label="target_family", into=contact_sheets
+    )
     _write_grouped_sheets(
         out_dir / "by_source_to_target",
         applied,
-        key=lambda row: f"{row.get('source_color_family') or 'unknown'}_to_{row.get('target_color_family') or 'unknown'}",
+        key=lambda row: (
+            f"{row.get('source_color_family') or 'unknown'}_to_{row.get('target_color_family') or 'unknown'}"
+        ),
         label="source_to_target",
         into=contact_sheets,
     )
@@ -996,8 +1090,12 @@ def _build_pair_sheet(items: Sequence[_SampleEvaluation], out_path: Path, *, sca
     sheet_height = grid_rows * cell + (grid_rows + 1) * padding
     sheet = Image.new("RGBA", (sheet_width, sheet_height), (38, 38, 42, 255))
     for index, item in enumerate(rows):
-        before = checkerboard_rgba(rgba_array_to_image(np.asarray(item.before_rgba))).resize((cell, cell), Image.Resampling.NEAREST)
-        after = checkerboard_rgba(rgba_array_to_image(np.asarray(item.after_rgba))).resize((cell, cell), Image.Resampling.NEAREST)
+        before = checkerboard_rgba(rgba_array_to_image(np.asarray(item.before_rgba))).resize(
+            (cell, cell), Image.Resampling.NEAREST
+        )
+        after = checkerboard_rgba(rgba_array_to_image(np.asarray(item.after_rgba))).resize(
+            (cell, cell), Image.Resampling.NEAREST
+        )
         col = index % grid_cols
         row = index // grid_cols
         left = padding + col * (pair_width + padding)

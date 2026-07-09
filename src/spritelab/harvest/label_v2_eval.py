@@ -9,7 +9,13 @@ from typing import Any
 
 from spritelab.harvest.catalog import read_jsonl
 from spritelab.harvest.golden import GoldenLabel
-from spritelab.harvest.label_taxonomy import normalize_category, normalize_object_name, normalize_tags, object_name_token_f1, split_object_tokens
+from spritelab.harvest.label_taxonomy import (
+    normalize_category,
+    normalize_object_name,
+    normalize_tags,
+    object_name_token_f1,
+    split_object_tokens,
+)
 
 AUTO_BUCKETS = {
     "auto_filename_trusted",
@@ -75,7 +81,9 @@ def evaluate_label_v2(
         bucket = _bucket(record)
         buckets[bucket] += 1
         bucket_pairs[bucket].append((label, suggestion))
-        per_source_pairs[str(record.get("source_id") or record.get("source_name") or "unknown")].append((label, suggestion))
+        per_source_pairs[str(record.get("source_id") or record.get("source_name") or "unknown")].append(
+            (label, suggestion)
+        )
         per_category_pairs[label.category].append((label, suggestion))
         pred_category = normalize_category(str(suggestion.get("category", "unknown")))
         pred_object = normalize_object_name(str(suggestion.get("object_name", "")))
@@ -114,7 +122,9 @@ def evaluate_label_v2(
             if broad_to_specific or (token_f1 > 0.0 and (len(pred_tokens) > 1 or len(gold_tokens) > 1)):
                 near_miss_compound_errors[pattern] += 1
         filename = _object_from(record.get("filename_suggestion"))
-        vlm = _object_from(record.get("vlm_suggestion") or record.get("vlm_descriptor") or record.get("qwen_suggestion"))
+        vlm = _object_from(
+            record.get("vlm_suggestion") or record.get("vlm_descriptor") or record.get("qwen_suggestion")
+        )
         if filename and vlm and filename != vlm:
             conflict_pairs[f"{filename}->{vlm}"] += 1
 
@@ -127,7 +137,8 @@ def evaluate_label_v2(
     review_count = sum(
         1
         for sprite_id in matched_ids
-        if bool(_quality(by_id[sprite_id]).get("needs_review", False)) or _bucket(by_id[sprite_id]).startswith("needs_review")
+        if bool(_quality(by_id[sprite_id]).get("needs_review", False))
+        or _bucket(by_id[sprite_id]).startswith("needs_review")
     )
     tag_only_errors = (
         error_classes.get("tag_only_mismatch", 0)
@@ -138,10 +149,7 @@ def evaluate_label_v2(
     broad_to_specific_errors = error_classes.get("broad_to_specific_miss", 0)
     over_specific_errors = error_classes.get("over_specific_prediction", 0)
     hard_object_errors = (
-        category_errors
-        + error_classes.get("object_mismatch", 0)
-        + broad_to_specific_errors
-        + over_specific_errors
+        category_errors + error_classes.get("object_mismatch", 0) + broad_to_specific_errors + over_specific_errors
     )
     return {
         "golden_count": len(golden),
@@ -174,16 +182,22 @@ def evaluate_label_v2(
         "tag_only_errors": tag_only_errors,
         "category_errors": category_errors,
         "review_bucket_object_correct_count": review_bucket_object_correct_count,
-        "review_bucket_object_correct_rate": review_bucket_object_correct_count / review_bucket_count if review_bucket_count else 0.0,
+        "review_bucket_object_correct_rate": review_bucket_object_correct_count / review_bucket_count
+        if review_bucket_count
+        else 0.0,
         "category_mismatch_pairs": dict(category_mismatch_pairs.most_common(20)),
         "specificity_gap_rate": broad_to_specific_errors / matched if matched else 0.0,
         "per_source": {key: _field_metrics(value) for key, value in sorted(per_source_pairs.items())},
         "per_category": {key: _field_metrics(value) for key, value in sorted(per_category_pairs.items())},
         "bucket_metrics": bucket_metrics,
-        "object_exact_accuracy_by_bucket": {key: value["object_exact_accuracy"] for key, value in bucket_metrics.items()},
+        "object_exact_accuracy_by_bucket": {
+            key: value["object_exact_accuracy"] for key, value in bucket_metrics.items()
+        },
         "category_accuracy_by_bucket": {key: value["category_accuracy"] for key, value in bucket_metrics.items()},
         "headline": {
-            "auto_coverage_at_auto_precision_0_95": auto_count / len(golden) if golden and auto_precision >= 0.95 else 0.0,
+            "auto_coverage_at_auto_precision_0_95": auto_count / len(golden)
+            if golden and auto_precision >= 0.95
+            else 0.0,
             "auto_precision_target": 0.95,
         },
     }
@@ -267,7 +281,9 @@ def label_v2_error_records(
                 "error_class": error_class,
                 "reason": "; ".join(reasons) or "mismatch",
                 "vlm_possible_object": _object_from(vlm),
-                "vlm_alternative_object_names": list(normalize_tags(vlm.get("alternative_object_names") or ())) if isinstance(vlm, Mapping) else [],
+                "vlm_alternative_object_names": list(normalize_tags(vlm.get("alternative_object_names") or ()))
+                if isinstance(vlm, Mapping)
+                else [],
             }
         )
     return errors
@@ -315,15 +331,19 @@ def sweep_label_v2_operating_points(
         for point in points
         if point["auto_precision"] >= precision_target and point["category_accuracy"] >= precision_target
     ]
-    best = max(
-        satisfying or points,
-        key=lambda point: (
-            point["auto_coverage"],
-            point["object_token_f1"],
-            point["auto_precision"],
-            -point["review_rate"],
-        ),
-    ) if points else None
+    best = (
+        max(
+            satisfying or points,
+            key=lambda point: (
+                point["auto_coverage"],
+                point["object_token_f1"],
+                point["auto_precision"],
+                -point["review_rate"],
+            ),
+        )
+        if points
+        else None
+    )
     return {
         "precision_target": precision_target,
         "points": points,

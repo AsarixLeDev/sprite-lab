@@ -7,7 +7,6 @@ import zipfile
 import pytest
 
 from _harvest_testdata import make_zip_of_pngs
-
 from spritelab.harvest.archive import extract_archive, iter_archive_pngs
 from spritelab.harvest.download import compute_sha256
 

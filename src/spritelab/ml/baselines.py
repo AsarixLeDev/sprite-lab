@@ -70,7 +70,7 @@ class MajorityIndexBaseline:
     def __init__(self) -> None:
         self.majority_index = 1
 
-    def fit(self, dataset: Iterable[dict[str, Any]]) -> "MajorityIndexBaseline":
+    def fit(self, dataset: Iterable[dict[str, Any]]) -> MajorityIndexBaseline:
         counts: Counter = Counter()
         for sample in dataset:
             counts.update(_visible_index_counts(sample))
@@ -88,7 +88,7 @@ class PerCategoryMajorityIndexBaseline:
         self.global_majority = 1
         self.per_category: dict[int, int] = {}
 
-    def fit(self, dataset: Iterable[dict[str, Any]]) -> "PerCategoryMajorityIndexBaseline":
+    def fit(self, dataset: Iterable[dict[str, Any]]) -> PerCategoryMajorityIndexBaseline:
         global_counts: Counter = Counter()
         category_counts: dict[int, Counter] = {}
         for sample in dataset:
@@ -98,8 +98,7 @@ class PerCategoryMajorityIndexBaseline:
             category_counts.setdefault(category, Counter()).update(counts)
         self.global_majority = _majority(global_counts)
         self.per_category = {
-            category: _majority(counts, fallback=self.global_majority)
-            for category, counts in category_counts.items()
+            category: _majority(counts, fallback=self.global_majority) for category, counts in category_counts.items()
         }
         return self
 
@@ -112,7 +111,7 @@ class PerCategoryMajorityIndexBaseline:
 class PaletteRampBaseline:
     """Map shadow/midtone/highlight roles onto low/middle/high palette slots."""
 
-    def fit(self, dataset: Iterable[dict[str, Any]]) -> "PaletteRampBaseline":
+    def fit(self, dataset: Iterable[dict[str, Any]]) -> PaletteRampBaseline:
         return self
 
     def predict(self, sample: dict[str, Any]) -> torch.Tensor:
@@ -150,7 +149,7 @@ class CopyVisibleBaseline:
     def __init__(self) -> None:
         self.global_majority = 1
 
-    def fit(self, dataset: Iterable[dict[str, Any]]) -> "CopyVisibleBaseline":
+    def fit(self, dataset: Iterable[dict[str, Any]]) -> CopyVisibleBaseline:
         counts: Counter = Counter()
         for sample in dataset:
             counts.update(_visible_index_counts(sample))
@@ -160,11 +159,7 @@ class CopyVisibleBaseline:
     def predict(self, sample: dict[str, Any]) -> torch.Tensor:
         input_map = sample.get("input_index_map", sample["index_map"]).long()
         loss_mask = sample.get("loss_mask")
-        visible = (
-            (sample["alpha"] == 1)
-            & (input_map >= 1)
-            & (~loss_mask if loss_mask is not None else True)
-        )
+        visible = (sample["alpha"] == 1) & (input_map >= 1) & (~loss_mask if loss_mask is not None else True)
         counts = Counter(int(value) for value in input_map[visible])
         value = _majority(counts, fallback=self.global_majority)
         return _fill_masked(sample, _base_prediction(sample), value)
@@ -218,16 +213,10 @@ def run_baseline_evaluation(
             )
             for sample, prediction in zip(samples, predictions)
         ]
-        results["baselines"][name] = metrics_to_dict(
-            average_reconstruction_metrics(metrics)
-        )
+        results["baselines"][name] = metrics_to_dict(average_reconstruction_metrics(metrics))
         if name in ("copy_visible", "palette_ramp"):
-            save_prediction_grid(
-                samples, predictions, output_dir / f"preview_{name}.png"
-            )
+            save_prediction_grid(samples, predictions, output_dir / f"preview_{name}.png")
 
     metrics_path = output_dir / "baseline_metrics.json"
-    metrics_path.write_text(
-        json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    metrics_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return results

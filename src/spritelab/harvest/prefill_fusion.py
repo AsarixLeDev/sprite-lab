@@ -109,7 +109,11 @@ def fuse_prefill_suggestions(
         fused = _merge_suggestions(filename_data, qwen_data, preferred="filename")
         source = "filename_adjudicated"
     elif adjudication_choice in {"both_wrong", "cannot_tell"}:
-        fused = _merge_suggestions(filename_data, qwen_data, preferred="filename" if filename_confidence >= (qwen_confidence or 0.0) else "qwen")
+        fused = _merge_suggestions(
+            filename_data,
+            qwen_data,
+            preferred="filename" if filename_confidence >= (qwen_confidence or 0.0) else "qwen",
+        )
         source = "mixed"
         review_required = True
         corrected = _adjudication_correction(adjudication_data)
@@ -123,7 +127,11 @@ def fuse_prefill_suggestions(
         source = "qwen"
         review_required = bool(conflict_reasons)
     elif conflict_reasons:
-        fused = _merge_suggestions(filename_data, qwen_data, preferred="filename" if filename_confidence >= (qwen_confidence or 0.0) else "qwen")
+        fused = _merge_suggestions(
+            filename_data,
+            qwen_data,
+            preferred="filename" if filename_confidence >= (qwen_confidence or 0.0) else "qwen",
+        )
         source = "mixed"
         review_required = True
     else:
@@ -197,7 +205,9 @@ def _base_suggestion(data: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _merge_suggestions(filename_data: Mapping[str, Any], qwen_data: Mapping[str, Any], *, preferred: str) -> dict[str, Any]:
+def _merge_suggestions(
+    filename_data: Mapping[str, Any], qwen_data: Mapping[str, Any], *, preferred: str
+) -> dict[str, Any]:
     primary = qwen_data if preferred == "qwen" else filename_data
     secondary = filename_data if preferred == "qwen" else qwen_data
     base = _base_suggestion(primary)
@@ -261,7 +271,11 @@ def _adjudication_correction(adjudication_data: Mapping[str, Any]) -> dict[str, 
     """Corrected fields the adjudicator supplied alongside ``both_wrong``."""
 
     corrected: dict[str, Any] = {}
-    category = normalize_category(str(adjudication_data.get("corrected_category", ""))) if str(adjudication_data.get("corrected_category", "")).strip() else ""
+    category = (
+        normalize_category(str(adjudication_data.get("corrected_category", "")))
+        if str(adjudication_data.get("corrected_category", "")).strip()
+        else ""
+    )
     object_name = normalize_tag(str(adjudication_data.get("corrected_object_name", "")))
     if category and category != "unknown":
         corrected["category"] = category

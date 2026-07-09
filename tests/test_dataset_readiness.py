@@ -114,7 +114,14 @@ def _write_run(
             "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
         )
         (run_dir / "label_v2_summary.json").write_text(
-            json.dumps({"total": 10, "auto_count": 10 - review_count, "review_rate": review_rate, "top_categories": {"material": 10}}),
+            json.dumps(
+                {
+                    "total": 10,
+                    "auto_count": 10 - review_count,
+                    "review_rate": review_rate,
+                    "top_categories": {"material": 10},
+                }
+            ),
             encoding="utf-8",
         )
     if semantic:
@@ -149,7 +156,9 @@ def test_scanner_detects_exported_semantic_v3_dataset(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
     datasets = tmp_path / "datasets"
     runs.mkdir()
-    _write_exported_dataset(datasets, "packA_label_v2_semantic_v3", dataset_qa={"errors": []}, training_manifest_qa={"errors": []})
+    _write_exported_dataset(
+        datasets, "packA_label_v2_semantic_v3", dataset_qa={"errors": []}, training_manifest_qa={"errors": []}
+    )
     report = scan_readiness(runs, datasets)
     pack = _find(report, "packA_label_v2_semantic_v3")
     assert pack.has_exported_dataset is True
@@ -174,9 +183,7 @@ def test_scanner_detects_dataset_qa_report(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
     datasets = tmp_path / "datasets"
     runs.mkdir()
-    _write_exported_dataset(
-        datasets, "packA_label_v2_semantic_v3", dataset_qa={"errors": ["boom"]}
-    )
+    _write_exported_dataset(datasets, "packA_label_v2_semantic_v3", dataset_qa={"errors": ["boom"]})
     report = scan_readiness(runs, datasets)
     pack = _find(report, "packA_label_v2_semantic_v3")
     assert pack.dataset_qa_status == "fail"
@@ -295,7 +302,9 @@ def test_scanner_classifies_legacy_nonsemantic_dataset(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
     datasets = tmp_path / "datasets"
     runs.mkdir()
-    _write_exported_dataset(datasets, "legacy_pack_label_v2", semantic=False, dataset_qa={"errors": []}, training_manifest_qa={"errors": []})
+    _write_exported_dataset(
+        datasets, "legacy_pack_label_v2", semantic=False, dataset_qa={"errors": []}, training_manifest_qa={"errors": []}
+    )
     report = scan_readiness(runs, datasets)
     pack = _find(report, "legacy_pack_label_v2")
     assert pack.recommended_action == "legacy_nonsemantic_dataset"

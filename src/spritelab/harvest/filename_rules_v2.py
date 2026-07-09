@@ -8,8 +8,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from spritelab.harvest.label_schema import LabelSuggestion
 from spritelab.harvest.label_candidates import exact_sheet_object_for_record
+from spritelab.harvest.label_schema import LabelSuggestion
 from spritelab.harvest.label_taxonomy import (
     canonicalize_object_name,
     normalize_category,
@@ -322,7 +322,6 @@ _GEM_OBJECTS = {
     "sapphire_gem",
     "amethyst_gem",
     "emerald_gem",
-    "diamond_gem",
 }
 
 _POTION_CONTAINER_OBJECTS = {
@@ -695,7 +694,9 @@ def _suggestion_for_object(
         confidence=confidence,
         confidence_reason=confidence_reason,
         source="filename_rules_v2",
-        evidence=(f"profile:{profile.name}", f"filename_object:{object_name}") if object_name else (f"profile:{profile.name}",),
+        evidence=(f"profile:{profile.name}", f"filename_object:{object_name}")
+        if object_name
+        else (f"profile:{profile.name}",),
     )
 
 
@@ -850,7 +851,9 @@ def _tags_for_object(object_name: str, profile: SourceProfile) -> tuple[str, ...
 
 
 def _is_food_object(object_name: str) -> bool:
-    return object_name in {canonicalize_object_name(value) for value in _FOOD_OBJECTS} or object_name.startswith("soda_can_")
+    return object_name in {canonicalize_object_name(value) for value in _FOOD_OBJECTS} or object_name.startswith(
+        "soda_can_"
+    )
 
 
 def _contains_source_author_artifact(tokens: tuple[str, ...]) -> bool:
@@ -885,7 +888,9 @@ def _description(object_name: str, category: str) -> str:
 
 def _suggest_rpg_icon(tokens: tuple[str, ...], profile: SourceProfile) -> tuple[LabelSuggestion, float, str]:
     if not tokens:
-        suggestion = _suggestion_for_object("", profile, 0.25, "RPG icon filename has no semantic token", alias_used=False)
+        suggestion = _suggestion_for_object(
+            "", profile, 0.25, "RPG icon filename has no semantic token", alias_used=False
+        )
         return suggestion, suggestion.confidence, suggestion.confidence_reason
 
     prefix = tokens[0]
@@ -958,9 +963,16 @@ def _rpg_object_from_tokens(tokens: tuple[str, ...]) -> str:
         return alias
     if joined in _MATERIAL_OBJECTS:
         return joined
-    if joined in _RPG_MAIN_TOKENS or _is_known_object(joined, detect_source_profile({"source_id": "oga_496_rpg_icons"})):
+    if joined in _RPG_MAIN_TOKENS or _is_known_object(
+        joined, detect_source_profile({"source_id": "oga_496_rpg_icons"})
+    ):
         return joined
     for token in canonical_tokens:
-        if token in _RPG_MAIN_TOKENS or token in _WEAPON_OBJECTS or token in _EFFECT_OBJECTS or token in _MATERIAL_OBJECTS:
+        if (
+            token in _RPG_MAIN_TOKENS
+            or token in _WEAPON_OBJECTS
+            or token in _EFFECT_OBJECTS
+            or token in _MATERIAL_OBJECTS
+        ):
             return token
     return joined

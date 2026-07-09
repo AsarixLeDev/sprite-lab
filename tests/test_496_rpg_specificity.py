@@ -1,5 +1,4 @@
 from _harvest_testdata import make_sprite_png
-
 from spritelab.harvest.filename_rules_v2 import suggest_from_filename_v2
 from spritelab.harvest.label_candidates import specialize_496_rpg_object
 from spritelab.harvest.label_fusion_v2 import FusionThresholds
@@ -34,9 +33,42 @@ def _safe(row: dict) -> tuple[str, str]:
 
 
 def test_496_category_overrides_for_materials_and_mushroom(tmp_path) -> None:
-    gem = _row(tmp_path, "I_Agate.png", LabelSuggestion("material", "agate", tags=("gem",), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    fabric = _row(tmp_path, "I_Fabric.png", LabelSuggestion("material", "fabric", tags=("cloth",), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    mushroom = _row(tmp_path, "I_C_Mushroom.png", LabelSuggestion("plant", "mushroom", tags=("mushroom",), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
+    gem = _row(
+        tmp_path,
+        "I_Agate.png",
+        LabelSuggestion(
+            "material",
+            "agate",
+            tags=("gem",),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    fabric = _row(
+        tmp_path,
+        "I_Fabric.png",
+        LabelSuggestion(
+            "material",
+            "fabric",
+            tags=("cloth",),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    mushroom = _row(
+        tmp_path,
+        "I_C_Mushroom.png",
+        LabelSuggestion(
+            "plant",
+            "mushroom",
+            tags=("mushroom",),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
 
     assert _safe(gem)[0] == "material"
     assert _safe(gem)[1] in {"agate", "agate_gem"}
@@ -45,8 +77,30 @@ def test_496_category_overrides_for_materials_and_mushroom(tmp_path) -> None:
 
 
 def test_496_shield_shape_overrides_material_family(tmp_path) -> None:
-    wood = _row(tmp_path, "E_Wood03.png", LabelSuggestion("material", "wood", tags=("bordered", "wood_grain", "shield_shape"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    metal = _row(tmp_path, "E_Metal09.png", LabelSuggestion("material", "metal", tags=("shield_shape", "metallic"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
+    wood = _row(
+        tmp_path,
+        "E_Wood03.png",
+        LabelSuggestion(
+            "material",
+            "wood",
+            tags=("bordered", "wood_grain", "shield_shape"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    metal = _row(
+        tmp_path,
+        "E_Metal09.png",
+        LabelSuggestion(
+            "material",
+            "metal",
+            tags=("shield_shape", "metallic"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
 
     assert _safe(wood) == ("armor", "wooden_shield")
     assert _safe(metal)[0] == "armor"
@@ -54,11 +108,63 @@ def test_496_shield_shape_overrides_material_family(tmp_path) -> None:
 
 
 def test_496_armor_and_clothing_specificity_uses_vlm_evidence(tmp_path) -> None:
-    chestplate = _row(tmp_path, "A_Armor05.png", LabelSuggestion("armor", "armor", tags=("chest_shape", "shoulder_guards"), alternative_object_names=("chestplate", "breastplate"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    golden = _row(tmp_path, "A_Armour03.png", LabelSuggestion("armor", "armor", tags=("gold", "yellow", "torso_shape"), alternative_object_names=("chestplate", "breastplate"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    leather = _row(tmp_path, "A_Armour01.png", LabelSuggestion("armor", "leather_armor", tags=("brown", "tan", "torso_covering"), alternative_object_names=("chestplate", "breastplate"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    tunic = _row(tmp_path, "A_Clothing02.png", LabelSuggestion("armor", "clothing", tags=("v_neck", "short_sleeve"), alternative_object_names=("tunic",), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    broad = _row(tmp_path, "A_Armor05.png", LabelSuggestion("armor", "armor", confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
+    chestplate = _row(
+        tmp_path,
+        "A_Armor05.png",
+        LabelSuggestion(
+            "armor",
+            "armor",
+            tags=("chest_shape", "shoulder_guards"),
+            alternative_object_names=("chestplate", "breastplate"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    golden = _row(
+        tmp_path,
+        "A_Armour03.png",
+        LabelSuggestion(
+            "armor",
+            "armor",
+            tags=("gold", "yellow", "torso_shape"),
+            alternative_object_names=("chestplate", "breastplate"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    leather = _row(
+        tmp_path,
+        "A_Armour01.png",
+        LabelSuggestion(
+            "armor",
+            "leather_armor",
+            tags=("brown", "tan", "torso_covering"),
+            alternative_object_names=("chestplate", "breastplate"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    tunic = _row(
+        tmp_path,
+        "A_Clothing02.png",
+        LabelSuggestion(
+            "armor",
+            "clothing",
+            tags=("v_neck", "short_sleeve"),
+            alternative_object_names=("tunic",),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    broad = _row(
+        tmp_path,
+        "A_Armor05.png",
+        LabelSuggestion("armor", "armor", confidence=0.85, source="vlm_descriptor", source_consistency="consistent"),
+    )
 
     assert _safe(chestplate) == ("armor", "chestplate")
     assert _safe(golden) == ("armor", "golden_chestplate")
@@ -68,11 +174,66 @@ def test_496_armor_and_clothing_specificity_uses_vlm_evidence(tmp_path) -> None:
 
 
 def test_496_potion_color_and_container_specificity(tmp_path) -> None:
-    red = _row(tmp_path, "P_Red03.png", LabelSuggestion("item_icon", "potion", tags=("bottle", "cork", "red_liquid"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    blue = _row(tmp_path, "P_Blue05.png", LabelSuggestion("item_icon", "potion", tags=("bottle", "liquid", "blue"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    green = _row(tmp_path, "P_Green06.png", LabelSuggestion("item_icon", "potion", tags=("bottle", "liquid", "green"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    pink = _row(tmp_path, "P_Pink04.png", LabelSuggestion("item_icon", "potion", tags=("vial", "diagonal", "pink", "liquid"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    medicine = _row(tmp_path, "P_Medicine06.png", LabelSuggestion("item_icon", "medicine", tags=("bottle", "cork", "liquid"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
+    red = _row(
+        tmp_path,
+        "P_Red03.png",
+        LabelSuggestion(
+            "item_icon",
+            "potion",
+            tags=("bottle", "cork", "red_liquid"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    blue = _row(
+        tmp_path,
+        "P_Blue05.png",
+        LabelSuggestion(
+            "item_icon",
+            "potion",
+            tags=("bottle", "liquid", "blue"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    green = _row(
+        tmp_path,
+        "P_Green06.png",
+        LabelSuggestion(
+            "item_icon",
+            "potion",
+            tags=("bottle", "liquid", "green"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    pink = _row(
+        tmp_path,
+        "P_Pink04.png",
+        LabelSuggestion(
+            "item_icon",
+            "potion",
+            tags=("vial", "diagonal", "pink", "liquid"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    medicine = _row(
+        tmp_path,
+        "P_Medicine06.png",
+        LabelSuggestion(
+            "item_icon",
+            "medicine",
+            tags=("bottle", "cork", "liquid"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
 
     assert _safe(red) == ("item_icon", "red_potion")
     assert _safe(blue) == ("item_icon", "blue_potion")
@@ -83,11 +244,66 @@ def test_496_potion_color_and_container_specificity(tmp_path) -> None:
 
 
 def test_496_food_preparation_specificity(tmp_path) -> None:
-    fish = _row(tmp_path, "I_C_Fish.png", LabelSuggestion("item_icon", "fish", tags=("food",), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    raw_fish = _row(tmp_path, "I_C_RawFish.png", LabelSuggestion("item_icon", "raw_fish", tags=("fish",), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    pie = _row(tmp_path, "I_C_Pie.png", LabelSuggestion("item_icon", "pie", tags=("slice", "baked_food"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    watermelon = _row(tmp_path, "I_C_Watermellon.png", LabelSuggestion("item_icon", "watermelon", tags=("slice", "red", "green"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    meat = _row(tmp_path, "I_C_RawMeat.png", LabelSuggestion("item_icon", "meat", tags=("meat",), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
+    fish = _row(
+        tmp_path,
+        "I_C_Fish.png",
+        LabelSuggestion(
+            "item_icon",
+            "fish",
+            tags=("food",),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    raw_fish = _row(
+        tmp_path,
+        "I_C_RawFish.png",
+        LabelSuggestion(
+            "item_icon",
+            "raw_fish",
+            tags=("fish",),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    pie = _row(
+        tmp_path,
+        "I_C_Pie.png",
+        LabelSuggestion(
+            "item_icon",
+            "pie",
+            tags=("slice", "baked_food"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    watermelon = _row(
+        tmp_path,
+        "I_C_Watermellon.png",
+        LabelSuggestion(
+            "item_icon",
+            "watermelon",
+            tags=("slice", "red", "green"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    meat = _row(
+        tmp_path,
+        "I_C_RawMeat.png",
+        LabelSuggestion(
+            "item_icon",
+            "meat",
+            tags=("meat",),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
 
     assert _safe(fish) == ("item_icon", "fish_skewer")
     assert _safe(raw_fish) == ("item_icon", "raw_fish_skewer")
@@ -109,8 +325,23 @@ def test_496_effect_and_weapon_specificity(tmp_path) -> None:
     }
     for filename, expected in cases.items():
         category = "weapon" if filename.startswith("W_") else "effect_icon"
-        family = "gold" if filename.startswith("W_Gold") else filename.split("_", 1)[1].split(".", 1)[0].rstrip("0123456789").lower()
-        row = _row(tmp_path, filename, LabelSuggestion(category, family, tags=("weapon_shape", "curved", "metallic"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
+        family = (
+            "gold"
+            if filename.startswith("W_Gold")
+            else filename.split("_", 1)[1].split(".", 1)[0].rstrip("0123456789").lower()
+        )
+        row = _row(
+            tmp_path,
+            filename,
+            LabelSuggestion(
+                category,
+                family,
+                tags=("weapon_shape", "curved", "metallic"),
+                confidence=0.85,
+                source="vlm_descriptor",
+                source_consistency="consistent",
+            ),
+        )
         assert row["safe_prefill"]["object_name"] == expected
 
 
@@ -210,9 +441,43 @@ def test_496_golden_chestplate_requires_gold_not_red_orange_highlights(tmp_path)
 
 
 def test_496_potion_shape_and_visual_color_cleanup(tmp_path) -> None:
-    compact = _row(tmp_path, "P_Pink04.png", LabelSuggestion("item_icon", "potion", tags=("compact", "diagonal", "pink", "liquid"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    tall = _row(tmp_path, "P_Yellow07.png", LabelSuggestion("item_icon", "potion", tags=("tall", "vertical", "yellow", "liquid", "potion"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    purple = _row(tmp_path, "P_Pink08.png", LabelSuggestion("item_icon", "potion", tags=("narrow", "purple", "liquid", "bottle"), dominant_colors=("purple",), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
+    compact = _row(
+        tmp_path,
+        "P_Pink04.png",
+        LabelSuggestion(
+            "item_icon",
+            "potion",
+            tags=("compact", "diagonal", "pink", "liquid"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    tall = _row(
+        tmp_path,
+        "P_Yellow07.png",
+        LabelSuggestion(
+            "item_icon",
+            "potion",
+            tags=("tall", "vertical", "yellow", "liquid", "potion"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    purple = _row(
+        tmp_path,
+        "P_Pink08.png",
+        LabelSuggestion(
+            "item_icon",
+            "potion",
+            tags=("narrow", "purple", "liquid", "bottle"),
+            dominant_colors=("purple",),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
 
     assert _safe(compact) == ("item_icon", "pink_vial")
     assert _safe(tall) == ("item_icon", "yellow_potion")
@@ -220,10 +485,54 @@ def test_496_potion_shape_and_visual_color_cleanup(tmp_path) -> None:
 
 
 def test_496_safe_broad_to_specific_compounds(tmp_path) -> None:
-    fire_cannon = _row(tmp_path, "I_Cannon02.png", LabelSuggestion("item_icon", "cannon", tags=("orange", "blast", "barrel_shaped"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    yellow_cannon = _row(tmp_path, "I_Cannon04.png", LabelSuggestion("item_icon", "cannon", tags=("yellow", "barrel_shaped"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    fire_feather = _row(tmp_path, "I_Feather02.png", LabelSuggestion("item_icon", "feather", tags=("orange", "flame", "feather"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
-    yellow_ink = _row(tmp_path, "I_Ink.png", LabelSuggestion("item_icon", "ink", tags=("yellow", "container_like", "liquid"), confidence=0.85, source="vlm_descriptor", source_consistency="consistent"))
+    fire_cannon = _row(
+        tmp_path,
+        "I_Cannon02.png",
+        LabelSuggestion(
+            "item_icon",
+            "cannon",
+            tags=("orange", "blast", "barrel_shaped"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    yellow_cannon = _row(
+        tmp_path,
+        "I_Cannon04.png",
+        LabelSuggestion(
+            "item_icon",
+            "cannon",
+            tags=("yellow", "barrel_shaped"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    fire_feather = _row(
+        tmp_path,
+        "I_Feather02.png",
+        LabelSuggestion(
+            "item_icon",
+            "feather",
+            tags=("orange", "flame", "feather"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
+    yellow_ink = _row(
+        tmp_path,
+        "I_Ink.png",
+        LabelSuggestion(
+            "item_icon",
+            "ink",
+            tags=("yellow", "container_like", "liquid"),
+            confidence=0.85,
+            source="vlm_descriptor",
+            source_consistency="consistent",
+        ),
+    )
 
     assert _safe(fire_cannon) == ("item_icon", "fire_cannon")
     assert _safe(yellow_cannon) == ("item_icon", "yellow_cannon")

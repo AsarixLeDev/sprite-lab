@@ -58,7 +58,9 @@ class TinyCaptionSpriteGenerator(_ModuleBase):
             nn_mod.Upsample(scale_factor=2, mode="nearest"),
             nn_mod.Conv2d(self.hidden_channels, max(8, self.hidden_channels // 2), kernel_size=3, padding=1),
             nn_mod.ReLU(),
-            nn_mod.Conv2d(max(8, self.hidden_channels // 2), max(8, self.hidden_channels // 2), kernel_size=3, padding=1),
+            nn_mod.Conv2d(
+                max(8, self.hidden_channels // 2), max(8, self.hidden_channels // 2), kernel_size=3, padding=1
+            ),
             nn_mod.ReLU(),
         )
         out_channels = max(8, self.hidden_channels // 2)

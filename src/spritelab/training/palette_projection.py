@@ -251,9 +251,13 @@ def write_runtime_projection_report(
         contact_sheets["before_after"] = before_after
     before = out_root / "palette_projection_before_contact_sheet.png"
     after = out_root / "palette_projection_after_contact_sheet.png"
-    if _build_projection_contact_sheet(out_root, samples, before, path_key="before_path", max_samples=max_contact_sheet_samples):
+    if _build_projection_contact_sheet(
+        out_root, samples, before, path_key="before_path", max_samples=max_contact_sheet_samples
+    ):
         contact_sheets["before"] = before
-    if _build_projection_contact_sheet(out_root, samples, after, path_key="after_path", max_samples=max_contact_sheet_samples):
+    if _build_projection_contact_sheet(
+        out_root, samples, after, path_key="after_path", max_samples=max_contact_sheet_samples
+    ):
         contact_sheets["after"] = after
 
     report = _aggregate_report(
@@ -333,7 +337,9 @@ def _project_record(
     projected_record["paths"] = {**dict(paths), **projected_paths}
     projected_record["max_colors"] = int(config.target_colors)
     projected_record["visible_color_count"] = int(primary_metrics["visible_color_count_after"])
-    alpha_count_key = next((key for key in ("hard_rgba", "indexed_png", "raw_rgba") if key in alpha_opaque_counts), None)
+    alpha_count_key = next(
+        (key for key in ("hard_rgba", "indexed_png", "raw_rgba") if key in alpha_opaque_counts), None
+    )
     projected_record["alpha_opaque_count"] = alpha_opaque_counts.get(alpha_count_key, 0) if alpha_count_key else 0
     projected_record = _with_projection_manifest_fields(
         projected_record,
@@ -591,7 +597,9 @@ def _merge_tiny_clusters(
         target_id = min(
             candidates,
             key=lambda other_id: (
-                float(np.sum(np.square(source_center - _center_for_cluster(unique, counts, merged, other_id, centers)))),
+                float(
+                    np.sum(np.square(source_center - _center_for_cluster(unique, counts, merged, other_id, centers)))
+                ),
                 -int(cluster_counts[other_id]),
                 int(other_id),
             ),
@@ -628,10 +636,7 @@ def _center_for_cluster(
 def _compact_clusters(unique: np.ndarray, counts: np.ndarray, labels: np.ndarray) -> np.ndarray:
     centers = _centers_for_labels(unique, counts, labels)
     old_ids = sorted(set(int(label) for label in labels))
-    old_centers = {
-        old_id: _center_for_cluster(unique, counts, labels, old_id, centers)
-        for old_id in old_ids
-    }
+    old_centers = {old_id: _center_for_cluster(unique, counts, labels, old_id, centers) for old_id in old_ids}
     ordered = sorted(
         old_ids,
         key=lambda old_id: (
@@ -1226,6 +1231,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parsed = parser.parse_args(argv)
     report = project_generated_palette(PaletteProjectionConfig(**vars(parsed)))
     print(f"Projected samples: {report['sample_count']}")
-    print(f"Median visible colors: {report['median_visible_color_count_before']} -> {report['median_visible_color_count_after']}")
+    print(
+        f"Median visible colors: {report['median_visible_color_count_before']} -> {report['median_visible_color_count_after']}"
+    )
     print(f"Mean RGB MAE visible: {report['mean_rgb_mae_visible']}")
     print(f"Outputs written to {parsed.out}")

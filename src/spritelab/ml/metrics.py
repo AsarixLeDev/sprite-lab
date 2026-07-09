@@ -6,8 +6,8 @@ pixel is masked) are reported as ``0.0``.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import torch

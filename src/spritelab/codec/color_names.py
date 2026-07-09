@@ -46,9 +46,7 @@ COLOR_NAME_TABLE: tuple[tuple[str, tuple[int, int, int]], ...] = (
 )
 
 _TABLE_NAMES = tuple(name for name, _ in COLOR_NAME_TABLE)
-_TABLE_OKLAB = rgb_u8_array_to_oklab(
-    np.array([rgb for _, rgb in COLOR_NAME_TABLE], dtype=np.uint8)
-)
+_TABLE_OKLAB = rgb_u8_array_to_oklab(np.array([rgb for _, rgb in COLOR_NAME_TABLE], dtype=np.uint8))
 
 
 def color_name(rgb: Sequence[int]) -> str:
@@ -91,8 +89,6 @@ def dominant_colors_from_bundle(
     total = int(opaque.size)
     ranked = sorted(name_counts.items(), key=lambda kv: (-kv[1], kv[0]))
     result = [
-        name
-        for index, (name, count) in enumerate(ranked[:max_colors])
-        if index == 0 or count / total >= min_coverage
+        name for index, (name, count) in enumerate(ranked[:max_colors]) if index == 0 or count / total >= min_coverage
     ]
     return tuple(result)

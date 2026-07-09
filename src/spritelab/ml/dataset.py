@@ -95,14 +95,8 @@ def validate_npz_dataset_arrays(arrays: Mapping[str, np.ndarray]) -> list[str]:
         errors.append(f"category_id shape must be [N], got {category_id.shape}")
     if sprite_id.ndim != 1:
         errors.append(f"sprite_id shape must be [N], got {sprite_id.shape}")
-    if (
-        palette.ndim == 3
-        and palette_mask.ndim == 2
-        and palette.shape[:2] != palette_mask.shape
-    ):
-        errors.append(
-            f"palette rows {palette.shape[:2]} and palette_mask {palette_mask.shape} disagree"
-        )
+    if palette.ndim == 3 and palette_mask.ndim == 2 and palette.shape[:2] != palette_mask.shape:
+        errors.append(f"palette rows {palette.shape[:2]} and palette_mask {palette_mask.shape} disagree")
     if errors:
         return errors
 
@@ -111,9 +105,7 @@ def validate_npz_dataset_arrays(arrays: Mapping[str, np.ndarray]) -> list[str]:
     if np.any(index_map < 0):
         errors.append("index_map values must be >= 0")
     if np.any(index_map >= palette.shape[1]):
-        errors.append(
-            f"index_map values must be < palette row count {palette.shape[1]}"
-        )
+        errors.append(f"index_map values must be < palette row count {palette.shape[1]}")
     if np.any((alpha == 0) & (index_map != 0)):
         errors.append("transparent pixels must have index_map == 0")
     if np.any((alpha == 1) & (index_map < 1)):
@@ -181,9 +173,7 @@ class SpriteBundleDataset(torch.utils.data.Dataset):
             if config_path.exists():
                 self.dataset_config = load_dataset_config(config_path)
 
-        self._manifest_by_id = {
-            record.get("sprite_id"): record for record in self.manifest
-        }
+        self._manifest_by_id = {record.get("sprite_id"): record for record in self.manifest}
 
     def __len__(self) -> int:
         return int(self.arrays["alpha"].shape[0])
@@ -192,23 +182,13 @@ class SpriteBundleDataset(torch.utils.data.Dataset):
         sprite_id = str(self.arrays["sprite_id"][index])
         palette_u8 = np.asarray(self.arrays["palette"][index], dtype=np.uint8)
         sample: dict[str, Any] = {
-            "alpha": torch.as_tensor(
-                np.asarray(self.arrays["alpha"][index], dtype=np.int64)
-            ),
-            "index_map": torch.as_tensor(
-                np.asarray(self.arrays["index_map"][index], dtype=np.int64)
-            ),
-            "role_map": torch.as_tensor(
-                np.asarray(self.arrays["role_map"][index], dtype=np.int64)
-            ),
+            "alpha": torch.as_tensor(np.asarray(self.arrays["alpha"][index], dtype=np.int64)),
+            "index_map": torch.as_tensor(np.asarray(self.arrays["index_map"][index], dtype=np.int64)),
+            "role_map": torch.as_tensor(np.asarray(self.arrays["role_map"][index], dtype=np.int64)),
             "palette": torch.as_tensor(palette_u8.astype(np.float32) / 255.0),
             "palette_u8": torch.as_tensor(palette_u8),
-            "palette_mask": torch.as_tensor(
-                np.asarray(self.arrays["palette_mask"][index], dtype=bool)
-            ),
-            "category_id": torch.as_tensor(
-                int(self.arrays["category_id"][index]), dtype=torch.int64
-            ),
+            "palette_mask": torch.as_tensor(np.asarray(self.arrays["palette_mask"][index], dtype=bool)),
+            "category_id": torch.as_tensor(int(self.arrays["category_id"][index]), dtype=torch.int64),
             "sprite_id": sprite_id,
             "sample_index": int(index),
             "metadata": dict(self._manifest_by_id.get(sprite_id, {})),

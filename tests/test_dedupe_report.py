@@ -33,7 +33,9 @@ def test_create_dedupe_report_writes_outputs_and_detects_groups(tmp_path: Path) 
             records=[
                 _record("red_a", bundle_a, source_path="raw/red.png", sha256="same-source", split="train"),
                 _record("red_b_duplicate", bundle_b, source_path="raw/red.png", sha256="same-source", split="val"),
-                _record("red_c_near_duplicate", bundle_c, source_path="raw/red_c.png", sha256="near-source", split="train"),
+                _record(
+                    "red_c_near_duplicate", bundle_c, source_path="raw/red_c.png", sha256="near-source", split="train"
+                ),
                 _record("blue_unique", bundle_d, source_path="raw/blue.png", sha256="blue-source", split="test"),
             ],
             rejected_count=0,

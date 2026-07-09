@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from spritelab.dataset_maker.qa import build_contact_sheet, qa_dataset, write_reports
 
@@ -235,9 +234,7 @@ def test_potion_color_only_names_are_caught_for_496(tmp_path: Path) -> None:
         (dataset_dir / f"manifest_{split}.jsonl").write_text(
             "\n".join(json.dumps(r, sort_keys=True) for r in recs) + "\n", encoding="utf-8"
         )
-        np.savez_compressed(
-            dataset_dir / f"{split}.npz", **_bundle_arrays([str(r["sprite_id"]) for r in recs])
-        )
+        np.savez_compressed(dataset_dir / f"{split}.npz", **_bundle_arrays([str(r["sprite_id"]) for r in recs]))
     (dataset_dir / "dataset_config.json").write_text(
         json.dumps({"dataset_name": "oga_496_rpg_icons_32fix_label_v2", "max_palette_slots": 32}),
         encoding="utf-8",

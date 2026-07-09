@@ -8,9 +8,9 @@ import pytest
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from _semantic_dataset import default_specs, make_semantic_dataset
-
 from spritelab.dataset_maker.training_manifest import build_training_manifest, write_training_manifest
 from spritelab.training.conditioning import apply_conditioning_mode
+from spritelab.training.generated_qa import qa_generated_sprites
 from spritelab.training.generator_challenger import (
     NULL_FIELD_CHOICES,
     V1_1_CFG_BASE_SCALE,
@@ -30,7 +30,6 @@ from spritelab.training.generator_challenger import (
     run_sample_generator_challenger,
     strip_color_conditioning,
 )
-from spritelab.training.generated_qa import qa_generated_sprites
 from spritelab.training.tokenization import SpriteTextTokenizer
 
 
@@ -438,7 +437,7 @@ def test_challenger_sample_config_factored_cfg_and_null_fields_default_off() -> 
     assert config.null_fields == ""
 
 
-def _tiny_model_and_inputs() -> tuple[RectifiedFlowUNet, "torch.Tensor", "torch.Tensor", "torch.Tensor"]:
+def _tiny_model_and_inputs() -> tuple[RectifiedFlowUNet, torch.Tensor, torch.Tensor, torch.Tensor]:
     torch.manual_seed(0)
     model = RectifiedFlowUNet(
         vocab_size=12,
@@ -818,11 +817,16 @@ def test_null_field_choices_are_stable() -> None:
 
 # ── v2 Phase 1 conditioning architecture tests ──────────────────────────────
 
+
 def test_model_film_off_is_default_and_shapes_match() -> None:
     model = RectifiedFlowUNet(
-        vocab_size=64, embed_dim=32, base_channels=32,
-        channel_mults=(1,), res_blocks_per_level=1,
-        pad_token_id=0, film_conditioning=False,
+        vocab_size=64,
+        embed_dim=32,
+        base_channels=32,
+        channel_mults=(1,),
+        res_blocks_per_level=1,
+        pad_token_id=0,
+        film_conditioning=False,
     )
     assert model.film_conditioning is False
     cfg = model.config()
@@ -836,9 +840,13 @@ def test_model_film_off_is_default_and_shapes_match() -> None:
 
 def test_model_film_on_shapes_match() -> None:
     model = RectifiedFlowUNet(
-        vocab_size=64, embed_dim=32, base_channels=32,
-        channel_mults=(1,), res_blocks_per_level=1,
-        pad_token_id=0, film_conditioning=True,
+        vocab_size=64,
+        embed_dim=32,
+        base_channels=32,
+        channel_mults=(1,),
+        res_blocks_per_level=1,
+        pad_token_id=0,
+        film_conditioning=True,
     )
     assert model.film_conditioning is True
     cfg = model.config()
@@ -852,9 +860,13 @@ def test_model_film_on_shapes_match() -> None:
 
 def test_model_bottleneck_attention_on_shapes_match() -> None:
     model = RectifiedFlowUNet(
-        vocab_size=64, embed_dim=32, base_channels=32,
-        channel_mults=(1, 2), res_blocks_per_level=1,
-        pad_token_id=0, bottleneck_attention=True,
+        vocab_size=64,
+        embed_dim=32,
+        base_channels=32,
+        channel_mults=(1, 2),
+        res_blocks_per_level=1,
+        pad_token_id=0,
+        bottleneck_attention=True,
     )
     assert model.bottleneck_attention is True
     cfg = model.config()
@@ -868,9 +880,14 @@ def test_model_bottleneck_attention_on_shapes_match() -> None:
 
 def test_model_film_and_attention_together() -> None:
     model = RectifiedFlowUNet(
-        vocab_size=64, embed_dim=32, base_channels=32,
-        channel_mults=(1, 2), res_blocks_per_level=1,
-        pad_token_id=0, film_conditioning=True, bottleneck_attention=True,
+        vocab_size=64,
+        embed_dim=32,
+        base_channels=32,
+        channel_mults=(1, 2),
+        res_blocks_per_level=1,
+        pad_token_id=0,
+        film_conditioning=True,
+        bottleneck_attention=True,
     )
     assert model.film_conditioning is True
     assert model.bottleneck_attention is True
@@ -883,7 +900,8 @@ def test_model_film_and_attention_together() -> None:
 
 def test_old_default_config_has_features_off() -> None:
     config = ChallengerTrainConfig(
-        dataset_dir=Path("ds"), training_manifest=Path("m.jsonl"),
+        dataset_dir=Path("ds"),
+        training_manifest=Path("m.jsonl"),
         out_dir=Path("out"),
     )
     assert config.film_conditioning is False
@@ -893,18 +911,21 @@ def test_old_default_config_has_features_off() -> None:
 
 def test_per_group_dropout_accepts_valid_string() -> None:
     from spritelab.training.cli import _parse_dropout_rates
+
     rates = _parse_dropout_rates("category=0.10,object_id=0.35,colors=0.15")
     assert rates == {"category": 0.10, "object_id": 0.35, "colors": 0.15}
 
 
 def test_per_group_dropout_rejects_unknown_group() -> None:
     from spritelab.training.cli import _parse_dropout_rates
+
     with pytest.raises(ValueError, match="Unknown"):
         _parse_dropout_rates("unknown=0.5")
 
 
 def test_per_group_dropout_rejects_invalid_rate() -> None:
     from spritelab.training.cli import _parse_dropout_rates
+
     with pytest.raises(ValueError, match="must be in"):
         _parse_dropout_rates("category=1.5")
     with pytest.raises(ValueError, match="must be in"):
@@ -913,12 +934,14 @@ def test_per_group_dropout_rejects_invalid_rate() -> None:
 
 def test_per_group_dropout_returns_none_for_empty() -> None:
     from spritelab.training.cli import _parse_dropout_rates
+
     assert _parse_dropout_rates(None) is None
     assert _parse_dropout_rates("") is None
 
 
 def test_cli_accepts_film_conditioning_flag() -> None:
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--film-conditioning", action="store_true", default=False)
     parsed = parser.parse_args(["--film-conditioning"])
@@ -929,6 +952,7 @@ def test_cli_accepts_film_conditioning_flag() -> None:
 
 def test_cli_accepts_bottleneck_attention_flag() -> None:
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--bottleneck-attention", action="store_true", default=False)
     parsed = parser.parse_args(["--bottleneck-attention"])
@@ -939,6 +963,7 @@ def test_cli_accepts_bottleneck_attention_flag() -> None:
 
 def test_cli_accepts_dropout_rates_flag() -> None:
     import argparse
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--structured-field-dropout-rates", default=None)
     parsed = parser.parse_args(["--structured-field-dropout-rates", "category=0.10,colors=0.15"])
@@ -948,6 +973,7 @@ def test_cli_accepts_dropout_rates_flag() -> None:
 
 
 # ── v2 Phase 2: palette/index head tests ────────────────────────────────────
+
 
 def _dummy_batch(bs: int = 2) -> dict[str, Any]:
     """Create a minimal batch with palette/index_map tensors."""
@@ -965,8 +991,12 @@ def _dummy_batch(bs: int = 2) -> dict[str, Any]:
 
 def test_model_forward_returns_velocity_only_by_default() -> None:
     model = RectifiedFlowUNet(
-        vocab_size=64, embed_dim=32, base_channels=32,
-        channel_mults=(1,), res_blocks_per_level=1, pad_token_id=0,
+        vocab_size=64,
+        embed_dim=32,
+        base_channels=32,
+        channel_mults=(1,),
+        res_blocks_per_level=1,
+        pad_token_id=0,
     )
     x = torch.randn(2, 4, 32, 32)
     out = model(x, torch.rand(2), caption_tokens=torch.randint(0, 64, (2, 8)))
@@ -976,12 +1006,17 @@ def test_model_forward_returns_velocity_only_by_default() -> None:
 
 def test_model_forward_return_aux_returns_dict() -> None:
     model = RectifiedFlowUNet(
-        vocab_size=64, embed_dim=32, base_channels=32,
-        channel_mults=(1, 2), res_blocks_per_level=1, pad_token_id=0,
+        vocab_size=64,
+        embed_dim=32,
+        base_channels=32,
+        channel_mults=(1, 2),
+        res_blocks_per_level=1,
+        pad_token_id=0,
     )
     x = torch.randn(2, 4, 32, 32)
     out = model(
-        x, torch.rand(2),
+        x,
+        torch.rand(2),
         caption_tokens=torch.randint(0, 64, (2, 8)),
         return_aux=True,
     )
@@ -998,7 +1033,8 @@ def test_model_forward_return_aux_returns_dict() -> None:
 
 def test_default_config_has_head_loss_weights_zero() -> None:
     config = ChallengerTrainConfig(
-        dataset_dir=Path("ds"), training_manifest=Path("m.jsonl"),
+        dataset_dir=Path("ds"),
+        training_manifest=Path("m.jsonl"),
         out_dir=Path("out"),
     )
     assert config.index_head_loss_weight == 0.0
@@ -1010,13 +1046,19 @@ def test_default_config_has_head_loss_weights_zero() -> None:
 def test_loss_skips_heads_when_weights_zero() -> None:
     """When all head weights are zero, only velocity + palette_aux losses appear."""
     from spritelab.training.generator_challenger import rectified_flow_loss
+
     model = RectifiedFlowUNet(
-        vocab_size=64, embed_dim=32, base_channels=32,
-        channel_mults=(1,), res_blocks_per_level=1, pad_token_id=0,
+        vocab_size=64,
+        embed_dim=32,
+        base_channels=32,
+        channel_mults=(1,),
+        res_blocks_per_level=1,
+        pad_token_id=0,
     )
     batch = _dummy_batch(bs=2)
     losses = rectified_flow_loss(
-        model, batch,
+        model,
+        batch,
         conditioning_mode="caption_semantic",
         cfg_dropout=0.0,
         pad_token_id=0,
@@ -1033,15 +1075,21 @@ def test_palette_head_loss_finite() -> None:
     from spritelab.training.generator_challenger import (
         rectified_flow_loss,
     )
+
     model = RectifiedFlowUNet(
-        vocab_size=64, embed_dim=32, base_channels=32,
-        channel_mults=(1,), res_blocks_per_level=1, pad_token_id=0,
+        vocab_size=64,
+        embed_dim=32,
+        base_channels=32,
+        channel_mults=(1,),
+        res_blocks_per_level=1,
+        pad_token_id=0,
     )
     K = 16
     batch = _dummy_batch(bs=2)
     batch["palette_mask"] = torch.ones(2, K, dtype=torch.bool)
     losses = rectified_flow_loss(
-        model, batch,
+        model,
+        batch,
         conditioning_mode="caption_semantic",
         cfg_dropout=0.0,
         pad_token_id=0,
@@ -1061,16 +1109,22 @@ def test_index_head_loss_finite() -> None:
     from spritelab.training.generator_challenger import (
         rectified_flow_loss,
     )
+
     model = RectifiedFlowUNet(
-        vocab_size=64, embed_dim=32, base_channels=32,
-        channel_mults=(1,), res_blocks_per_level=1, pad_token_id=0,
+        vocab_size=64,
+        embed_dim=32,
+        base_channels=32,
+        channel_mults=(1,),
+        res_blocks_per_level=1,
+        pad_token_id=0,
     )
     batch = _dummy_batch(bs=2)
     batch["index_map"] = torch.randint(0, 16, (2, 32, 32))
     # Set some pixels as invisible
     batch["rgba"][:, 3:4] = 0.0
     losses = rectified_flow_loss(
-        model, batch,
+        model,
+        batch,
         conditioning_mode="caption_semantic",
         cfg_dropout=0.0,
         pad_token_id=0,
@@ -1088,13 +1142,19 @@ def test_index_head_inactive_before_warmup() -> None:
     from spritelab.training.generator_challenger import (
         rectified_flow_loss,
     )
+
     model = RectifiedFlowUNet(
-        vocab_size=64, embed_dim=32, base_channels=32,
-        channel_mults=(1,), res_blocks_per_level=1, pad_token_id=0,
+        vocab_size=64,
+        embed_dim=32,
+        base_channels=32,
+        channel_mults=(1,),
+        res_blocks_per_level=1,
+        pad_token_id=0,
     )
     batch = _dummy_batch(bs=2)
     losses = rectified_flow_loss(
-        model, batch,
+        model,
+        batch,
         conditioning_mode="caption_semantic",
         cfg_dropout=0.0,
         pad_token_id=0,
@@ -1112,7 +1172,7 @@ def test_index_head_inactive_before_warmup() -> None:
 
 def test_cli_accepts_inspect_palette_index_heads() -> None:
     import argparse
-    from spritelab.training.cli import _add_speed_option_arguments
+
 
     parser = argparse.ArgumentParser(prog="test")
     sub = parser.add_subparsers(dest="subcommand", required=True)
@@ -1130,10 +1190,14 @@ def test_cli_accepts_inspect_palette_index_heads() -> None:
     parsed = parser.parse_args(
         [
             "inspect-palette-index-heads",
-            "--checkpoint", "ckpt.pt",
-            "--dataset", "ds",
-            "--training-manifest", "manifest.jsonl",
-            "--out", "out",
+            "--checkpoint",
+            "ckpt.pt",
+            "--dataset",
+            "ds",
+            "--training-manifest",
+            "manifest.jsonl",
+            "--out",
+            "out",
         ]
     )
     assert parsed.subcommand == "inspect-palette-index-heads"
@@ -1161,10 +1225,14 @@ def test_cli_accepts_speed_flags_for_inspect() -> None:
     parsed = parser.parse_args(
         [
             "inspect-palette-index-heads",
-            "--checkpoint", "ckpt.pt",
-            "--dataset", "ds",
-            "--training-manifest", "manifest.jsonl",
-            "--out", "out",
+            "--checkpoint",
+            "ckpt.pt",
+            "--dataset",
+            "ds",
+            "--training-manifest",
+            "manifest.jsonl",
+            "--out",
+            "out",
             "--cudnn-benchmark",
             "--tf32",
         ]
@@ -1276,11 +1344,11 @@ def test_inspect_presence_perfect_prediction() -> None:
 
 def test_inspect_report_writes_json_and_markdown(tmp_path: Path) -> None:
     from spritelab.training.palette_index_head_inspect import (
+        PaletteIndexHeadInspectConfig,
         _BatchMetrics,
         _IndexMetrics,
         _PalettePresenceMetrics,
         _PaletteRGBMetrics,
-        PaletteIndexHeadInspectConfig,
         write_inspect_report,
     )
 
@@ -1293,9 +1361,15 @@ def test_inspect_report_writes_json_and_markdown(tmp_path: Path) -> None:
         ),
         palette_rgb=_PaletteRGBMetrics(mse=0.001, mae=0.02, active_slot_count_mean=4.5),
         palette_presence=_PalettePresenceMetrics(
-            bce=0.3, accuracy=0.9, precision=0.85, recall=0.88, f1=0.86,
-            predicted_active_mean=5.0, target_active_mean=4.5,
-            false_positives_rate=0.05, false_negatives_rate=0.1,
+            bce=0.3,
+            accuracy=0.9,
+            precision=0.85,
+            recall=0.88,
+            f1=0.86,
+            predicted_active_mean=5.0,
+            target_active_mean=4.5,
+            false_positives_rate=0.05,
+            false_negatives_rate=0.1,
         ),
     )
 
@@ -1346,12 +1420,21 @@ def test_inspect_cmd_fails_for_non_challenger_checkpoint(tmp_path: Path) -> None
 def test_inspect_unsupported_for_model_without_heads(tmp_path: Path) -> None:
     class OldModel(torch.nn.Module):
         def config(self):
-            return {"vocab_size": 64, "embed_dim": 32, "base_channels": 32,
-                    "channel_mults": [1], "res_blocks_per_level": 1,
-                    "pad_token_id": 0, "structured_vocab_sizes": None,
-                    "film_conditioning": False, "bottleneck_attention": False}
-        def forward(self, x, t, caption_tokens=None, semantic_tokens=None,
-                    structured_conditioning=None, return_aux=False):
+            return {
+                "vocab_size": 64,
+                "embed_dim": 32,
+                "base_channels": 32,
+                "channel_mults": [1],
+                "res_blocks_per_level": 1,
+                "pad_token_id": 0,
+                "structured_vocab_sizes": None,
+                "film_conditioning": False,
+                "bottleneck_attention": False,
+            }
+
+        def forward(
+            self, x, t, caption_tokens=None, semantic_tokens=None, structured_conditioning=None, return_aux=False
+        ):
             return x[:, :4]
 
     old = OldModel()
@@ -1369,8 +1452,7 @@ def test_inspect_unsupported_for_model_without_heads(tmp_path: Path) -> None:
     )
 
     from spritelab.training.palette_index_head_inspect import (
-        PaletteIndexHeadInspectConfig,
         _has_palette_index_heads,
     )
-    assert not _has_palette_index_heads(old)
 
+    assert not _has_palette_index_heads(old)

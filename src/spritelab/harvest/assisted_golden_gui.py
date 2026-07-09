@@ -19,8 +19,6 @@ from spritelab.harvest.assisted_golden import (
     AssistedGoldenCandidate,
     AssistedGoldenLabel,
     append_golden_label,
-    assisted_candidate_to_dict,
-    assisted_golden_label_to_dict,
     build_assisted_golden_label,
     candidate_review_priority,
     load_assisted_candidates,
@@ -28,7 +26,6 @@ from spritelab.harvest.assisted_golden import (
     load_golden_candidates_jsonl,
     normalize_category,
     normalize_object_name,
-    normalize_tags,
     write_golden_candidates_jsonl,
 )
 from spritelab.harvest.sources import utc_timestamp
@@ -238,7 +235,15 @@ def launch_assisted_golden_gui(
         for control in (unlabeled_only, corrected_only, conflicts_only, category_filter, source_filter, search_filter):
             control.change(
                 apply_filters,
-                inputs=[state_box, unlabeled_only, corrected_only, conflicts_only, category_filter, source_filter, search_filter],
+                inputs=[
+                    state_box,
+                    unlabeled_only,
+                    corrected_only,
+                    conflicts_only,
+                    category_filter,
+                    source_filter,
+                    search_filter,
+                ],
                 outputs=table,
             )
 
@@ -273,12 +278,34 @@ def order_candidates(
         random.Random(seed).shuffle(values)
         return tuple(values)
     if order == "source_order":
-        return tuple(sorted(candidates, key=lambda candidate: (candidate.source_id, candidate.relative_path, candidate.sprite_id)))
+        return tuple(
+            sorted(
+                candidates, key=lambda candidate: (candidate.source_id, candidate.relative_path, candidate.sprite_id)
+            )
+        )
     if order == "uncertain_first":
         return tuple(sorted(candidates, key=lambda candidate: (-_uncertainty_score(candidate), candidate.sprite_id)))
     if order == "unlabeled_first":
-        return tuple(sorted(candidates, key=lambda candidate: (candidate.sprite_id in labels, -candidate_review_priority(candidate), candidate.sprite_id)))
-    return tuple(sorted(candidates, key=lambda candidate: (-candidate_review_priority(candidate), candidate.sprite_id in labels, candidate.sprite_id)))
+        return tuple(
+            sorted(
+                candidates,
+                key=lambda candidate: (
+                    candidate.sprite_id in labels,
+                    -candidate_review_priority(candidate),
+                    candidate.sprite_id,
+                ),
+            )
+        )
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda candidate: (
+                -candidate_review_priority(candidate),
+                candidate.sprite_id in labels,
+                candidate.sprite_id,
+            ),
+        )
+    )
 
 
 def save_current_label(
@@ -367,10 +394,16 @@ def candidate_gui_model(candidate: AssistedGoldenCandidate, label: AssistedGolde
     """Return editable and reference data used by the assisted golden GUI."""
 
     editable = {
-        "category": label.category if label else candidate.gold_category if candidate.gold_category != "unknown" else candidate.suggested_category,
+        "category": label.category
+        if label
+        else candidate.gold_category
+        if candidate.gold_category != "unknown"
+        else candidate.suggested_category,
         "object_name": label.object_name if label else candidate.gold_object_name or candidate.suggested_object_name,
         "tags": list(label.tags if label else candidate.gold_tags or candidate.suggested_tags),
-        "short_description": label.short_description if label else candidate.gold_short_description or candidate.suggested_description,
+        "short_description": label.short_description
+        if label
+        else candidate.gold_short_description or candidate.suggested_description,
         "materials": list(label.materials if label else candidate.gold_materials),
         "mood": list(label.mood if label else candidate.gold_mood),
         "notes": label.notes if label else "",
@@ -454,7 +487,11 @@ def filter_candidates(
             continue
         if category and candidate.suggested_category != category:
             continue
-        if source_query and source_query not in candidate.source_name.lower() and source_query not in candidate.source_id.lower():
+        if (
+            source_query
+            and source_query not in candidate.source_name.lower()
+            and source_query not in candidate.source_id.lower()
+        ):
             continue
         searchable = " ".join(
             [
@@ -551,7 +588,24 @@ def _view_outputs(state: AssistedGoldenState) -> tuple[Any, ...]:
         f"Remaining: {counts['remaining']}"
     )
     if candidate is None:
-        return progress, "", None, "No candidates loaded.", "unknown", "", "", "", "", "", "", {}, {}, {}, "", {"data": []}
+        return (
+            progress,
+            "",
+            None,
+            "No candidates loaded.",
+            "unknown",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            {},
+            {},
+            {},
+            "",
+            {"data": []},
+        )
     label = state.labels.get(candidate.sprite_id)
     gui_model = candidate_gui_model(candidate, label)
     editable = gui_model["editable"]

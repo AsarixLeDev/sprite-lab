@@ -2,7 +2,11 @@ from pathlib import Path
 
 from PIL import Image
 
-from spritelab.harvest.visual_facts import dominant_color_names_from_rgba, extract_visual_facts_from_png, shape_hints_from_alpha
+from spritelab.harvest.visual_facts import (
+    dominant_color_names_from_rgba,
+    extract_visual_facts_from_png,
+    shape_hints_from_alpha,
+)
 
 
 def test_visual_facts_bbox_and_colors(tmp_path: Path) -> None:

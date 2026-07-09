@@ -168,20 +168,14 @@ def compute_sprite_quality_metrics(
     center = _compute_center(opaque_mask, opaque_pixel_count)
     components = _component_sizes(opaque_mask)
     connected_component_count = len(components)
-    largest_component_ratio = (
-        max(components) / opaque_pixel_count if opaque_pixel_count > 0 and components else None
-    )
+    largest_component_ratio = max(components) / opaque_pixel_count if opaque_pixel_count > 0 and components else None
     single_pixel_component_count = sum(1 for size in components if size == 1)
     single_pixel_component_ratio = (
-        single_pixel_component_count / connected_component_count
-        if connected_component_count > 0
-        else None
+        single_pixel_component_count / connected_component_count if connected_component_count > 0 else None
     )
     alpha_hole_count = _count_alpha_holes(alpha)
     edge_touching_opaque_count = _count_edge_opaque(opaque_mask)
-    edge_touching_opaque_ratio = (
-        edge_touching_opaque_count / opaque_pixel_count if opaque_pixel_count > 0 else 0.0
-    )
+    edge_touching_opaque_ratio = edge_touching_opaque_count / opaque_pixel_count if opaque_pixel_count > 0 else 0.0
     luminance = _compute_luminance_metrics(alpha, index_map, palette)
 
     issue_codes = _issue_codes(
@@ -531,7 +525,9 @@ def _count_edge_opaque(opaque_mask: np.ndarray) -> int:
     return int(np.count_nonzero(opaque_mask & edge))
 
 
-def _compute_luminance_metrics(alpha: np.ndarray, index_map: np.ndarray, palette: np.ndarray) -> dict[str, float | None]:
+def _compute_luminance_metrics(
+    alpha: np.ndarray, index_map: np.ndarray, palette: np.ndarray
+) -> dict[str, float | None]:
     if int(np.count_nonzero(alpha == 1)) == 0:
         return {
             "contrast_score": None,
@@ -650,11 +646,7 @@ def _duplicate_sha256_groups(dataset_path: Path, included_ids: set[str]) -> dict
         if record.id in included_ids and record.sha256:
             groups[record.sha256].append(record.id)
 
-    return {
-        digest: sorted(ids)
-        for digest, ids in sorted(groups.items())
-        if len(ids) >= 2
-    }
+    return {digest: sorted(ids) for digest, ids in sorted(groups.items()) if len(ids) >= 2}
 
 
 def _load_manifest_for_dataset(dataset_path: Path) -> DatasetManifest | None:

@@ -8,7 +8,6 @@ import pytest
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from _semantic_dataset import default_specs, make_semantic_dataset
-
 from spritelab.dataset_maker.training_manifest import build_training_manifest, write_training_manifest
 from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch
 

@@ -178,9 +178,7 @@ def qa_training_manifest(
             missing_source_record.append(location)
 
     duplicate_captions = sorted(
-        f"{sprite_id}: {caption!r} x{count}"
-        for (sprite_id, caption), count in duplicate_pairs.items()
-        if count > 1
+        f"{sprite_id}: {caption!r} x{count}" for (sprite_id, caption), count in duplicate_pairs.items() if count > 1
     )
 
     result.unique_sprites = len([sid for sid in per_sprite if sid])
@@ -392,9 +390,7 @@ def _render_markdown(result: TrainingManifestQAResult) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_training_manifest_qa_reports(
-    result: TrainingManifestQAResult, *, out_json: Path, out_md: Path
-) -> None:
+def write_training_manifest_qa_reports(result: TrainingManifestQAResult, *, out_json: Path, out_md: Path) -> None:
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(result.to_json_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     out_md.parent.mkdir(parents=True, exist_ok=True)

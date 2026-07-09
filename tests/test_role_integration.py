@@ -10,7 +10,6 @@ from spritelab.codec.quantize import QuantizationOptions, encode_rgba_image_to_q
 from spritelab.codec.reconstruct import reconstruct_rgba
 from spritelab.codec.role_inference import apply_role_inference_to_bundle, validate_role_map
 from spritelab.codec.validate import assert_valid_bundle
-
 from test_role_helpers import make_role_demo_bundle
 
 

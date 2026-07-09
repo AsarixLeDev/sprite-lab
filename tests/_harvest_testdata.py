@@ -37,7 +37,9 @@ def make_sprite_png(
     return path
 
 
-def make_sheet_png(path: Path, *, rows: int = 2, cols: int = 2, tile: int = 32, empty_tiles: tuple[tuple[int, int], ...] = ()) -> Path:
+def make_sheet_png(
+    path: Path, *, rows: int = 2, cols: int = 2, tile: int = 32, empty_tiles: tuple[tuple[int, int], ...] = ()
+) -> Path:
     """Write a sprite sheet with distinct colored tiles."""
 
     pixels = np.zeros((rows * tile, cols * tile, 4), dtype=np.uint8)

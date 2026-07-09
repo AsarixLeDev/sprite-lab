@@ -37,11 +37,6 @@ from spritelab.training.generated_canonicalizer import (
     write_generated_sprite_artifacts,
     write_generation_reports,
 )
-from spritelab.training.palette_swap import (
-    DEFAULT_SWAP_FAMILIES_TEXT,
-    PaletteSwapConfig,
-    estimate_applied,
-)
 from spritelab.training.optim_utils import (
     amp_autocast,
     apply_backend_speed_flags,
@@ -51,13 +46,18 @@ from spritelab.training.optim_utils import (
     dataloader_perf_kwargs,
     device_type,
 )
-from spritelab.training.prompt_sensitivity import COLOR_WORDS
 from spritelab.training.overfit_subset import (
     OverfitSubsetSelection,
     read_sprite_id_list,
     select_overfit_subset,
 )
+from spritelab.training.palette_swap import (
+    DEFAULT_SWAP_FAMILIES_TEXT,
+    PaletteSwapConfig,
+    estimate_applied,
+)
 from spritelab.training.progress import StepProgressBar
+from spritelab.training.prompt_sensitivity import COLOR_WORDS
 from spritelab.training.rgba import save_rgba_contact_sheet
 from spritelab.training.sample_generator import read_prompt_records
 from spritelab.training.structured_conditioning import (
@@ -281,14 +281,24 @@ class RectifiedFlowUNet(_ModuleBase):
         for level, channel in enumerate(channels):
             blocks = nn_mod.ModuleList()
             for block_index in range(max(1, self.res_blocks_per_level)):
-                blocks.append(_ResidualBlock(current if block_index == 0 else channel, channel, emb_dim, film=self.film_conditioning))
-            down = nn_mod.Conv2d(channel, channel, kernel_size=3, stride=2, padding=1) if level < len(channels) - 1 else None
+                blocks.append(
+                    _ResidualBlock(
+                        current if block_index == 0 else channel, channel, emb_dim, film=self.film_conditioning
+                    )
+                )
+            down = (
+                nn_mod.Conv2d(channel, channel, kernel_size=3, stride=2, padding=1)
+                if level < len(channels) - 1
+                else None
+            )
             self.downs.append(nn_mod.ModuleDict({"blocks": blocks, "down": down or nn_mod.Identity()}))
             current = channel
-        self.mid = nn_mod.ModuleList([
-            _ResidualBlock(current, current, emb_dim, film=self.film_conditioning),
-            _ResidualBlock(current, current, emb_dim, film=self.film_conditioning),
-        ])
+        self.mid = nn_mod.ModuleList(
+            [
+                _ResidualBlock(current, current, emb_dim, film=self.film_conditioning),
+                _ResidualBlock(current, current, emb_dim, film=self.film_conditioning),
+            ]
+        )
         # v2 Phase 1: optional lightweight bottleneck self-attention (default-off)
         # Placed here so *current* still holds the bottleneck channel count.
         if self.bottleneck_attention:
@@ -538,7 +548,11 @@ class _ResidualBlock(_ModuleBase):
         self.emb = nn_mod.Linear(emb_dim, out_channels)
         self.norm2 = _group_norm(out_channels)
         self.conv2 = nn_mod.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.skip = nn_mod.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn_mod.Identity()
+        self.skip = (
+            nn_mod.Conv2d(in_channels, out_channels, kernel_size=1)
+            if in_channels != out_channels
+            else nn_mod.Identity()
+        )
         self.act = nn_mod.SiLU()
         self._film = bool(film)
         if self._film:
@@ -553,12 +567,16 @@ class _ResidualBlock(_ModuleBase):
     def forward(self, x: Any, emb: Any) -> Any:
         h = self.conv1(self.act(self.norm1(x)))
         if self._film:
-            h = h * (1.0 + self.emb_scale1(emb).unsqueeze(-1).unsqueeze(-1)) + self.emb_shift1(emb).unsqueeze(-1).unsqueeze(-1)
+            h = h * (1.0 + self.emb_scale1(emb).unsqueeze(-1).unsqueeze(-1)) + self.emb_shift1(emb).unsqueeze(
+                -1
+            ).unsqueeze(-1)
         else:
             h = h + self.emb(emb).unsqueeze(-1).unsqueeze(-1)
         h = self.conv2(self.act(self.norm2(h)))
         if self._film:
-            h = h * (1.0 + self.emb_scale2(emb).unsqueeze(-1).unsqueeze(-1)) + self.emb_shift2(emb).unsqueeze(-1).unsqueeze(-1)
+            h = h * (1.0 + self.emb_scale2(emb).unsqueeze(-1).unsqueeze(-1)) + self.emb_shift2(emb).unsqueeze(
+                -1
+            ).unsqueeze(-1)
         return h + self.skip(x)
 
 
@@ -580,7 +598,7 @@ class ChallengerPromptAdapter:
         self.pad_token_id = int(pad_token_id)
         self.structured_vocab = structured_vocab
 
-    def eval(self) -> "ChallengerPromptAdapter":
+    def eval(self) -> ChallengerPromptAdapter:
         self.model.eval()
         return self
 
@@ -644,10 +662,14 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         if subset_selection is not None
         else [row for row in token_rows if row.get("split") == effective_split]
     )
-    tokenizer = SpriteTextTokenizer.build_from_records(train_rows or token_rows or manifest_rows, max_length=config.caption_max_length)
+    tokenizer = SpriteTextTokenizer.build_from_records(
+        train_rows or token_rows or manifest_rows, max_length=config.caption_max_length
+    )
     tokenizer.save(out_dir / "vocab.json")
     structured_vocab = (
-        build_structured_conditioning_vocab([row for row in token_rows if row.get("split") == effective_split] or train_rows or token_rows)
+        build_structured_conditioning_vocab(
+            [row for row in token_rows if row.get("split") == effective_split] or train_rows or token_rows
+        )
         if uses_structured_conditioning(conditioning_mode)
         else None
     )
@@ -1039,7 +1061,9 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "checkpoint_step_ema_paths": checkpoint_step_ema_paths,
         "warnings": [],
     }
-    (out_dir / "train_report.json").write_text(json.dumps(_jsonable(report), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (out_dir / "train_report.json").write_text(
+        json.dumps(_jsonable(report), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return report
 
 
@@ -1333,14 +1357,14 @@ def rectified_flow_loss(
     )
 
     # Determine if aux heads should run
-    aux_active = (
-        (palette_head_loss_weight > 0.0 or palette_presence_loss_weight > 0.0)
-        or (index_head_loss_weight > 0.0 and global_step >= index_head_warmup_steps)
+    aux_active = (palette_head_loss_weight > 0.0 or palette_presence_loss_weight > 0.0) or (
+        index_head_loss_weight > 0.0 and global_step >= index_head_warmup_steps
     )
 
     if aux_active:
         aux = model(
-            xt, t,
+            xt,
+            t,
             caption_tokens=inputs["caption_tokens"],
             semantic_tokens=inputs["semantic_tokens"],
             structured_conditioning=inputs.get("structured_conditioning"),
@@ -1349,7 +1373,8 @@ def rectified_flow_loss(
         pred = aux["velocity"]
     else:
         pred = model(
-            xt, t,
+            xt,
+            t,
             caption_tokens=inputs["caption_tokens"],
             semantic_tokens=inputs["semantic_tokens"],
             structured_conditioning=inputs.get("structured_conditioning"),
@@ -1380,9 +1405,7 @@ def rectified_flow_loss(
     losses["index_head_active"] = False
 
     if aux_active:
-        head_losses = _palette_head_loss(
-            aux["palette_rgb"], aux["palette_presence_logits"], batch
-        )
+        head_losses = _palette_head_loss(aux["palette_rgb"], aux["palette_presence_logits"], batch)
         losses["loss_palette_head"] = head_losses["loss_palette_head"]
         losses["loss_palette_presence"] = head_losses["loss_palette_presence"]
 
@@ -1496,7 +1519,9 @@ def _evaluate_challenger_losses(
             )
             palette_weight = float(palette_loss_weight)
             losses["loss_palette_aux"] = palette_aux
-            losses["loss"] = losses["loss_velocity"] + (palette_aux * palette_weight if palette_weight > 0.0 else palette_aux * 0.0)
+            losses["loss"] = losses["loss_velocity"] + (
+                palette_aux * palette_weight if palette_weight > 0.0 else palette_aux * 0.0
+            )
             batch_size = int(target.shape[0])
             for key, value in losses.items():
                 totals[key] = totals.get(key, 0.0) + float(value.detach().cpu()) * batch_size
@@ -1537,6 +1562,7 @@ def _velocity_loss_components(
 
 # v2 Phase 2: palette/index auxiliary losses ─────────────────────────────────
 
+
 def _palette_head_loss(
     pred_rgb: Any,
     pred_presence_logits: Any,
@@ -1571,24 +1597,32 @@ def _palette_head_loss(
         else:
             # Pad with zeros (RGB) and large negative logits (presence)
             pad_k = K_gt - K_pred
-            pred_rgb = th.cat([
-                pred_rgb,
-                th.zeros(pred_rgb.shape[0], pad_k, 3, device=pred_rgb.device, dtype=pred_rgb.dtype),
-            ], dim=1)
-            pred_presence_logits = th.cat([
-                pred_presence_logits,
-                th.full((pred_presence_logits.shape[0], pad_k), -10.0,
-                        device=pred_presence_logits.device, dtype=pred_presence_logits.dtype),
-            ], dim=1)
+            pred_rgb = th.cat(
+                [
+                    pred_rgb,
+                    th.zeros(pred_rgb.shape[0], pad_k, 3, device=pred_rgb.device, dtype=pred_rgb.dtype),
+                ],
+                dim=1,
+            )
+            pred_presence_logits = th.cat(
+                [
+                    pred_presence_logits,
+                    th.full(
+                        (pred_presence_logits.shape[0], pad_k),
+                        -10.0,
+                        device=pred_presence_logits.device,
+                        dtype=pred_presence_logits.dtype,
+                    ),
+                ],
+                dim=1,
+            )
 
     mse = ((pred_rgb - gt_rgb) ** 2).mean(dim=-1)  # (B, K_gt)
     mse = mse.masked_select(gt_mask)
     loss_rgb = mse.mean() if mse.numel() > 0 else zero
 
     if pred_presence_logits.shape[-1] == gt_mask.shape[-1]:
-        bce = th.nn.functional.binary_cross_entropy_with_logits(
-            pred_presence_logits, gt_mask.float()
-        )
+        bce = th.nn.functional.binary_cross_entropy_with_logits(pred_presence_logits, gt_mask.float())
     else:
         bce = zero
 
@@ -1700,7 +1734,9 @@ def integrate_rectified_flow(
     total_steps = max(1, int(steps))
     dt = 1.0 / float(total_steps)
     uncond_caption = caption_tokens.new_full(caption_tokens.shape, int(pad_token_id))
-    uncond_semantic = None if semantic_tokens is None else semantic_tokens.new_full(semantic_tokens.shape, int(pad_token_id))
+    uncond_semantic = (
+        None if semantic_tokens is None else semantic_tokens.new_full(semantic_tokens.shape, int(pad_token_id))
+    )
     uncond_structured = _null_structured_conditioning(structured_conditioning)
 
     no_color_caption = no_color_semantic = no_color_structured = None
@@ -1874,7 +1910,9 @@ def apply_conditioning_field_ablations(
     return result
 
 
-def load_challenger_from_checkpoint(ckpt: dict[str, Any], *, device: Any) -> tuple[RectifiedFlowUNet, SpriteTextTokenizer, str, int]:
+def load_challenger_from_checkpoint(
+    ckpt: dict[str, Any], *, device: Any
+) -> tuple[RectifiedFlowUNet, SpriteTextTokenizer, str, int]:
     if str(ckpt.get("model_type") or "") != "generator_challenger":
         raise ValueError("checkpoint is not a generator_challenger checkpoint")
     tokenizer = _tokenizer_from_checkpoint(ckpt)
@@ -1964,7 +2002,9 @@ def _update_ema_state(ema_state: dict[str, Any], model: RectifiedFlowUNet, *, de
                 continue
             target = ema_state[key]
             if target.dtype.is_floating_point:
-                target.mul_(clipped_decay).add_(current.to(device=target.device, dtype=target.dtype), alpha=1.0 - clipped_decay)
+                target.mul_(clipped_decay).add_(
+                    current.to(device=target.device, dtype=target.dtype), alpha=1.0 - clipped_decay
+                )
             else:
                 target.copy_(current.to(device=target.device, dtype=target.dtype))
 
@@ -2114,8 +2154,7 @@ def _apply_structured_field_dropout(
         per_group = {str(k): float(v) for k, v in dropout_rates.items()}
 
     dropped: dict[str, Any] = {
-        str(key): value.clone() if isinstance(value, th.Tensor) else value
-        for key, value in structured.items()
+        str(key): value.clone() if isinstance(value, th.Tensor) else value for key, value in structured.items()
     }
     any_masked = False
     for group_name, fields in STRUCTURED_DROPOUT_GROUPS:
@@ -2220,7 +2259,9 @@ def _null_structured_conditioning(structured: Mapping[str, Any] | None) -> dict[
     if not isinstance(structured, Mapping):
         return None
     th, _nn_mod = _require_torch()
-    return {str(key): th.zeros_like(value) if isinstance(value, th.Tensor) else value for key, value in structured.items()}
+    return {
+        str(key): th.zeros_like(value) if isinstance(value, th.Tensor) else value for key, value in structured.items()
+    }
 
 
 def _masked_structured_conditioning(structured: Mapping[str, Any], mask: Any) -> dict[str, Any]:

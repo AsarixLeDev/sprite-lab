@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 def build_dataset_maker_report(
     imported: Sequence[ImportedSprite],
-    result: "DatasetMakerExportResult | None" = None,
+    result: DatasetMakerExportResult | None = None,
 ) -> str:
     """Build a concise Markdown report for a Dataset Maker run."""
 
@@ -67,7 +67,7 @@ def _counter_lines(counter: Counter[str]) -> list[str]:
     return [f"- {name}: {count}" for name, count in sorted(counter.items(), key=lambda item: (str(item[0]), item[1]))]
 
 
-def _warning_lines(imported: Sequence[ImportedSprite], result: "DatasetMakerExportResult | None") -> list[str]:
+def _warning_lines(imported: Sequence[ImportedSprite], result: DatasetMakerExportResult | None) -> list[str]:
     warnings: list[str] = []
     for sprite in imported:
         for warning in sprite.warnings:

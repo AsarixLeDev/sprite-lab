@@ -27,7 +27,7 @@ class PrefillGroup:
 
 
 def group_sprites_for_prefill(
-    harvested: Sequence["HarvestedSprite"],
+    harvested: Sequence[HarvestedSprite],
     selected_indices: Sequence[int],
     *,
     exact_duplicates: bool = True,
@@ -59,7 +59,9 @@ def group_sprites_for_prefill(
             order.append(key)
         exact_groups[key].append(index)
 
-    merged: list[tuple[list[str], str]] = [([key], "exact" if len(exact_groups[key]) > 1 else "single") for key in order]
+    merged: list[tuple[list[str], str]] = [
+        ([key], "exact" if len(exact_groups[key]) > 1 else "single") for key in order
+    ]
     if near_duplicates and len(order) > 1:
         merged = _merge_near_duplicates(
             harvested,
@@ -88,7 +90,7 @@ def group_sprites_for_prefill(
 
 
 def _merge_near_duplicates(
-    harvested: Sequence["HarvestedSprite"],
+    harvested: Sequence[HarvestedSprite],
     exact_groups: dict[str, list[int]],
     order: list[str],
     threshold: int,

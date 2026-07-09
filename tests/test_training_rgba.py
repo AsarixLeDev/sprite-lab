@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from _semantic_dataset import default_specs, make_semantic_dataset
-
 from spritelab.dataset_maker.training_manifest import build_training_manifest, write_training_manifest
 from spritelab.training.rgba import npz_row_to_rgba
 

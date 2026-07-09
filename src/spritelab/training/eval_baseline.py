@@ -144,11 +144,13 @@ def evaluate_model(model: Any, loader: Any, *, device: Any) -> dict[str, float]:
             count += batch_size
     model.train()
     if count == 0:
-        return {key: 0.0 for key in totals}
+        return dict.fromkeys(totals, 0.0)
     return {key: value / count for key, value in totals.items()}
 
 
-def save_reconstruction_sheet(batch: dict[str, Any], outputs: dict[str, Any], path: str | Path, *, max_items: int = 16, scale: int = 6) -> None:
+def save_reconstruction_sheet(
+    batch: dict[str, Any], outputs: dict[str, Any], path: str | Path, *, max_items: int = 16, scale: int = 6
+) -> None:
     """Write target/prediction/alpha contact sheet when Pillow is available."""
 
     try:
@@ -187,7 +189,9 @@ def save_reconstruction_sheet(batch: dict[str, Any], outputs: dict[str, Any], pa
     cell = 32 * scale
     padding = scale
     columns = 3
-    sheet = Image.new("RGBA", (columns * cell + (columns + 1) * padding, count * cell + (count + 1) * padding), (36, 36, 40, 255))
+    sheet = Image.new(
+        "RGBA", (columns * cell + (columns + 1) * padding, count * cell + (count + 1) * padding), (36, 36, 40, 255)
+    )
     for row in range(count):
         images = [
             render(targets[row], palettes[row], target_alpha[row]),

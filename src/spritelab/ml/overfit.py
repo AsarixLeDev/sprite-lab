@@ -174,9 +174,7 @@ def run_overfit_smoke_test(config: OverfitConfig) -> dict[str, Any]:
 
     final_loss, final_metrics, predictions = evaluate()
 
-    passed = final_loss < initial_loss and (
-        final_metrics["masked_accuracy"] >= initial_metrics["masked_accuracy"]
-    )
+    passed = final_loss < initial_loss and (final_metrics["masked_accuracy"] >= initial_metrics["masked_accuracy"])
     result: dict[str, Any] = {
         "dataset_root": str(config.dataset_root),
         "split": config.split,
@@ -194,8 +192,6 @@ def run_overfit_smoke_test(config: OverfitConfig) -> dict[str, Any]:
 
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "metrics.json").write_text(
-        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    (output_dir / "metrics.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     save_prediction_grid(samples, predictions, output_dir / "predictions.png")
     return result

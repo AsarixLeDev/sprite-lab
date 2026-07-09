@@ -17,13 +17,12 @@ from spritelab.harvest.autolabel import (
 from spritelab.harvest.catalog import (
     write_candidates_jsonl,
     write_imported_jsonl,
-    write_jsonl,
     write_sources_jsonl,
 )
 from spritelab.harvest.pipeline import (
+    HarvestedSprite,
     HarvestImportOptions,
     HarvestPolicy,
-    HarvestedSprite,
     apply_harvest_policy,
     export_harvested_dataset,
     harvest_source_to_imported_sprites,
@@ -167,7 +166,9 @@ def launch_harvest_gui(
         failed = sum(1 for s in state["harvested"] if "qwen_error" in s.auto_metadata)
         return f"Qwen prefilled: {suggested}, failed: {failed}, workers: {config.workers}."
 
-    def on_browse(status: str, source_filter: str, license_filter: str, category: str, tag: str, search: str, page: float):
+    def on_browse(
+        status: str, source_filter: str, license_filter: str, category: str, tag: str, search: str, page: float
+    ):
         rows = _filter_rows(state["harvested"], status, source_filter, license_filter, category, tag, search)
         start = max(0, int(page)) * PAGE_SIZE
         visible = rows[start : start + PAGE_SIZE]
@@ -312,12 +313,30 @@ def launch_harvest_gui(
             import_button.click(
                 on_import,
                 inputs=[
-                    source_type, source_name, source_id, source_url, download_url,
-                    zip_path, dir_path, author, license_name, license_url,
-                    attribution_required, commercial_allowed, derivatives_allowed,
-                    share_alike, user_confirmed, run_name, max_palette_slots,
-                    quantize_overcolor, infer_role_map, canonicalize_palette,
-                    allow_resize, center_pad, slice_sheets, tile_size,
+                    source_type,
+                    source_name,
+                    source_id,
+                    source_url,
+                    download_url,
+                    zip_path,
+                    dir_path,
+                    author,
+                    license_name,
+                    license_url,
+                    attribution_required,
+                    commercial_allowed,
+                    derivatives_allowed,
+                    share_alike,
+                    user_confirmed,
+                    run_name,
+                    max_palette_slots,
+                    quantize_overcolor,
+                    infer_role_map,
+                    canonicalize_palette,
+                    allow_resize,
+                    center_pad,
+                    slice_sheets,
+                    tile_size,
                 ],
                 outputs=import_output,
             )
@@ -326,7 +345,9 @@ def launch_harvest_gui(
             autolabel_button = gr.Button("Apply rule-based auto-label")
             autolabel_output = gr.Textbox(label="Result")
             autolabel_button.click(on_autolabel, outputs=autolabel_output)
-            qwen_backend = gr.Dropdown(["openai_compatible", "ollama", "rule_based"], value="openai_compatible", label="Backend")
+            qwen_backend = gr.Dropdown(
+                ["openai_compatible", "ollama", "rule_based"], value="openai_compatible", label="Backend"
+            )
             qwen_base_url = gr.Textbox(value="http://127.0.0.1:8000/v1", label="Qwen base URL")
             qwen_model = gr.Textbox(value="Qwen/Qwen3-VL-8B-Instruct", label="Model")
             qwen_api_key = gr.Textbox(value="not-needed", label="API key", type="password")
@@ -393,7 +414,15 @@ def launch_harvest_gui(
             policy_output = gr.Textbox(label="Status counts", lines=5)
             policy_button.click(
                 on_policy,
-                inputs=[accept_cc0, accept_own, accept_allow, quarantine_unknown, quarantine_low, threshold, reject_invalid],
+                inputs=[
+                    accept_cc0,
+                    accept_own,
+                    accept_allow,
+                    quarantine_unknown,
+                    quarantine_low,
+                    threshold,
+                    reject_invalid,
+                ],
                 outputs=policy_output,
             )
 

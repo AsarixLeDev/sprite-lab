@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from _harvest_testdata import make_source, make_sprite_png
-
 from spritelab.harvest.extract import discover_png_candidates, filter_candidate_basic
 
 

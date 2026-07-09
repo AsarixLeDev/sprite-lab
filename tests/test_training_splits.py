@@ -35,9 +35,9 @@ def test_sprites_in_same_group_stay_in_same_split() -> None:
     groups = {"a": "dupe_1", "b": "dupe_1"}
 
     split = make_group_aware_split(sprite_ids, group_by_sprite_id=groups, seed=5)
-    lookup = {sprite_id: "train" for sprite_id in split.train}
-    lookup.update({sprite_id: "val" for sprite_id in split.val})
-    lookup.update({sprite_id: "test" for sprite_id in split.test})
+    lookup = dict.fromkeys(split.train, "train")
+    lookup.update(dict.fromkeys(split.val, "val"))
+    lookup.update(dict.fromkeys(split.test, "test"))
 
     assert lookup["a"] == lookup["b"]
 

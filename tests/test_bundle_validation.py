@@ -190,10 +190,7 @@ def test_visible_black_after_dummy_slot_is_allowed_when_unique() -> None:
 
 def test_too_many_visible_palette_rows_are_rejected() -> None:
     bundle = make_valid_bundle()
-    visible_rows = [
-        [index % 256, index // 256 + 1, 0]
-        for index in range(MAX_TRAINING_PALETTE_SLOTS + 1)
-    ]
+    visible_rows = [[index % 256, index // 256 + 1, 0] for index in range(MAX_TRAINING_PALETTE_SLOTS + 1)]
     bundle.palette = np.array([[0, 0, 0], *visible_rows], dtype=np.uint8)
 
     assert_has_error(bundle, "too many visible rows")

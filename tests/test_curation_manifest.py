@@ -14,10 +14,12 @@ from spritelab.curation.manifest import (
     format_curation_summary,
     load_curation_events,
     load_latest_curation,
-    main as curation_manifest_main,
     summarize_curation,
     validate_curation_against_bundles,
     write_curation_events,
+)
+from spritelab.curation.manifest import (
+    main as curation_manifest_main,
 )
 
 

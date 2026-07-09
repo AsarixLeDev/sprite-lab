@@ -16,6 +16,7 @@ for path in (SRC, EXAMPLES):
         sys.path.insert(0, str(path))
 
 from create_demo_bundle import build_demo_bundle
+
 from spritelab.codec.bundle import SpriteBundle, SpriteMetadata
 from spritelab.codec.canonical_palette import canonicalize_bundle_palette, remap_index_map
 from spritelab.codec.io import load_bundle, save_bundle
@@ -43,9 +44,7 @@ def make_scrambled_bundle(bundle: SpriteBundle) -> SpriteBundle:
     metadata_data["id"] = f"{bundle.metadata.id}_scrambled"
     metadata_data["extra"] = dict(metadata_data.get("extra") or {})
     metadata_data["extra"]["palette_scrambled_for_demo"] = True
-    metadata_data["extra"]["palette_scramble_old_to_new"] = {
-        str(old): new for old, new in old_to_scrambled.items()
-    }
+    metadata_data["extra"]["palette_scramble_old_to_new"] = {str(old): new for old, new in old_to_scrambled.items()}
 
     return SpriteBundle(
         alpha=np.asarray(bundle.alpha).copy(),

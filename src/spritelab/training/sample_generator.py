@@ -16,13 +16,13 @@ try:
 except ImportError:  # pragma: no cover - exercised when torch is absent or broken.
     torch = None  # type: ignore[assignment]
 
-from spritelab.training.eval_baseline import resolve_device
-from spritelab.training.eval_generator import _load_checkpoint, _tokenizer_from_checkpoint
 from spritelab.training.conditioning import (
     apply_conditioning_mode,
     checkpoint_conditioning_mode,
     checkpoint_semantic_max_length,
 )
+from spritelab.training.eval_baseline import resolve_device
+from spritelab.training.eval_generator import _load_checkpoint, _tokenizer_from_checkpoint
 from spritelab.training.generated_canonicalizer import (
     build_generation_contact_sheet,
     canonicalize_generated_rgba,
@@ -91,10 +91,7 @@ def run_sample_generator(config: SampleGeneratorConfig) -> dict[str, Any]:
             device=device,
         )
         semantic_tokens = th.as_tensor(
-            [
-                tokenizer.encode_record_semantics(record, max_length=semantic_max_length)
-                for record in batch_records
-            ],
+            [tokenizer.encode_record_semantics(record, max_length=semantic_max_length) for record in batch_records],
             dtype=th.long,
             device=device,
         )

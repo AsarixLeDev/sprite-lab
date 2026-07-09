@@ -90,7 +90,9 @@ def test_missing_quality_report_warning_appears() -> None:
 def test_many_unknown_categories_warning_appears() -> None:
     records = [_record(f"sprite_{index}", category="unknown", reports=True) for index in range(4)]
 
-    report = build_training_readiness_report(records, _split([r["sprite_id"] for r in records]), _palette_report(), accepted_count=4, exported_count=4)
+    report = build_training_readiness_report(
+        records, _split([r["sprite_id"] for r in records]), _palette_report(), accepted_count=4, exported_count=4
+    )
 
     assert _has_issue(report, "MANY_UNKNOWN_CATEGORIES")
 
@@ -129,8 +131,12 @@ def test_markdown_contains_expected_sections() -> None:
 def test_readiness_report_is_deterministic() -> None:
     records = [_record("sprite_a", reports=True)]
 
-    left = build_training_readiness_report(records, _split(["sprite_a"]), _palette_report(), accepted_count=1, exported_count=1)
-    right = build_training_readiness_report(records, _split(["sprite_a"]), _palette_report(), accepted_count=1, exported_count=1)
+    left = build_training_readiness_report(
+        records, _split(["sprite_a"]), _palette_report(), accepted_count=1, exported_count=1
+    )
+    right = build_training_readiness_report(
+        records, _split(["sprite_a"]), _palette_report(), accepted_count=1, exported_count=1
+    )
 
     assert left == right
 

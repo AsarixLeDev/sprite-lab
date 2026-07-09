@@ -97,9 +97,7 @@ class _BatchMetrics:
 
 def _has_palette_index_heads(model: RectifiedFlowUNet) -> bool:
     return (
-        hasattr(model, "palette_head_rgb")
-        and hasattr(model, "palette_head_presence")
-        and hasattr(model, "index_head")
+        hasattr(model, "palette_head_rgb") and hasattr(model, "palette_head_presence") and hasattr(model, "index_head")
     )
 
 
@@ -159,7 +157,7 @@ def compute_index_head_metrics(
                 per_role[role_name] = role_acc
         other_mask = eval_mask.clone()
         for role_id in ROLE_LABELS:
-            other_mask &= (role_map != role_id)
+            other_mask &= role_map != role_id
         other_count = int(other_mask.sum().item())
         if other_count > 0:
             per_role["other"] = float((correct & other_mask).sum().item()) / other_count
@@ -206,14 +204,20 @@ def compute_palette_rgb_metrics(
         palette_mask = palette_mask[:, :K_pred].contiguous()
     elif K_gt < K_pred:
         pad_k = K_pred - K_gt
-        target_palette = th.cat([
-            target_palette,
-            th.zeros(B, pad_k, 3, device=target_palette.device, dtype=target_palette.dtype),
-        ], dim=1)
-        palette_mask = th.cat([
-            palette_mask,
-            th.zeros(B, pad_k, device=palette_mask.device, dtype=palette_mask.dtype),
-        ], dim=1)
+        target_palette = th.cat(
+            [
+                target_palette,
+                th.zeros(B, pad_k, 3, device=target_palette.device, dtype=target_palette.dtype),
+            ],
+            dim=1,
+        )
+        palette_mask = th.cat(
+            [
+                palette_mask,
+                th.zeros(B, pad_k, device=palette_mask.device, dtype=palette_mask.dtype),
+            ],
+            dim=1,
+        )
 
     mask = palette_mask.bool()
     active_count = mask.sum(dim=1).float().mean()
@@ -237,7 +241,9 @@ def compute_palette_rgb_metrics(
         slot_mask = mask[:, slot]
         slot_count = slot_mask.sum()
         if slot_count > 0:
-            slot_abs = (predicted_palette_rgb[:, slot] - target_palette[:, slot].to(dtype=predicted_palette_rgb.dtype)).abs()
+            slot_abs = (
+                predicted_palette_rgb[:, slot] - target_palette[:, slot].to(dtype=predicted_palette_rgb.dtype)
+            ).abs()
             slot_mae = float((slot_abs * slot_mask.unsqueeze(-1).float()).sum().item() / (slot_count.item() * 3))
             per_slot.append(slot_mae)
         else:
@@ -273,22 +279,36 @@ def compute_palette_presence_metrics(
     K_gt = target_mask.shape[1]
     K_pred = predicted_logits.shape[1]
     if K_gt > K_pred:
-        predicted_logits = th.cat([
-            predicted_logits,
-            th.full((predicted_logits.shape[0], K_gt - K_pred), -10.0,
-                    device=predicted_logits.device, dtype=predicted_logits.dtype),
-        ], dim=1)
+        predicted_logits = th.cat(
+            [
+                predicted_logits,
+                th.full(
+                    (predicted_logits.shape[0], K_gt - K_pred),
+                    -10.0,
+                    device=predicted_logits.device,
+                    dtype=predicted_logits.dtype,
+                ),
+            ],
+            dim=1,
+        )
     elif K_gt < K_pred:
-        target_mask = th.cat([
-            target_mask,
-            th.zeros(target_mask.shape[0], K_pred - K_gt, device=target_mask.device, dtype=target_mask.dtype),
-        ], dim=1)
+        target_mask = th.cat(
+            [
+                target_mask,
+                th.zeros(target_mask.shape[0], K_pred - K_gt, device=target_mask.device, dtype=target_mask.dtype),
+            ],
+            dim=1,
+        )
 
     target = target_mask.float()
 
-    bce = float(th.nn.functional.binary_cross_entropy_with_logits(
-        predicted_logits, target, reduction="mean",
-    ).item())
+    bce = float(
+        th.nn.functional.binary_cross_entropy_with_logits(
+            predicted_logits,
+            target,
+            reduction="mean",
+        ).item()
+    )
 
     pred_prob = th.sigmoid(predicted_logits)
     pred_binary = (pred_prob > PALETTE_PRESENCE_THRESHOLD).float()
@@ -308,7 +328,7 @@ def compute_palette_presence_metrics(
 
     false_pos = (pred_binary * (1 - target)).sum().float()
     true_neg = ((1 - pred_binary) * (1 - target)).sum().float()
-    total_neg = ((1 - target)).sum().float()
+    total_neg = (1 - target).sum().float()
     false_neg = ((1 - pred_binary) * target).sum().float()
     total_pos = target.sum().float()
 
@@ -375,11 +395,19 @@ def _aggregate_metrics(batches: list[_BatchMetrics]) -> _BatchMetrics:
 
     per_role: dict[str, float] = {}
     for role_name in sorted(ROLE_LABELS.values()):
-        role_values = [(b.index.per_role_accuracy.get(role_name, 0.0), b.index.visible_pixel_count) for b in idx_batches if role_name in b.index.per_role_accuracy]
+        role_values = [
+            (b.index.per_role_accuracy.get(role_name, 0.0), b.index.visible_pixel_count)
+            for b in idx_batches
+            if role_name in b.index.per_role_accuracy
+        ]
         if role_values:
             weighted = sum(acc * cnt for acc, cnt in role_values) / sum(cnt for _, cnt in role_values)
             per_role[role_name] = weighted
-    other_values = [(b.index.per_role_accuracy.get("other", 0.0), b.index.visible_pixel_count) for b in idx_batches if "other" in b.index.per_role_accuracy]
+    other_values = [
+        (b.index.per_role_accuracy.get("other", 0.0), b.index.visible_pixel_count)
+        for b in idx_batches
+        if "other" in b.index.per_role_accuracy
+    ]
     if other_values:
         weighted = sum(acc * cnt for acc, cnt in other_values) / sum(cnt for _, cnt in other_values)
         per_role["other"] = weighted
@@ -547,7 +575,9 @@ def _build_markdown(report: dict[str, Any]) -> list[str]:
     if ppr["f1"] > 0.80:
         lines.append("- Palette presence F1 is high - the model reliably predicts which slots are active.")
     elif ppr["f1"] > 0.50:
-        lines.append("- Palette presence F1 is moderate - the model partially distinguishes active from inactive slots.")
+        lines.append(
+            "- Palette presence F1 is moderate - the model partially distinguishes active from inactive slots."
+        )
     else:
         lines.append("- Palette presence F1 is low - the model struggles with slot presence prediction.")
 
@@ -580,9 +610,7 @@ def run_inspect_palette_index_heads(config: PaletteIndexHeadInspectConfig) -> Pa
     device = resolve_device(config.device)
     apply_backend_speed_flags(cudnn_benchmark=config.cudnn_benchmark, tf32=config.tf32)
 
-    model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(
-        ckpt, device=device
-    )
+    model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(ckpt, device=device)
 
     structured_vocab = structured_vocab_from_checkpoint(ckpt)
 
@@ -669,7 +697,9 @@ def run_inspect_palette_index_heads(config: PaletteIndexHeadInspectConfig) -> Pa
     print(f"Index cross-entropy:           {agg.index.cross_entropy:.6f}")
     print(f"Palette RGB MAE:               {agg.palette_rgb.mae:.6f}")
     print(f"Palette RGB MSE:               {agg.palette_rgb.mse:.6f}")
-    print(f"Presence precision/recall/F1:  {agg.palette_presence.precision:.4f} / {agg.palette_presence.recall:.4f} / {agg.palette_presence.f1:.4f}")
+    print(
+        f"Presence precision/recall/F1:  {agg.palette_presence.precision:.4f} / {agg.palette_presence.recall:.4f} / {agg.palette_presence.f1:.4f}"
+    )
     print(f"Predicted active slots mean:   {agg.palette_presence.predicted_active_mean:.2f}")
     print(f"Target active slots mean:      {agg.palette_presence.target_active_mean:.2f}")
     print(f"Batches evaluated:             {len(all_batches)}")

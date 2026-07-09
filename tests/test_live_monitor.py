@@ -23,7 +23,9 @@ def _write_run(run_dir: Path, *, name: str, losses: list[float], max_steps: int)
 
 
 def test_collect_run_states_parses_metrics(tmp_path: Path) -> None:
-    _write_run(tmp_path / "runs" / "overfit_16_sprites", name="overfit_16_sprites", losses=[1.0, 0.5, 0.25], max_steps=3)
+    _write_run(
+        tmp_path / "runs" / "overfit_16_sprites", name="overfit_16_sprites", losses=[1.0, 0.5, 0.25], max_steps=3
+    )
     states = collect_run_states(tmp_path)
     assert len(states) == 1
     state = states[0]
@@ -60,12 +62,14 @@ def test_aggregate_counts_and_fraction(tmp_path: Path) -> None:
 
 
 def test_render_html_contains_runs_and_svg(tmp_path: Path) -> None:
-    _write_run(tmp_path / "runs" / "overfit_64_sprites", name="overfit_64_sprites", losses=[1.0, 0.8, 0.6, 0.4], max_steps=8)
+    _write_run(
+        tmp_path / "runs" / "overfit_64_sprites", name="overfit_64_sprites", losses=[1.0, 0.8, 0.6, 0.4], max_steps=8
+    )
     states = collect_run_states(tmp_path)
     out = render_html(states, refresh_seconds=3)
     assert "overfit_64_sprites" in out
     assert "<svg" in out
-    assert "http-equiv=\"refresh\"" in out
+    assert 'http-equiv="refresh"' in out
     assert "polyline" in out
 
 

@@ -23,8 +23,8 @@ and surfaced by the CLI, without corrupting the dataset.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -315,9 +315,7 @@ def _write_build_reports(report: BuildReport, dataset_dir: Path) -> None:
     (dataset_dir / "semantic_dataset_build_report.json").write_text(
         json.dumps(report.to_json_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (dataset_dir / "semantic_dataset_build_report.md").write_text(
-        format_build_report(report), encoding="utf-8"
-    )
+    (dataset_dir / "semantic_dataset_build_report.md").write_text(format_build_report(report), encoding="utf-8")
 
 
 def format_build_report(report: BuildReport) -> str:
@@ -404,7 +402,9 @@ def resolve_raw_label_v2_prediction_file(run_dir: Path, value: str | Path | None
         path = run_dir / name
         if path.is_file() and is_raw_label_v2_prediction_file(path):
             return path
-    candidates = sorted(path for path in run_dir.glob("label_v2_suggestions*.jsonl") if is_raw_label_v2_prediction_file(path))
+    candidates = sorted(
+        path for path in run_dir.glob("label_v2_suggestions*.jsonl") if is_raw_label_v2_prediction_file(path)
+    )
     if candidates:
         return candidates[0]
     return run_dir / RAW_LABEL_V2_PREDICTION_PREFERENCE[-2]

@@ -51,7 +51,14 @@ def test_semantic_strings_include_nested_conditioning() -> None:
         "conditioning": {
             "semantic_v3": {
                 "open_name": "golden sword",
-                "attributes": {"colors": ["gold"], "materials": ["metal"], "shapes": [], "effects": [], "state": [], "function": ["attack"]},
+                "attributes": {
+                    "colors": ["gold"],
+                    "materials": ["metal"],
+                    "shapes": [],
+                    "effects": [],
+                    "state": [],
+                    "function": ["attack"],
+                },
             },
             "kept_attributes": {"colors": ["gold"]},
             "dropped_attributes": {"materials": ["metal"]},

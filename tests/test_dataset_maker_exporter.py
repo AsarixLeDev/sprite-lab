@@ -202,7 +202,14 @@ def test_overwrite_true_allows_replacing_output(tmp_path: Path) -> None:
         assert data["sprite_id"].tolist() == ["sprite_b"]
 
 
-def _item(sprite_id: str, *, status: str = "accepted", category: str = "unknown", tags: tuple[str, ...] = (), split: str | None = None) -> DatasetMakerItem:
+def _item(
+    sprite_id: str,
+    *,
+    status: str = "accepted",
+    category: str = "unknown",
+    tags: tuple[str, ...] = (),
+    split: str | None = None,
+) -> DatasetMakerItem:
     return DatasetMakerItem(
         sprite_id=sprite_id,
         source_path=Path(f"{sprite_id}.png"),

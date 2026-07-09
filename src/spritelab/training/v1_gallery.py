@@ -15,9 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from spritelab.training.generated_canonicalizer import build_generation_contact_sheet
 from spritelab.training.generated_qa import qa_generated_sprites
 from spritelab.training.generated_review import GeneratedReviewConfig, review_generated_sprites
-from spritelab.training.generated_canonicalizer import build_generation_contact_sheet
 from spritelab.training.generator_challenger import (
     V1_1_CFG_BASE_SCALE,
     V1_1_CFG_COLOR_SCALE,
@@ -541,7 +541,9 @@ def _assemble_report(
     checkpoint_resolved = generation_config.get("checkpoint_resolved")
 
     review_overall = review_result.report.get("overall") if isinstance(review_result.report, Mapping) else {}
-    warning_counts = review_overall.get("warning_counts") if isinstance(review_overall.get("warning_counts"), Mapping) else {}
+    warning_counts = (
+        review_overall.get("warning_counts") if isinstance(review_overall.get("warning_counts"), Mapping) else {}
+    )
     review_sample_count = int(review_overall.get("count") or prompt_count)
     rare_color_warning_rate = (
         int(warning_counts.get("too_many_rare_colors", 0)) / review_sample_count if review_sample_count else None
@@ -716,7 +718,9 @@ def _format_markdown(report: Mapping[str, Any]) -> str:
             ]
         )
         if isinstance(v1_1_reference, Mapping):
-            lines.append(f"- Deltas (v1.1 - v1): `{json.dumps(v1_1_reference.get('deltas_v1_1_minus_v1', {}), sort_keys=True)}`")
+            lines.append(
+                f"- Deltas (v1.1 - v1): `{json.dumps(v1_1_reference.get('deltas_v1_1_minus_v1', {}), sort_keys=True)}`"
+            )
             lines.append(f"- Decision: {v1_1_reference.get('decision', '')}")
             lines.append("")
     lines.extend(

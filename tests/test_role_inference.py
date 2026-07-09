@@ -14,7 +14,6 @@ from spritelab.codec.roles import (
     ROLE_TEXTURE_DETAIL,
     ROLE_TRANSPARENT,
 )
-
 from test_role_helpers import make_role_demo_bundle, make_single_color_bundle
 
 

@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import socket
 import threading
 import urllib.error
 import urllib.request
@@ -192,7 +191,9 @@ class MetadataSuggestion:
         if self.confidence is not None:
             object.__setattr__(self, "confidence", max(0.0, min(1.0, float(self.confidence))))
         object.__setattr__(self, "uncertainty", normalize_tag(self.uncertainty))
-        object.__setattr__(self, "warnings", tuple(str(warning).strip() for warning in self.warnings if str(warning).strip()))
+        object.__setattr__(
+            self, "warnings", tuple(str(warning).strip() for warning in self.warnings if str(warning).strip())
+        )
         object.__setattr__(self, "filename_agreement", normalize_tag(self.filename_agreement))
         object.__setattr__(self, "visual_evidence", _normalize_sequence(self.visual_evidence))
         object.__setattr__(self, "disagreement_reason", str(self.disagreement_reason).strip())
@@ -200,7 +201,9 @@ class MetadataSuggestion:
         object.__setattr__(self, "source_consistency", source_consistency)
         object.__setattr__(self, "alternative_object_names", _normalize_sequence(self.alternative_object_names)[:3])
         object.__setattr__(self, "evidence_for_source", _clean_string_tuple(self.evidence_for_source, max_items=5))
-        object.__setattr__(self, "evidence_against_source", _clean_string_tuple(self.evidence_against_source, max_items=5))
+        object.__setattr__(
+            self, "evidence_against_source", _clean_string_tuple(self.evidence_against_source, max_items=5)
+        )
         if self.vote_stats is not None:
             object.__setattr__(self, "vote_stats", dict(self.vote_stats))
         object.__setattr__(self, "raw_response", str(self.raw_response))
@@ -220,13 +223,17 @@ class AdjudicationResult:
     def __post_init__(self) -> None:
         choice = normalize_tag(self.choice)
         object.__setattr__(self, "choice", choice if choice in ADJUDICATION_CHOICES else "cannot_tell")
-        corrected_category = normalize_category(str(self.corrected_category)) if str(self.corrected_category).strip() else ""
+        corrected_category = (
+            normalize_category(str(self.corrected_category)) if str(self.corrected_category).strip() else ""
+        )
         if corrected_category and corrected_category not in ALLOWED_CATEGORIES:
             corrected_category = ""
         object.__setattr__(self, "corrected_category", corrected_category)
         object.__setattr__(self, "corrected_object_name", normalize_tag(self.corrected_object_name))
         object.__setattr__(self, "reason", str(self.reason).strip())
-        object.__setattr__(self, "warnings", tuple(str(warning).strip() for warning in self.warnings if str(warning).strip()))
+        object.__setattr__(
+            self, "warnings", tuple(str(warning).strip() for warning in self.warnings if str(warning).strip())
+        )
         object.__setattr__(self, "raw_response", str(self.raw_response))
 
 
@@ -414,8 +421,10 @@ class OpenAICompatibleQwenPrefillBackend(MetadataPrefillBackend):
         try:
             payload = self._payload(images, request=request, retry_note=retry_note, attempt=attempt)
             status, response_text = self._post(endpoint, payload)
-        except (TimeoutError, socket.timeout) as exc:
-            return _warning_suggestion(f"prefill request timed out after {self.config.timeout_seconds:g} seconds: {exc}")
+        except TimeoutError as exc:
+            return _warning_suggestion(
+                f"prefill request timed out after {self.config.timeout_seconds:g} seconds: {exc}"
+            )
         except urllib.error.HTTPError as exc:
             detail = _read_http_error(exc)
             if self._should_fall_back_to_plain(exc.code, detail):
@@ -437,7 +446,9 @@ class OpenAICompatibleQwenPrefillBackend(MetadataPrefillBackend):
 
         content = _extract_response_text(data)
         if not content:
-            return _warning_suggestion("prefill server response did not contain message text.", raw_response=response_text)
+            return _warning_suggestion(
+                "prefill server response did not contain message text.", raw_response=response_text
+            )
         if self.config.vlm_role == "descriptor":
             return flag_degenerate_suggestion(parse_descriptor_suggestion(content))
         return flag_degenerate_suggestion(parse_metadata_suggestion(content))
@@ -486,7 +497,9 @@ class OpenAICompatibleQwenPrefillBackend(MetadataPrefillBackend):
                 "type": "text",
                 "text": _prompt_for_role(
                     self.config,
-                    request.filename_suggestion if self.config.include_filename_hint or self.config.vlm_role == "descriptor" else None,
+                    request.filename_suggestion
+                    if self.config.include_filename_hint or self.config.vlm_role == "descriptor"
+                    else None,
                     image_facts=request.image_facts,
                     retry_note=retry_note,
                     candidate_object_names=request.candidate_object_names,
@@ -564,17 +577,21 @@ class OpenAICompatibleQwenPrefillBackend(MetadataPrefillBackend):
                 self._structured_unsupported = True
                 return self.adjudicate(request, candidate_a, candidate_b)
             return AdjudicationResult(warnings=(f"adjudication request returned HTTP {exc.code}: {detail}",))
-        except (TimeoutError, socket.timeout, urllib.error.URLError, OSError) as exc:
+        except (TimeoutError, urllib.error.URLError, OSError) as exc:
             return AdjudicationResult(warnings=(f"adjudication request failed: {exc}",))
         if status < 200 or status >= 300:
             return AdjudicationResult(warnings=(f"adjudication request returned HTTP {status}: {response_text[:500]}",))
         try:
             data = json.loads(response_text)
         except json.JSONDecodeError as exc:
-            return AdjudicationResult(warnings=(f"adjudication server returned invalid JSON: {exc}",), raw_response=response_text)
+            return AdjudicationResult(
+                warnings=(f"adjudication server returned invalid JSON: {exc}",), raw_response=response_text
+            )
         content = _extract_response_text(data)
         if not content:
-            return AdjudicationResult(warnings=("adjudication response did not contain message text.",), raw_response=response_text)
+            return AdjudicationResult(
+                warnings=("adjudication response did not contain message text.",), raw_response=response_text
+            )
         return parse_adjudication_result(content)
 
 
@@ -620,7 +637,9 @@ class OllamaQwenPrefillBackend(MetadataPrefillBackend):
                         "role": "user",
                         "content": _prompt_for_role(
                             self.config,
-                            request.filename_suggestion if self.config.include_filename_hint or self.config.vlm_role == "descriptor" else None,
+                            request.filename_suggestion
+                            if self.config.include_filename_hint or self.config.vlm_role == "descriptor"
+                            else None,
                             image_facts=request.image_facts,
                             retry_note=retry_note,
                             candidate_object_names=request.candidate_object_names,
@@ -629,10 +648,15 @@ class OllamaQwenPrefillBackend(MetadataPrefillBackend):
                     }
                 ],
                 "stream": False,
-                "options": {"temperature": temperature, "seed": _RETRY_SEED_BASE + 1000 * request.sample_index + attempt},
+                "options": {
+                    "temperature": temperature,
+                    "seed": _RETRY_SEED_BASE + 1000 * request.sample_index + attempt,
+                },
             }
             if self.config.structured_output != "off":
-                payload["format"] = DESCRIPTOR_JSON_SCHEMA if self.config.vlm_role == "descriptor" else METADATA_JSON_SCHEMA
+                payload["format"] = (
+                    DESCRIPTOR_JSON_SCHEMA if self.config.vlm_role == "descriptor" else METADATA_JSON_SCHEMA
+                )
             body = json.dumps(payload).encode("utf-8")
             http_request = urllib.request.Request(
                 endpoint,
@@ -643,8 +667,10 @@ class OllamaQwenPrefillBackend(MetadataPrefillBackend):
             with urllib.request.urlopen(http_request, timeout=self.config.timeout_seconds) as response:
                 status = int(getattr(response, "status", response.getcode()))
                 response_text = response.read().decode("utf-8")
-        except (TimeoutError, socket.timeout) as exc:
-            return _warning_suggestion(f"ollama prefill request timed out after {self.config.timeout_seconds:g} seconds: {exc}")
+        except TimeoutError as exc:
+            return _warning_suggestion(
+                f"ollama prefill request timed out after {self.config.timeout_seconds:g} seconds: {exc}"
+            )
         except urllib.error.HTTPError as exc:
             detail = _read_http_error(exc)
             return _warning_suggestion(f"ollama prefill request returned HTTP {exc.code}: {detail}")
@@ -703,17 +729,21 @@ class OllamaQwenPrefillBackend(MetadataPrefillBackend):
             with urllib.request.urlopen(http_request, timeout=self.config.timeout_seconds) as response:
                 status = int(getattr(response, "status", response.getcode()))
                 response_text = response.read().decode("utf-8")
-        except (TimeoutError, socket.timeout, urllib.error.URLError, OSError) as exc:
+        except (TimeoutError, urllib.error.URLError, OSError) as exc:
             return AdjudicationResult(warnings=(f"ollama adjudication request failed: {exc}",))
         if status < 200 or status >= 300:
             return AdjudicationResult(warnings=(f"ollama adjudication returned HTTP {status}: {response_text[:500]}",))
         try:
             data = json.loads(response_text)
         except json.JSONDecodeError as exc:
-            return AdjudicationResult(warnings=(f"ollama adjudication returned invalid JSON: {exc}",), raw_response=response_text)
+            return AdjudicationResult(
+                warnings=(f"ollama adjudication returned invalid JSON: {exc}",), raw_response=response_text
+            )
         content = _extract_ollama_response_text(data)
         if not content:
-            return AdjudicationResult(warnings=("ollama adjudication response had no content.",), raw_response=response_text)
+            return AdjudicationResult(
+                warnings=("ollama adjudication response had no content.",), raw_response=response_text
+            )
         return parse_adjudication_result(content)
 
 
@@ -884,11 +914,7 @@ def merge_voted_suggestions(samples: Sequence[MetadataSuggestion]) -> MetadataSu
 
     if not samples:
         raise ValueError("merge_voted_suggestions requires at least one sample.")
-    usable = [
-        sample
-        for sample in samples
-        if _suggestion_has_content(sample) and not _has_degenerate_warning(sample)
-    ]
+    usable = [sample for sample in samples if _suggestion_has_content(sample) and not _has_degenerate_warning(sample)]
     if not usable:
         return samples[0]
 
@@ -898,9 +924,7 @@ def merge_voted_suggestions(samples: Sequence[MetadataSuggestion]) -> MetadataSu
     if category_tie:
         category = "unknown"
         warnings.append("vote_tie: no category majority across samples.")
-    object_name, object_count, object_tie = _majority(
-        normalize_tag(sample.object_name) for sample in usable
-    )
+    object_name, object_count, object_tie = _majority(normalize_tag(sample.object_name) for sample in usable)
     if object_tie:
         object_name = ""
 
@@ -1169,9 +1193,11 @@ def build_vlm_descriptor_prompt(
     if filename_suggestion:
         filename_trust = normalize_tag(str(filename_suggestion.get("filename_trust", "")))
         profile_name = normalize_tag(str(filename_suggestion.get("source_profile_name", "")))
-        prefix_family_source = bool(candidate_values) and (filename_trust == "prefix_family" or profile_name == "oga_496_rpg_icons")
+        prefix_family_source = bool(candidate_values) and (
+            filename_trust == "prefix_family" or profile_name == "oga_496_rpg_icons"
+        )
 
-    source_block = "\nNo trusted object name is available.\nIdentify cautiously from visible evidence.\nUse uncertainty=\"cannot_tell\" if ambiguous.\nPrefer candidate object names if provided.\n"
+    source_block = '\nNo trusted object name is available.\nIdentify cautiously from visible evidence.\nUse uncertainty="cannot_tell" if ambiguous.\nPrefer candidate object names if provided.\n'
     if filename_suggestion:
         confidence = _confidence_or_none(filename_suggestion.get("confidence")) or 0.0
         object_name = normalize_tag(str(filename_suggestion.get("object_name", "")))
@@ -1183,7 +1209,7 @@ def build_vlm_descriptor_prompt(
                 "Prefer one candidate if visually plausible.\n"
                 "Do not invent unrelated objects outside the candidate family unless all candidates are clearly contradicted.\n"
                 "If the exact subtype is unclear, keep the broad family candidate and put plausible subtypes in alternative_object_names.\n"
-                "If none of the candidates fit, set source_consistency=\"contradicted\" or \"unclear\" and explain briefly.\n"
+                'If none of the candidates fit, set source_consistency="contradicted" or "unclear" and explain briefly.\n'
                 f"Filename/source family hint:\n{json.dumps(dict(filename_suggestion), sort_keys=True)}\n"
             )
         elif confidence >= 0.85 and object_name:
@@ -1200,7 +1226,7 @@ def build_vlm_descriptor_prompt(
                 "\nNo trusted object name is available.\n"
                 "A weak filename/path hypothesis is available; do not copy it unless the visible sprite supports it:\n"
                 f"{json.dumps(dict(filename_suggestion), sort_keys=True)}\n"
-                "Identify cautiously from visible evidence. Use uncertainty=\"cannot_tell\" if ambiguous. Prefer candidate object names if provided.\n"
+                'Identify cautiously from visible evidence. Use uncertainty="cannot_tell" if ambiguous. Prefer candidate object names if provided.\n'
             )
     candidate_block = ""
     if candidate_values:
@@ -1314,7 +1340,11 @@ def build_qwen_prefill_prompt(
             "confirm or reject it from the image instead of copying it:\n"
             f"{json.dumps(dict(filename_suggestion), sort_keys=True)}\n"
         )
-    retry_block = f"\nPrevious attempt issue: {retry_note}\nLook again carefully and answer from the image.\n" if retry_note else ""
+    retry_block = (
+        f"\nPrevious attempt issue: {retry_note}\nLook again carefully and answer from the image.\n"
+        if retry_note
+        else ""
+    )
 
     category_lines = "\n".join(f"- {name}: {definition}" for name, definition in _CATEGORY_DEFINITIONS)
 
@@ -1418,7 +1448,9 @@ def parse_adjudication_result(text: str) -> AdjudicationResult:
     raw = str(text)
     candidate = _extract_json_candidate(raw)
     if candidate is None:
-        return AdjudicationResult(warnings=("invalid JSON from adjudication: expected a JSON object.",), raw_response=raw)
+        return AdjudicationResult(
+            warnings=("invalid JSON from adjudication: expected a JSON object.",), raw_response=raw
+        )
     try:
         data = json.loads(candidate)
     except json.JSONDecodeError as exc:
@@ -1473,7 +1505,9 @@ def parse_metadata_suggestion(text: str) -> MetadataSuggestion:
     except json.JSONDecodeError as exc:
         return _warning_suggestion(f"invalid JSON from model: {exc}", raw_response=raw)
     if not isinstance(data, dict):
-        return _warning_suggestion("invalid JSON from model: expected an object, not an array or scalar.", raw_response=raw)
+        return _warning_suggestion(
+            "invalid JSON from model: expected an object, not an array or scalar.", raw_response=raw
+        )
 
     warnings = _warning_tuple(data.get("warnings"))
     category = normalize_category(str(data.get("category", "unknown")))
@@ -1523,7 +1557,9 @@ def parse_descriptor_suggestion(text: str) -> MetadataSuggestion:
     except json.JSONDecodeError as exc:
         return _warning_suggestion(f"invalid JSON from descriptor: {exc}", raw_response=raw)
     if not isinstance(data, dict):
-        return _warning_suggestion("invalid JSON from descriptor: expected an object, not an array or scalar.", raw_response=raw)
+        return _warning_suggestion(
+            "invalid JSON from descriptor: expected an object, not an array or scalar.", raw_response=raw
+        )
 
     warnings = _warning_tuple(data.get("warnings"))[:5]
     source_consistency = _normalize_source_consistency(
@@ -2056,7 +2092,9 @@ def _read_cached_suggestion(path: Path) -> MetadataSuggestion | None:
             filename_agreement=str(suggestion_data.get("filename_agreement", "")),
             visual_evidence=_string_tuple(suggestion_data.get("visual_evidence")),
             disagreement_reason=str(suggestion_data.get("disagreement_reason", "")),
-            source_consistency=str(suggestion_data.get("source_consistency", suggestion_data.get("agrees_with_source", ""))),
+            source_consistency=str(
+                suggestion_data.get("source_consistency", suggestion_data.get("agrees_with_source", ""))
+            ),
             alternative_object_names=_string_tuple(suggestion_data.get("alternative_object_names"))[:3],
             evidence_for_source=_clean_string_tuple(suggestion_data.get("evidence_for_source"), max_items=5),
             evidence_against_source=_clean_string_tuple(suggestion_data.get("evidence_against_source"), max_items=5),

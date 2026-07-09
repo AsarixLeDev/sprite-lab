@@ -7,7 +7,6 @@ import pytest
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from _ml_testdata import write_synthetic_dataset
-
 from spritelab.ml.dataset import SpriteBundleDataset
 from spritelab.ml.masking import INDEX_MASK, FixedOpaqueMask, FullOpaqueMask, RandomOpaqueMask
 
@@ -36,9 +35,7 @@ def test_loss_mask_only_masked_opaque(tmp_path):
     assert bool((sample["alpha"][loss_mask] == 1).all())
     assert bool((sample["input_index_map"][loss_mask] == INDEX_MASK).all())
     unmasked = ~loss_mask
-    assert bool(
-        (sample["input_index_map"][unmasked] == sample["index_map"][unmasked]).all()
-    )
+    assert bool((sample["input_index_map"][unmasked] == sample["index_map"][unmasked]).all())
 
 
 def test_fixed_mask_deterministic(tmp_path):

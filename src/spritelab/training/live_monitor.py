@@ -233,10 +233,7 @@ def render_text_dashboard(states: list[RunState], *, ascii_only: bool | None = N
         filled = int(state.fraction * bar_w)
         bar = fill_char * filled + empty_char * (bar_w - filled)
         spark = sparkline(state.loss_curve, width=24, ascii_only=ascii_only)
-        head = (
-            f"{glyph} {state.name:<28} [{bar}] {pct:3d}%  "
-            f"{state.step}/{state.max_steps or '?'}"
-        )
+        head = f"{glyph} {state.name:<28} [{bar}] {pct:3d}%  {state.step}/{state.max_steps or '?'}"
         stats = (
             f"    loss {_fmt(state.last_loss)}  best {_fmt(state.best_loss)}  "
             f"ema {_fmt(state.ema_loss)}  {(state.rate or 0):.1f} it/s  "
@@ -290,7 +287,7 @@ def render_html(states: list[RunState], *, refresh_seconds: float = 3.0, title: 
         {_svg_loss_curve(state)}
         <div class="progress"><div class="fill" style="width:{pct:.1f}%"></div></div>
         <div class="meta">
-          <div><span>step</span><b>{state.step} / {state.max_steps or '?'}</b></div>
+          <div><span>step</span><b>{state.step} / {state.max_steps or "?"}</b></div>
           <div><span>loss</span><b>{_fmt(state.last_loss)}</b></div>
           <div><span>best</span><b>{_fmt(state.best_loss)}</b></div>
           <div><span>ema</span><b>{_fmt(state.ema_loss)}</b></div>
@@ -341,7 +338,7 @@ def render_html(states: list[RunState], *, refresh_seconds: float = 3.0, title: 
 <header>
   <h1>{html.escape(title)}</h1>
   <span class="sub">auto-refresh {max(1, int(refresh_seconds))}s · generated {generated}</span>
-  <span class="overall">{agg['done']}/{agg['runs']} done · {agg['running']} running · overall {agg['fraction'] * 100:.1f}%</span>
+  <span class="overall">{agg["done"]}/{agg["runs"]} done · {agg["running"]} running · overall {agg["fraction"] * 100:.1f}%</span>
 </header>
 <main>
 {body}

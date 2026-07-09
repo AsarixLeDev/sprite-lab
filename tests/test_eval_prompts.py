@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from _semantic_dataset import default_specs, make_semantic_dataset
-
 from spritelab.dataset_maker.eval_prompts import (
     build_eval_prompts,
     summarize_eval_prompts,

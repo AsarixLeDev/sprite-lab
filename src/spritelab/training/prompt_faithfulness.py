@@ -43,7 +43,9 @@ SOURCE_SELECTION_MODES = ("all", "deterministic_first_n", "deterministic_balance
 def run_prompt_faithfulness(config: PromptFaithfulnessConfig) -> dict[str, Any]:
     generated_dir = Path(config.generated)
     generated_records = _read_jsonl(generated_dir / "generated_manifest.jsonl")
-    prompt_records = _read_jsonl(config.prompts) if config.prompts is not None and Path(config.prompts).is_file() else []
+    prompt_records = (
+        _read_jsonl(config.prompts) if config.prompts is not None and Path(config.prompts).is_file() else []
+    )
     prompts_by_id = {str(record.get("prompt_id", "")): record for record in prompt_records}
     manifest_path = Path(config.dataset) / "training_manifest.jsonl"
     source_index = load_source_sprite_index(config.dataset, manifest_path)
@@ -155,8 +157,7 @@ def run_prompt_faithfulness(config: PromptFaithfulnessConfig) -> dict[str, Any]:
     candidate_ids_path = out_json.with_name("source_candidate_ids.jsonl")
     candidate_ids_path.write_text(
         "".join(
-            json.dumps(_source_candidate_row(source_index, sprite_id), sort_keys=True) + "\n"
-            for sprite_id in used_ids
+            json.dumps(_source_candidate_row(source_index, sprite_id), sort_keys=True) + "\n" for sprite_id in used_ids
         ),
         encoding="utf-8",
     )
@@ -223,7 +224,11 @@ def format_prompt_faithfulness_markdown(report: Mapping[str, Any]) -> str:
             "|---|---:|---|",
         ]
     )
-    for pair in report.get("prompt_pair_separability", {}).get("pairs", []) if isinstance(report.get("prompt_pair_separability"), Mapping) else []:
+    for pair in (
+        report.get("prompt_pair_separability", {}).get("pairs", [])
+        if isinstance(report.get("prompt_pair_separability"), Mapping)
+        else []
+    ):
         metrics = pair.get("metrics") if isinstance(pair.get("metrics"), Mapping) else {}
         lines.append(
             "| "
@@ -261,7 +266,9 @@ def format_prompt_faithfulness_markdown(report: Mapping[str, Any]) -> str:
             )
             + " |"
         )
-    lines.extend(["", "## Worst Object Families", "", "| Object | Count | Mean distance | Consistency |", "|---|---:|---:|---:|"])
+    lines.extend(
+        ["", "## Worst Object Families", "", "| Object | Count | Mean distance | Consistency |", "|---|---:|---:|---:|"]
+    )
     for item in report.get("object_families_worst_faithfulness") or []:
         if not isinstance(item, Mapping):
             continue
@@ -297,7 +304,9 @@ def _review_sample(
     generated_colors = _dominant_color_names(image)
     structural = _structural_stats(image)
     expected_categories = source_categories_by_object.get(prompt_object, set()) if prompt_object else set()
-    category_consistent = None if not expected_categories else str(nearest_meta.get("category") or "") in expected_categories
+    category_consistent = (
+        None if not expected_categories else str(nearest_meta.get("category") or "") in expected_categories
+    )
     color_consistent = None if not prompt_colors else bool(set(prompt_colors) & set(generated_colors))
     shape_bbox_consistent = _shape_bbox_consistent(prompt_object, nearest.get("metrics", {}))
     sample = {
@@ -366,7 +375,9 @@ def _resolve_source_selection_mode(max_sources: int | None, source_selection: st
     if mode in ("", "auto"):
         mode = "all" if (requested is None or requested <= 0) else "deterministic_first_n"
     if mode not in SOURCE_SELECTION_MODES:
-        raise ValueError(f"Unknown source_selection mode: {source_selection!r} (expected one of {SOURCE_SELECTION_MODES} or 'auto')")
+        raise ValueError(
+            f"Unknown source_selection mode: {source_selection!r} (expected one of {SOURCE_SELECTION_MODES} or 'auto')"
+        )
     if requested is None or requested <= 0:
         mode = "all"
     return mode, requested
@@ -585,9 +596,15 @@ def _clusters(samples: Sequence[Mapping[str, Any]], key: str) -> list[dict[str, 
                 "sample_ids": [str(row.get("sample_id") or "") for row in rows],
                 "prompt_ids": [str(row.get("prompt_id") or "") for row in rows],
                 "prompts": [str(row.get("prompt") or "") for row in rows],
-                "prompt_objects": sorted({str(row.get("prompt_object") or "") for row in rows if row.get("prompt_object")}),
+                "prompt_objects": sorted(
+                    {str(row.get("prompt_object") or "") for row in rows if row.get("prompt_object")}
+                ),
                 "nearest_source_objects": sorted(
-                    {str(row.get("nearest_source_object_name") or "") for row in rows if row.get("nearest_source_object_name")}
+                    {
+                        str(row.get("nearest_source_object_name") or "")
+                        for row in rows
+                        if row.get("nearest_source_object_name")
+                    }
                 ),
             }
         )
@@ -681,9 +698,23 @@ def _collapse_summary(samples: Sequence[Mapping[str, Any]]) -> dict[str, float]:
         value = str(sample.get(key) or "").lower()
         return any(needle in value for needle in needles)
 
-    potion = sum(1 for sample in samples if object_has(sample, ("potion", "bottle", "vial"), nearest=True) and not object_has(sample, ("potion", "bottle", "vial"), nearest=False))
-    flame = sum(1 for sample in samples if object_has(sample, ("flame", "fire", "fireball"), nearest=True) and not object_has(sample, ("flame", "fire", "fireball"), nearest=False))
-    blob = sum(1 for sample in samples if sample.get("generic_blob_like") and not object_has(sample, ("potion", "flame", "fire"), nearest=False))
+    potion = sum(
+        1
+        for sample in samples
+        if object_has(sample, ("potion", "bottle", "vial"), nearest=True)
+        and not object_has(sample, ("potion", "bottle", "vial"), nearest=False)
+    )
+    flame = sum(
+        1
+        for sample in samples
+        if object_has(sample, ("flame", "fire", "fireball"), nearest=True)
+        and not object_has(sample, ("flame", "fire", "fireball"), nearest=False)
+    )
+    blob = sum(
+        1
+        for sample in samples
+        if sample.get("generic_blob_like") and not object_has(sample, ("potion", "flame", "fire"), nearest=False)
+    )
     return {
         "generic_potion_collapse_rate": potion / float(count),
         "generic_flame_collapse_rate": flame / float(count),
@@ -723,7 +754,9 @@ def _nearest_neighbor_duplicate_rate(samples: Sequence[Mapping[str, Any]]) -> fl
         return 0.0
     duplicate_members: set[str] = set()
     for a, b in itertools.combinations(samples, 2):
-        if a.get("alpha_silhouette_hash") == b.get("alpha_silhouette_hash") and a.get("color_histogram_signature") == b.get("color_histogram_signature"):
+        if a.get("alpha_silhouette_hash") == b.get("alpha_silhouette_hash") and a.get(
+            "color_histogram_signature"
+        ) == b.get("color_histogram_signature"):
             duplicate_members.add(str(a.get("sample_id") or ""))
             duplicate_members.add(str(b.get("sample_id") or ""))
     return len(duplicate_members) / float(len(samples))

@@ -6,7 +6,6 @@ import json
 from dataclasses import replace
 
 from _harvest_testdata import make_source, make_sprite_png
-
 from spritelab.harvest.pipeline import HarvestImportOptions, harvest_source_to_imported_sprites
 from spritelab.harvest.report import build_harvest_report, build_harvest_report_data, write_harvest_reports
 

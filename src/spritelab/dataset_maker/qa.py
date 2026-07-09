@@ -36,15 +36,11 @@ SPLIT_NAMES: tuple[str, ...] = ("train", "val", "test")
 FORBIDDEN_OBJECT_NAMES: frozenset[str] = frozenset({"sho", "armour", "elm"})
 
 # Bare colour tokens that must not become object names for 496 potion records.
-POTION_COLOR_ONLY_NAMES: frozenset[str] = frozenset(
-    {"red", "blue", "green", "yellow", "pink", "white", "orange"}
-)
+POTION_COLOR_ONLY_NAMES: frozenset[str] = frozenset({"red", "blue", "green", "yellow", "pink", "white", "orange"})
 
 # Statuses that indicate a record leaked out of review/quarantine into the
 # accepted export.
-REVIEW_STATUS_TOKENS: frozenset[str] = frozenset(
-    {"needs_review", "quarantine", "needs_fix", "rejected", "review"}
-)
+REVIEW_STATUS_TOKENS: frozenset[str] = frozenset({"needs_review", "quarantine", "needs_fix", "rejected", "review"})
 
 _EXPECTED_NPZ_KEYS: frozenset[str] = frozenset(
     {"alpha", "index_map", "role_map", "palette", "palette_mask", "category_id", "sprite_id"}
@@ -57,9 +53,7 @@ FORBIDDEN_CAPTION_CONTENT: tuple[str, ...] = ("photorealistic", "watermark", "te
 MAX_SEMANTIC_CAPTION_LENGTH = 300
 
 # Base objects whose sprites are expected to carry color information.
-_COLOR_EXPECTED_BASE_OBJECTS: frozenset[str] = frozenset(
-    {"gem", "crystal", "potion", "vial", "bottle", "flask", "jar"}
-)
+_COLOR_EXPECTED_BASE_OBJECTS: frozenset[str] = frozenset({"gem", "crystal", "potion", "vial", "bottle", "flask", "jar"})
 
 
 @dataclass
@@ -165,9 +159,7 @@ def qa_dataset(
     _check_distribution(result, all_records, vocab, max_object_share=max_object_share)
     _check_review_queue(result, all_records, review_queue)
 
-    result.total_images = sum(
-        int(payload["count"]) for payload in npz_by_split.values() if payload is not None
-    )
+    result.total_images = sum(int(payload["count"]) for payload in npz_by_split.values() if payload is not None)
     return result
 
 
@@ -643,9 +635,7 @@ def _check_semantic_v3(
         for sprite_id in missing_semantic:
             result.add_error(f"record missing required semantic_v3 metadata: {sprite_id}")
     elif is_semantic_dataset and missing_semantic:
-        result.add_warning(
-            f"{len(missing_semantic)}/{len(records)} records lack semantic_v3 in a semantic dataset"
-        )
+        result.add_warning(f"{len(missing_semantic)}/{len(records)} records lack semantic_v3 in a semantic dataset")
 
     for sprite_id in missing_schema_version:
         result.add_error(f"semantic_v3.schema_version missing: {sprite_id}")
@@ -715,9 +705,7 @@ def _check_splits(
     overlap = sorted(sprite_id for sprite_id, splits in id_to_splits.items() if len(splits) > 1)
 
     total = sum(len(manifests.get(split, [])) for split in SPLIT_NAMES)
-    fractions = {
-        split: (len(manifests.get(split, [])) / total if total else 0.0) for split in SPLIT_NAMES
-    }
+    fractions = {split: (len(manifests.get(split, [])) / total if total else 0.0) for split in SPLIT_NAMES}
     expected = dict(zip(SPLIT_NAMES, expected_fractions))
     ratio_warnings: list[str] = []
     tolerance = 0.08
@@ -821,9 +809,7 @@ def _check_distribution(
 
     single_tag = len(result.manifest_checks.get("single_tag_records", []))
     if single_tag and single_tag / total > 0.10:
-        result.add_warning(
-            f"{single_tag}/{total} records have only one tag ({single_tag / total:.1%})"
-        )
+        result.add_warning(f"{single_tag}/{total} records have only one tag ({single_tag / total:.1%})")
 
 
 # ---------------------------------------------------------------------------
@@ -898,8 +884,7 @@ def _render_markdown(result: DatasetQAResult) -> str:
     ic = result.image_checks
     lines.append(f"- all 32x32: {ic.get('all_32x32')}")
     lines.append(
-        f"- max palette slots seen: {ic.get('max_palette_slots_seen')} "
-        f"(allowed {ic.get('max_palette_slots_allowed')})"
+        f"- max palette slots seen: {ic.get('max_palette_slots_seen')} (allowed {ic.get('max_palette_slots_allowed')})"
     )
     lines.append(f"- missing images: {len(ic.get('missing_images', []))}")
     lines.append(f"- unreferenced images: {len(ic.get('unreferenced_images', []))}")
@@ -1065,9 +1050,7 @@ def build_contact_sheet(
     return out_path
 
 
-def _contact_sheet_samples(
-    dataset_dir: Path, sample_limit: int
-) -> list[tuple[str, Any, str, str]]:
+def _contact_sheet_samples(dataset_dir: Path, sample_limit: int) -> list[tuple[str, Any, str, str]]:
     from PIL import Image
 
     object_by_id: dict[str, str] = {}
@@ -1100,7 +1083,7 @@ def _contact_sheet_samples(
             sprite_ids = [str(value) for value in np.asarray(data["sprite_id"])]
         for row, sprite_id in enumerate(sprite_ids):
             rgb = palette[row][np.clip(index_map[row], 0, palette[row].shape[0] - 1)]
-            a = (alpha[row].astype(np.uint8) * 255)
+            a = alpha[row].astype(np.uint8) * 255
             rgba_array = np.dstack([rgb.astype(np.uint8), a]).astype(np.uint8)
             image = Image.fromarray(rgba_array, mode="RGBA")
             collected.append((sprite_id, image, object_by_id.get(sprite_id, ""), split))

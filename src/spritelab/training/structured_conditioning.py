@@ -67,7 +67,7 @@ class StructuredConditioningVocab:
         }
 
     @classmethod
-    def from_json_dict(cls, data: Mapping[str, Any] | None) -> "StructuredConditioningVocab | None":
+    def from_json_dict(cls, data: Mapping[str, Any] | None) -> StructuredConditioningVocab | None:
         if not isinstance(data, Mapping):
             return None
         return cls(
@@ -82,7 +82,7 @@ class StructuredConditioningVocab:
         )
 
     @classmethod
-    def empty(cls) -> "StructuredConditioningVocab":
+    def empty(cls) -> StructuredConditioningVocab:
         return cls(
             categories=(UNKNOWN_TOKEN,),
             objects=(UNKNOWN_TOKEN,),
@@ -137,10 +137,7 @@ def extract_structured_fields(record: Mapping[str, Any]) -> dict[str, Any]:
     semantic = _semantic_v3(record)
     attributes = _semantic_attributes(record, semantic)
     colors = _token_list(
-        attributes.get("colors")
-        or record.get("colors")
-        or record.get("color")
-        or record.get("colour")
+        attributes.get("colors") or record.get("colors") or record.get("color") or record.get("colour")
     )
     materials = _token_list(attributes.get("materials") or record.get("materials") or record.get("material"))
     shapes = _token_list(attributes.get("shapes") or record.get("shapes") or record.get("shape"))

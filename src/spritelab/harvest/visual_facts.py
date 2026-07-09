@@ -89,9 +89,7 @@ def dominant_color_names_from_rgba(path: Path, top_k: int = 4) -> tuple[str, ...
     ranked = sorted(name_counts.items(), key=lambda item: (-item[1], item[0]))
     total = sum(name_counts.values())
     result = [
-        name
-        for index, (name, count) in enumerate(ranked[: max(1, int(top_k))])
-        if index == 0 or count / total >= 0.08
+        name for index, (name, count) in enumerate(ranked[: max(1, int(top_k))]) if index == 0 or count / total >= 0.08
     ]
     return tuple(result)
 

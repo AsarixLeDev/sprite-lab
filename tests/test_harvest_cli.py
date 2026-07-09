@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 
 from _harvest_testdata import make_sprite_png, make_zip_of_pngs
-
 from spritelab.harvest.cli import main
 
 
@@ -18,13 +17,20 @@ def _import_dir_args(tmp_path, *, license_name="cc0", run_name="run_dir"):
     make_sprite_png(root / "two.png")
     return [
         "import-dir",
-        "--dir", str(root),
-        "--run-name", run_name,
-        "--run-root", str(tmp_path / "harvest_runs"),
-        "--source-id", "cli_source",
-        "--source-name", "CLI Source",
-        "--license", license_name,
-        "--author", "Tester",
+        "--dir",
+        str(root),
+        "--run-name",
+        run_name,
+        "--run-root",
+        str(tmp_path / "harvest_runs"),
+        "--source-id",
+        "cli_source",
+        "--source-name",
+        "CLI Source",
+        "--license",
+        license_name,
+        "--author",
+        "Tester",
         "--user-confirmed-license",
     ]
 
@@ -41,17 +47,26 @@ def test_import_dir(tmp_path, capsys):
 
 def test_import_zip(tmp_path, capsys):
     zip_path = make_zip_of_pngs(tmp_path / "pack.zip", ["a.png", "b.png", "c.png"])
-    main([
-        "import-zip",
-        "--zip", str(zip_path),
-        "--run-name", "run_zip",
-        "--run-root", str(tmp_path / "harvest_runs"),
-        "--source-id", "zip_source",
-        "--source-name", "Zip Source",
-        "--license", "cc0",
-        "--author", "Tester",
-        "--user-confirmed-license",
-    ])
+    main(
+        [
+            "import-zip",
+            "--zip",
+            str(zip_path),
+            "--run-name",
+            "run_zip",
+            "--run-root",
+            str(tmp_path / "harvest_runs"),
+            "--source-id",
+            "zip_source",
+            "--source-name",
+            "Zip Source",
+            "--license",
+            "cc0",
+            "--author",
+            "Tester",
+            "--user-confirmed-license",
+        ]
+    )
     output = capsys.readouterr().out
     assert "Valid: 3" in output
 
@@ -61,12 +76,17 @@ def test_export_writes_dataset(tmp_path, capsys):
     # accept everything valid via policy first
     run = str(tmp_path / "harvest_runs" / "run_dir")
     main(["apply-policy", "--run", run, "--auto-accept-valid-cc0", "--reject-invalid"])
-    main([
-        "export",
-        "--run", run,
-        "--dataset-name", "cli_dataset",
-        "--output-root", str(tmp_path / "datasets"),
-    ])
+    main(
+        [
+            "export",
+            "--run",
+            run,
+            "--dataset-name",
+            "cli_dataset",
+            "--output-root",
+            str(tmp_path / "datasets"),
+        ]
+    )
     npz = tmp_path / "datasets" / "cli_dataset" / "train.npz"
     assert npz.exists()
     with np.load(npz, allow_pickle=False) as data:
@@ -77,20 +97,30 @@ def test_export_blocked_without_override(tmp_path, capsys):
     main(_import_dir_args(tmp_path, license_name="unknown", run_name="run_unknown"))
     run = str(tmp_path / "harvest_runs" / "run_unknown")
     with pytest.raises(SystemExit):
-        main([
-            "export",
-            "--run", run,
-            "--dataset-name", "blocked",
-            "--output-root", str(tmp_path / "datasets"),
-        ])
+        main(
+            [
+                "export",
+                "--run",
+                run,
+                "--dataset-name",
+                "blocked",
+                "--output-root",
+                str(tmp_path / "datasets"),
+            ]
+        )
     assert "Export blocked" in capsys.readouterr().out
-    main([
-        "export",
-        "--run", run,
-        "--dataset-name", "unblocked",
-        "--output-root", str(tmp_path / "datasets"),
-        "--allow-unknown-license",
-    ])
+    main(
+        [
+            "export",
+            "--run",
+            run,
+            "--dataset-name",
+            "unblocked",
+            "--output-root",
+            str(tmp_path / "datasets"),
+            "--allow-unknown-license",
+        ]
+    )
     assert (tmp_path / "datasets" / "unblocked" / "train.npz").exists()
 
 
@@ -137,11 +167,15 @@ def test_assisted_golden_sample_cli_writes_candidates(tmp_path, capsys):
 
 
 def test_filename_prefill_cli_outputs_filename_rule_json(capsys):
-    main([
-        "filename-prefill",
-        "--sprite-id", "oga_496_rpg_icons_32fix_i_c_banana",
-        "--filename", "I_C_Banana.png",
-    ])
+    main(
+        [
+            "filename-prefill",
+            "--sprite-id",
+            "oga_496_rpg_icons_32fix_i_c_banana",
+            "--filename",
+            "I_C_Banana.png",
+        ]
+    )
 
     data = json.loads(capsys.readouterr().out)
     assert data["source"] == "filename_rules"

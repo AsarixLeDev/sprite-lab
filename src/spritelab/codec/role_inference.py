@@ -524,17 +524,33 @@ def _scored_roles(
 
         scores = {
             "outline": 0.45 * darkness + 0.35 * edge + 0.10 * frequency_strength + 0.10 * contrast,
-            "deep_shadow": 0.55 * darkness + 0.20 * frequency_strength + 0.15 * same_color_cluster + 0.10 * lower_spatial_bias,
-            "shadow": 0.45 * darkness + 0.25 * frequency_strength + 0.20 * same_color_cluster + 0.10 * lower_spatial_bias,
-            "midtone": 0.45 * frequency_strength + 0.25 * mid_luminance_score + 0.20 * same_color_cluster + 0.10 * not_edge,
-            "light": 0.50 * lightness + 0.20 * frequency_strength + 0.15 * same_color_cluster + 0.15 * upper_spatial_bias,
+            "deep_shadow": 0.55 * darkness
+            + 0.20 * frequency_strength
+            + 0.15 * same_color_cluster
+            + 0.10 * lower_spatial_bias,
+            "shadow": 0.45 * darkness
+            + 0.25 * frequency_strength
+            + 0.20 * same_color_cluster
+            + 0.10 * lower_spatial_bias,
+            "midtone": 0.45 * frequency_strength
+            + 0.25 * mid_luminance_score
+            + 0.20 * same_color_cluster
+            + 0.10 * not_edge,
+            "light": 0.50 * lightness
+            + 0.20 * frequency_strength
+            + 0.15 * same_color_cluster
+            + 0.15 * upper_spatial_bias,
             "highlight": 0.45 * lightness + 0.25 * rarity + 0.15 * contrast + 0.15 * upper_spatial_bias,
             "accent": 0.45 * chroma + 0.30 * rarity + 0.15 * contrast + 0.10 * not_edge,
             "emissive": 0.40 * chroma + 0.35 * lightness + 0.15 * rarity + 0.10 * contrast,
             "texture_detail": 0.35 * rarity + 0.25 * contrast + 0.20 * not_edge + 0.20 * local_isolated_detail,
         }
 
-        if not (feature.is_high_chroma and feature.oklab_l >= options.emissive_luminance_threshold and (feature.is_rare or feature.frequency <= 0.20)):
+        if not (
+            feature.is_high_chroma
+            and feature.oklab_l >= options.emissive_luminance_threshold
+            and (feature.is_rare or feature.frequency <= 0.20)
+        ):
             scores["emissive"] = 0.0
         if not (feature.is_high_chroma and feature.is_rare):
             scores["accent"] *= 0.35

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any
 
 from spritelab.dataset_maker.model import normalize_sprite_id
 

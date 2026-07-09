@@ -13,19 +13,17 @@ from typing import Any
 
 import numpy as np
 
-from spritelab.codec.bundle import BUNDLE_SCHEMA_VERSION, CODEC_VERSION, INDEX_MASK, INDEX_PAD, SpriteBundle
+from spritelab.codec.bundle import BUNDLE_SCHEMA_VERSION, CODEC_VERSION, SpriteBundle
 from spritelab.codec.io import load_bundle
 from spritelab.codec.roles import ROLE_NAMES, ROLE_TRANSPARENT, ROLE_UNKNOWN
 from spritelab.codec.validate import assert_valid_bundle
 from spritelab.curation.manifest import discover_bundle_ids, load_latest_curation, summarize_curation
 from spritelab.training.palette_report import (
-    PaletteSemanticsReport,
     build_palette_semantics_report,
     write_palette_semantics_report_json,
     write_palette_semantics_report_markdown,
 )
 from spritelab.training.readiness import (
-    TrainingReadinessReport,
     build_training_readiness_report,
     write_training_readiness_markdown,
 )
@@ -97,9 +95,7 @@ def export_training_dataset(config: TrainingExportConfig) -> TrainingExportResul
         raise ValueError("bundle ID collision detected: " + "; ".join(messages))
     latest = load_latest_curation(config.curation_path)
     curation_summary = summarize_curation(latest)
-    accepted_ids = tuple(
-        sorted(sprite_id for sprite_id, decision in latest.items() if decision.status == "accepted")
-    )
+    accepted_ids = tuple(sorted(sprite_id for sprite_id, decision in latest.items() if decision.status == "accepted"))
     missing_accepted = [sprite_id for sprite_id in accepted_ids if sprite_id not in bundle_ids]
     if missing_accepted:
         message = ", ".join(missing_accepted)
@@ -163,7 +159,12 @@ def export_training_dataset(config: TrainingExportConfig) -> TrainingExportResul
         raise ValueError(f"Duplicate leakage across splits: {joined}")
 
     split_lookup = _split_lookup(split_assignment)
-    records = [_manifest_record(sprite, split_lookup[sprite.sprite_id], config, dedupe_report_provided, quality_report_provided) for sprite in sprites]
+    records = [
+        _manifest_record(
+            sprite, split_lookup[sprite.sprite_id], config, dedupe_report_provided, quality_report_provided
+        )
+        for sprite in sprites
+    ]
     for split_name, split_ids in {
         "train": split_assignment.train,
         "val": split_assignment.val,
@@ -193,7 +194,9 @@ def export_training_dataset(config: TrainingExportConfig) -> TrainingExportResul
         duplicate_leakage=leakage,
     )
     write_training_readiness_markdown(readiness, output_dir / "training_readiness_report.md")
-    _write_export_config(output_dir / "export_config.json", config, accepted_count=len(accepted_ids), exported_count=len(sprites))
+    _write_export_config(
+        output_dir / "export_config.json", config, accepted_count=len(accepted_ids), exported_count=len(sprites)
+    )
 
     warnings.extend(issue.message for issue in readiness.issues if issue.severity == "warning")
     excluded_count = max(0, len(bundle_ids) - len(sprites))
@@ -298,10 +301,7 @@ def _export_sprite(
 
 
 def _category_vocab(loaded: Sequence[tuple[str, Path, SpriteBundle]], latest: Mapping[str, Any]) -> dict[str, int]:
-    categories = {
-        _category_for(bundle, latest[sprite_id].tags)
-        for sprite_id, _path, bundle in loaded
-    }
+    categories = {_category_for(bundle, latest[sprite_id].tags) for sprite_id, _path, bundle in loaded}
     ordered = ["unknown", *sorted(category for category in categories if category != "unknown")]
     return {category: index for index, category in enumerate(ordered)}
 
@@ -421,9 +421,9 @@ def _write_export_config(path: Path, config: TrainingExportConfig, *, accepted_c
 
 
 def _split_lookup(split_assignment: SplitAssignment) -> dict[str, str]:
-    lookup = {sprite_id: "train" for sprite_id in split_assignment.train}
-    lookup.update({sprite_id: "val" for sprite_id in split_assignment.val})
-    lookup.update({sprite_id: "test" for sprite_id in split_assignment.test})
+    lookup = dict.fromkeys(split_assignment.train, "train")
+    lookup.update(dict.fromkeys(split_assignment.val, "val"))
+    lookup.update(dict.fromkeys(split_assignment.test, "test"))
     return lookup
 
 

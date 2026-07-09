@@ -43,7 +43,9 @@ def compare_generator_families(config: CompareGeneratorFamiliesConfig) -> dict[s
         json.dumps(_jsonable(report), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    (out_dir / "compare_generator_families_report.md").write_text(format_compare_families_markdown(report), encoding="utf-8")
+    (out_dir / "compare_generator_families_report.md").write_text(
+        format_compare_families_markdown(report), encoding="utf-8"
+    )
     return report
 
 
@@ -149,7 +151,9 @@ def _family_summary(run_dir: Path, generated_dir: Path, *, label: str) -> dict[s
         "review_mean_visible_color_count": _num(overall.get("mean_visible_color_count")),
         "prompt_sensitivity_same_noise_difference": _num(same_noise.get("mean_pairwise_difference")),
         "prompt_sensitivity_same_prompt_diversity": _num(same_prompt.get("diversity_score")),
-        "faithfulness_sample_count": int(faithfulness.get("sample_count") or 0) if isinstance(faithfulness, Mapping) else 0,
+        "faithfulness_sample_count": int(faithfulness.get("sample_count") or 0)
+        if isinstance(faithfulness, Mapping)
+        else 0,
         "faithfulness_repeated_silhouette_rate": _num(faithfulness.get("repeated_silhouette_rate")),
         "faithfulness_generic_potion_collapse_rate": _num(faithfulness.get("generic_potion_collapse_rate")),
         "faithfulness_color_consistency_rate": _num(faithfulness.get("color_consistency_rate")),

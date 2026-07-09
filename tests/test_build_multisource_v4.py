@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 from _semantic_dataset import default_specs, make_semantic_dataset
-
 from spritelab.dataset_maker.qa import qa_dataset, write_reports
 from spritelab.dataset_maker.training_manifest import build_training_manifest, write_training_manifest
 from spritelab.dataset_maker.training_manifest_qa import qa_training_manifest, write_training_manifest_qa_reports

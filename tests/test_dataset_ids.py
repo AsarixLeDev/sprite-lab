@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PIL import Image
+
 from spritelab.data.ids import make_sprite_id, sha256_file
 from spritelab.data.ingest_clean_pngs import IngestOptions, ingest_clean_png_folder
-
-from PIL import Image
 
 
 def test_simple_filename_becomes_safe_id() -> None:

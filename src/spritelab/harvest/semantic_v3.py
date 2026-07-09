@@ -87,14 +87,35 @@ class SemanticAttributes:
     environment: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        for name in ("colors", "materials", "shapes", "effects", "state", "function", "mood", "style", "parts", "environment"):
+        for name in (
+            "colors",
+            "materials",
+            "shapes",
+            "effects",
+            "state",
+            "function",
+            "mood",
+            "style",
+            "parts",
+            "environment",
+        ):
             object.__setattr__(self, name, normalize_tags(getattr(self, name)))
 
     @property
     def non_empty_group_count(self) -> int:
         return sum(
             1
-            for name in ("colors", "materials", "shapes", "effects", "state", "function", "mood", "parts", "environment")
+            for name in (
+                "colors",
+                "materials",
+                "shapes",
+                "effects",
+                "state",
+                "function",
+                "mood",
+                "parts",
+                "environment",
+            )
             if getattr(self, name)
         )
 
@@ -213,12 +234,19 @@ def build_semantic_v3_record(prediction: Mapping[str, Any], *, max_captions: int
     from_tags = extract_attribute_tokens(tags)
     from_family = family_attributes(base_object)
 
-    dominant_colors = normalize_tags(_as_str_tuple(visual_facts.get("dominant_colors")) or _as_str_tuple(safe.get("dominant_colors")))
+    dominant_colors = normalize_tags(
+        _as_str_tuple(visual_facts.get("dominant_colors")) or _as_str_tuple(safe.get("dominant_colors"))
+    )
     dominant_color_names = extract_attribute_tokens(dominant_colors).colors
 
     colors = _dedupe_cap((*from_name.colors, *from_tags.colors, *dominant_color_names), cap=5)
     materials = _dedupe_cap(
-        (*normalize_tags(_as_str_tuple(safe.get("materials"))), *from_name.materials, *from_tags.materials, *from_family.materials),
+        (
+            *normalize_tags(_as_str_tuple(safe.get("materials"))),
+            *from_name.materials,
+            *from_tags.materials,
+            *from_family.materials,
+        ),
         cap=5,
     )
     shape_hints = tuple(
@@ -240,7 +268,12 @@ def build_semantic_v3_record(prediction: Mapping[str, Any], *, max_captions: int
 
     is_icon = category in _ICON_CATEGORIES or str(profile.get("domain", "")) == "rpg_icons"
     mood = _dedupe_cap(
-        (*normalize_tags(_as_str_tuple(safe.get("mood"))), *from_name.mood, *from_tags.mood, *(("fantasy",) if is_icon else ())),
+        (
+            *normalize_tags(_as_str_tuple(safe.get("mood"))),
+            *from_name.mood,
+            *from_tags.mood,
+            *(("fantasy",) if is_icon else ()),
+        ),
         cap=4,
     )
     style = ("32x32", "pixel_art", "rpg_icon") if is_icon else ("32x32", "pixel_art")
@@ -405,7 +438,15 @@ def build_prompt_phrases(record: SemanticV3Record) -> tuple[str, ...]:
     color = _caption_color(attributes.colors)
     category_word = _CATEGORY_WORD.get(record.category, "item")
     phrases = [f"32x32 pixel art {open_name}".strip()]
-    second = _join_words([color, "fantasy" if "fantasy" in attributes.mood else "", _open_name(record.base_object), category_word, "icon"])
+    second = _join_words(
+        [
+            color,
+            "fantasy" if "fantasy" in attributes.mood else "",
+            _open_name(record.base_object),
+            category_word,
+            "icon",
+        ]
+    )
     if second and second.lower() != phrases[0].lower():
         phrases.append(second)
     return tuple(" ".join(phrase.split()) for phrase in phrases if phrase)
@@ -538,7 +579,11 @@ def format_semantic_v3_report(summary: Mapping[str, Any]) -> str:
     ]
     for name, count in dict(summary.get("top_base_objects") or {}).items():
         lines.append(f"- {name}: {count}")
-    for title, key in (("Top colors", "top_colors"), ("Top materials", "top_materials"), ("Top effects", "top_effects")):
+    for title, key in (
+        ("Top colors", "top_colors"),
+        ("Top materials", "top_materials"),
+        ("Top effects", "top_effects"),
+    ):
         lines.extend(["", f"## {title}"])
         for name, count in dict(summary.get(key) or {}).items():
             lines.append(f"- {name}: {count}")

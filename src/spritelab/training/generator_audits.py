@@ -21,9 +21,9 @@ from spritelab.training.generator_challenger import (
     run_challenger_training,
     run_sample_generator_challenger,
 )
-from spritelab.training.palette_swap import DEFAULT_SWAP_FAMILIES_TEXT as PALETTE_SWAP_DEFAULT_FAMILIES
-from spritelab.training.overfit_subset import OverfitSubsetSelection, select_overfit_subset
 from spritelab.training.ood_prompts import OodCompositionalPromptConfig, build_ood_compositional_prompts
+from spritelab.training.overfit_subset import OverfitSubsetSelection, select_overfit_subset
+from spritelab.training.palette_swap import DEFAULT_SWAP_FAMILIES_TEXT as PALETTE_SWAP_DEFAULT_FAMILIES
 from spritelab.training.prompt_faithfulness import PromptFaithfulnessConfig, run_prompt_faithfulness
 from spritelab.training.prompt_sensitivity import PromptSensitivityConfig, run_prompt_sensitivity
 from spritelab.training.rgba import npz_row_to_rgba
@@ -907,7 +907,12 @@ def decide_full_v4_challenger_audit(sections: Mapping[str, Any]) -> dict[str, An
         ood_review = _section(ood, "generated_review")
         ood_faithfulness = _section(ood, "prompt_faithfulness")
         ood_sensitivity = _section(ood, "prompt_sensitivity")
-        _warn_if_gt(warnings, "ood_generated_qa_errors", ood_qa.get("errors"), FULL_V4_AUDIT_THRESHOLDS["generated_qa_errors_warn"])
+        _warn_if_gt(
+            warnings,
+            "ood_generated_qa_errors",
+            ood_qa.get("errors"),
+            FULL_V4_AUDIT_THRESHOLDS["generated_qa_errors_warn"],
+        )
         _warn_source_delta(
             warnings,
             "ood_border_touch_source_delta",
@@ -1016,7 +1021,8 @@ def compare_challenger_conditioning_audits(
     rare_color_comparison = _rare_color_comparison(
         baseline_report,
         structured_report,
-        fallback=ood_comparisons.get("too_many_rare_colors_rate") or grounded_comparisons.get("too_many_rare_colors_rate"),
+        fallback=ood_comparisons.get("too_many_rare_colors_rate")
+        or grounded_comparisons.get("too_many_rare_colors_rate"),
     )
     answers = {
         "dataset_grounded_category": _metric_status(grounded_comparisons.get("category_consistency")),
@@ -1294,7 +1300,9 @@ def _run_full_v4_ood_evaluation(
         "generation": _full_v4_generation_summary(ood_sample_report, generated_dir=generated_dir),
         "palette_projection": _full_v4_palette_projection_summary(generated_dir, ood_sample_report),
         "generated_qa": _full_v4_qa_summary(ood_qa),
-        "generated_review": _full_v4_generated_review_summary(ood_review_result.report, max_colors=int(config.max_colors)),
+        "generated_review": _full_v4_generated_review_summary(
+            ood_review_result.report, max_colors=int(config.max_colors)
+        ),
         "prompt_faithfulness": _full_v4_faithfulness_summary(ood_faithfulness),
     }
     if include_sensitivity:
@@ -1537,15 +1545,7 @@ def _ood_control_score_v1(metrics: Mapping[str, Any]) -> float:
     repeated = _metric_or_default(metrics, "repeated_silhouette_rate", "ood_repeated_silhouette_rate", default=1.0)
     potion = _metric_or_default(metrics, "potion_collapse_rate", "ood_potion_rate", default=1.0)
     qa_error_rate = _metric_or_default(metrics, "qa_error_rate", default=1.0)
-    return (
-        2.0 * category
-        + 2.0 * color
-        - 1.5 * rare
-        - 1.5 * blob
-        - 1.0 * repeated
-        - 0.5 * potion
-        - 1.0 * qa_error_rate
-    )
+    return 2.0 * category + 2.0 * color - 1.5 * rare - 1.5 * blob - 1.0 * repeated - 0.5 * potion - 1.0 * qa_error_rate
 
 
 def _metric_or_default(metrics: Mapping[str, Any], *keys: str, default: float) -> float:
@@ -1663,14 +1663,24 @@ def _prompt_set_summary(
     prompt_file: Path,
     reused_existing: bool,
 ) -> dict[str, Any]:
-    target_ids = [str(row.get("target_sprite_id") or row.get("source_sprite_id") or row.get("sprite_id") or row.get("prompt_id") or "") for row in rows]
+    target_ids = [
+        str(
+            row.get("target_sprite_id")
+            or row.get("source_sprite_id")
+            or row.get("sprite_id")
+            or row.get("prompt_id")
+            or ""
+        )
+        for row in rows
+    ]
     categories = Counter(_category(row) for row in rows)
     return {
         "prompt_file": str(prompt_file),
         "prompt_count": len(rows),
         "category_counts": dict(sorted(categories.items())),
         "unique_target_sprite_count": len({sprite_id for sprite_id in target_ids if sprite_id}),
-        "target_ids_unique": len([sprite_id for sprite_id in target_ids if sprite_id]) == len({sprite_id for sprite_id in target_ids if sprite_id}),
+        "target_ids_unique": len([sprite_id for sprite_id in target_ids if sprite_id])
+        == len({sprite_id for sprite_id in target_ids if sprite_id}),
         "reused_existing_prompts": bool(reused_existing),
         **structured_prompt_summary(rows),
     }
@@ -1678,7 +1688,7 @@ def _prompt_set_summary(
 
 def _full_v4_palette_swap_summary(
     train_report: Mapping[str, Any],
-    config: "FullV4ChallengerAuditConfig",
+    config: FullV4ChallengerAuditConfig,
 ) -> dict[str, Any]:
     reported = train_report.get("palette_swap") if isinstance(train_report.get("palette_swap"), Mapping) else {}
     summary = {
@@ -1758,8 +1768,14 @@ def _full_v4_training_summary(train_report: Mapping[str, Any]) -> dict[str, Any]
         "val_loss": val_loss,
         "val_loss_components": train_report.get("val_loss_components", {}),
         "val_train_loss_gap": None if val_loss is None or final_loss is None else val_loss - final_loss,
-        "val_train_loss_ratio": None if val_loss is None or final_loss is None or final_loss <= 0.0 else val_loss / final_loss,
-        "steps": _optional_int(train_report.get("steps_completed") if train_report.get("steps_completed") is not None else train_report.get("max_steps")),
+        "val_train_loss_ratio": None
+        if val_loss is None or final_loss is None or final_loss <= 0.0
+        else val_loss / final_loss,
+        "steps": _optional_int(
+            train_report.get("steps_completed")
+            if train_report.get("steps_completed") is not None
+            else train_report.get("max_steps")
+        ),
         "batch_size": _optional_int(train_report.get("batch_size")),
         "model_config": train_report.get("model_config", {}),
         "elapsed_seconds": _optional_float(train_report.get("elapsed_seconds")),
@@ -1779,7 +1795,9 @@ def _full_v4_generation_summary(sample_report: Mapping[str, Any], *, generated_d
 
 def _full_v4_palette_projection_summary(generated_dir: Path, sample_report: Mapping[str, Any]) -> dict[str, Any]:
     report_path = Path(generated_dir) / "palette_projection_report.json"
-    projection = sample_report.get("palette_projection") if isinstance(sample_report.get("palette_projection"), Mapping) else {}
+    projection = (
+        sample_report.get("palette_projection") if isinstance(sample_report.get("palette_projection"), Mapping) else {}
+    )
     report: dict[str, Any] = {}
     if report_path.is_file():
         try:
@@ -1801,7 +1819,9 @@ def _full_v4_palette_projection_summary(generated_dir: Path, sample_report: Mapp
         "mean_visible_color_count_after": _optional_float(report.get("mean_visible_color_count_after")),
         "rare_color_rate_before": _optional_float(report.get("rare_color_rate_before")),
         "rare_color_rate_after": _optional_float(report.get("rare_color_rate_after")),
-        "mean_rgb_mae_visible": _optional_float(report.get("mean_rgb_mae_visible") or projection.get("mean_rgb_mae_visible")),
+        "mean_rgb_mae_visible": _optional_float(
+            report.get("mean_rgb_mae_visible") or projection.get("mean_rgb_mae_visible")
+        ),
         "destructive_rate": _optional_float(report.get("destructive_rate") or projection.get("destructive_rate")),
         "safe_count": _optional_int(report.get("safe_count")),
         "moderate_count": _optional_int(report.get("moderate_count")),
@@ -1836,10 +1856,7 @@ def _full_v4_generated_review_summary(review: Mapping[str, Any], *, max_colors: 
         if isinstance(sample, Mapping) and isinstance(sample.get("metrics"), Mapping)
     ]
     sample_warnings = [
-        str(warning)
-        for sample in samples
-        if isinstance(sample, Mapping)
-        for warning in (sample.get("warnings") or [])
+        str(warning) for sample in samples if isinstance(sample, Mapping) for warning in (sample.get("warnings") or [])
     ]
     if not warning_counts and sample_warnings:
         warning_counts = Counter(sample_warnings)
@@ -1862,7 +1879,9 @@ def _full_v4_generated_review_summary(review: Mapping[str, Any], *, max_colors: 
     )
     return {
         "sample_count": _optional_int(review.get("sample_count")),
-        "mean_alpha_coverage": _first_float(overall.get("mean_alpha_coverage"), _mean_metric(sample_metrics, "alpha_coverage")),
+        "mean_alpha_coverage": _first_float(
+            overall.get("mean_alpha_coverage"), _mean_metric(sample_metrics, "alpha_coverage")
+        ),
         "mean_bbox_width": _first_float(overall.get("mean_bbox_width"), _mean_metric(sample_metrics, "bbox_width")),
         "mean_bbox_height": _first_float(overall.get("mean_bbox_height"), _mean_metric(sample_metrics, "bbox_height")),
         "mean_center_offset": _first_float(
@@ -1876,7 +1895,9 @@ def _full_v4_generated_review_summary(review: Mapping[str, Any], *, max_colors: 
             _group_weighted_metric(review.get("groups"), "mean_visible_color_count"),
             _mean_metric(sample_metrics, "visible_color_count"),
         ),
-        "median_visible_color_count": _first_float(overall.get("median_visible_color_count"), _median_metric(sample_metrics, "visible_color_count")),
+        "median_visible_color_count": _first_float(
+            overall.get("median_visible_color_count"), _median_metric(sample_metrics, "visible_color_count")
+        ),
         "warning_counts": dict(sorted((str(key), int(value)) for key, value in warning_counts.items())),
         "touches_border_rate": touches_border_rate,
         "too_many_rare_colors_rate": too_many_rare_colors_rate,
@@ -1885,7 +1906,9 @@ def _full_v4_generated_review_summary(review: Mapping[str, Any], *, max_colors: 
         "max_colors": _optional_int(max_colors),
         "median_visible_colors_pinned": bool(
             max_colors is not None
-            and _first_float(overall.get("median_visible_color_count"), _median_metric(sample_metrics, "visible_color_count"))
+            and _first_float(
+                overall.get("median_visible_color_count"), _median_metric(sample_metrics, "visible_color_count")
+            )
             == float(max_colors)
         ),
         "groups": review.get("groups", {}),
@@ -2198,7 +2221,9 @@ def _category_weighted_source_baseline(
                 if category not in missing:
                     missing.append(category)
                 continue
-            source_metrics = source_category.get("metrics") if isinstance(source_category.get("metrics"), Mapping) else {}
+            source_metrics = (
+                source_category.get("metrics") if isinstance(source_category.get("metrics"), Mapping) else {}
+            )
             value = _optional_float(source_metrics.get(key))
             if value is None:
                 if category not in missing:
@@ -2395,7 +2420,11 @@ def _format_full_v4_markdown(report: Mapping[str, Any]) -> str:
         "",
     ]
     if ood:
-        lines.extend(_format_full_v4_ood_markdown(ood, source_distribution=source_distribution, generated_vs_source=generated_vs_source))
+        lines.extend(
+            _format_full_v4_ood_markdown(
+                ood, source_distribution=source_distribution, generated_vs_source=generated_vs_source
+            )
+        )
     if bool(checkpoint_evaluation.get("enabled")):
         lines.extend(_format_checkpoint_ood_leaderboard_markdown(checkpoint_evaluation))
     lines.extend(
@@ -2412,7 +2441,9 @@ def _format_full_v4_markdown(report: Mapping[str, Any]) -> str:
     warnings = decision.get("warnings") if isinstance(decision.get("warnings"), list) else []
     if warnings:
         for warning in warnings:
-            lines.append(f"- {warning.get('name')}: value={_fmt(warning.get('value'))}, threshold={_fmt(warning.get('threshold'))}")
+            lines.append(
+                f"- {warning.get('name')}: value={_fmt(warning.get('value'))}, threshold={_fmt(warning.get('threshold'))}"
+            )
     else:
         lines.append("- (none)")
     lines.extend(
@@ -2515,7 +2546,9 @@ def _format_full_v4_ood_markdown(
 
 
 def _format_checkpoint_ood_leaderboard_markdown(checkpoint_evaluation: Mapping[str, Any]) -> list[str]:
-    leaderboard = checkpoint_evaluation.get("leaderboard") if isinstance(checkpoint_evaluation.get("leaderboard"), list) else []
+    leaderboard = (
+        checkpoint_evaluation.get("leaderboard") if isinstance(checkpoint_evaluation.get("leaderboard"), list) else []
+    )
     lines = [
         "## Checkpoint OOD Leaderboard",
         "",
@@ -2640,7 +2673,9 @@ def _checkpoint_selection_summary(report: Mapping[str, Any]) -> dict[str, Any]:
         "guardrail_failures": list(selected_metrics.get("guardrail_failures") or []) if enabled else [],
         "sample_checkpoint": sample_checkpoint,
         "final_step_checkpoint": final_step_checkpoint,
-        "sampled_selected_checkpoint": bool(enabled and selected_checkpoint and str(sample_checkpoint) == str(selected_checkpoint)),
+        "sampled_selected_checkpoint": bool(
+            enabled and selected_checkpoint and str(sample_checkpoint) == str(selected_checkpoint)
+        ),
         "sampled_final_step": bool(final_step_checkpoint and str(sample_checkpoint) == str(final_step_checkpoint)),
     }
 
@@ -2656,7 +2691,9 @@ def _checkpoint_selection_comparison(
         warnings.append("comparing final-step run vs selected-checkpoint run: checkpoint selection differs")
     elif bool(baseline["enabled"]) and bool(structured["enabled"]):
         if bool(baseline["sampled_final_step"]) != bool(structured["sampled_final_step"]):
-            warnings.append("one selected-checkpoint report sampled the final step while the other selected an earlier checkpoint")
+            warnings.append(
+                "one selected-checkpoint report sampled the final step while the other selected an earlier checkpoint"
+            )
     return {
         "baseline": baseline,
         "structured": structured,
@@ -2907,7 +2944,9 @@ def _rare_color_comparison(
     baseline_delta = _rare_color_source_delta(baseline_report)
     structured_delta = _rare_color_source_delta(structured_report)
     if baseline_delta is None or structured_delta is None:
-        return dict(fallback) if isinstance(fallback, Mapping) else _metric_comparison(None, None, higher_is_better=False)
+        return (
+            dict(fallback) if isinstance(fallback, Mapping) else _metric_comparison(None, None, higher_is_better=False)
+        )
     return _metric_comparison(baseline_delta, structured_delta, higher_is_better=False)
 
 
@@ -3379,9 +3418,7 @@ def _audit_run_summary(
         "overfit_sprite_id_file": None if overfit_sprite_id_file is None else str(overfit_sprite_id_file),
         "overfit_subset": None if overfit_subset is None else dict(overfit_subset),
         "generated_target_subset": None if generated_target_subset is None else dict(generated_target_subset),
-        "source_match_target_subset": None
-        if source_match_target_subset is None
-        else dict(source_match_target_subset),
+        "source_match_target_subset": None if source_match_target_subset is None else dict(source_match_target_subset),
         "status": _run_status(qa, source_match, sprite_count=budget_metadata["sprite_count"]),
     }
 
@@ -3448,7 +3485,9 @@ def _challenger_decision(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 
 
 def _write_audit_report(out_dir: Path, report: Mapping[str, Any], *, filename: str) -> None:
-    (out_dir / f"{filename}.json").write_text(json.dumps(_jsonable(report), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (out_dir / f"{filename}.json").write_text(
+        json.dumps(_jsonable(report), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     (out_dir / f"{filename}.md").write_text(_format_audit_markdown(report), encoding="utf-8")
 
 

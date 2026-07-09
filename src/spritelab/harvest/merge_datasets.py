@@ -51,9 +51,7 @@ _PACK_SUFFIXES: tuple[str, ...] = (
 )
 
 # Statuses / flags that indicate a record leaked from review or quarantine.
-_REVIEW_STATUS_TOKENS: frozenset[str] = frozenset(
-    {"needs_review", "quarantine", "needs_fix", "rejected", "review"}
-)
+_REVIEW_STATUS_TOKENS: frozenset[str] = frozenset({"needs_review", "quarantine", "needs_fix", "rejected", "review"})
 
 SPLIT_POLICIES: tuple[str, ...] = ("preserve", "reshuffle")
 
@@ -228,9 +226,7 @@ def merge_datasets(
     result.split_counts = {split: len(per_split_records[split]) for split in SPLIT_NAMES}
     result.source_contributions = dict(sorted(source_contributions.items()))
     result.category_distribution = dict(sorted(category_distribution.items()))
-    result.base_object_distribution = dict(
-        sorted(base_object_distribution.items(), key=lambda kv: (-kv[1], kv[0]))
-    )
+    result.base_object_distribution = dict(sorted(base_object_distribution.items(), key=lambda kv: (-kv[1], kv[0])))
     result.semantic_v3_coverage = semantic_present / len(loaded) if loaded else 0.0
 
     _validate_merge(result, loaded, final_ids, per_split_records, per_split_arrays)
@@ -287,9 +283,7 @@ def _load_source_dataset(source_path: Path, *, target_palette_rows: int) -> list
                 raise MergeError(f"{source_dataset}:{split}: manifest record with empty sprite_id")
             row = row_by_id.get(sprite_id)
             if row is None:
-                raise MergeError(
-                    f"{source_dataset}:{split}: manifest sprite {sprite_id} has no matching npz raster"
-                )
+                raise MergeError(f"{source_dataset}:{split}: manifest sprite {sprite_id} has no matching npz raster")
             records.append(
                 _LoadedRecord(
                     source_dataset=source_dataset,
@@ -304,9 +298,7 @@ def _load_source_dataset(source_path: Path, *, target_palette_rows: int) -> list
     return records
 
 
-def _load_split_npz(
-    npz_path: Path, *, target_palette_rows: int
-) -> tuple[list[dict[str, np.ndarray]], list[str]]:
+def _load_split_npz(npz_path: Path, *, target_palette_rows: int) -> tuple[list[dict[str, np.ndarray]], list[str]]:
     with np.load(npz_path, allow_pickle=False) as data:
         arrays = {key: np.asarray(data[key]) for key in data.files}
 
@@ -375,9 +367,7 @@ def _resolve_sprite_ids(loaded: Sequence[_LoadedRecord], result: MergeResult) ->
     return final_ids
 
 
-def _assign_target_splits(
-    loaded: Sequence[_LoadedRecord], *, split_policy: str, seed: int
-) -> list[str]:
+def _assign_target_splits(loaded: Sequence[_LoadedRecord], *, split_policy: str, seed: int) -> list[str]:
     if split_policy == "preserve":
         return [record.source_split for record in loaded]
 
@@ -438,9 +428,7 @@ def _validate_merge(
         records = per_split_records[split]
         arrays = per_split_arrays[split]
         if len(records) != len(arrays):
-            result.errors.append(
-                f"{split}: record/array count mismatch ({len(records)} vs {len(arrays)})"
-            )
+            result.errors.append(f"{split}: record/array count mismatch ({len(records)} vs {len(arrays)})")
         for record, row_arrays in zip(records, arrays):
             sprite_id = str(record.get("sprite_id", ""))
             for field_name in ("source_dataset", "source_pack", "source_sprite_id", "source_split"):
@@ -456,8 +444,7 @@ def _validate_merge(
     if result.semantic_v3_coverage < 1.0:
         missing = round((1.0 - result.semantic_v3_coverage) * len(loaded))
         result.errors.append(
-            f"semantic_v3 coverage is {result.semantic_v3_coverage:.3f} "
-            f"({missing} records lack semantic_v3)"
+            f"semantic_v3 coverage is {result.semantic_v3_coverage:.3f} ({missing} records lack semantic_v3)"
         )
 
     # Splits that existed in a source should not vanish.
@@ -527,9 +514,7 @@ def _write_merged_dataset(
     )
 
 
-def _write_stacked_npz(
-    path: Path, arrays: Sequence[Mapping[str, np.ndarray]], *, max_palette_slots: int
-) -> None:
+def _write_stacked_npz(path: Path, arrays: Sequence[Mapping[str, np.ndarray]], *, max_palette_slots: int) -> None:
     count = len(arrays)
     palette_rows = max_palette_slots + 1
     alpha = np.zeros((count, 32, 32), dtype=np.uint8)

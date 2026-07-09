@@ -95,6 +95,7 @@ def encode_png_to_bundle(
         generate_role_map=generate_role_map,
     )
 
+
 def _copy_metadata_with_size_and_palette(metadata: SpriteMetadata, palette_size: int) -> SpriteMetadata:
     metadata_data = copy.deepcopy(metadata.to_dict())
     metadata_data["width"] = SPRITE_WIDTH

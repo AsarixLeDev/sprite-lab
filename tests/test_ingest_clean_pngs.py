@@ -94,9 +94,7 @@ def test_skip_existing_does_not_rewrite_existing_bundle(tmp_path: Path) -> None:
     bundle_path = Path(first.records[0].bundle_dir) / "bundle.npz"
     initial_mtime = bundle_path.stat().st_mtime_ns
 
-    second = ingest_clean_png_folder(
-        IngestOptions(input_dir=input_dir, output_dir=output_dir, skip_existing=True)
-    )
+    second = ingest_clean_png_folder(IngestOptions(input_dir=input_dir, output_dir=output_dir, skip_existing=True))
 
     assert len(second.records) == 1
     assert bundle_path.stat().st_mtime_ns == initial_mtime

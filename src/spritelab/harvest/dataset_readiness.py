@@ -141,26 +141,20 @@ def scan_readiness(
         exported = dataset_by_pack.get(run_dir.name)
         if exported is not None:
             consumed_datasets.add(exported)
-        report.packs.append(
-            _scan_run(run_dir, exported_dataset=exported, review_rate_ceiling=review_rate_ceiling)
-        )
+        report.packs.append(_scan_run(run_dir, exported_dataset=exported, review_rate_ceiling=review_rate_ceiling))
 
     # Exported datasets with no matching run (e.g. hand-built or merged datasets)
     # still deserve an entry so they can be considered for merging.
     for dataset_dir in dataset_dirs:
         if dataset_dir in consumed_datasets:
             continue
-        report.packs.append(
-            _scan_standalone_dataset(dataset_dir, review_rate_ceiling=review_rate_ceiling)
-        )
+        report.packs.append(_scan_standalone_dataset(dataset_dir, review_rate_ceiling=review_rate_ceiling))
 
     report.packs.sort(key=lambda pack: pack.run_name)
     return report
 
 
-def _scan_run(
-    run_dir: Path, *, exported_dataset: Path | None, review_rate_ceiling: float
-) -> PackReadiness:
+def _scan_run(run_dir: Path, *, exported_dataset: Path | None, review_rate_ceiling: float) -> PackReadiness:
     pack = PackReadiness(run_name=run_dir.name, run_path=str(run_dir))
 
     pack.has_label_v2_predictions = bool(_label_v2_prediction_files(run_dir))
@@ -182,8 +176,12 @@ def _scan_run(
             pack.category_distribution = {str(k): int(v) for k, v in categories.items()}
     if raw_predictions:
         pack.total_records = max(pack.total_records, pack.raw_prediction_records)
-        pack.review_rate = (pack.raw_prediction_review_count / pack.raw_prediction_records) if pack.raw_prediction_records else 0.0
-        pack.auto_rate = (pack.raw_prediction_auto_count / pack.raw_prediction_records) if pack.raw_prediction_records else 0.0
+        pack.review_rate = (
+            (pack.raw_prediction_review_count / pack.raw_prediction_records) if pack.raw_prediction_records else 0.0
+        )
+        pack.auto_rate = (
+            (pack.raw_prediction_auto_count / pack.raw_prediction_records) if pack.raw_prediction_records else 0.0
+        )
     if pack.total_records == 0:
         pack.total_records = _count_imported_records(run_dir)
 
@@ -227,11 +225,7 @@ def _fill_from_dataset(pack: PackReadiness, dataset_dir: Path) -> None:
     if records:
         with_semantic = [r for r in records if isinstance(r.get("semantic_v3"), Mapping) and r.get("semantic_v3")]
         pack.semantic_v3_coverage = len(with_semantic) / len(records)
-        base_objects = sum(
-            1
-            for r in with_semantic
-            if str((r.get("semantic_v3") or {}).get("base_object", "")).strip()
-        )
+        base_objects = sum(1 for r in with_semantic if str((r.get("semantic_v3") or {}).get("base_object", "")).strip())
         pack.base_object_coverage = base_objects / len(records)
         caption_counts = [
             len((r.get("semantic_v3") or {}).get("captions") or [])
@@ -267,9 +261,7 @@ def _fill_semantic_from_predictions(pack: PackReadiness, run_dir: Path) -> None:
         return
     with_semantic = [r for r in records if isinstance(r.get("semantic_v3"), Mapping) and r.get("semantic_v3")]
     pack.semantic_v3_coverage = len(with_semantic) / len(records)
-    base_objects = sum(
-        1 for r in with_semantic if str((r.get("semantic_v3") or {}).get("base_object", "")).strip()
-    )
+    base_objects = sum(1 for r in with_semantic if str((r.get("semantic_v3") or {}).get("base_object", "")).strip())
     pack.base_object_coverage = base_objects / len(records)
 
 
@@ -443,9 +435,7 @@ def _has_exportable_auto_records(pack: PackReadiness) -> bool:
 def write_readiness_reports(report: ReadinessReport, *, out_md: Path | None, out_json: Path | None) -> None:
     if out_json is not None:
         out_json.parent.mkdir(parents=True, exist_ok=True)
-        out_json.write_text(
-            json.dumps(report.to_json_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        out_json.write_text(json.dumps(report.to_json_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if out_md is not None:
         out_md.parent.mkdir(parents=True, exist_ok=True)
         out_md.write_text(format_readiness_report(report), encoding="utf-8")
@@ -507,8 +497,7 @@ def format_readiness_report(report: ReadinessReport) -> str:
             f"accepted_auto={pack.apply_report_accepted_auto_labels}"
         )
         lines.append(
-            "- QA errors: "
-            f"dataset={pack.dataset_qa_errors} training_manifest={pack.training_manifest_qa_errors}"
+            f"- QA errors: dataset={pack.dataset_qa_errors} training_manifest={pack.training_manifest_qa_errors}"
         )
         lines.append(f"- review rate: {pack.review_rate:.3f}  auto rate: {pack.auto_rate:.3f}")
         lines.append(

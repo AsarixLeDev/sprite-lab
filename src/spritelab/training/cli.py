@@ -60,16 +60,19 @@ def _parse_dropout_rates(raw: str | None) -> dict[str, float] | None:
     if not raw or not str(raw).strip():
         return None
     result: dict[str, float] = {}
-    known_groups = {group[0] for group in (  # noqa: F841 — used below
-        ("category", ("category_id",)),
-        ("object_id", ("object_id",)),
-        ("base_object", ("base_object_id",)),
-        ("colors", ("primary_color_id", "color_multi_hot")),
-        ("materials", ("material_multi_hot",)),
-        ("shapes", ("shape_multi_hot",)),
-        ("function", ("function_multi_hot",)),
-        ("style", ("style_multi_hot",)),
-    )}
+    known_groups = {
+        group[0]
+        for group in (
+            ("category", ("category_id",)),
+            ("object_id", ("object_id",)),
+            ("base_object", ("base_object_id",)),
+            ("colors", ("primary_color_id", "color_multi_hot")),
+            ("materials", ("material_multi_hot",)),
+            ("shapes", ("shape_multi_hot",)),
+            ("function", ("function_multi_hot",)),
+            ("style", ("style_multi_hot",)),
+        )
+    }
     for token in str(raw).split(","):
         token = token.strip()
         if not token:
@@ -593,38 +596,49 @@ def main(argv: Sequence[str] | None = None) -> None:
     challenger.add_argument("--lr-warmup-steps", type=int, default=0)
     _add_speed_option_arguments(challenger)
     challenger.add_argument(
-        "--film-conditioning", action="store_true", default=False,
-        help="Enable FiLM conditioning in residual blocks (v2 Phase 1)."
+        "--film-conditioning",
+        action="store_true",
+        default=False,
+        help="Enable FiLM conditioning in residual blocks (v2 Phase 1).",
     )
     challenger.add_argument(
-        "--bottleneck-attention", action="store_true", default=False,
-        help="Enable lightweight self-attention at U-Net bottleneck (v2 Phase 1)."
+        "--bottleneck-attention",
+        action="store_true",
+        default=False,
+        help="Enable lightweight self-attention at U-Net bottleneck (v2 Phase 1).",
     )
     challenger.add_argument(
         "--structured-field-dropout-rates",
         default=None,
         help="Per-group structured dropout rates, e.g. 'category=0.10,object_id=0.35,colors=0.15'. "
-             "Overrides --structured-field-dropout for listed groups.",
+        "Overrides --structured-field-dropout for listed groups.",
     )
     challenger.add_argument(
-        "--index-head-loss-weight", type=float, default=0.0,
-        help="Weight for index map cross-entropy head loss (v2 Phase 2)."
+        "--index-head-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for index map cross-entropy head loss (v2 Phase 2).",
     )
     challenger.add_argument(
-        "--palette-head-loss-weight", type=float, default=0.0,
-        help="Weight for palette slot MSE head loss (v2 Phase 2)."
+        "--palette-head-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for palette slot MSE head loss (v2 Phase 2).",
     )
     challenger.add_argument(
-        "--palette-presence-loss-weight", type=float, default=0.0,
-        help="Weight for palette slot presence BCE head loss (v2 Phase 2)."
+        "--palette-presence-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for palette slot presence BCE head loss (v2 Phase 2).",
     )
     challenger.add_argument(
-        "--index-head-warmup-steps", type=int, default=0,
-        help="Index head loss inactive before this step (v2 Phase 2)."
+        "--index-head-warmup-steps", type=int, default=0, help="Index head loss inactive before this step (v2 Phase 2)."
     )
     challenger.add_argument(
-        "--palette-head-use-gt-palette-prob", type=float, default=1.0,
-        help="Probability of using GT palette vs predicted palette for training (v2 Phase 2)."
+        "--palette-head-use-gt-palette-prob",
+        type=float,
+        default=1.0,
+        help="Probability of using GT palette vs predicted palette for training (v2 Phase 2).",
     )
 
     palette_swap_review = subparsers.add_parser(
@@ -652,8 +666,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     palette_swap_review.add_argument("--palette-swap-keep-original-prob", type=float, default=0.0)
     palette_swap_review.add_argument("--palette-swap-require-role-map", action="store_true", default=False)
     palette_swap_review.add_argument("--palette-swap-require-explicit-color", action="store_true", default=False)
-    palette_swap_review.add_argument("--palette-swap-require-explicit-caption-color", action="store_true", default=False)
-    palette_swap_review.add_argument("--palette-swap-require-explicit-semantic-color", action="store_true", default=False)
+    palette_swap_review.add_argument(
+        "--palette-swap-require-explicit-caption-color", action="store_true", default=False
+    )
+    palette_swap_review.add_argument(
+        "--palette-swap-require-explicit-semantic-color", action="store_true", default=False
+    )
     palette_swap_review.add_argument(
         "--palette-swap-allow-colorless-caption-if-semantic-color", action="store_true", default=False
     )
@@ -798,7 +816,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Deterministic source-candidate selection strategy.",
     )
 
-    audit_regression = subparsers.add_parser("audit-regression-generator", help="Run regression generator overfit audit.")
+    audit_regression = subparsers.add_parser(
+        "audit-regression-generator", help="Run regression generator overfit audit."
+    )
     audit_regression.add_argument("--dataset", required=True, type=Path)
     audit_regression.add_argument("--training-manifest", required=True, type=Path)
     audit_regression.add_argument("--out", required=True, type=Path, dest="out_dir")
@@ -868,38 +888,49 @@ def main(argv: Sequence[str] | None = None) -> None:
     audit_challenger_full.add_argument("--lr-warmup-steps", type=int, default=500)
     _add_speed_option_arguments(audit_challenger_full)
     audit_challenger_full.add_argument(
-        "--film-conditioning", action="store_true", default=False,
-        help="Enable FiLM conditioning in residual blocks (v2 Phase 1)."
+        "--film-conditioning",
+        action="store_true",
+        default=False,
+        help="Enable FiLM conditioning in residual blocks (v2 Phase 1).",
     )
     audit_challenger_full.add_argument(
-        "--bottleneck-attention", action="store_true", default=False,
-        help="Enable lightweight self-attention at U-Net bottleneck (v2 Phase 1)."
+        "--bottleneck-attention",
+        action="store_true",
+        default=False,
+        help="Enable lightweight self-attention at U-Net bottleneck (v2 Phase 1).",
     )
     audit_challenger_full.add_argument(
         "--structured-field-dropout-rates",
         default=None,
         help="Per-group structured dropout rates, e.g. 'category=0.10,object_id=0.35,colors=0.15'. "
-             "Overrides --structured-field-dropout for listed groups.",
+        "Overrides --structured-field-dropout for listed groups.",
     )
     audit_challenger_full.add_argument(
-        "--index-head-loss-weight", type=float, default=0.0,
-        help="Weight for index map cross-entropy head loss (v2 Phase 2)."
+        "--index-head-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for index map cross-entropy head loss (v2 Phase 2).",
     )
     audit_challenger_full.add_argument(
-        "--palette-head-loss-weight", type=float, default=0.0,
-        help="Weight for palette slot MSE head loss (v2 Phase 2)."
+        "--palette-head-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for palette slot MSE head loss (v2 Phase 2).",
     )
     audit_challenger_full.add_argument(
-        "--palette-presence-loss-weight", type=float, default=0.0,
-        help="Weight for palette slot presence BCE head loss (v2 Phase 2)."
+        "--palette-presence-loss-weight",
+        type=float,
+        default=0.0,
+        help="Weight for palette slot presence BCE head loss (v2 Phase 2).",
     )
     audit_challenger_full.add_argument(
-        "--index-head-warmup-steps", type=int, default=0,
-        help="Index head loss inactive before this step (v2 Phase 2)."
+        "--index-head-warmup-steps", type=int, default=0, help="Index head loss inactive before this step (v2 Phase 2)."
     )
     audit_challenger_full.add_argument(
-        "--palette-head-use-gt-palette-prob", type=float, default=1.0,
-        help="Probability of using GT palette vs predicted palette for training (v2 Phase 2)."
+        "--palette-head-use-gt-palette-prob",
+        type=float,
+        default=1.0,
+        help="Probability of using GT palette vs predicted palette for training (v2 Phase 2).",
     )
 
     build_ood = subparsers.add_parser(
@@ -935,24 +966,25 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Optional custom JSONL prompt file. Defaults to the built-in deterministic v1 gallery prompt set.",
     )
     _add_export_preset_argument(build_v1_gallery, include_v1_1=True, default="v1")
-    build_v1_gallery.add_argument("--device", default="cpu", help="'cpu' or 'cuda'. Use 'cuda' to match the validated release gallery.")
+    build_v1_gallery.add_argument(
+        "--device", default="cpu", help="'cpu' or 'cuda'. Use 'cuda' to match the validated release gallery."
+    )
     build_v1_gallery.add_argument("--seed", type=int, default=20260723)
     build_v1_gallery.add_argument("--batch-size", type=int, default=32)
     build_v1_gallery.add_argument("--num-samples", type=int, help="Cap the number of prompts/samples.")
-    build_v1_gallery.add_argument(
-        "--categories", help="Comma-separated category filter for the built-in prompt set."
-    )
+    build_v1_gallery.add_argument("--categories", help="Comma-separated category filter for the built-in prompt set.")
     build_v1_gallery.add_argument("--contact-sheet-columns", type=int, default=8)
     build_v1_gallery.add_argument(
-        "--include-ood", action="store_true", default=True, help="Include a trimmed OOD compositional prompt slice (default on)."
+        "--include-ood",
+        action="store_true",
+        default=True,
+        help="Include a trimmed OOD compositional prompt slice (default on).",
     )
     build_v1_gallery.add_argument("--no-include-ood", action="store_false", dest="include_ood")
     build_v1_gallery.add_argument("--include-grounded", action="store_true", default=True)
     build_v1_gallery.add_argument("--no-include-grounded", action="store_false", dest="include_grounded")
     build_v1_gallery.add_argument("--include-stress-prompts", action="store_true", default=True)
-    build_v1_gallery.add_argument(
-        "--no-include-stress-prompts", action="store_false", dest="include_stress_prompts"
-    )
+    build_v1_gallery.add_argument("--no-include-stress-prompts", action="store_false", dest="include_stress_prompts")
 
     v1_gallery_gui = subparsers.add_parser(
         "v1-gallery-gui",
@@ -979,100 +1011,110 @@ def main(argv: Sequence[str] | None = None) -> None:
             "See docs/v2_phase0_diagnostics.md."
         ),
     )
+    v2_phase0.add_argument("--out", required=True, type=Path, help="Output directory for runs and summaries.")
     v2_phase0.add_argument(
-        "--out", required=True, type=Path, help="Output directory for runs and summaries."
+        "--checkpoint", required=True, type=Path, help="Path to a generator_challenger checkpoint (.pt or directory)."
     )
     v2_phase0.add_argument(
-        "--checkpoint", required=True, type=Path,
-        help="Path to a generator_challenger checkpoint (.pt or directory)."
+        "--prompts",
+        type=Path,
+        help="JSONL prompt file (e.g. OOD compositional prompts). Required unless --build-prompts is used.",
     )
     v2_phase0.add_argument(
-        "--prompts", type=Path,
-        help="JSONL prompt file (e.g. OOD compositional prompts). Required unless --build-prompts is used."
+        "--dataset", required=True, type=Path, help="Training dataset directory (must contain training_manifest.jsonl)."
     )
     v2_phase0.add_argument(
-        "--dataset", required=True, type=Path,
-        help="Training dataset directory (must contain training_manifest.jsonl)."
+        "--presets", default="v1,v1.1", help="Comma-separated presets, e.g. 'v1,v1.1'. Default: v1,v1.1."
     )
     v2_phase0.add_argument(
-        "--presets", default="v1,v1.1",
-        help="Comma-separated presets, e.g. 'v1,v1.1'. Default: v1,v1.1."
-    )
-    v2_phase0.add_argument(
-        "--seeds", default="20260723,20260724,20260725",
-        help="Comma-separated integer seeds. Default: 20260723,20260724,20260725."
+        "--seeds",
+        default="20260723,20260724,20260725",
+        help="Comma-separated integer seeds. Default: 20260723,20260724,20260725.",
     )
     v2_phase0.add_argument("--max-samples", type=int, default=96)
     v2_phase0.add_argument("--device", default="cpu")
     v2_phase0.add_argument("--batch-size", type=int, default=16)
     v2_phase0.add_argument(
-        "--include-ablations", action="store_true", default=False,
-        help="Include null-field ablation cells."
+        "--include-ablations", action="store_true", default=False, help="Include null-field ablation cells."
     )
     v2_phase0.add_argument(
-        "--null-field-sets", default="",
-        help="Comma-separated null-field groups, e.g. 'colors,object_id,category'."
+        "--null-field-sets", default="", help="Comma-separated null-field groups, e.g. 'colors,object_id,category'."
     )
     v2_phase0.add_argument(
-        "--factored-grid", default="",
-        help="Grid string, e.g. 'base=1.5,2.0,2.5;color=2.0,3.0,4.5,6.0'."
+        "--factored-grid", default="", help="Grid string, e.g. 'base=1.5,2.0,2.5;color=2.0,3.0,4.5,6.0'."
     )
     v2_phase0.add_argument(
-        "--skip-sampling-if-exists", action="store_true", default=False,
-        help="Skip cells whose output directories already exist."
+        "--skip-sampling-if-exists",
+        action="store_true",
+        default=False,
+        help="Skip cells whose output directories already exist.",
     )
     v2_phase0.add_argument(
-        "--faithfulness-max-sources", type=int, default=0,
-        help="Source sprites for prompt-faithfulness. 0 uses all."
+        "--faithfulness-max-sources", type=int, default=0, help="Source sprites for prompt-faithfulness. 0 uses all."
     )
     v2_phase0.add_argument(
-        "--no-contact-sheets", action="store_true", default=False,
-        help="Skip contact sheet generation for faster evaluation."
+        "--no-contact-sheets",
+        action="store_true",
+        default=False,
+        help="Skip contact sheet generation for faster evaluation.",
     )
     v2_phase0.add_argument(
-        "--dry-run", action="store_true", default=False,
-        help="Print planned run cells without executing."
+        "--dry-run", action="store_true", default=False, help="Print planned run cells without executing."
     )
     v2_phase0.add_argument(
-        "--report-only", action="store_true", default=False,
-        help="Harvest existing run outputs and write summary reports without sampling."
+        "--report-only",
+        action="store_true",
+        default=False,
+        help="Harvest existing run outputs and write summary reports without sampling.",
     )
     v2_phase0.add_argument(
-        "--allow-partial-report", action="store_true", default=False,
-        help="When --report-only, allow reports from partial/missing run outputs."
+        "--allow-partial-report",
+        action="store_true",
+        default=False,
+        help="When --report-only, allow reports from partial/missing run outputs.",
     )
     v2_phase0.add_argument(
-        "--build-prompts", action="store_true", default=False,
-        help="Build eval prompts from the dataset manifest instead of using --prompts."
+        "--build-prompts",
+        action="store_true",
+        default=False,
+        help="Build eval prompts from the dataset manifest instead of using --prompts.",
     )
     v2_phase0.add_argument(
-        "--prompt-count", type=int, default=384,
-        help="Target prompt count when --build-prompts is used. Default: 384."
+        "--prompt-count", type=int, default=384, help="Target prompt count when --build-prompts is used. Default: 384."
     )
     v2_phase0.add_argument(
-        "--prompt-seed", type=int, default=20260706,
-        help="Seed for prompt building when --build-prompts is used. Default: 20260706."
+        "--prompt-seed",
+        type=int,
+        default=20260706,
+        help="Seed for prompt building when --build-prompts is used. Default: 20260706.",
     )
     v2_phase0.add_argument(
-        "--speed-optimizations", action="store_true", default=True, dest="speed_optimizations",
+        "--speed-optimizations",
+        action="store_true",
+        default=True,
+        dest="speed_optimizations",
         help="Enable cuDNN autotuning + TF32 for sampling (CUDA only; no-op on CPU). "
         "On by default since this harness resamples the same checkpoint/shape across "
-        "many cells and seeds; use --no-speed-optimizations for the plain numeric path."
+        "many cells and seeds; use --no-speed-optimizations for the plain numeric path.",
     )
     v2_phase0.add_argument(
-        "--no-speed-optimizations", action="store_false", dest="speed_optimizations",
+        "--no-speed-optimizations",
+        action="store_false",
+        dest="speed_optimizations",
     )
     v2_phase0.add_argument(
-        "--eval-profile", default="all",
+        "--eval-profile",
+        default="all",
         choices=["all", "ood_core", "ood_plus_grid"],
         help="Evaluation profile. 'all' includes all prompt families. "
-             "'ood_core' excludes in-distribution anchors. Default: all."
+        "'ood_core' excludes in-distribution anchors. Default: all.",
     )
     v2_phase0.add_argument(
-        "--profile-weighting", default="family",
+        "--profile-weighting",
+        default="family",
         choices=["sample", "family"],
         help="Profile weighting method. 'family' gives equal weight to each prompt family. "
-             "'sample' weights by sample count. Default: family."
+        "'sample' weights by sample count. Default: family.",
     )
 
     build_eval_prompts = subparsers.add_parser(
@@ -1115,7 +1157,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     monitor.add_argument("--dir", required=True, type=Path, dest="root", help="Run dir or experiment dir to watch.")
     monitor.add_argument("--interval", type=float, default=2.0, help="Seconds between refreshes.")
-    monitor.add_argument("--html", type=Path, default=None, dest="html_path", help="Also write an auto-refreshing HTML dashboard.")
+    monitor.add_argument(
+        "--html", type=Path, default=None, dest="html_path", help="Also write an auto-refreshing HTML dashboard."
+    )
     monitor.add_argument("--once", action="store_true", help="Render a single snapshot and exit.")
     monitor.add_argument("--no-rich", action="store_true", help="Force plain-text output.")
 
@@ -1331,7 +1375,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
             kwargs = _parsed_config_kwargs(parsed)
             dropout_rates = _parse_dropout_rates(kwargs.pop("structured_field_dropout_rates", None))
-            report = run_challenger_training(ChallengerTrainConfig(**kwargs, structured_field_dropout_rates=dropout_rates))
+            report = run_challenger_training(
+                ChallengerTrainConfig(**kwargs, structured_field_dropout_rates=dropout_rates)
+            )
             print(f"Initial train loss: {report['initial_train_loss']:.6f}")
             print(f"Final train loss: {report['final_train_loss']:.6f}")
             if report["val_loss"] is not None:
@@ -1550,7 +1596,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         elif parsed.subcommand == "run-v2-phase0-eval":
             from spritelab.training.v2_phase0_eval import (
                 V2Phase0EvalConfig,
-                parse_factored_grid,
                 parse_null_field_sets,
                 parse_presets,
                 parse_seeds,

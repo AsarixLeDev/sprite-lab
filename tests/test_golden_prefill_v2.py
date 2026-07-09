@@ -1,12 +1,10 @@
-import json
 
 from _harvest_testdata import make_sprite_png
-
 from spritelab.harvest.assisted_golden import (
     AssistedGoldenLabel,
     append_golden_label,
-    build_label_v2_prefilled_candidates,
     build_assisted_golden_label,
+    build_label_v2_prefilled_candidates,
     format_golden_prefill_report,
     summarize_golden_prefill_records,
 )

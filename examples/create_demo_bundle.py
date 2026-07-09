@@ -26,12 +26,12 @@ def build_demo_bundle() -> SpriteBundle:
 
     palette = np.array(
         [
-            [0, 0, 0],        # dummy transparent slot
-            [34, 32, 52],     # outline
-            [69, 40, 60],     # shadow
-            [130, 76, 98],    # midtone
+            [0, 0, 0],  # dummy transparent slot
+            [34, 32, 52],  # outline
+            [69, 40, 60],  # shadow
+            [130, 76, 98],  # midtone
             [238, 195, 154],  # highlight
-            [91, 192, 235],   # accent
+            [91, 192, 235],  # accent
         ],
         dtype=np.uint8,
     )

@@ -110,7 +110,9 @@ def test_manifest_vocab_and_config_are_written(tmp_path) -> None:
         TrainingExportConfig(bundle_root=bundles, curation_path=curation, output_dir=tmp_path / "export")
     )
 
-    manifest_line = json.loads((tmp_path / "export" / "manifest_train.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    manifest_line = json.loads(
+        (tmp_path / "export" / "manifest_train.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
     vocab = json.loads((tmp_path / "export" / "vocab.json").read_text(encoding="utf-8"))
     config = json.loads((tmp_path / "export" / "export_config.json").read_text(encoding="utf-8"))
 
@@ -130,7 +132,9 @@ def test_same_seed_produces_same_split(tmp_path) -> None:
         TrainingExportConfig(bundle_root=bundles, curation_path=curation, output_dir=tmp_path / "right", seed=42)
     )
 
-    assert _manifest_ids(tmp_path / "left" / "manifest_train.jsonl") == _manifest_ids(tmp_path / "right" / "manifest_train.jsonl")
+    assert _manifest_ids(tmp_path / "left" / "manifest_train.jsonl") == _manifest_ids(
+        tmp_path / "right" / "manifest_train.jsonl"
+    )
 
 
 def test_grouped_duplicates_do_not_cross_splits(tmp_path) -> None:

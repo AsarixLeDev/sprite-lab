@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -49,7 +50,7 @@ class SpriteMetadata:
         return data
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "SpriteMetadata":
+    def from_dict(cls, data: Mapping[str, Any]) -> SpriteMetadata:
         """Build metadata from a dictionary loaded from JSON."""
 
         copied = dict(data)

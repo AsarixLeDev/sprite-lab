@@ -42,8 +42,7 @@ class OverfitSubsetSelection:
             "missing_sprite_ids": list(self.missing_sprite_ids),
             "categories": dict(sorted(Counter(_row_category(row) for row in first_by_id.values()).items())),
             "object_names": {
-                sprite_id: str(first_by_id.get(sprite_id, {}).get("object_name") or "")
-                for sprite_id in self.sprite_ids
+                sprite_id: str(first_by_id.get(sprite_id, {}).get("object_name") or "") for sprite_id in self.sprite_ids
             },
         }
 
@@ -83,11 +82,7 @@ def select_overfit_subset(
 ) -> OverfitSubsetSelection:
     """Select a deterministic set of sprite IDs and matching manifest rows."""
 
-    split_rows = [
-        dict(row)
-        for row in records
-        if split is None or str(row.get("split", "")) == str(split)
-    ]
+    split_rows = [dict(row) for row in records if split is None or str(row.get("split", "")) == str(split)]
     first_by_id = _first_rows_by_sprite_id(split_rows)
 
     requested_count = None if count is None else max(0, int(count))

@@ -12,14 +12,14 @@ from spritelab.dataset_maker.exporter import (
     DatasetMakerExportResult,
     export_dataset_from_imported_sprites,
 )
-from spritelab.dataset_maker.importer import ImportOptions, ImportedSprite, import_png_as_dataset_item
+from spritelab.dataset_maker.importer import ImportedSprite, ImportOptions, import_png_as_dataset_item
 from spritelab.dataset_maker.model import DatasetMakerItem, normalize_sprite_id
 from spritelab.harvest.archive import extract_archive
 from spritelab.harvest.autolabel import merge_auto_labels, suggest_metadata_from_path
-from spritelab.harvest.download import compute_sha256, download_file
+from spritelab.harvest.download import download_file
 from spritelab.harvest.extract import HarvestCandidate, discover_png_candidates, filter_candidate_basic
 from spritelab.harvest.sheets import SheetSliceConfig, center_pad_to_32, looks_like_sprite_sheet, slice_sheet_to_pngs
-from spritelab.harvest.sources import SourceRecord, is_license_allowed_for_training, source_warnings
+from spritelab.harvest.sources import SourceRecord, is_license_allowed_for_training
 
 
 @dataclass(frozen=True)
@@ -71,19 +71,13 @@ def harvest_source_to_imported_sprites(
         if size == (32, 32):
             final_pngs.append((candidate, candidate.extracted_path, []))
         elif (
-            options.slice_sheets
-            and options.sheet_config.enabled
-            and looks_like_sprite_sheet(candidate.extracted_path)
+            options.slice_sheets and options.sheet_config.enabled and looks_like_sprite_sheet(candidate.extracted_path)
         ):
             tile_dir = sliced_dir / candidate.candidate_id
             tiles = slice_sheet_to_pngs(candidate.extracted_path, tile_dir, options.sheet_config)
             for tile in tiles:
                 final_pngs.append((candidate, tile, []))
-        elif (
-            options.allow_center_pad_to_32
-            and candidate.width <= 32
-            and candidate.height <= 32
-        ):
+        elif options.allow_center_pad_to_32 and candidate.width <= 32 and candidate.height <= 32:
             padded = center_pad_to_32(
                 candidate.extracted_path,
                 padded_dir / f"{candidate.candidate_id}.png",
@@ -153,8 +147,10 @@ def apply_harvest_policy(
             item = _with_status(item, "rejected")
         elif policy.quarantine_unknown_license and not is_license_allowed_for_training(license_name):
             item = _with_status(item, "quarantine")
-        elif policy.quarantine_low_qwen_confidence and _qwen_confidence(sprite) is not None and (
-            _qwen_confidence(sprite) < policy.qwen_confidence_threshold
+        elif (
+            policy.quarantine_low_qwen_confidence
+            and _qwen_confidence(sprite) is not None
+            and (_qwen_confidence(sprite) < policy.qwen_confidence_threshold)
         ):
             item = _with_status(item, "quarantine")
         elif valid and (
@@ -187,11 +183,7 @@ def export_harvested_dataset(
     if not accepted:
         raise ValueError("no accepted sprites to export.")
 
-    blocked = [
-        sprite
-        for sprite in accepted
-        if not is_license_allowed_for_training(sprite.source.license.license)
-    ]
+    blocked = [sprite for sprite in accepted if not is_license_allowed_for_training(sprite.source.license.license)]
     if blocked and not allow_unknown_license:
         offenders = sorted({f"{s.source.source_id} ({s.source.license.license})" for s in blocked})
         raise ValueError(
@@ -256,9 +248,7 @@ def _resolve_source_root(source: SourceRecord, work_dir: Path) -> Path:
         if not (extracted.exists() and any(extracted.iterdir())):
             extract_archive(archive_path, extracted, overwrite=True)
         return extracted
-    raise ValueError(
-        f"{source.source_id}: source has no local_root_path, local_archive_path, or download_url."
-    )
+    raise ValueError(f"{source.source_id}: source has no local_root_path, local_archive_path, or download_url.")
 
 
 def _apply_source_metadata(

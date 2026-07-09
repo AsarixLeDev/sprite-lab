@@ -40,7 +40,9 @@ def build_pack_drilldown(
     semantic_summary = _semantic_summary(run_path, prediction_path, predictions)
     objects = Counter(str(_safe(record).get("object_name") or "(empty)") for record in predictions)
     categories = Counter(str(_safe(record).get("category") or "unknown") for record in predictions)
-    author_examples = _examples(predictions, lambda record: _contains_source_author_token(str(_safe(record).get("object_name", ""))))
+    author_examples = _examples(
+        predictions, lambda record: _contains_source_author_token(str(_safe(record).get("object_name", "")))
+    )
     sheet_examples = _examples(predictions, lambda record: _is_sheet_coordinate(record))
     review_examples = _examples(predictions, _is_review)
     auto_examples = _examples(predictions, is_safe_auto_prediction)
@@ -76,7 +78,11 @@ def build_pack_drilldown(
         "top_object_names": dict(objects.most_common(20)),
         "top_categories": dict(categories.most_common(20)),
         "top_source_author_token_objects": dict(
-            Counter(str(_safe(record).get("object_name") or "") for record in predictions if _contains_source_author_token(str(_safe(record).get("object_name", "")))).most_common(20)
+            Counter(
+                str(_safe(record).get("object_name") or "")
+                for record in predictions
+                if _contains_source_author_token(str(_safe(record).get("object_name", "")))
+            ).most_common(20)
         ),
         "examples_that_should_stay_review": review_examples[:10],
         "examples_that_could_be_auto_trusted": auto_examples[:10],
@@ -183,7 +189,9 @@ def _fix_classes(
     return _dedupe(fixes)
 
 
-def _semantic_summary(run_path: Path, prediction_path: Path, predictions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def _semantic_summary(
+    run_path: Path, prediction_path: Path, predictions: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
     if predictions and any(isinstance(record.get("semantic_v3"), Mapping) for record in predictions):
         return summarize_semantic_v3_records(predictions)
     semantic_path = prediction_path.with_name(f"{prediction_path.stem}_semantic_v3.jsonl")

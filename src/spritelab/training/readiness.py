@@ -48,7 +48,9 @@ def build_training_readiness_report(
     if accepted_count == 0:
         issues.append(ReadinessIssue("error", "NO_ACCEPTED_SPRITES", "No accepted sprites are available."))
     if accepted_count > 0 and exported_count == 0:
-        issues.append(ReadinessIssue("error", "ZERO_EXPORTED_SPRITES", "Accepted sprites exist but zero sprites were exported."))
+        issues.append(
+            ReadinessIssue("error", "ZERO_EXPORTED_SPRITES", "Accepted sprites exist but zero sprites were exported.")
+        )
     for sprite_id, reason in invalid_accepted:
         issues.append(ReadinessIssue("error", "INVALID_ACCEPTED_BUNDLE", reason, sprite_id=sprite_id))
     for sprite_id, left_split, right_split in duplicate_leakage:
@@ -88,27 +90,49 @@ def build_training_readiness_report(
             issues.append(ReadinessIssue("error", "BUNDLE_ID_COLLISION", "Metadata or bundle ID collision detected."))
 
     if exported_count < 500:
-        issues.append(ReadinessIssue("warning", "TINY_DATASET", "Fewer than 500 sprites exported; useful mainly for smoke tests."))
+        issues.append(
+            ReadinessIssue("warning", "TINY_DATASET", "Fewer than 500 sprites exported; useful mainly for smoke tests.")
+        )
     elif exported_count < 2000:
-        issues.append(ReadinessIssue("warning", "SMALL_DATASET", "Fewer than 2000 sprites exported; likely narrow generation coverage."))
+        issues.append(
+            ReadinessIssue(
+                "warning", "SMALL_DATASET", "Fewer than 2000 sprites exported; likely narrow generation coverage."
+            )
+        )
 
     if records and not any(bool(record.get("dedupe_report_provided")) for record in records):
-        issues.append(ReadinessIssue("warning", "NO_DEDUPE_REPORT", "No dedupe report was provided; split cannot protect against unknown near-duplicate leakage."))
+        issues.append(
+            ReadinessIssue(
+                "warning",
+                "NO_DEDUPE_REPORT",
+                "No dedupe report was provided; split cannot protect against unknown near-duplicate leakage.",
+            )
+        )
     if records and not any(bool(record.get("quality_report_provided")) for record in records):
         issues.append(ReadinessIssue("warning", "NO_QUALITY_REPORT", "No quality report was provided."))
 
     if records:
         unknown_categories = sum(1 for record in records if record.get("category") == "unknown")
         if unknown_categories / len(records) > 0.5:
-            issues.append(ReadinessIssue("warning", "MANY_UNKNOWN_CATEGORIES", "More than 50% of exported sprites have unknown category."))
+            issues.append(
+                ReadinessIssue(
+                    "warning", "MANY_UNKNOWN_CATEGORIES", "More than 50% of exported sprites have unknown category."
+                )
+            )
         missing_roles = sum(1 for record in records if not bool(record.get("has_role_map")))
         if missing_roles / len(records) > 0.5:
-            issues.append(ReadinessIssue("warning", "MANY_MISSING_ROLE_MAPS", "More than 50% of exported sprites have no original role_map."))
+            issues.append(
+                ReadinessIssue(
+                    "warning", "MANY_MISSING_ROLE_MAPS", "More than 50% of exported sprites have no original role_map."
+                )
+            )
         category_counts = Counter(str(record.get("category", "unknown")) for record in records)
         if category_counts:
             most_common = category_counts.most_common(1)[0][1]
             if len(category_counts) > 1 and most_common / len(records) > 0.9:
-                issues.append(ReadinessIssue("warning", "IMBALANCED_CATEGORIES", "Category distribution is very imbalanced."))
+                issues.append(
+                    ReadinessIssue("warning", "IMBALANCED_CATEGORIES", "Category distribution is very imbalanced.")
+                )
 
     split_counts = {
         "train": len(split_assignment.train),
@@ -136,7 +160,9 @@ def build_training_readiness_report(
 
     status_counts = Counter(str(record.get("curation_status", "accepted")) for record in records)
     if status_counts.get("needs_fix", 0) + status_counts.get("quarantine", 0) > exported_count:
-        issues.append(ReadinessIssue("warning", "HIGH_UNSTABLE_CURATION_COUNT", "Many sprites are quarantine or needs_fix."))
+        issues.append(
+            ReadinessIssue("warning", "HIGH_UNSTABLE_CURATION_COUNT", "Many sprites are quarantine or needs_fix.")
+        )
 
     counts = {
         "accepted": int(accepted_count),
@@ -184,7 +210,11 @@ def format_training_readiness_markdown(report: TrainingReadinessReport) -> str:
     lines.extend(["", "## Warnings", ""])
     lines.extend(_issue_lines(warnings))
     lines.extend(["", "## Split safety", ""])
-    lines.append("- Duplicate leakage detected." if any(issue.code == "DUPLICATE_LEAKAGE" for issue in errors) else "- No duplicate leakage was reported.")
+    lines.append(
+        "- Duplicate leakage detected."
+        if any(issue.code == "DUPLICATE_LEAKAGE" for issue in errors)
+        else "- No duplicate leakage was reported."
+    )
     lines.extend(["", "## Palette readiness", ""])
     lines.append(f"- Palette size distribution: {_format_distribution(report.palette_size_counts)}")
     high_entropy = [issue for issue in warnings if issue.code == "HIGH_SLOT_ROLE_ENTROPY"]
@@ -213,7 +243,9 @@ def build_readiness_report_from_export(export_dir: Path) -> TrainingReadinessRep
         train=tuple(record["sprite_id"] for record in records if record.get("split") == "train"),
         val=tuple(record["sprite_id"] for record in records if record.get("split") == "val"),
         test=tuple(record["sprite_id"] for record in records if record.get("split") == "test"),
-        group_by_sprite_id={str(record["sprite_id"]): str(record.get("dedupe_group") or record["sprite_id"]) for record in records},
+        group_by_sprite_id={
+            str(record["sprite_id"]): str(record.get("dedupe_group") or record["sprite_id"]) for record in records
+        },
     )
     palette_report = _load_palette_report(export_path / "palette_semantics_report.json")
     config = _load_export_config(export_path / "export_config.json")
@@ -243,8 +275,7 @@ def _issue_lines(issues: Sequence[ReadinessIssue]) -> list[str]:
     if not issues:
         return ["- None"]
     return [
-        f"- `{issue.code}`{f' ({issue.sprite_id})' if issue.sprite_id else ''}: {issue.message}"
-        for issue in issues
+        f"- `{issue.code}`{f' ({issue.sprite_id})' if issue.sprite_id else ''}: {issue.message}" for issue in issues
     ]
 
 

@@ -321,6 +321,7 @@ def _farthest_weighted_index(colors: np.ndarray, weights: np.ndarray, centers: n
     scores = distances * np.sqrt(weights)
     return int(np.argmax(scores))
 
+
 def _metadata_with_quantization(metadata: SpriteMetadata, result: QuantizationResult) -> SpriteMetadata:
     metadata_data = copy.deepcopy(metadata.to_dict())
     metadata_data["width"] = SPRITE_WIDTH

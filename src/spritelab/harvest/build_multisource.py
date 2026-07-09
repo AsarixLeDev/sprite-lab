@@ -229,9 +229,7 @@ def _write_reports(report: BuildMultisourceReport, output_dir: Path) -> None:
     (output_dir / "build_multisource_report.json").write_text(
         json.dumps(report.to_json_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (output_dir / "build_multisource_report.md").write_text(
-        format_build_multisource_report(report), encoding="utf-8"
-    )
+    (output_dir / "build_multisource_report.md").write_text(format_build_multisource_report(report), encoding="utf-8")
 
 
 def _is_exported_dataset(dataset_dir: Path) -> bool:

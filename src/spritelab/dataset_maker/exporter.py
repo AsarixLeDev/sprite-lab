@@ -288,8 +288,14 @@ def _manifest_records(sprites: Sequence[_PreparedSprite]) -> list[dict[str, Any]
     for sprite in sorted(sprites, key=lambda value: value.item.sprite_id):
         item = sprite.item
         label_v2 = _label_v2_manifest_metadata(sprite.auto_metadata)
-        safe_prefill = _mapping(sprite.auto_metadata.get("label_v2_safe_prefill")) if isinstance(sprite.auto_metadata, Mapping) else {}
-        semantic_v3 = _mapping(sprite.auto_metadata.get("semantic_v3")) if isinstance(sprite.auto_metadata, Mapping) else {}
+        safe_prefill = (
+            _mapping(sprite.auto_metadata.get("label_v2_safe_prefill"))
+            if isinstance(sprite.auto_metadata, Mapping)
+            else {}
+        )
+        semantic_v3 = (
+            _mapping(sprite.auto_metadata.get("semantic_v3")) if isinstance(sprite.auto_metadata, Mapping) else {}
+        )
         records.append(
             {
                 "sprite_id": item.sprite_id,

@@ -130,8 +130,10 @@ def test_sample_image_items_reads_manifest(tmp_path) -> None:
     Image.new("RGBA", (32, 32), (10, 20, 30, 255)).save(samples_dir / "sprite_0.png")
     manifest = samples_dir / "generated_manifest.jsonl"
     manifest.write_text(
-        json.dumps({"prompt": "red sword", "paths": {"indexed_png": "sprite_0.png"}}) + "\n"
-        + json.dumps({"prompt": "missing", "paths": {"indexed_png": "gone.png"}}) + "\n",
+        json.dumps({"prompt": "red sword", "paths": {"indexed_png": "sprite_0.png"}})
+        + "\n"
+        + json.dumps({"prompt": "missing", "paths": {"indexed_png": "gone.png"}})
+        + "\n",
         encoding="utf-8",
     )
 

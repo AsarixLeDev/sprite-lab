@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 import pytest
-from _semantic_dataset import default_specs, make_semantic_dataset
 
+from _semantic_dataset import default_specs, make_semantic_dataset
 from spritelab.harvest.cli import main
 
 
@@ -23,11 +23,16 @@ def test_build_training_manifest_cli(tmp_path: Path, capsys) -> None:
     main(
         [
             "build-training-manifest",
-            "--dataset", str(dataset),
-            "--out", str(out),
-            "--caption-policy", "mixed",
-            "--variants-per-sprite", "8",
-            "--seed", "4962026",
+            "--dataset",
+            str(dataset),
+            "--out",
+            str(out),
+            "--caption-policy",
+            "mixed",
+            "--variants-per-sprite",
+            "8",
+            "--seed",
+            "4962026",
         ]
     )
     output = capsys.readouterr().out
@@ -50,8 +55,10 @@ def test_build_training_manifest_per_split(tmp_path: Path) -> None:
     main(
         [
             "build-training-manifest",
-            "--dataset", str(dataset),
-            "--variants-per-sprite", "3",
+            "--dataset",
+            str(dataset),
+            "--variants-per-sprite",
+            "3",
             "--per-split",
         ]
     )

@@ -200,7 +200,17 @@ def _summarize_group(samples: list[Mapping[str, Any]], key: str) -> dict[str, An
 def _distribution(metrics: list[Mapping[str, Any]], key: str) -> dict[str, float | int | None]:
     values = _numeric_values(metrics, key)
     if not values:
-        return {"count": 0, "min": None, "p05": None, "p25": None, "median": None, "mean": None, "p75": None, "p95": None, "max": None}
+        return {
+            "count": 0,
+            "min": None,
+            "p05": None,
+            "p25": None,
+            "median": None,
+            "mean": None,
+            "p75": None,
+            "p95": None,
+            "max": None,
+        }
     return {
         "count": len(values),
         "min": float(min(values)),
@@ -244,7 +254,9 @@ def _border_touch_examples(samples: list[Mapping[str, Any]], limit: int = 20) ->
     return [_example(sample) for sample in touched[:limit]]
 
 
-def _rank_examples(samples: list[Mapping[str, Any]], metric: str, *, reverse: bool, limit: int = 20) -> list[dict[str, Any]]:
+def _rank_examples(
+    samples: list[Mapping[str, Any]], metric: str, *, reverse: bool, limit: int = 20
+) -> list[dict[str, Any]]:
     ranked = sorted(
         samples,
         key=lambda sample: float(sample.get("metrics", {}).get(metric) or 0.0),
@@ -304,9 +316,13 @@ def _compare_with_generated(
         errors.append("generated review report has no samples list")
         return None
 
-    source_metrics = [sample.get("metrics", {}) for sample in source_samples if isinstance(sample.get("metrics"), Mapping)]
+    source_metrics = [
+        sample.get("metrics", {}) for sample in source_samples if isinstance(sample.get("metrics"), Mapping)
+    ]
     generated_metrics = [
-        sample.get("metrics", {}) for sample in generated_samples if isinstance(sample, Mapping) and isinstance(sample.get("metrics"), Mapping)
+        sample.get("metrics", {})
+        for sample in generated_samples
+        if isinstance(sample, Mapping) and isinstance(sample.get("metrics"), Mapping)
     ]
     return {
         "generated_dir": str(generated_dir),
@@ -466,13 +482,37 @@ def format_dataset_framing_markdown(report: Mapping[str, Any]) -> str:
         )
 
     examples = report.get("examples") if isinstance(report.get("examples"), Mapping) else {}
-    lines.extend(["", "## Worst Border-Touch Examples", "", "| Sprite | Split | Category | Base object | Alpha | BBox |", "|---|---|---|---|---:|---:|"])
+    lines.extend(
+        [
+            "",
+            "## Worst Border-Touch Examples",
+            "",
+            "| Sprite | Split | Category | Base object | Alpha | BBox |",
+            "|---|---|---|---|---:|---:|",
+        ]
+    )
     for example in (examples.get("worst_border_touch") or [])[:10]:
         lines.append(_example_row(example))
-    lines.extend(["", "## Largest Alpha-Coverage Examples", "", "| Sprite | Split | Category | Base object | Alpha | BBox |", "|---|---|---|---|---:|---:|"])
+    lines.extend(
+        [
+            "",
+            "## Largest Alpha-Coverage Examples",
+            "",
+            "| Sprite | Split | Category | Base object | Alpha | BBox |",
+            "|---|---|---|---|---:|---:|",
+        ]
+    )
     for example in (examples.get("largest_alpha_coverage") or [])[:10]:
         lines.append(_example_row(example))
-    lines.extend(["", "## Smallest Alpha-Coverage Examples", "", "| Sprite | Split | Category | Base object | Alpha | BBox |", "|---|---|---|---|---:|---:|"])
+    lines.extend(
+        [
+            "",
+            "## Smallest Alpha-Coverage Examples",
+            "",
+            "| Sprite | Split | Category | Base object | Alpha | BBox |",
+            "|---|---|---|---|---:|---:|",
+        ]
+    )
     for example in (examples.get("smallest_alpha_coverage") or [])[:10]:
         lines.append(_example_row(example))
 

@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from _harvest_testdata import make_sprite_png
-
 from spritelab.harvest.build_semantic_dataset import (
     BuildError,
     build_semantic_dataset,
@@ -36,13 +35,20 @@ def _make_run(tmp_path: Path, *, run_name: str = "tiny_pack") -> Path:
     main(
         [
             "import-dir",
-            "--dir", str(png_dir),
-            "--run-name", run_name,
-            "--run-root", str(run_root),
-            "--source-id", "tiny_source",
-            "--source-name", "Tiny Source",
-            "--license", "cc0",
-            "--author", "Tester",
+            "--dir",
+            str(png_dir),
+            "--run-name",
+            run_name,
+            "--run-root",
+            str(run_root),
+            "--source-id",
+            "tiny_source",
+            "--source-name",
+            "Tiny Source",
+            "--license",
+            "cc0",
+            "--author",
+            "Tester",
             "--user-confirmed-license",
         ]
     )
@@ -187,9 +193,7 @@ def test_auto_only_excludes_review_records(tmp_path: Path) -> None:
     records[0].setdefault("label_quality", {})
     records[0]["label_quality"]["needs_review"] = True
     records[0]["needs_review"] = True
-    suggestions_path.write_text(
-        "\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n", encoding="utf-8"
-    )
+    suggestions_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n", encoding="utf-8")
 
     report = build_semantic_dataset(
         run_dir,
@@ -211,7 +215,11 @@ def test_auto_only_excludes_review_records(tmp_path: Path) -> None:
 
 def test_auto_only_does_not_export_stale_accepted_without_current_apply(tmp_path: Path) -> None:
     run_dir = _make_run(tmp_path)
-    imported = [json.loads(line) for line in (run_dir / "imported.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    imported = [
+        json.loads(line)
+        for line in (run_dir / "imported.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     stale = imported[0]
     stale["status"] = "accepted"
     stale["auto_metadata"] = {
@@ -248,7 +256,11 @@ def test_auto_only_does_not_export_stale_accepted_without_current_apply(tmp_path
 
 def test_auto_only_exports_only_current_applied_records(tmp_path: Path) -> None:
     run_dir = _make_run(tmp_path)
-    imported = [json.loads(line) for line in (run_dir / "imported.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    imported = [
+        json.loads(line)
+        for line in (run_dir / "imported.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     imported[0]["status"] = "accepted"
     imported[0]["auto_metadata"] = {
         "label_v2_applied": True,
@@ -261,8 +273,14 @@ def test_auto_only_exports_only_current_applied_records(tmp_path: Path) -> None:
         "\n".join(json.dumps(record, sort_keys=True) for record in imported) + "\n",
         encoding="utf-8",
     )
-    suggestions = [json.loads(line) for line in (run_dir / "label_v2_suggestions.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
-    (run_dir / "label_v2_suggestions.jsonl").write_text(json.dumps(suggestions[1], sort_keys=True) + "\n", encoding="utf-8")
+    suggestions = [
+        json.loads(line)
+        for line in (run_dir / "label_v2_suggestions.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    (run_dir / "label_v2_suggestions.jsonl").write_text(
+        json.dumps(suggestions[1], sort_keys=True) + "\n", encoding="utf-8"
+    )
 
     report = build_semantic_dataset(
         run_dir,

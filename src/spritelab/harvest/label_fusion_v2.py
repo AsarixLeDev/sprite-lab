@@ -120,6 +120,7 @@ class _CandidateMatch:
     kind: str
     score: float = 1.0
 
+
 _KNOWN_HALLUCINATION_OBJECTS = {
     "gold_bar",
     "gold_coin",
@@ -214,7 +215,12 @@ def fuse_label_v2(
     candidate_match = _candidate_match(vlm, candidates)
     alternative_candidate_match = _alternative_candidate_match(vlm, candidates)
     known_hallucination = _is_known_hallucination(vlm)
-    if known_hallucination and prefix_family_trusted and candidate_match is not None and candidate_match.kind == "primary":
+    if (
+        known_hallucination
+        and prefix_family_trusted
+        and candidate_match is not None
+        and candidate_match.kind == "primary"
+    ):
         known_hallucination = False
     if known_hallucination:
         flags.append("vlm_known_hallucination")
@@ -236,7 +242,9 @@ def fuse_label_v2(
             if alternative_candidate_match is not None:
                 flags.append("vlm_alternative_candidate_match")
             if candidate_match.kind == "alternative":
-                if not generic_alternative_candidate and not _vlm_primary_is_compatible_with_candidate_family(vlm, candidates, profile):
+                if not generic_alternative_candidate and not _vlm_primary_is_compatible_with_candidate_family(
+                    vlm, candidates, profile
+                ):
                     flags.append("vlm_outside_candidate_family")
                     candidate_conflict = True
             else:
@@ -249,7 +257,9 @@ def fuse_label_v2(
                 candidate_conflict = True
     if candidate_conflict:
         flags.append("needs_review_candidate_conflict")
-        conflict_reasons.append(f"candidate_family: vlm={vlm.object_name if vlm else ''}, candidates={','.join(candidates[:8])}")
+        conflict_reasons.append(
+            f"candidate_family: vlm={vlm.object_name if vlm else ''}, candidates={','.join(candidates[:8])}"
+        )
 
     agreement = _agreement_score(filename, vlm)
     if filename is not None and vlm is not None:
@@ -312,7 +322,13 @@ def fuse_label_v2(
             review_priority = 0.35 if food_currency_hallucination else 0.5 if severe else 0.25
         return _result(safe, filename, vlm, bucket, needs_review, flags, conflict_reasons, provenance, review_priority)
 
-    if filename is not None and vlm is not None and agreement >= thresholds.agreement_token_f1 and not vlm_degenerate and not candidate_conflict:
+    if (
+        filename is not None
+        and vlm is not None
+        and agreement >= thresholds.agreement_token_f1
+        and not vlm_degenerate
+        and not candidate_conflict
+    ):
         if prefix_family_trusted:
             if _prefix_family_agreement_can_auto(
                 filename,
@@ -341,14 +357,26 @@ def fuse_label_v2(
                     0.12,
                 )
         else:
-            safe = _merged_label(filename, vlm, visual_facts, preferred=filename if filename.confidence >= vlm.confidence else vlm)
+            safe = _merged_label(
+                filename, vlm, visual_facts, preferred=filename if filename.confidence >= vlm.confidence else vlm
+            )
             provenance = {
                 "object_name": "filename_rules_v2+vlm_descriptor",
                 "category": "filename_rules_v2+vlm_descriptor",
                 "tags": ["filename_rules_v2", "deterministic_visual_facts", "vlm_descriptor"],
                 "description": "vlm_descriptor" if vlm.short_description else "filename_rules_v2",
             }
-            return _result(safe, filename, vlm, "fused_automatically", False, [*flags, "vlm_agrees_with_filename"], conflict_reasons, provenance, 0.05)
+            return _result(
+                safe,
+                filename,
+                vlm,
+                "fused_automatically",
+                False,
+                [*flags, "vlm_agrees_with_filename"],
+                conflict_reasons,
+                provenance,
+                0.05,
+            )
 
     candidate_winner = _vlm_candidate_can_win(
         filename,
@@ -369,7 +397,17 @@ def fuse_label_v2(
             "tags": ["vlm_descriptor", "source_candidates", "deterministic_visual_facts"],
             "description": "vlm_descriptor",
         }
-        return _result(safe, filename, vlm, "auto_vlm_candidate_ranked", False, [*flags, "auto_vlm_candidate_ranked"], conflict_reasons, provenance, 0.15)
+        return _result(
+            safe,
+            filename,
+            vlm,
+            "auto_vlm_candidate_ranked",
+            False,
+            [*flags, "auto_vlm_candidate_ranked"],
+            conflict_reasons,
+            provenance,
+            0.15,
+        )
 
     if candidate_conflict:
         safe = _fallback_prefill(filename, vlm, visual_facts, profile=profile)
@@ -391,7 +429,14 @@ def fuse_label_v2(
             0.85,
         )
 
-    if _vlm_can_win(filename, vlm, thresholds, profile=profile, vlm_degenerate=vlm_degenerate, known_hallucination=known_hallucination):
+    if _vlm_can_win(
+        filename,
+        vlm,
+        thresholds,
+        profile=profile,
+        vlm_degenerate=vlm_degenerate,
+        known_hallucination=known_hallucination,
+    ):
         safe = _with_visual_facts(vlm, visual_facts, source="vlm_descriptor")
         provenance = {
             "object_name": "vlm_descriptor",
@@ -399,7 +444,17 @@ def fuse_label_v2(
             "tags": ["vlm_descriptor", "deterministic_visual_facts"],
             "description": "vlm_descriptor",
         }
-        return _result(safe, filename, vlm, "auto_vlm_when_filename_weak", False, [*flags, "auto_vlm_when_filename_weak"], conflict_reasons, provenance, 0.2)
+        return _result(
+            safe,
+            filename,
+            vlm,
+            "auto_vlm_when_filename_weak",
+            False,
+            [*flags, "auto_vlm_when_filename_weak"],
+            conflict_reasons,
+            provenance,
+            0.2,
+        )
 
     safe = _fallback_prefill(filename, vlm, visual_facts, profile=profile)
     if filename is None or filename.confidence < 0.65:
@@ -441,7 +496,9 @@ def _result(
     )
 
 
-def _trusted_filename_wins(filename: LabelSuggestion | None, profile: SourceProfile, thresholds: FusionThresholds) -> bool:
+def _trusted_filename_wins(
+    filename: LabelSuggestion | None, profile: SourceProfile, thresholds: FusionThresholds
+) -> bool:
     if filename is None:
         return False
     return (
@@ -452,7 +509,11 @@ def _trusted_filename_wins(filename: LabelSuggestion | None, profile: SourceProf
 
 
 def _low_information_filename(filename: LabelSuggestion) -> bool:
-    return object_is_generic(filename.object_name) or normalize_object_name(filename.object_name) in _GENERIC_OBJECTS or filename.confidence <= 0.25
+    return (
+        object_is_generic(filename.object_name)
+        or normalize_object_name(filename.object_name) in _GENERIC_OBJECTS
+        or filename.confidence <= 0.25
+    )
 
 
 def _malformed_filename_object(filename: LabelSuggestion, profile: SourceProfile) -> bool:
@@ -492,11 +553,7 @@ def _prefix_family_agreement_can_auto(
     if candidates:
         if candidate_match is not None and candidate_match.kind == "alternative":
             return False
-        return (
-            filename.object_name in candidates
-            or vlm.object_name in candidates
-            or candidate_match is not None
-        )
+        return filename.object_name in candidates or vlm.object_name in candidates or candidate_match is not None
     return _is_known_safe_prefix_family_object(filename.object_name, profile)
 
 
@@ -523,7 +580,9 @@ def _rpg_496_specialization_flags(filename: LabelSuggestion | None) -> tuple[str
     if filename is None:
         return ()
     prefix = "rpg_496_specialization:"
-    return normalize_tags(str(value).removeprefix(prefix) for value in filename.evidence if str(value).startswith(prefix))
+    return normalize_tags(
+        str(value).removeprefix(prefix) for value in filename.evidence if str(value).startswith(prefix)
+    )
 
 
 def _vlm_supports_rpg_496_specialization(filename: LabelSuggestion, vlm: LabelSuggestion, flags: set[str]) -> bool:
@@ -544,11 +603,22 @@ def _vlm_supports_rpg_496_specialization(filename: LabelSuggestion, vlm: LabelSu
     if "rpg_496_vlm_alternative_promoted" in flags:
         return True
     if "rpg_496_color_potion_promoted" in flags:
-        return bool({"potion", "liquid", "bottle", "vial", "flask", "cork", "glass"} & terms) or vlm_object in {"potion", "bottle", "vial", "flask"}
+        return bool({"potion", "liquid", "bottle", "vial", "flask", "cork", "glass"} & terms) or vlm_object in {
+            "potion",
+            "bottle",
+            "vial",
+            "flask",
+        }
     if "rpg_496_shield_shape_override" in flags:
-        return bool({"shield", "shield_shape", "shield_like", "bordered", "wood_grain", "metallic"} & terms) or vlm_object in {"wood", "metal", "shield"}
+        return bool(
+            {"shield", "shield_shape", "shield_like", "bordered", "wood_grain", "metallic"} & terms
+        ) or vlm_object in {"wood", "metal", "shield"}
     if "rpg_496_arrow_variant_promoted" in flags:
-        return prefix == "s" and (family == "bow" or vlm_object in {"bow", "arrow"} or bool({"bow", "arrow", "weapon_shape", "curved"} & terms))
+        return prefix == "s" and (
+            family == "bow"
+            or vlm_object in {"bow", "arrow"}
+            or bool({"bow", "arrow", "weapon_shape", "curved"} & terms)
+        )
     if "rpg_496_filename_variant_promoted" in flags:
         if prefix in {"s", "w"}:
             return True
@@ -563,7 +633,11 @@ def _vlm_supports_rpg_496_specialization(filename: LabelSuggestion, vlm: LabelSu
                 return True
         if filename_object == "fire_feather" and bool({"fire", "flame", "orange"} & terms):
             return True
-        if filename_object == "yellow_ink_bucket" and bool({"yellow"} & terms) and bool({"bucket", "container", "container_like"} & terms):
+        if (
+            filename_object == "yellow_ink_bucket"
+            and bool({"yellow"} & terms)
+            and bool({"bucket", "container", "container_like"} & terms)
+        ):
             return True
         object_parts = set(filename_object.split("_"))
         return bool(object_parts & terms)
@@ -663,7 +737,10 @@ def _safe_from_filename(
         mood=filename.mood,
         dominant_colors=visual_facts.dominant_colors if visual_facts is not None else filename.dominant_colors,
         warnings=filename.warnings,
-        evidence=(*filename.evidence, *((f"vlm_note:{vlm.object_name}",) if conflict and vlm and vlm.object_name else ())),
+        evidence=(
+            *filename.evidence,
+            *((f"vlm_note:{vlm.object_name}",) if conflict and vlm and vlm.object_name else ()),
+        ),
         source_consistency=filename.source_consistency,
         candidate_object_names=filename.candidate_object_names,
     )
@@ -703,7 +780,9 @@ def _merged_label(
         source="label_fusion_v2",
         materials=normalize_tags((*filename.materials, *vlm.materials)),
         mood=normalize_tags((*filename.mood, *vlm.mood)),
-        dominant_colors=visual_facts.dominant_colors if visual_facts is not None else normalize_tags((*filename.dominant_colors, *vlm.dominant_colors)),
+        dominant_colors=visual_facts.dominant_colors
+        if visual_facts is not None
+        else normalize_tags((*filename.dominant_colors, *vlm.dominant_colors)),
         warnings=(*filename.warnings, *vlm.warnings),
         evidence=(*filename.evidence, *vlm.evidence),
         source_consistency=vlm.source_consistency,
@@ -714,7 +793,9 @@ def _merged_label(
     )
 
 
-def _with_visual_facts(suggestion: LabelSuggestion, visual_facts: VisualFacts | None, *, source: str) -> LabelSuggestion:
+def _with_visual_facts(
+    suggestion: LabelSuggestion, visual_facts: VisualFacts | None, *, source: str
+) -> LabelSuggestion:
     tags = list(suggestion.tags)
     if visual_facts is not None:
         tags.extend(visual_facts.dominant_colors)
@@ -803,7 +884,11 @@ def _vlm_can_win(
     if is_prefix_family_trusted(profile) and filename is not None and filename.confidence >= 0.65:
         return False
     filename_confidence = filename.confidence if filename is not None else 0.0
-    return filename_confidence < 0.65 and vlm.confidence >= thresholds.auto_vlm_threshold and vlm.object_name not in _GENERIC_OBJECTS
+    return (
+        filename_confidence < 0.65
+        and vlm.confidence >= thresholds.auto_vlm_threshold
+        and vlm.object_name not in _GENERIC_OBJECTS
+    )
 
 
 def _vlm_candidate_can_win(
@@ -825,7 +910,11 @@ def _vlm_candidate_can_win(
     if candidate_match is None or candidate_conflict:
         return None
     vlm_primary_generic = object_is_generic(vlm.object_name) or vlm.object_name in _GENERIC_OBJECTS
-    if vlm_primary_generic and candidate_match.kind != "primary" and not (is_prefix_family_trusted(profile) and candidate_match.kind == "alternative"):
+    if (
+        vlm_primary_generic
+        and candidate_match.kind != "primary"
+        and not (is_prefix_family_trusted(profile) and candidate_match.kind == "alternative")
+    ):
         return None
     if _profile_category(vlm.category, profile) == "unknown":
         return None
@@ -931,7 +1020,9 @@ def _candidate_objects(filename: LabelSuggestion | None, vlm: LabelSuggestion | 
     return normalize_tags(values)
 
 
-def _food_currency_hallucination(filename: LabelSuggestion | None, vlm: LabelSuggestion | None, profile: SourceProfile) -> bool:
+def _food_currency_hallucination(
+    filename: LabelSuggestion | None, vlm: LabelSuggestion | None, profile: SourceProfile
+) -> bool:
     if filename is None or vlm is None:
         return False
     filename_food = profile.domain == "food" or "food" in filename.tags

@@ -8,14 +8,13 @@ import pytest
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from _semantic_dataset import default_specs, make_semantic_dataset
-
 from spritelab.dataset_maker.training_manifest import build_training_manifest, write_training_manifest
+from spritelab.training.cli import main as train_cli
 from spritelab.training.conditioning import (
     DEFAULT_CONDITIONING_MODE,
     apply_conditioning_mode,
     checkpoint_conditioning_mode,
 )
-from spritelab.training.cli import main as train_cli
 from spritelab.training.tokenization import semantic_strings_from_record
 from spritelab.training.train_generator import GeneratorTrainConfig, run_generator_training
 

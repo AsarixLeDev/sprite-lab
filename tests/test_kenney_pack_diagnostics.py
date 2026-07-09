@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 from _harvest_testdata import make_sprite_png
-
 from spritelab.harvest.label_fusion_v2 import FusionThresholds
 from spritelab.harvest.label_v2_pipeline import build_label_v2_record
 from spritelab.harvest.pack_drilldown import build_pack_drilldown
@@ -23,7 +22,15 @@ def test_kenney_coordinate_and_ui_records_remain_review(tmp_path: Path) -> None:
 def test_kenney_drilldown_reports_low_base_object_coverage_and_manual_seed(tmp_path: Path) -> None:
     run = tmp_path / "harvest_runs" / "kenney_micro_roguelike"
     run.mkdir(parents=True)
-    imported = [{"sprite_id": "r000_c001", "relative_path": "r000_c001.png", "final_png_path": "r000_c001.png", "source_id": "kenney_micro_roguelike", "source_name": "Kenney"}]
+    imported = [
+        {
+            "sprite_id": "r000_c001",
+            "relative_path": "r000_c001.png",
+            "final_png_path": "r000_c001.png",
+            "source_id": "kenney_micro_roguelike",
+            "source_name": "Kenney",
+        }
+    ]
     predictions = [
         {
             "sprite_id": "r000_c001",

@@ -43,10 +43,14 @@ class LabelSuggestion:
         object.__setattr__(self, "warnings", _clean_strings(self.warnings))
         object.__setattr__(self, "evidence", _clean_strings(self.evidence))
         object.__setattr__(self, "source_consistency", _normalize_source_consistency(self.source_consistency))
-        object.__setattr__(self, "alternative_object_names", _normalize_objects(self.alternative_object_names, max_items=3))
+        object.__setattr__(
+            self, "alternative_object_names", _normalize_objects(self.alternative_object_names, max_items=3)
+        )
         object.__setattr__(self, "evidence_for_source", _clean_strings(self.evidence_for_source)[:5])
         object.__setattr__(self, "evidence_against_source", _clean_strings(self.evidence_against_source)[:5])
-        object.__setattr__(self, "candidate_object_names", _normalize_objects(self.candidate_object_names, max_items=40))
+        object.__setattr__(
+            self, "candidate_object_names", _normalize_objects(self.candidate_object_names, max_items=40)
+        )
 
 
 @dataclass(frozen=True)
@@ -98,18 +102,8 @@ def label_suggestion_to_json(suggestion: LabelSuggestion | None) -> dict[str, An
 def label_suggestion_from_json(data: Mapping[str, Any] | None) -> LabelSuggestion | None:
     if not isinstance(data, Mapping):
         return None
-    description = (
-        data.get("short_description")
-        or data.get("visual_description")
-        or data.get("description")
-        or ""
-    )
-    object_name = (
-        data.get("object_name")
-        or data.get("possible_object_name")
-        or data.get("suggested_object_name")
-        or ""
-    )
+    description = data.get("short_description") or data.get("visual_description") or data.get("description") or ""
+    object_name = data.get("object_name") or data.get("possible_object_name") or data.get("suggested_object_name") or ""
     category = data.get("category") or data.get("possible_category") or "unknown"
     tags = data.get("tags")
     if tags is None:

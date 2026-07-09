@@ -93,14 +93,18 @@ _OBJECT_RULES: dict[str, _ObjectRule] = {
     "bread": _ObjectRule("item_icon", ("bread", "food", "consumable"), confidence=0.96),
     "fish": _ObjectRule("item_icon", ("fish", "food", "consumable"), confidence=0.94),
     "meat": _ObjectRule("item_icon", ("meat", "food", "consumable"), confidence=0.94),
-    "potion": _ObjectRule("item_icon", ("potion", "vial", "liquid", "consumable", "magic"), ("glass",), confidence=0.94),
+    "potion": _ObjectRule(
+        "item_icon", ("potion", "vial", "liquid", "consumable", "magic"), ("glass",), confidence=0.94
+    ),
     "vial": _ObjectRule("item_icon", ("vial", "liquid", "consumable"), ("glass",), confidence=0.92),
     "bottle": _ObjectRule("item_icon", ("bottle", "liquid", "consumable"), ("glass",), confidence=0.9),
     "coin": _ObjectRule("item_icon", ("coin", "currency", "treasure"), ("metal",), confidence=0.94),
     "medal": _ObjectRule("item_icon", ("medal", "accessory", "jewelry", "award"), ("metal",), confidence=0.95),
     "necklace": _ObjectRule("item_icon", ("necklace", "accessory", "jewelry"), ("metal",), confidence=0.95),
     "ring": _ObjectRule("item_icon", ("ring", "accessory", "jewelry"), ("metal",), confidence=0.95),
-    "amulet": _ObjectRule("item_icon", ("amulet", "accessory", "jewelry", "magic"), ("metal",), ("mystical",), confidence=0.93),
+    "amulet": _ObjectRule(
+        "item_icon", ("amulet", "accessory", "jewelry", "magic"), ("metal",), ("mystical",), confidence=0.93
+    ),
     "crystal": _ObjectRule("item_icon", ("crystal", "gem", "magic"), ("crystal",), ("mystical",), confidence=0.92),
     "gem": _ObjectRule("item_icon", ("gem", "crystal", "treasure"), ("crystal",), confidence=0.92),
     "key": _ObjectRule("item_icon", ("key", "lock", "quest_item"), ("metal",), confidence=0.92),

@@ -87,8 +87,6 @@ def iter_archive_pngs(archive_path: str | Path) -> list[str]:
         names = [
             info.filename
             for info in archive.infolist()
-            if not info.is_dir()
-            and info.filename.lower().endswith(".png")
-            and _is_safe_member_name(info.filename)
+            if not info.is_dir() and info.filename.lower().endswith(".png") and _is_safe_member_name(info.filename)
         ]
     return sorted(names)

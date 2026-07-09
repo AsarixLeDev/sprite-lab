@@ -89,7 +89,9 @@ def _prepare_shared_objects(config: ChallengerTrainConfig) -> tuple[Any, Any, st
     token_rows = [row for row in manifest_rows if _matches_caption_policy(row, config.caption_policy_filter)]
     effective_split = str(config.overfit_split or config.split)
     train_rows = [row for row in token_rows if row.get("split") == effective_split]
-    tokenizer = SpriteTextTokenizer.build_from_records(train_rows or token_rows or manifest_rows, max_length=config.caption_max_length)
+    tokenizer = SpriteTextTokenizer.build_from_records(
+        train_rows or token_rows or manifest_rows, max_length=config.caption_max_length
+    )
     conditioning_mode = validate_conditioning_mode(config.conditioning_mode)
     structured_vocab = (
         build_structured_conditioning_vocab(train_rows or token_rows)
@@ -112,7 +114,9 @@ def _prepare_shared_objects(config: ChallengerTrainConfig) -> tuple[Any, Any, st
     return tokenizer, structured_vocab, conditioning_mode, train_dataset
 
 
-def _build_model(config: ChallengerTrainConfig, tokenizer: Any, structured_vocab: Any, device: Any) -> RectifiedFlowUNet:
+def _build_model(
+    config: ChallengerTrainConfig, tokenizer: Any, structured_vocab: Any, device: Any
+) -> RectifiedFlowUNet:
     model = RectifiedFlowUNet(
         vocab_size=len(tokenizer),
         embed_dim=int(config.embed_dim),
@@ -302,7 +306,9 @@ def main() -> None:
     device = resolve_device(args.device or config.device)
     print(f"Device: {device} | amp={config.amp} | batch_size={config.batch_size} | num_workers={config.num_workers}")
 
-    variant_names = None if args.variants is None else {name.strip() for name in args.variants.split(",") if name.strip()}
+    variant_names = (
+        None if args.variants is None else {name.strip() for name in args.variants.split(",") if name.strip()}
+    )
     variants = [v for v in DEFAULT_VARIANTS if variant_names is None or v["name"] in variant_names]
     if not variants:
         raise SystemExit(f"No matching variants for --variants {args.variants!r}")

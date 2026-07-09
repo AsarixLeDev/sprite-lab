@@ -102,14 +102,16 @@ def _run_overfit_smoke(parsed: argparse.Namespace) -> None:
             device=parsed.device,
         )
     )
-    print(json.dumps(
-        {
-            "initial_loss": result["initial_loss"],
-            "final_loss": result["final_loss"],
-            "initial_masked_accuracy": result["initial_masked_accuracy"],
-            "final_masked_accuracy": result["final_masked_accuracy"],
-            "passed": result["passed"],
-        },
-        indent=2,
-    ))
+    print(
+        json.dumps(
+            {
+                "initial_loss": result["initial_loss"],
+                "final_loss": result["final_loss"],
+                "initial_masked_accuracy": result["initial_masked_accuracy"],
+                "final_masked_accuracy": result["final_masked_accuracy"],
+                "passed": result["passed"],
+            },
+            indent=2,
+        )
+    )
     print(f"Outputs written to {parsed.out}")

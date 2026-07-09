@@ -95,9 +95,7 @@ def build_eval_prompts(
 # ---------------------------------------------------------------------------
 
 
-def _seen_object_prompts(
-    records: Sequence[_Semantic], *, count: int, seed: int
-) -> list[dict[str, Any]]:
+def _seen_object_prompts(records: Sequence[_Semantic], *, count: int, seed: int) -> list[dict[str, Any]]:
     if not records:
         return []
     ordered = sorted(records, key=lambda item: item.sprite_id)
@@ -130,21 +128,13 @@ def _seen_object_prompts(
     return prompts
 
 
-def _unseen_composition_prompts(
-    records: Sequence[_Semantic], *, count: int, seed: int
-) -> list[dict[str, Any]]:
+def _unseen_composition_prompts(records: Sequence[_Semantic], *, count: int, seed: int) -> list[dict[str, Any]]:
     if not records:
         return []
     base_objects = _sorted_seen(record.base_object for record in records)
-    colors = _sorted_seen(
-        token for record in records for token in record.colors if token in COLOR_TOKENS
-    )
-    shapes = _sorted_seen(
-        token for record in records for token in record.shapes if token in SHAPE_TOKENS
-    )
-    materials = _sorted_seen(
-        token for record in records for token in record.materials if token in MATERIAL_TOKENS
-    )
+    colors = _sorted_seen(token for record in records for token in record.colors if token in COLOR_TOKENS)
+    shapes = _sorted_seen(token for record in records for token in record.shapes if token in SHAPE_TOKENS)
+    materials = _sorted_seen(token for record in records for token in record.materials if token in MATERIAL_TOKENS)
     if not base_objects or not colors:
         return []
 

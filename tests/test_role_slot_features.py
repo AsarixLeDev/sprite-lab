@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 
 from spritelab.codec.role_inference import compute_palette_slot_role_features
-
 from test_role_helpers import make_role_demo_bundle
 
 

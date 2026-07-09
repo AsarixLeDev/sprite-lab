@@ -16,15 +16,15 @@ try:
 except ImportError:  # pragma: no cover - exercised when torch is absent or broken.
     torch = None  # type: ignore[assignment]
 
-from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch, read_jsonl
-from spritelab.training.eval_baseline import move_batch_to_device, resolve_device
-from spritelab.training.eval_generator import evaluate_generator_model
 from spritelab.training.conditioning import (
     CONDITIONING_MODES,
     DEFAULT_CONDITIONING_MODE,
     apply_conditioning_mode,
     validate_conditioning_mode,
 )
+from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch, read_jsonl
+from spritelab.training.eval_baseline import move_batch_to_device, resolve_device
+from spritelab.training.eval_generator import evaluate_generator_model
 from spritelab.training.generator_losses import rgba_generator_loss
 from spritelab.training.generator_models import TinyCaptionSpriteGenerator
 from spritelab.training.optim_utils import (

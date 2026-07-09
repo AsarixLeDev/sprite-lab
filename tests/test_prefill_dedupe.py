@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import threading
 
+from _harvest_testdata import make_source, make_sprite_png
 from spritelab.dataset_maker.prefill import MetadataSuggestion
 from spritelab.harvest.autolabel import QwenBatchPrefillConfig, batch_prefill_with_qwen
 from spritelab.harvest.pipeline import HarvestImportOptions, harvest_source_to_imported_sprites
 from spritelab.harvest.prefill_dedupe import group_sprites_for_prefill
-
-from _harvest_testdata import make_source, make_sprite_png
 
 
 class _CountingBackend:
@@ -36,9 +35,7 @@ def _harvest_with_duplicates(tmp_path):
     make_sprite_png(root / "mushroom_b.png")  # identical pixels, other name
     make_sprite_png(root / "vial_one.png", color=(60, 100, 220, 255))
     source = make_source(local_root_path=str(root))
-    return harvest_source_to_imported_sprites(
-        source, options=HarvestImportOptions(), work_dir=tmp_path / "work"
-    )
+    return harvest_source_to_imported_sprites(source, options=HarvestImportOptions(), work_dir=tmp_path / "work")
 
 
 def test_group_sprites_exact_duplicates(tmp_path):
@@ -103,9 +100,7 @@ def test_exact_propagation_disabled_even_when_near_enabled(tmp_path):
     make_sprite_png(root / "copy_a.png")
     make_sprite_png(root / "copy_b.png")
     source = make_source(local_root_path=str(root))
-    harvested = harvest_source_to_imported_sprites(
-        source, options=HarvestImportOptions(), work_dir=tmp_path / "work"
-    )
+    harvested = harvest_source_to_imported_sprites(source, options=HarvestImportOptions(), work_dir=tmp_path / "work")
     backend = _CountingBackend()
 
     updated = batch_prefill_with_qwen(
@@ -129,13 +124,9 @@ def test_near_duplicate_grouping(tmp_path):
     make_sprite_png(root / "slime_a.png")
     make_sprite_png(root / "slime_b.png")  # identical
     source = make_source(local_root_path=str(root))
-    harvested = harvest_source_to_imported_sprites(
-        source, options=HarvestImportOptions(), work_dir=tmp_path / "work"
-    )
+    harvested = harvest_source_to_imported_sprites(source, options=HarvestImportOptions(), work_dir=tmp_path / "work")
 
-    groups = group_sprites_for_prefill(
-        harvested, range(len(harvested)), near_duplicates=True, near_dup_threshold=2
-    )
+    groups = group_sprites_for_prefill(harvested, range(len(harvested)), near_duplicates=True, near_dup_threshold=2)
     assert len(groups) == 1
     assert groups[0].kind == "exact"
 
@@ -145,13 +136,9 @@ def test_near_duplicate_grouping_merges_non_exact_images(tmp_path):
     make_sprite_png(root / "gem_a.png", color=(200, 40, 40, 255))
     make_sprite_png(root / "gem_b.png", color=(201, 40, 40, 255))
     source = make_source(local_root_path=str(root))
-    harvested = harvest_source_to_imported_sprites(
-        source, options=HarvestImportOptions(), work_dir=tmp_path / "work"
-    )
+    harvested = harvest_source_to_imported_sprites(source, options=HarvestImportOptions(), work_dir=tmp_path / "work")
 
-    groups = group_sprites_for_prefill(
-        harvested, range(len(harvested)), near_duplicates=True, near_dup_threshold=2
-    )
+    groups = group_sprites_for_prefill(harvested, range(len(harvested)), near_duplicates=True, near_dup_threshold=2)
 
     assert len(groups) == 1
     assert groups[0].kind == "near"
@@ -162,9 +149,7 @@ def test_near_duplicate_prefill_propagates_and_scales_confidence(tmp_path):
     make_sprite_png(root / "gem_a.png", color=(200, 40, 40, 255))
     make_sprite_png(root / "gem_b.png", color=(201, 40, 40, 255))
     source = make_source(local_root_path=str(root))
-    harvested = harvest_source_to_imported_sprites(
-        source, options=HarvestImportOptions(), work_dir=tmp_path / "work"
-    )
+    harvested = harvest_source_to_imported_sprites(source, options=HarvestImportOptions(), work_dir=tmp_path / "work")
     backend = _CountingBackend()
 
     updated = batch_prefill_with_qwen(
@@ -181,8 +166,6 @@ def test_near_duplicate_prefill_propagates_and_scales_confidence(tmp_path):
     assert backend.calls == 1
     propagated = [sprite for sprite in updated if sprite.auto_metadata.get("prefill_propagated_near_dup")]
     assert len(propagated) == 1
-    assert propagated[0].auto_metadata["prefill_propagated_from"] in {
-        sprite.final_item.sprite_id for sprite in updated
-    }
+    assert propagated[0].auto_metadata["prefill_propagated_from"] in {sprite.final_item.sprite_id for sprite in updated}
     assert propagated[0].auto_metadata["qwen_suggestion"]["confidence"] == 0.81
     assert "propagated_near_dup" in propagated[0].auto_metadata["prefill_quality"]["flags"]

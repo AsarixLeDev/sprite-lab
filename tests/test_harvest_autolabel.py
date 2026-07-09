@@ -7,7 +7,6 @@ import time
 from pathlib import Path
 
 from _harvest_testdata import make_source, make_sprite_png
-
 from spritelab.dataset_maker.model import DatasetMakerItem
 from spritelab.dataset_maker.prefill import MetadataSuggestion
 from spritelab.harvest.autolabel import (
@@ -108,9 +107,7 @@ def _harvest(tmp_path):
     make_sprite_png(root / "mushroom_one.png")
     make_sprite_png(root / "vial_two.png", color=(60, 100, 220, 255))
     source = make_source(local_root_path=str(root))
-    return harvest_source_to_imported_sprites(
-        source, options=HarvestImportOptions(), work_dir=tmp_path / "work"
-    )
+    return harvest_source_to_imported_sprites(source, options=HarvestImportOptions(), work_dir=tmp_path / "work")
 
 
 def test_qwen_batch_merges_suggestions(tmp_path):
@@ -173,9 +170,7 @@ def test_qwen_batch_adjudicates_conflicts(tmp_path):
     root = tmp_path / "pngs"
     make_sprite_png(root / "W_Axe014.png")
     source = make_source(local_root_path=str(root))
-    harvested = harvest_source_to_imported_sprites(
-        source, options=HarvestImportOptions(), work_dir=tmp_path / "work"
-    )
+    harvested = harvest_source_to_imported_sprites(source, options=HarvestImportOptions(), work_dir=tmp_path / "work")
     backend = _AdjudicatingBackend(choice="b")
 
     updated = batch_prefill_with_qwen(harvested, QwenBatchPrefillConfig(enabled=True), backend=backend)
@@ -191,9 +186,7 @@ def test_qwen_batch_no_adjudication_when_disabled(tmp_path):
     root = tmp_path / "pngs"
     make_sprite_png(root / "W_Axe014.png")
     source = make_source(local_root_path=str(root))
-    harvested = harvest_source_to_imported_sprites(
-        source, options=HarvestImportOptions(), work_dir=tmp_path / "work"
-    )
+    harvested = harvest_source_to_imported_sprites(source, options=HarvestImportOptions(), work_dir=tmp_path / "work")
     backend = _AdjudicatingBackend()
 
     updated = batch_prefill_with_qwen(
@@ -218,9 +211,7 @@ def test_qwen_batch_workers_prefill_concurrently_and_preserve_order(tmp_path):
 
     assert backend.calls == len(harvested)
     assert backend.max_active >= 2
-    assert [sprite.final_item.sprite_id for sprite in updated] == [
-        sprite.final_item.sprite_id for sprite in harvested
-    ]
+    assert [sprite.final_item.sprite_id for sprite in updated] == [sprite.final_item.sprite_id for sprite in harvested]
     assert all("qwen_suggestion" in sprite.auto_metadata for sprite in updated)
 
 

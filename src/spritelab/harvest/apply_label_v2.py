@@ -47,7 +47,9 @@ def apply_label_v2_predictions(
     imported_path = run_path / "imported.jsonl"
     prediction_path = _resolve_run_path(run_path, prediction_file)
     output_imported_path = _resolve_run_path(run_path, out_imported) if out_imported is not None else imported_path
-    output_review_path = _resolve_run_path(run_path, out_review) if out_review is not None else run_path / LABEL_V2_REVIEW_QUEUE
+    output_review_path = (
+        _resolve_run_path(run_path, out_review) if out_review is not None else run_path / LABEL_V2_REVIEW_QUEUE
+    )
 
     if mode not in {"auto-only", "all", "review-only"}:
         raise ValueError("mode must be one of: auto-only, all, review-only")
@@ -91,7 +93,9 @@ def apply_label_v2_predictions(
         if is_review_prediction(prediction):
             review_queue.append(build_review_queue_record(prediction, imported_by_id=None))
 
-    imported_by_id = {str(record.get("sprite_id", "")): record for record in imported if str(record.get("sprite_id", ""))}
+    imported_by_id = {
+        str(record.get("sprite_id", "")): record for record in imported if str(record.get("sprite_id", ""))
+    }
     if review_queue:
         review_queue = [
             build_review_queue_record(prediction, imported_by_id=imported_by_id)
@@ -287,7 +291,9 @@ def apply_prediction_to_imported_record(
     if accept_auto:
         updated["status"] = "accepted"
 
-    auto_metadata = dict(updated.get("auto_metadata") or {}) if isinstance(updated.get("auto_metadata"), Mapping) else {}
+    auto_metadata = (
+        dict(updated.get("auto_metadata") or {}) if isinstance(updated.get("auto_metadata"), Mapping) else {}
+    )
     label_v2_metadata = {
         "applied": True,
         "prediction_file": prediction_file,
@@ -316,7 +322,11 @@ def apply_prediction_to_imported_record(
     if label_quality:
         auto_metadata["label_v2_label_quality"] = dict(label_quality)
         label_v2_metadata["label_quality"] = dict(label_quality)
-    conflict_reasons = [str(value) for value in label_quality.get("conflict_reasons") or prediction.get("conflict_reasons") or () if str(value)]
+    conflict_reasons = [
+        str(value)
+        for value in label_quality.get("conflict_reasons") or prediction.get("conflict_reasons") or ()
+        if str(value)
+    ]
     if conflict_reasons:
         auto_metadata["label_v2_conflict_reasons"] = conflict_reasons
     semantic_v3 = _mapping(prediction.get("semantic_v3"))
@@ -343,7 +353,11 @@ def is_safe_auto_prediction(prediction: Mapping[str, Any]) -> bool:
 def is_review_prediction(prediction: Mapping[str, Any]) -> bool:
     bucket = prediction_bucket(prediction)
     quality = _mapping(prediction.get("label_quality"))
-    return bool(prediction.get("needs_review", quality.get("needs_review", False))) or bucket in REVIEW_BUCKETS or bucket.startswith("needs_review")
+    return (
+        bool(prediction.get("needs_review", quality.get("needs_review", False)))
+        or bucket in REVIEW_BUCKETS
+        or bucket.startswith("needs_review")
+    )
 
 
 def is_raw_auto_prediction(prediction: Mapping[str, Any]) -> bool:
@@ -401,7 +415,9 @@ def build_review_queue_record(
         "flags": flags,
         "label_quality": dict(quality),
         "vlm_descriptor": dict(vlm_descriptor),
-        "candidate_object_names": [str(value) for value in prediction.get("candidate_object_names") or () if str(value)],
+        "candidate_object_names": [
+            str(value) for value in prediction.get("candidate_object_names") or () if str(value)
+        ],
         "conflict_reasons": conflict_reasons,
         "reason": "; ".join(part for part in reason_parts if part),
         "missing_imported": bool(imported_by_id is not None and sprite_id not in imported_by_id),
@@ -539,7 +555,9 @@ def _has_human_label(record: Mapping[str, Any]) -> bool:
     if str(record.get("labeler", "")).strip() or str(record.get("labeled_at", "")).strip():
         return True
     auto_metadata = record.get("auto_metadata") if isinstance(record.get("auto_metadata"), Mapping) else {}
-    if bool(auto_metadata.get("human_label") or auto_metadata.get("human_labeled") or auto_metadata.get("manually_labeled")):
+    if bool(
+        auto_metadata.get("human_label") or auto_metadata.get("human_labeled") or auto_metadata.get("manually_labeled")
+    ):
         return True
     if str(auto_metadata.get("label_source", "")).strip().lower() in {"human", "manual", "golden", "review_gui"}:
         return True

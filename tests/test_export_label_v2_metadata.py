@@ -62,7 +62,9 @@ def test_export_manifest_includes_label_v2_object_and_audit_metadata(tmp_path: P
         DatasetMakerExportConfig(dataset_name="label_v2_pack", output_root=tmp_path),
     )
 
-    manifest = json.loads((tmp_path / "label_v2_pack" / "manifest_train.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    manifest = json.loads(
+        (tmp_path / "label_v2_pack" / "manifest_train.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
     assert manifest["category"] == "armor"
     assert manifest["object_name"] == "chestplate"
     assert manifest["tags"] == ["chestplate", "armor", "metal"]

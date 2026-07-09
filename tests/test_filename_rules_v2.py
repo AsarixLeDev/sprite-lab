@@ -2,7 +2,12 @@ from spritelab.harvest.filename_rules_v2 import suggest_from_filename_v2
 
 
 def _record(name: str, source_id: str = "oga_cc0_food_ocal") -> dict[str, str]:
-    return {"sprite_id": name.removesuffix(".png"), "relative_path": name, "source_id": source_id, "source_name": source_id}
+    return {
+        "sprite_id": name.removesuffix(".png"),
+        "relative_path": name,
+        "source_id": source_id,
+        "source_name": source_id,
+    }
 
 
 def test_food_bad_examples_are_high_confidence_filename_labels() -> None:

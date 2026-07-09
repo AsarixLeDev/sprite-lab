@@ -7,9 +7,9 @@ import colorsys
 import json
 import math
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from collections.abc import Sequence
 
 import numpy as np
 

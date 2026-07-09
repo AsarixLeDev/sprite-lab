@@ -63,9 +63,7 @@ class CurationDecision:
         timestamp = self.timestamp or _utc_timestamp()
         reviewer = self.reviewer if self.reviewer is None or isinstance(self.reviewer, str) else str(self.reviewer)
         source_path = (
-            self.source_path
-            if self.source_path is None or isinstance(self.source_path, str)
-            else str(self.source_path)
+            self.source_path if self.source_path is None or isinstance(self.source_path, str) else str(self.source_path)
         )
 
         object.__setattr__(self, "sprite_id", sprite_id)
@@ -86,7 +84,7 @@ class CurationDecision:
         return data
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> "CurationDecision":
+    def from_dict(cls, data: Mapping[str, Any]) -> CurationDecision:
         """Build a decision from JSON data, tolerating missing optional fields."""
 
         if not isinstance(data, Mapping):
@@ -134,9 +132,7 @@ class CurationValidationResult:
 class _BundleIdMap(dict[str, Path]):
     def __init__(self, *args: Any, collisions: Mapping[str, Sequence[Path]] | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        self.collisions: dict[str, tuple[Path, ...]] = {
-            key: tuple(paths) for key, paths in (collisions or {}).items()
-        }
+        self.collisions: dict[str, tuple[Path, ...]] = {key: tuple(paths) for key, paths in (collisions or {}).items()}
 
 
 def load_curation_events(path: str | Path) -> list[CurationDecision]:
@@ -357,11 +353,7 @@ def _bundle_directories(root: Path) -> list[Path]:
 
     search_root = root / "bundles" if (root / "bundles").is_dir() else root
     return sorted(
-        {
-            path.parent
-            for path in search_root.rglob("bundle.npz")
-            if (path.parent / "metadata.json").exists()
-        },
+        {path.parent for path in search_root.rglob("bundle.npz") if (path.parent / "metadata.json").exists()},
         key=lambda path: str(path).lower(),
     )
 

@@ -71,6 +71,7 @@ def _patch_common_audit_steps(monkeypatch: pytest.MonkeyPatch) -> None:
         "review_generated_sprites",
         lambda config: SimpleNamespace(report={"overall": {"total_warnings": 0, "mean_alpha_coverage": 1.0}}),
     )
+
     def fake_source_match(config: Any) -> dict[str, Any]:
         manifest = config.generated / "generated_manifest.jsonl"
         rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
@@ -128,9 +129,7 @@ def test_challenger_overfit_specs_default_to_normalized_steps() -> None:
 
 
 def test_challenger_has_64_sprite_run_with_normalized_budget() -> None:
-    spec = next(
-        spec for spec in generator_audits.CHALLENGER_SPECS if spec["name"] == "overfit_64_sprites"
-    )
+    spec = next(spec for spec in generator_audits.CHALLENGER_SPECS if spec["name"] == "overfit_64_sprites")
     assert spec["count"] == 64
     assert "steps" not in spec  # relies on the normalized budget helper
     budget = generator_audits._resolve_micro_overfit_budget(spec)
@@ -337,6 +336,7 @@ def test_full_v4_audit_summary_schema_with_patched_stages(tmp_path: Path, monkey
             }
         ),
     )
+
     def fake_faithfulness(config: Any) -> dict[str, Any]:
         report = {
             "sample_count": 4,
@@ -372,7 +372,9 @@ def test_full_v4_audit_summary_schema_with_patched_stages(tmp_path: Path, monkey
         "run_prompt_sensitivity",
         lambda config: {
             "sets": {
-                "same_noise_different_prompts": {"metrics": {"mean_pairwise_difference": 0.3, "near_duplicate_rate": 0.0}},
+                "same_noise_different_prompts": {
+                    "metrics": {"mean_pairwise_difference": 0.3, "near_duplicate_rate": 0.0}
+                },
                 "same_prompt_different_noise": {"metrics": {"diversity_score": 0.1}},
                 "prompt_pairs": {"metrics": {"near_duplicate_rate": 0.6, "pairs": []}},
             },
@@ -545,7 +547,9 @@ def test_full_v4_audit_projection_enabled_summarizes_projected_outputs(
 
     def fake_faithfulness(config: Any) -> dict[str, Any]:
         faithfulness_dirs.append(Path(config.generated))
-        first = json.loads((Path(config.generated) / "generated_manifest.jsonl").read_text(encoding="utf-8").splitlines()[0])
+        first = json.loads(
+            (Path(config.generated) / "generated_manifest.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
         assert first["paths"]["indexed_png"].startswith("projected/")
         report = {
             "sample_count": 2,
@@ -582,7 +586,9 @@ def test_full_v4_audit_projection_enabled_summarizes_projected_outputs(
         "run_prompt_sensitivity",
         lambda config: {
             "sets": {
-                "same_noise_different_prompts": {"metrics": {"mean_pairwise_difference": 0.4, "near_duplicate_rate": 0.0}},
+                "same_noise_different_prompts": {
+                    "metrics": {"mean_pairwise_difference": 0.4, "near_duplicate_rate": 0.0}
+                },
                 "same_prompt_different_noise": {"metrics": {"diversity_score": 0.2}},
                 "prompt_pairs": {"metrics": {"near_duplicate_rate": 0.0, "pairs": []}},
             },
@@ -744,7 +750,9 @@ def test_full_v4_checkpoint_evaluation_leaderboard_and_selected_generation(
         "run_prompt_sensitivity",
         lambda config: {
             "sets": {
-                "same_noise_different_prompts": {"metrics": {"mean_pairwise_difference": 0.3, "near_duplicate_rate": 0.0}},
+                "same_noise_different_prompts": {
+                    "metrics": {"mean_pairwise_difference": 0.3, "near_duplicate_rate": 0.0}
+                },
                 "same_prompt_different_noise": {"metrics": {"diversity_score": 0.1}},
                 "prompt_pairs": {"metrics": {"near_duplicate_rate": 0.0, "pairs": []}},
             },
@@ -805,9 +813,7 @@ def test_full_v4_checkpoint_evaluation_leaderboard_and_selected_generation(
         "grounded_color",
         "grounded_guardrails_passed",
         "selected",
-    } <= set(
-        checkpoint_eval["leaderboard"][0]
-    )
+    } <= set(checkpoint_eval["leaderboard"][0])
     assert checkpoint_eval["leaderboard"][0]["score"] == checkpoint_eval["leaderboard"][0]["ood_score"]
     final_generation_call = next(call for call in sample_calls if Path(call.out_dir).name == "generated_eval")
     assert str(final_generation_call.checkpoint).endswith("checkpoint_step_000001_ema.pt")
@@ -1064,7 +1070,10 @@ def test_challenger_conditioning_comparison_displays_checkpoint_guardrails(tmp_p
     assert comparison["baseline"]["checkpoint_selection"]["grounded_guardrails_passed"] is False
     assert comparison["structured"]["checkpoint_selection"]["grounded_guardrails_passed"] is True
     markdown = (tmp_path / "comparison" / "challenger_conditioning_comparison.md").read_text(encoding="utf-8")
-    assert "| Run | Enabled | Selected step | Selection score | Guardrails | Grounded | OOD | Selected checkpoint |" in markdown
+    assert (
+        "| Run | Enabled | Selected step | Selection score | Guardrails | Grounded | OOD | Selected checkpoint |"
+        in markdown
+    )
     assert "grounded_category" in json.dumps(comparison)
 
 
@@ -1109,7 +1118,9 @@ def test_challenger_conditioning_comparison_warns_on_projection_mismatch(tmp_pat
     assert any("projected vs non-projected" in warning for warning in comparison["warnings"])
     assert any("projection target colors differ" in warning for warning in comparison["warnings"])
     assert comparison["structured"]["palette_projection"]["applied"] is True
-    markdown = (tmp_path / "comparison_projection" / "challenger_conditioning_comparison.md").read_text(encoding="utf-8")
+    markdown = (tmp_path / "comparison_projection" / "challenger_conditioning_comparison.md").read_text(
+        encoding="utf-8"
+    )
     assert "Palette projection" in markdown
     assert "deterministic_kmeans" in markdown
 
@@ -1217,8 +1228,26 @@ def test_challenger_conditioning_comparison_reports_checkpoint_selection_metadat
 
 def test_category_weighted_source_baseline_computation() -> None:
     by_category = {
-        "weapon": {"metrics": {"border_touch_rate": 0.75, "mean_alpha_coverage": 0.5, "mean_bbox_width": 20.0, "mean_bbox_height": 24.0, "mean_center_offset": 1.0, "mean_visible_color_count": 10.0}},
-        "item_icon": {"metrics": {"border_touch_rate": 0.25, "mean_alpha_coverage": 0.3, "mean_bbox_width": 12.0, "mean_bbox_height": 14.0, "mean_center_offset": 3.0, "mean_visible_color_count": 6.0}},
+        "weapon": {
+            "metrics": {
+                "border_touch_rate": 0.75,
+                "mean_alpha_coverage": 0.5,
+                "mean_bbox_width": 20.0,
+                "mean_bbox_height": 24.0,
+                "mean_center_offset": 1.0,
+                "mean_visible_color_count": 10.0,
+            }
+        },
+        "item_icon": {
+            "metrics": {
+                "border_touch_rate": 0.25,
+                "mean_alpha_coverage": 0.3,
+                "mean_bbox_width": 12.0,
+                "mean_bbox_height": 14.0,
+                "mean_center_offset": 3.0,
+                "mean_visible_color_count": 6.0,
+            }
+        },
     }
     weighted = generator_audits._category_weighted_source_baseline(
         by_category,
@@ -1235,15 +1264,24 @@ def test_full_v4_decision_border_warning_is_source_relative() -> None:
     base_sections = {
         "generated_qa": {"errors": 0},
         "generated_review": {"touches_border_rate": 0.95, "median_visible_colors_pinned": False},
-        "prompt_faithfulness": {"category_consistency_rate": 0.9, "color_consistency_rate": 0.9, "repeated_silhouette_rate": 0.0, "generic_blob_collapse_rate": 0.0},
+        "prompt_faithfulness": {
+            "category_consistency_rate": 0.9,
+            "color_consistency_rate": 0.9,
+            "repeated_silhouette_rate": 0.0,
+            "generic_blob_collapse_rate": 0.0,
+        },
         "prompt_sensitivity": {"prompt_pair_near_duplicate_rate": 0.0},
-        "generated_vs_source": {"grounded_eval": {"deltas": {"border_touch_rate": 0.05, "mean_visible_color_count": 0.0}}},
+        "generated_vs_source": {
+            "grounded_eval": {"deltas": {"border_touch_rate": 0.05, "mean_visible_color_count": 0.0}}
+        },
     }
     no_warning = decide_full_v4_challenger_audit(base_sections)
     assert "border_touch_source_delta" not in {warning["name"] for warning in no_warning["warnings"]}
 
     high_delta = dict(base_sections)
-    high_delta["generated_vs_source"] = {"grounded_eval": {"deltas": {"border_touch_rate": 0.11, "mean_visible_color_count": 0.0}}}
+    high_delta["generated_vs_source"] = {
+        "grounded_eval": {"deltas": {"border_touch_rate": 0.11, "mean_visible_color_count": 0.0}}
+    }
     warning = decide_full_v4_challenger_audit(high_delta)
     assert "border_touch_source_delta" in {item["name"] for item in warning["warnings"]}
 
@@ -1252,15 +1290,26 @@ def test_full_v4_decision_rare_color_warning_is_source_relative() -> None:
     sections = {
         "generated_qa": {"errors": 0},
         "generated_review": {"median_visible_color_count": 32, "max_colors": 32, "median_visible_colors_pinned": False},
-        "prompt_faithfulness": {"category_consistency_rate": 0.9, "color_consistency_rate": 0.9, "repeated_silhouette_rate": 0.0, "generic_blob_collapse_rate": 0.0},
+        "prompt_faithfulness": {
+            "category_consistency_rate": 0.9,
+            "color_consistency_rate": 0.9,
+            "repeated_silhouette_rate": 0.0,
+            "generic_blob_collapse_rate": 0.0,
+        },
         "prompt_sensitivity": {"prompt_pair_near_duplicate_rate": 0.0},
-        "generated_vs_source": {"grounded_eval": {"deltas": {"border_touch_rate": 0.0, "mean_visible_color_count": 8.5}}},
+        "generated_vs_source": {
+            "grounded_eval": {"deltas": {"border_touch_rate": 0.0, "mean_visible_color_count": 8.5}}
+        },
     }
     decision = decide_full_v4_challenger_audit(sections)
     assert "visible_color_count_source_delta" in {warning["name"] for warning in decision["warnings"]}
 
     pinned = dict(sections)
-    pinned["generated_review"] = {"median_visible_color_count": 32, "max_colors": 32, "median_visible_colors_pinned": True}
+    pinned["generated_review"] = {
+        "median_visible_color_count": 32,
+        "max_colors": 32,
+        "median_visible_colors_pinned": True,
+    }
     decision = decide_full_v4_challenger_audit(pinned)
     assert "median_visible_colors_pinned" in {warning["name"] for warning in decision["warnings"]}
 
@@ -1420,9 +1469,7 @@ def test_challenger_64_audit_uses_persisted_subset_and_normalized_budget(
     )
 
     run = report["runs"][0]
-    persisted = json.loads(
-        (tmp_path / "audit" / "runs" / "overfit_64_sprites" / "overfit_sprite_ids.json").read_text()
-    )
+    persisted = json.loads((tmp_path / "audit" / "runs" / "overfit_64_sprites" / "overfit_sprite_ids.json").read_text())
     assert captured_steps == [12000]
     assert run["name"] == "overfit_64_sprites"
     assert run["sprite_count"] == 64

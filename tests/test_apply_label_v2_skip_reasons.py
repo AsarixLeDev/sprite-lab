@@ -3,10 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from _harvest_testdata import make_sprite_png
-
 from spritelab.harvest.apply_label_v2 import apply_label_v2_predictions
 from spritelab.harvest.build_semantic_dataset import build_semantic_dataset
 from spritelab.harvest.cli import main
@@ -59,18 +56,27 @@ def test_build_semantic_dataset_report_includes_auto_skip_reasons(tmp_path: Path
     main(
         [
             "import-dir",
-            "--dir", str(png_dir),
-            "--run-name", "food_pack",
-            "--run-root", str(run_root),
-            "--source-id", "oga_cc0_food_ocal",
-            "--source-name", "Food",
-            "--license", "cc0",
-            "--author", "Tester",
+            "--dir",
+            str(png_dir),
+            "--run-name",
+            "food_pack",
+            "--run-root",
+            str(run_root),
+            "--source-id",
+            "oga_cc0_food_ocal",
+            "--source-name",
+            "Food",
+            "--license",
+            "cc0",
+            "--author",
+            "Tester",
             "--user-confirmed-license",
         ]
     )
     run = run_root / "food_pack"
-    imported = [json.loads(line) for line in (run / "imported.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    imported = [
+        json.loads(line) for line in (run / "imported.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
     _write_jsonl(
         run / "label_v2_suggestions.jsonl",
         [

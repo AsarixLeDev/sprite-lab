@@ -234,7 +234,7 @@ def build_generation_contact_sheet(
     for record in rows:
         paths = record.get("paths") if isinstance(record.get("paths"), Mapping) else {}
         images: list[Image.Image] = []
-        for key in (("raw_rgba",) if include_raw else ()):
+        for key in ("raw_rgba",) if include_raw else ():
             rel = paths.get(key)
             if rel:
                 images.append(Image.open(Path(generated_dir) / str(rel)).convert("RGBA"))

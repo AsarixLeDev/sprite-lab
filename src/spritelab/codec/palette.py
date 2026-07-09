@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Final
 
 import numpy as np
-from PIL import Image
 from numpy.typing import NDArray
+from PIL import Image
 
 from spritelab.codec.bundle import SPRITE_SIZE
 from spritelab.utils.image import assert_exact_size, ensure_rgba

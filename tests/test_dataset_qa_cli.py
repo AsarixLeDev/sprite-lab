@@ -57,9 +57,7 @@ def _make_dataset(tmp_path: Path, records_by_split: dict[str, list[dict]]) -> Pa
             "\n".join(json.dumps(r, sort_keys=True) for r in recs) + ("\n" if recs else ""),
             encoding="utf-8",
         )
-        np.savez_compressed(
-            dataset_dir / f"{split}.npz", **_bundle_arrays([str(r["sprite_id"]) for r in recs])
-        )
+        np.savez_compressed(dataset_dir / f"{split}.npz", **_bundle_arrays([str(r["sprite_id"]) for r in recs]))
     (dataset_dir / "dataset_config.json").write_text(
         json.dumps({"dataset_name": "ds", "max_palette_slots": 32}), encoding="utf-8"
     )
@@ -124,9 +122,7 @@ def test_cli_fail_on_warning_exits_nonzero(tmp_path: Path) -> None:
     np.savez_compressed(dataset_dir / "train.npz", **arrays)
 
     with pytest.raises(SystemExit) as excinfo:
-        harvest_main(
-            ["dataset-qa", "--dataset", str(dataset_dir), "--no-contact-sheet", "--fail-on-warning"]
-        )
+        harvest_main(["dataset-qa", "--dataset", str(dataset_dir), "--no-contact-sheet", "--fail-on-warning"])
     assert excinfo.value.code == 1
 
 

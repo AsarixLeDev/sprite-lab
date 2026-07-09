@@ -124,7 +124,7 @@ def launch_v1_gallery_gui(
             )
         except FileNotFoundError as exc:
             return (f"### Generation failed\n\n```\n{exc}\n```", [], [], "")
-        except Exception as exc:  # noqa: BLE001 - surface any failure to the user, don't crash the server.
+        except Exception as exc:
             return (f"### Generation failed\n\n```\n{type(exc).__name__}: {exc}\n```", [], [], "")
 
         progress(0.95, desc="Collecting outputs…")
@@ -200,9 +200,7 @@ def launch_v1_gallery_gui(
             with gr.Row():
                 seed_box = gr.Number(label="Seed", value=20260723, precision=0)
                 batch_size_box = gr.Number(label="Batch size", value=32, precision=0)
-                num_samples_box = gr.Number(
-                    label="Max samples (blank = all)", value=None, precision=0
-                )
+                num_samples_box = gr.Number(label="Max samples (blank = all)", value=None, precision=0)
                 contact_columns_box = gr.Number(label="Contact-sheet columns", value=8, precision=0)
 
         build_button = gr.Button("🚀 Generate gallery", variant="primary", size="lg")
@@ -317,7 +315,7 @@ def _preview_prompt_set(
             return f"### Prompts file not found\n\n`{path}`"
         try:
             rows = read_prompt_records(path)
-        except Exception as exc:  # noqa: BLE001 - preview must never crash the server.
+        except Exception as exc:
             return f"### Could not read prompts file\n\n```\n{exc}\n```"
         return _prompt_list_markdown(rows, note=f"Custom file: `{path}`")
 

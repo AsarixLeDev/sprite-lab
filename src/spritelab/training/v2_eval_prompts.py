@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,14 +21,25 @@ from typing import Any
 
 from spritelab.training.data import read_jsonl
 
-
 # ── Constants ───────────────────────────────────────────────────────────────
 
 SCHEMA_VERSION = "v2_eval_prompts_v1.0"
 
 DEFAULT_COLORS: tuple[str, ...] = (
-    "red", "blue", "green", "yellow", "purple", "orange", "pink",
-    "black", "white", "gray", "brown", "gold", "silver", "cyan",
+    "red",
+    "blue",
+    "green",
+    "yellow",
+    "purple",
+    "orange",
+    "pink",
+    "black",
+    "white",
+    "gray",
+    "brown",
+    "gold",
+    "silver",
+    "cyan",
 )
 
 MATERIAL_COLORS: set[str] = {"gold", "silver", "metallic", "wooden", "stone", "iron"}
@@ -46,13 +56,28 @@ STYLE_MODIFIERS: tuple[str, ...] = (
 
 # Object names reserved for OOD-style combos (should be fairly universal)
 UNIVERSAL_OBJECTS: tuple[str, ...] = (
-    "sword", "axe", "bow", "dagger", "shield", "helm",
-    "potion", "bottle", "scroll", "ring", "gem", "coin",
-    "mushroom", "flower", "star", "flame", "crystal",
+    "sword",
+    "axe",
+    "bow",
+    "dagger",
+    "shield",
+    "helm",
+    "potion",
+    "bottle",
+    "scroll",
+    "ring",
+    "gem",
+    "coin",
+    "mushroom",
+    "flower",
+    "star",
+    "flame",
+    "crystal",
 )
 
 
 # ── Config ──────────────────────────────────────────────────────────────────
+
 
 @dataclass(frozen=True)
 class V2EvalPromptsConfig:
@@ -71,6 +96,7 @@ class V2EvalPromptsConfig:
 
 
 # ── Manifest vocab extraction ───────────────────────────────────────────────
+
 
 def _extract_vocab(manifest: Path) -> dict[str, Any]:
     """Extract vocab (categories, objects, colors, etc.) from a training manifest."""
@@ -156,6 +182,7 @@ def _extract_attributes(row: Mapping[str, Any]) -> dict[str, Any]:
 
 # ── Prompt builders ─────────────────────────────────────────────────────────
 
+
 def _color_for_category(category: str, colors: Sequence[str], seed: int, count: int = 6) -> list[str]:
     """Select `count` colors for a category, deterministic by seed + category."""
     rng = _category_rng(category, seed)
@@ -170,18 +197,20 @@ def _sample_indices(population_size: int, count: int, rng: Any) -> list[int]:
     """Sample `count` indices without replacement, deterministically."""
     pool = list(range(population_size))
     rng.shuffle(pool)
-    return pool[:min(count, population_size)]
+    return pool[: min(count, population_size)]
 
 
 def _category_rng(category: str, seed: int) -> Any:
     """Deterministic RNG keyed by seed + category."""
     import random
+
     h = hashlib.sha256(f"{seed}:{category}".encode()).digest()
     return random.Random(int.from_bytes(h[:8], "big"))
 
 
 def _global_rng(seed: int) -> Any:
     import random
+
     return random.Random(seed)
 
 
@@ -231,6 +260,7 @@ def _make_record(
 
 # ── Family builders ─────────────────────────────────────────────────────────
 
+
 def _build_category_color_grid(
     vocab: dict[str, Any],
     rng: Any,
@@ -253,8 +283,11 @@ def _build_category_color_grid(
             prompt = f"{color} {cat.replace('_', ' ')} 32x32 pixel art icon"
             rows.append(
                 _make_record(
-                    prompt_id, prompt,
-                    category=cat, object_name=cat, colors=[color],
+                    prompt_id,
+                    prompt,
+                    category=cat,
+                    object_name=cat,
+                    colors=[color],
                     prompt_family="category_color_grid",
                 )
             )
@@ -309,8 +342,11 @@ def _build_object_color_pairs(
                     break
             rows.append(
                 _make_record(
-                    prompt_id, prompt,
-                    category=cat, object_name=obj, colors=[color],
+                    prompt_id,
+                    prompt,
+                    category=cat,
+                    object_name=obj,
+                    colors=[color],
                     prompt_family="object_color_pairs",
                 )
             )
@@ -354,8 +390,11 @@ def _build_rare_combos(
                 break
         rows.append(
             _make_record(
-                prompt_id, prompt,
-                category=cat, object_name=obj, colors=[color],
+                prompt_id,
+                prompt,
+                category=cat,
+                object_name=obj,
+                colors=[color],
                 prompt_family="rare_combos",
             )
         )
@@ -397,8 +436,11 @@ def _build_style_stress(
                 break
         rows.append(
             _make_record(
-                prompt_id, prompt,
-                category=cat, object_name=obj, colors=[color],
+                prompt_id,
+                prompt,
+                category=cat,
+                object_name=obj,
+                colors=[color],
                 prompt_family="style_stress",
                 style=[mod] if mod else [],
             )
@@ -442,8 +484,10 @@ def _build_anchors(
         prompt_id = f"eval_anchor_{_safe_name(obj)}_{_safe_name(color_key)}_{len(anchors):04d}"
         anchors.append(
             _make_record(
-                prompt_id, prompt_text,
-                category=cat, object_name=obj,
+                prompt_id,
+                prompt_text,
+                category=cat,
+                object_name=obj,
                 colors=color_list if color_list else ["unknown"],
                 prompt_family="in_distribution_anchors",
                 materials=[str(m).strip().lower() for m in attrs.get("materials", [])],
@@ -455,6 +499,7 @@ def _build_anchors(
 
 
 # ── Main builder ────────────────────────────────────────────────────────────
+
 
 def build_v2_eval_prompts(config: V2EvalPromptsConfig) -> dict[str, Any]:
     rng = _global_rng(config.seed)
@@ -524,7 +569,7 @@ def build_v2_eval_prompts(config: V2EvalPromptsConfig) -> dict[str, Any]:
     for row in deduped:
         family_counts[str(row.get("prompt_family", ""))] += 1
         category_counts[str(row.get("category", ""))] += 1
-        for c in (row.get("colors") or []):
+        for c in row.get("colors") or []:
             color_counts[str(c)] += 1
         object_counts[str(row.get("object_name", ""))] += 1
 
@@ -618,33 +663,39 @@ def _write_prompt_report_md(report: dict[str, Any], path: Path) -> None:
     for family, count in sorted((report.get("families") or {}).items()):
         lines.append(f"| {family} | {count} |")
 
-    lines.extend([
-        "",
-        "## Category Counts",
-        "",
-        "| Category | Count |",
-        "|---|---:|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Category Counts",
+            "",
+            "| Category | Count |",
+            "|---|---:|",
+        ]
+    )
     for cat, count in sorted((report.get("category_counts") or {}).items()):
         lines.append(f"| {cat} | {count} |")
 
-    lines.extend([
-        "",
-        "## Color Counts",
-        "",
-        "| Color | Count |",
-        "|---|---:|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Color Counts",
+            "",
+            "| Color | Count |",
+            "|---|---:|",
+        ]
+    )
     for color, count in sorted((report.get("color_counts") or {}).items()):
         lines.append(f"| {color} | {count} |")
 
-    lines.extend([
-        "",
-        "## Top 20 Objects",
-        "",
-        "| Object | Count |",
-        "|---|---:|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Top 20 Objects",
+            "",
+            "| Object | Count |",
+            "|---|---:|",
+        ]
+    )
     for obj, count in sorted((report.get("object_counts_top20") or {}).items(), key=lambda x: -x[1])[:20]:
         lines.append(f"| {obj} | {count} |")
 
@@ -653,6 +704,7 @@ def _write_prompt_report_md(report: dict[str, Any], path: Path) -> None:
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
+
 
 def main(argv: list[str] | None = None) -> None:
     import argparse

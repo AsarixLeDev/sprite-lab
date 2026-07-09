@@ -3,7 +3,6 @@ import threading
 import time
 
 from _harvest_testdata import make_sprite_png
-
 from spritelab.dataset_maker.prefill import MetadataSuggestion
 from spritelab.harvest.cli import main
 
@@ -148,17 +147,19 @@ def test_label_v2_workers_call_backend_concurrently_and_preserve_order(tmp_path,
     backend = _SlowTrackingBackend()
     monkeypatch.setattr("spritelab.harvest.label_v2_pipeline.create_vlm_backend_from_args", lambda parsed: backend)
 
-    main([
-        "label-v2",
-        "--run",
-        str(run),
-        "--backend",
-        "rule_based",
-        "--refresh-vlm",
-        "--workers",
-        "3",
-        "--no-propagate-dups",
-    ])
+    main(
+        [
+            "label-v2",
+            "--run",
+            str(run),
+            "--backend",
+            "rule_based",
+            "--refresh-vlm",
+            "--workers",
+            "3",
+            "--no-propagate-dups",
+        ]
+    )
 
     assert backend.calls == 4
     assert backend.max_active >= 2

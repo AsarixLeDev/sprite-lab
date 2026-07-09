@@ -5,15 +5,18 @@ from __future__ import annotations
 import random
 
 from _harvest_testdata import make_sprite_png
-
 from spritelab.harvest.catalog import write_jsonl
 from spritelab.harvest.filename_rules import (
     filename_suggestion_to_dict,
     metadata_suggestions_differ,
     parse_filename_metadata,
 )
-from spritelab.harvest.prefill_review_gui import load_prefill_review_items, random_mismatch_index
-from spritelab.harvest.prefill_review_gui import _preview_image, _resolve_image_path
+from spritelab.harvest.prefill_review_gui import (
+    _preview_image,
+    _resolve_image_path,
+    load_prefill_review_items,
+    random_mismatch_index,
+)
 
 
 def test_filename_rules_parse_banana_item_icon() -> None:

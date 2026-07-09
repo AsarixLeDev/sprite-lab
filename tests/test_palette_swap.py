@@ -315,10 +315,7 @@ def test_stochastic_mode_varies_targets_for_same_sprite_across_draws() -> None:
         stochastic=True,
         seed=99,
     )
-    targets = {
-        _apply(config, record={**_record(), "sprite_id": "same_sprite"}).target_color_family
-        for _ in range(1)
-    }
+    targets = {_apply(config, record={**_record(), "sprite_id": "same_sprite"}).target_color_family for _ in range(1)}
     targets |= {
         apply_palette_swap(
             index_map=_sprite()["index"],
@@ -509,7 +506,11 @@ def test_dataset_stochastic_repeated_access_varies_same_sprite(tmp_path: Path) -
     )
     dataset = SpriteTrainingDataset(dataset_dir, manifest, split="train", palette_swap=swap, cache_samples=True)
     samples = [dataset[0] for _ in range(20)]
-    targets = {sample["palette_swap"]["target_color_family"] for sample in samples if sample["palette_swap"]["palette_swap_applied"]}
+    targets = {
+        sample["palette_swap"]["target_color_family"]
+        for sample in samples
+        if sample["palette_swap"]["palette_swap_applied"]
+    }
     draw_indices = [sample["palette_swap"]["palette_swap_draw_index"] for sample in samples]
     assert len(targets) > 1
     assert draw_indices == list(range(20))

@@ -5,7 +5,6 @@ from __future__ import annotations
 from PIL import Image
 
 from _harvest_testdata import make_sheet_png, make_sprite_png
-
 from spritelab.harvest.sheets import SheetSliceConfig, looks_like_sprite_sheet, slice_sheet_to_pngs
 
 

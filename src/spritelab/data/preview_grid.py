@@ -93,15 +93,11 @@ def filter_preview_records(
         filtered = [record for record in filtered if needle in record.id.lower()]
     if min_palette_size is not None:
         filtered = [
-            record
-            for record in filtered
-            if record.palette_size is not None and record.palette_size >= min_palette_size
+            record for record in filtered if record.palette_size is not None and record.palette_size >= min_palette_size
         ]
     if max_palette_size is not None:
         filtered = [
-            record
-            for record in filtered
-            if record.palette_size is not None and record.palette_size <= max_palette_size
+            record for record in filtered if record.palette_size is not None and record.palette_size <= max_palette_size
         ]
     return filtered
 
@@ -236,10 +232,7 @@ def create_preview_grid(options: PreviewGridOptions) -> Image.Image:
 
 def _records_from_manifest(manifest_path: Path) -> list[PreviewGridRecord]:
     manifest = load_manifest(manifest_path)
-    return [
-        _record_from_manifest_record(record, manifest_path=manifest_path)
-        for record in manifest.records
-    ]
+    return [_record_from_manifest_record(record, manifest_path=manifest_path) for record in manifest.records]
 
 
 def _record_from_manifest_record(record: IngestedSpriteRecord, *, manifest_path: Path) -> PreviewGridRecord:

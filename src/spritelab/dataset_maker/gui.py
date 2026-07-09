@@ -12,7 +12,12 @@ from PIL import Image
 
 from spritelab.codec.reconstruct import reconstruct_rgba
 from spritelab.dataset_maker.exporter import DatasetMakerExportConfig, export_dataset_from_imported_sprites
-from spritelab.dataset_maker.importer import ImportOptions, ImportedSprite, import_png_as_dataset_item, import_png_directory
+from spritelab.dataset_maker.importer import (
+    ImportedSprite,
+    ImportOptions,
+    import_png_as_dataset_item,
+    import_png_directory,
+)
 from spritelab.dataset_maker.model import DatasetMakerItem
 from spritelab.dataset_maker.prefill import (
     MetadataSuggestion,
@@ -96,7 +101,14 @@ def launch_dataset_maker_gui(
                 imported.append(sprite)
         index = 0
         suggestions: dict[str, Any] = {}
-        return (imported, index, suggestions, _import_summary(imported), *_view(imported, index), *_suggestion_view(suggestions, index))
+        return (
+            imported,
+            index,
+            suggestions,
+            _import_summary(imported),
+            *_view(imported, index),
+            *_suggestion_view(suggestions, index),
+        )
 
     def previous(imported: list[ImportedSprite], suggestions: dict[str, Any], index: int) -> tuple[Any, ...]:
         if not imported:
@@ -274,7 +286,13 @@ def launch_dataset_maker_gui(
                 selected_ids=(updated[safe_index].item.sprite_id,),
                 notes=(blocked,),
             )
-            return (updated, suggestions, summary, *_view(updated, safe_index), *_suggestion_view(suggestions, safe_index))
+            return (
+                updated,
+                suggestions,
+                summary,
+                *_view(updated, safe_index),
+                *_suggestion_view(suggestions, safe_index),
+            )
         backend = create_prefill_backend(config)
         suggestion = _suggest_for_sprite(backend, updated[safe_index])
         suggestions[_suggestion_key(safe_index)] = _suggestion_state_value(suggestion)
@@ -354,7 +372,13 @@ def launch_dataset_maker_gui(
                 selected_ids=(),
                 notes=("No sprites matched the selected bulk prefill scope and filters.",),
             )
-            return (updated, suggestions, summary, *_view(updated, safe_index), *_suggestion_view(suggestions, safe_index))
+            return (
+                updated,
+                suggestions,
+                summary,
+                *_view(updated, safe_index),
+                *_suggestion_view(suggestions, safe_index),
+            )
         blocked = _prefill_blocked_warning(config)
         if blocked is not None:
             blocked_results: list[tuple[str, MetadataSuggestion]] = []
@@ -371,7 +395,13 @@ def launch_dataset_maker_gui(
                 selected_ids=selected_ids,
                 notes=(blocked,),
             )
-            return (updated, suggestions, summary, *_view(updated, safe_index), *_suggestion_view(suggestions, safe_index))
+            return (
+                updated,
+                suggestions,
+                summary,
+                *_view(updated, safe_index),
+                *_suggestion_view(suggestions, safe_index),
+            )
         backend = create_prefill_backend(config)
         generated: list[tuple[str, MetadataSuggestion]] = []
         applied = 0
@@ -410,11 +440,21 @@ def launch_dataset_maker_gui(
         safe_index = min(max(0, int(index or 0)), len(updated) - 1)
         suggestion = _suggestion_from_state(suggestions.get(_suggestion_key(safe_index)))
         if suggestion is None:
-            return (updated, "No suggestion for the current sprite.", *_view(updated, safe_index), *_suggestion_view(suggestions, safe_index))
+            return (
+                updated,
+                "No suggestion for the current sprite.",
+                *_view(updated, safe_index),
+                *_suggestion_view(suggestions, safe_index),
+            )
         sprite = updated[safe_index]
         item = apply_suggestion_to_item(sprite.item, suggestion, overwrite_existing=bool(overwrite_existing))
         updated[safe_index] = replace(sprite, item=item)
-        return (updated, "Applied suggestion to current sprite.", *_view(updated, safe_index), *_suggestion_view(suggestions, safe_index))
+        return (
+            updated,
+            "Applied suggestion to current sprite.",
+            *_view(updated, safe_index),
+            *_suggestion_view(suggestions, safe_index),
+        )
 
     def discard_current_suggestion(
         imported: list[ImportedSprite],
@@ -477,7 +517,9 @@ def launch_dataset_maker_gui(
             notes = gr.Textbox(label="notes", lines=3)
             with gr.Row():
                 source_name = gr.Textbox(label="source name")
-                license_value = gr.Dropdown(label="license", choices=LICENSE_CHOICES, value="unknown", allow_custom_value=True)
+                license_value = gr.Dropdown(
+                    label="license", choices=LICENSE_CHOICES, value="unknown", allow_custom_value=True
+                )
                 author = gr.Textbox(label="author")
             with gr.Accordion("Last metadata suggestion", open=False):
                 suggestion_markdown = gr.Markdown("No suggestion for the current sprite.")
@@ -500,9 +542,16 @@ def launch_dataset_maker_gui(
             with gr.Row():
                 bulk_category = gr.Textbox(label="Apply category")
                 bulk_tags_add = gr.Textbox(label="Add tags")
-                bulk_license = gr.Dropdown(label="Apply license", choices=["no_change", *LICENSE_CHOICES], value="no_change", allow_custom_value=True)
+                bulk_license = gr.Dropdown(
+                    label="Apply license",
+                    choices=["no_change", *LICENSE_CHOICES],
+                    value="no_change",
+                    allow_custom_value=True,
+                )
                 bulk_author = gr.Textbox(label="Apply author")
-                bulk_status = gr.Dropdown(label="Apply status", choices=["no_change", *STATUS_CHOICES], value="no_change")
+                bulk_status = gr.Dropdown(
+                    label="Apply status", choices=["no_change", *STATUS_CHOICES], value="no_change"
+                )
             bulk_button = gr.Button("Apply bulk edit")
             bulk_summary = gr.Markdown()
 
@@ -524,7 +573,9 @@ def launch_dataset_maker_gui(
             with gr.Row():
                 prefill_auto_apply = gr.Checkbox(label="Apply automatically to empty fields only", value=False)
                 prefill_overwrite = gr.Checkbox(label="Overwrite existing fields", value=False)
-                prefill_scope = gr.Dropdown(label="Bulk scope", choices=["current", "filtered", "all"], value="filtered")
+                prefill_scope = gr.Dropdown(
+                    label="Bulk scope", choices=["current", "filtered", "all"], value="filtered"
+                )
                 prefill_workers = gr.Number(label="Bulk workers", value=1)
             with gr.Row():
                 prefill_current_button = gr.Button("Prefill current sprite", variant="primary")
@@ -586,10 +637,25 @@ def launch_dataset_maker_gui(
                 allow_resize,
                 recursive,
             ],
-            outputs=[imported_state, index_state, suggestions_state, import_summary, *view_outputs, *suggestion_outputs],
+            outputs=[
+                imported_state,
+                index_state,
+                suggestions_state,
+                import_summary,
+                *view_outputs,
+                *suggestion_outputs,
+            ],
         )
-        previous_button.click(previous, inputs=[imported_state, suggestions_state, index_state], outputs=[index_state, *view_outputs, *suggestion_outputs])
-        next_button.click(next_item, inputs=[imported_state, suggestions_state, index_state], outputs=[index_state, *view_outputs, *suggestion_outputs])
+        previous_button.click(
+            previous,
+            inputs=[imported_state, suggestions_state, index_state],
+            outputs=[index_state, *view_outputs, *suggestion_outputs],
+        )
+        next_button.click(
+            next_item,
+            inputs=[imported_state, suggestions_state, index_state],
+            outputs=[index_state, *view_outputs, *suggestion_outputs],
+        )
         save_button.click(
             save_current,
             inputs=[
@@ -607,10 +673,26 @@ def launch_dataset_maker_gui(
             ],
             outputs=[imported_state, *view_outputs],
         )
-        accept_button.click(lambda data, index: set_status(data, index, "accepted"), inputs=[imported_state, index_state], outputs=[imported_state, *view_outputs])
-        reject_button.click(lambda data, index: set_status(data, index, "rejected"), inputs=[imported_state, index_state], outputs=[imported_state, *view_outputs])
-        needs_fix_button.click(lambda data, index: set_status(data, index, "needs_fix"), inputs=[imported_state, index_state], outputs=[imported_state, *view_outputs])
-        quarantine_button.click(lambda data, index: set_status(data, index, "quarantine"), inputs=[imported_state, index_state], outputs=[imported_state, *view_outputs])
+        accept_button.click(
+            lambda data, index: set_status(data, index, "accepted"),
+            inputs=[imported_state, index_state],
+            outputs=[imported_state, *view_outputs],
+        )
+        reject_button.click(
+            lambda data, index: set_status(data, index, "rejected"),
+            inputs=[imported_state, index_state],
+            outputs=[imported_state, *view_outputs],
+        )
+        needs_fix_button.click(
+            lambda data, index: set_status(data, index, "needs_fix"),
+            inputs=[imported_state, index_state],
+            outputs=[imported_state, *view_outputs],
+        )
+        quarantine_button.click(
+            lambda data, index: set_status(data, index, "quarantine"),
+            inputs=[imported_state, index_state],
+            outputs=[imported_state, *view_outputs],
+        )
         bulk_button.click(
             bulk_apply,
             inputs=[
@@ -870,11 +952,7 @@ def _prefill_report(
     workers: int = 1,
     notes: tuple[str, ...] = (),
 ) -> str:
-    warning_rows = [
-        (sprite_id, warning)
-        for sprite_id, suggestion in results
-        for warning in suggestion.warnings
-    ]
+    warning_rows = [(sprite_id, warning) for sprite_id, suggestion in results for warning in suggestion.warnings]
     useful_count = sum(1 for _sprite_id, suggestion in results if _suggestion_has_content(suggestion))
     lines = [
         "## Prefill report",

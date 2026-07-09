@@ -16,13 +16,13 @@ except ImportError:  # pragma: no cover - exercised when torch is absent or brok
     torch = None  # type: ignore[assignment]
 
 from spritelab.training.palette_swap import PaletteSwapConfig, apply_palette_swap
-from spritelab.training.tokenization import SpriteTextTokenizer
 from spritelab.training.rgba import npz_row_to_rgba
 from spritelab.training.structured_conditioning import (
     STRUCTURED_BATCH_KEYS,
     StructuredConditioningVocab,
     encode_structured_conditioning,
 )
+from spritelab.training.tokenization import SpriteTextTokenizer
 
 SPRITE_SIZE = 32
 REQUIRED_NPZ_KEYS = (
@@ -139,9 +139,7 @@ class SpriteTrainingDataset(_DatasetBase):
         sprite_id = str(record.get("sprite_id", ""))
         npz_sprite_id = str(np.asarray(arrays["sprite_id"])[npz_row])
         if sprite_id and npz_sprite_id != sprite_id:
-            raise ValueError(
-                f"{sprite_id}: npz_row {npz_row} in {npz_file} holds sprite_id {npz_sprite_id!r}"
-            )
+            raise ValueError(f"{sprite_id}: npz_row {npz_row} in {npz_file} holds sprite_id {npz_sprite_id!r}")
 
         alpha_np = np.asarray(arrays["alpha"][npz_row], dtype=np.float32)
         index_np = np.asarray(arrays["index_map"][npz_row], dtype=np.int64)
@@ -265,7 +263,9 @@ class SpriteTrainingDataset(_DatasetBase):
         if palette.ndim != 3 or palette.shape[0] != alpha.shape[0] or palette.shape[2] not in (3, 4):
             raise ValueError(f"{path}: palette must have shape [N, K, 3] or [N, K, 4], got {palette.shape}")
         if palette_mask.shape != palette.shape[:2]:
-            raise ValueError(f"{path}: palette_mask shape {palette_mask.shape} does not match palette {palette.shape[:2]}")
+            raise ValueError(
+                f"{path}: palette_mask shape {palette_mask.shape} does not match palette {palette.shape[:2]}"
+            )
 
 
 def collate_sprite_batch(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

@@ -24,10 +24,10 @@ def make_scrambled_square_bundle(include_unused: bool = False) -> SpriteBundle:
     index_map[13:19, 13:19] = 1
 
     palette_rows = [
-        [0, 0, 0],        # slot 0 dummy transparent
-        [255, 238, 64],   # slot 1 bright highlight
-        [12, 10, 18],     # slot 2 dark outline
-        [116, 72, 152],   # slot 3 midtone
+        [0, 0, 0],  # slot 0 dummy transparent
+        [255, 238, 64],  # slot 1 bright highlight
+        [12, 10, 18],  # slot 2 dark outline
+        [116, 72, 152],  # slot 3 midtone
     ]
     if include_unused:
         palette_rows.append([0, 255, 128])

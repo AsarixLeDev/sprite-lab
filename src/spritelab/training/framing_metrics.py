@@ -87,7 +87,7 @@ def compute_connected_components(mask: np.ndarray) -> dict[str, Any]:
     largest = max(sizes) if sizes else 0
     largest_ratio = largest / float(opaque) if opaque else 0.0
     return {
-        "connected_components": int(len(sizes)),
+        "connected_components": len(sizes),
         "largest_component_pixels": int(largest),
         "largest_component_ratio": float(largest_ratio),
         "small_component_count": int(sum(1 for size in sizes if size <= 2)),

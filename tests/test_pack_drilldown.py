@@ -66,10 +66,14 @@ def test_pack_drilldown_reports_blocking_classes_and_writes_outputs(tmp_path: Pa
     main(
         [
             "pack-drilldown",
-            "--run", str(run),
-            "--prediction-file", "label_v2_suggestions_triage.jsonl",
-            "--out", str(out_md),
-            "--out-json", str(out_json),
+            "--run",
+            str(run),
+            "--prediction-file",
+            "label_v2_suggestions_triage.jsonl",
+            "--out",
+            str(out_md),
+            "--out-json",
+            str(out_json),
         ]
     )
 

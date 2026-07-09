@@ -151,7 +151,21 @@ def launch_prefill_review_gui(
         details = gr.Markdown()
 
         view_outputs = [index_state, image, filename_json, qwen_json, fused_json, quality_json, details]
-        load_button.click(load_run, inputs=run_dir_box, outputs=[items_state, index_state, summary, image, filename_json, qwen_json, fused_json, quality_json, details])
+        load_button.click(
+            load_run,
+            inputs=run_dir_box,
+            outputs=[
+                items_state,
+                index_state,
+                summary,
+                image,
+                filename_json,
+                qwen_json,
+                fused_json,
+                quality_json,
+                details,
+            ],
+        )
         previous_button.click(previous, inputs=[items_state, index_state], outputs=view_outputs)
         next_button.click(next_item, inputs=[items_state, index_state], outputs=view_outputs)
         random_button.click(random_mismatch, inputs=items_state, outputs=view_outputs)
@@ -172,9 +186,7 @@ def load_golden_label_items(run_dir: str | Path) -> list[PrefillReviewItem]:
         if record.get("sprite_id")
     }
     if not sample_ids:
-        raise RuntimeError(
-            f"no golden sample found in {run_dir}. Run `harvest golden-sample --run {run_dir}` first."
-        )
+        raise RuntimeError(f"no golden sample found in {run_dir}. Run `harvest golden-sample --run {run_dir}` first.")
     return [item for item in load_prefill_review_items(run_dir) if item.sprite_id in sample_ids]
 
 
@@ -258,9 +270,15 @@ def launch_golden_label_gui(
         details = gr.Markdown()
 
         view_outputs = [index_state, image, category_box, object_box, tags_box, details]
-        demo.load(load_run, outputs=[items_state, index_state, summary, image, category_box, object_box, tags_box, details])
-        previous_button.click(lambda items, index: go(items, index, -1), inputs=[items_state, index_state], outputs=view_outputs)
-        next_button.click(lambda items, index: go(items, index, 1), inputs=[items_state, index_state], outputs=view_outputs)
+        demo.load(
+            load_run, outputs=[items_state, index_state, summary, image, category_box, object_box, tags_box, details]
+        )
+        previous_button.click(
+            lambda items, index: go(items, index, -1), inputs=[items_state, index_state], outputs=view_outputs
+        )
+        next_button.click(
+            lambda items, index: go(items, index, 1), inputs=[items_state, index_state], outputs=view_outputs
+        )
         save_button.click(
             save_label,
             inputs=[items_state, index_state, category_box, object_box, tags_box, notes_box],

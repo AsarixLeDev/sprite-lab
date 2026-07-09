@@ -7,7 +7,6 @@ from pathlib import Path
 from PIL import Image
 
 from spritelab.codec.bundle import SpriteBundle
-from spritelab.codec.role_inference import role_map_to_preview_image, save_role_map_preview
 from spritelab.codec.reconstruct import reconstruct_rgba
 from spritelab.utils.image import ensure_rgba
 

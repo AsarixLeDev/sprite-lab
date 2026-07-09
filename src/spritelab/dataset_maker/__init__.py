@@ -7,8 +7,8 @@ from spritelab.dataset_maker.exporter import (
     make_dataset_maker_split,
 )
 from spritelab.dataset_maker.importer import (
-    ImportOptions,
     ImportedSprite,
+    ImportOptions,
     import_png_as_dataset_item,
     import_png_directory,
 )
@@ -36,12 +36,12 @@ from spritelab.dataset_maker.prefill import (
 from spritelab.dataset_maker.report import build_dataset_maker_report
 
 __all__ = [
+    "CachedPrefillBackend",
     "DatasetMakerExportConfig",
     "DatasetMakerExportResult",
     "DatasetMakerItem",
     "ImportOptions",
     "ImportedSprite",
-    "CachedPrefillBackend",
     "MetadataSuggestion",
     "NoopPrefillBackend",
     "OllamaQwenPrefillBackend",

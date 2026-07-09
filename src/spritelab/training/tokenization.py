@@ -70,7 +70,9 @@ def semantic_strings_from_record(record: Mapping[str, Any]) -> list[str]:
     if isinstance(target_semantics, Mapping):
         for key in ("base_object", "open_name", "object_name"):
             _extend_labeled_value(chunks, key, target_semantics.get(key))
-        attributes = target_semantics.get("attributes") if isinstance(target_semantics.get("attributes"), Mapping) else {}
+        attributes = (
+            target_semantics.get("attributes") if isinstance(target_semantics.get("attributes"), Mapping) else {}
+        )
         for group in ("colors", "materials", "shapes", "effects", "state", "function", "style"):
             _extend_labeled_value(chunks, group, attributes.get(group))
 
@@ -117,7 +119,7 @@ class SpriteTextTokenizer:
         max_length: int = 32,
         min_freq: int = 1,
         max_vocab_size: int | None = None,
-    ) -> "SpriteTextTokenizer":
+    ) -> SpriteTextTokenizer:
         counter: Counter[str] = Counter()
         for text in texts:
             counter.update(tokenize_text(text))
@@ -142,7 +144,7 @@ class SpriteTextTokenizer:
         max_length: int = 32,
         min_freq: int = 1,
         max_vocab_size: int | None = None,
-    ) -> "SpriteTextTokenizer":
+    ) -> SpriteTextTokenizer:
         texts: list[str] = []
         for record in records:
             texts.extend(record_texts(record))
@@ -224,7 +226,7 @@ class SpriteTextTokenizer:
         path.write_text(json.dumps(self.to_json_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     @classmethod
-    def load(cls, path: str | Path) -> "SpriteTextTokenizer":
+    def load(cls, path: str | Path) -> SpriteTextTokenizer:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         token_to_id = {str(token): int(index) for token, index in data["token_to_id"].items()}
         for index, token in enumerate(SPECIAL_TOKENS):

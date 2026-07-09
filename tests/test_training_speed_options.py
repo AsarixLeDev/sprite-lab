@@ -8,7 +8,6 @@ import pytest
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from _semantic_dataset import default_specs, make_semantic_dataset
-
 from spritelab.dataset_maker.training_manifest import build_training_manifest, write_training_manifest
 from spritelab.training.cli import main as train_cli
 from spritelab.training.generator_challenger import (
@@ -231,24 +230,39 @@ def test_cli_generator_challenger_threads_speed_flags_into_config_json(tmp_path:
     train_cli(
         [
             "generator-challenger",
-            "--dataset", str(dataset),
-            "--training-manifest", str(manifest),
-            "--out", str(out),
-            "--batch-size", "2",
-            "--max-steps", "1",
-            "--device", "cpu",
-            "--base-channels", "8",
-            "--channel-mults", "1,2",
-            "--res-blocks-per-level", "1",
-            "--embed-dim", "8",
-            "--sample-every", "0",
-            "--save-every", "0",
-            "--validation-mode", "none",
-            "--metrics-every", "3",
+            "--dataset",
+            str(dataset),
+            "--training-manifest",
+            str(manifest),
+            "--out",
+            str(out),
+            "--batch-size",
+            "2",
+            "--max-steps",
+            "1",
+            "--device",
+            "cpu",
+            "--base-channels",
+            "8",
+            "--channel-mults",
+            "1,2",
+            "--res-blocks-per-level",
+            "1",
+            "--embed-dim",
+            "8",
+            "--sample-every",
+            "0",
+            "--save-every",
+            "0",
+            "--validation-mode",
+            "none",
+            "--metrics-every",
+            "3",
             "--fused-adamw",
             "--cudnn-benchmark",
             "--tf32",
-            "--eval-max-batches", "1",
+            "--eval-max-batches",
+            "1",
         ]
     )
     config = json.loads((out / "config.json").read_text(encoding="utf-8"))

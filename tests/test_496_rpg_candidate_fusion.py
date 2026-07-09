@@ -9,8 +9,17 @@ def _profile():
 
 def test_shoes_primary_candidate_can_auto_rank() -> None:
     candidates = ("shoes", "boots", "boot", "footwear")
-    filename = LabelSuggestion("armor", "shoes", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates)
-    vlm = LabelSuggestion("armor", "boot", confidence=0.86, source="vlm_descriptor", source_consistency="consistent", candidate_object_names=candidates)
+    filename = LabelSuggestion(
+        "armor", "shoes", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates
+    )
+    vlm = LabelSuggestion(
+        "armor",
+        "boot",
+        confidence=0.86,
+        source="vlm_descriptor",
+        source_consistency="consistent",
+        candidate_object_names=candidates,
+    )
 
     fused = fuse_label_v2(filename, vlm, None, profile=_profile())
 
@@ -21,8 +30,17 @@ def test_shoes_primary_candidate_can_auto_rank() -> None:
 
 def test_necklace_primary_candidate_can_auto_rank() -> None:
     candidates = ("necklace", "amulet", "pendant", "medallion", "charm")
-    filename = LabelSuggestion("item_icon", "necklace", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates)
-    vlm = LabelSuggestion("item_icon", "pendant", confidence=0.86, source="vlm_descriptor", source_consistency="consistent", candidate_object_names=candidates)
+    filename = LabelSuggestion(
+        "item_icon", "necklace", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates
+    )
+    vlm = LabelSuggestion(
+        "item_icon",
+        "pendant",
+        confidence=0.86,
+        source="vlm_descriptor",
+        source_consistency="consistent",
+        candidate_object_names=candidates,
+    )
 
     fused = fuse_label_v2(filename, vlm, None, profile=_profile())
 
@@ -32,8 +50,17 @@ def test_necklace_primary_candidate_can_auto_rank() -> None:
 
 def test_gold_coin_candidate_can_auto_rank_without_hallucination_block() -> None:
     candidates = ("gold", "gold_coin", "coin", "gold_ingot", "gold_nugget", "currency")
-    filename = LabelSuggestion("material", "gold", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates)
-    vlm = LabelSuggestion("material", "coin", confidence=0.86, source="vlm_descriptor", source_consistency="consistent", candidate_object_names=candidates)
+    filename = LabelSuggestion(
+        "material", "gold", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates
+    )
+    vlm = LabelSuggestion(
+        "material",
+        "coin",
+        confidence=0.86,
+        source="vlm_descriptor",
+        source_consistency="consistent",
+        candidate_object_names=candidates,
+    )
 
     fused = fuse_label_v2(filename, vlm, None, profile=_profile())
 
@@ -44,7 +71,9 @@ def test_gold_coin_candidate_can_auto_rank_without_hallucination_block() -> None
 
 def test_helmet_contradicted_mushroom_stays_review_and_never_uses_mushroom() -> None:
     candidates = ("helmet", "helm", "headgear")
-    filename = LabelSuggestion("armor", "helmet", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates)
+    filename = LabelSuggestion(
+        "armor", "helmet", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates
+    )
     vlm = LabelSuggestion(
         "plant",
         "mushroom",
@@ -65,7 +94,9 @@ def test_helmet_contradicted_mushroom_stays_review_and_never_uses_mushroom() -> 
 
 def test_armor_alternatives_are_seen_without_forcing_unrelated_label() -> None:
     candidates = ("armor", "chestplate", "breastplate", "cuirass", "armor_piece", "leather_armor")
-    filename = LabelSuggestion("armor", "armor", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates)
+    filename = LabelSuggestion(
+        "armor", "armor", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates
+    )
     vlm = LabelSuggestion(
         "armor",
         "armor",
@@ -85,8 +116,17 @@ def test_armor_alternatives_are_seen_without_forcing_unrelated_label() -> None:
 
 def test_generic_vlm_with_candidates_reviews_unless_alternative_is_clear() -> None:
     candidates = ("necklace", "amulet", "pendant", "medallion", "charm")
-    filename = LabelSuggestion("item_icon", "necklace", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates)
-    generic = LabelSuggestion("item_icon", "item", confidence=0.7, source="vlm_descriptor", source_consistency="unclear", candidate_object_names=candidates)
+    filename = LabelSuggestion(
+        "item_icon", "necklace", confidence=0.75, source="filename_rules_v2", candidate_object_names=candidates
+    )
+    generic = LabelSuggestion(
+        "item_icon",
+        "item",
+        confidence=0.7,
+        source="vlm_descriptor",
+        source_consistency="unclear",
+        candidate_object_names=candidates,
+    )
 
     fused_generic = fuse_label_v2(filename, generic, None, profile=_profile())
 

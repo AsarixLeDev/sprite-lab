@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 
 from spritelab.codec.roles import ROLE_HIGHLIGHT, ROLE_MIDTONE, ROLE_OUTLINE
-from spritelab.training.palette_swap import PaletteSwapConfig, apply_palette_swap
 from spritelab.training.palette_swap_review import (
     PaletteSwapReviewConfig,
     aggregate_metrics,
@@ -324,8 +323,7 @@ def test_material_conflict_rows_are_inspectable_and_counted_by_row(tmp_path: Pat
     assert result.report["metrics"]["material_conflict_drop_count"] == len(conflicts)
     assert all(row["material_conflict_tokens_dropped"] == ["gold"] for row in conflicts)
     assert all(
-        row["material_conflict_reason"] == "material_color_token_conflicted_with_target_family"
-        for row in conflicts
+        row["material_conflict_reason"] == "material_color_token_conflicted_with_target_family" for row in conflicts
     )
 
 
@@ -536,23 +534,44 @@ def test_material_colors_excluded(tmp_path: Path) -> None:
         sprite_id=np.array(ids, dtype=np.str_),
     )
     rows = [
-        {"sprite_id": s, "split": "train", "npz_file": "train.npz", "npz_row": i,
-         "object_name": "gold_coin", "base_object": "coin", "category": "item_icon",
-         "caption": "gold coin", "colors": ["gold"], "materials": ["gold"]}
+        {
+            "sprite_id": s,
+            "split": "train",
+            "npz_file": "train.npz",
+            "npz_row": i,
+            "object_name": "gold_coin",
+            "base_object": "coin",
+            "category": "item_icon",
+            "caption": "gold coin",
+            "colors": ["gold"],
+            "materials": ["gold"],
+        }
         for i, s in enumerate(ids)
     ]
     manifest = dataset / "training_manifest.jsonl"
     manifest.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
     allowed = review_palette_swap(
-        _review_config(dataset, manifest, tmp_path / "allow", max_samples=2,
-                       palette_swap_families="red,blue,gold", palette_swap_source_families="red,blue,green,gold")
+        _review_config(
+            dataset,
+            manifest,
+            tmp_path / "allow",
+            max_samples=2,
+            palette_swap_families="red,blue,gold",
+            palette_swap_source_families="red,blue,green,gold",
+        )
     )
     assert allowed.report["metrics"]["applied_count"] > 0
 
     blocked = review_palette_swap(
-        _review_config(dataset, manifest, tmp_path / "block", max_samples=2,
-                       palette_swap_families="red,blue", palette_swap_allow_material_colors=False)
+        _review_config(
+            dataset,
+            manifest,
+            tmp_path / "block",
+            max_samples=2,
+            palette_swap_families="red,blue",
+            palette_swap_allow_material_colors=False,
+        )
     )
     metrics = blocked.report["metrics"]
     assert metrics["applied_count"] == 0
@@ -565,8 +584,7 @@ def test_material_colors_excluded(tmp_path: Path) -> None:
 def test_target_families_respected(tmp_path: Path) -> None:
     dataset, manifest = _build_dataset(tmp_path, count=16)
     result = review_palette_swap(
-        _review_config(dataset, manifest, tmp_path / "review", max_samples=16,
-                       palette_swap_target_families="red,blue")
+        _review_config(dataset, manifest, tmp_path / "review", max_samples=16, palette_swap_target_families="red,blue")
     )
     targets = set(result.report["metrics"]["target_family_counts"])
     assert targets
@@ -605,8 +623,17 @@ def test_color_confidence_threshold(tmp_path: Path) -> None:
         category_id=np.ones((1,), dtype=np.int64),
         sprite_id=np.array(["mixed_0"], dtype=np.str_),
     )
-    rows = [{"sprite_id": "mixed_0", "split": "train", "npz_file": "train.npz", "npz_row": 0,
-             "category": "weapon", "caption": "green sword", "colors": ["green"]}]
+    rows = [
+        {
+            "sprite_id": "mixed_0",
+            "split": "train",
+            "npz_file": "train.npz",
+            "npz_row": 0,
+            "category": "weapon",
+            "caption": "green sword",
+            "colors": ["green"],
+        }
+    ]
     manifest = dataset / "training_manifest.jsonl"
     manifest.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
@@ -616,8 +643,7 @@ def test_color_confidence_threshold(tmp_path: Path) -> None:
     assert 0.0 < row["source_color_confidence"] < 1.0
 
     strict = review_palette_swap(
-        _review_config(dataset, manifest, tmp_path / "strict", max_samples=1,
-                       palette_swap_min_color_confidence=0.99)
+        _review_config(dataset, manifest, tmp_path / "strict", max_samples=1, palette_swap_min_color_confidence=0.99)
     )
     metrics = strict.report["metrics"]
     assert metrics["applied_count"] == 0
@@ -668,8 +694,7 @@ def test_red_flags_material_like_targets(tmp_path: Path) -> None:
     # Force many gray/gold/brown targets -> material-like target red flag.
     dataset, manifest = _build_dataset(tmp_path, count=12)
     result = review_palette_swap(
-        _review_config(dataset, manifest, tmp_path / "review", max_samples=12,
-                       palette_swap_families="gray,gold,brown")
+        _review_config(dataset, manifest, tmp_path / "review", max_samples=12, palette_swap_families="gray,gold,brown")
     )
     names = {flag["name"] for flag in result.report["red_flags"]}
     assert "many_material_like_targets" in names
@@ -696,10 +721,7 @@ def test_red_flag_when_caption_prepending_occurs_while_disabled() -> None:
         }
     ]
     metrics = aggregate_metrics(rows)
-    names = {
-        flag["name"]
-        for flag in compute_red_flags(metrics, rows, {"palette_swap_no_caption_prepend": True})
-    }
+    names = {flag["name"] for flag in compute_red_flags(metrics, rows, {"palette_swap_no_caption_prepend": True})}
     assert "caption_prepending_nonzero_when_disabled" in names
 
 

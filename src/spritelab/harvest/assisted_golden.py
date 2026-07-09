@@ -111,7 +111,9 @@ class AssistedGoldenCandidate:
         object.__setattr__(self, "qwen_category", normalize_category(self.qwen_category))
         object.__setattr__(self, "qwen_object_name", normalize_object_name(self.qwen_object_name))
         object.__setattr__(self, "qwen_tags", normalize_tags(self.qwen_tags))
-        object.__setattr__(self, "qwen_warnings", tuple(str(value).strip() for value in self.qwen_warnings if str(value).strip()))
+        object.__setattr__(
+            self, "qwen_warnings", tuple(str(value).strip() for value in self.qwen_warnings if str(value).strip())
+        )
         object.__setattr__(self, "fused_category", normalize_category(self.fused_category))
         object.__setattr__(self, "fused_object_name", normalize_object_name(self.fused_object_name))
         object.__setattr__(self, "fused_tags", normalize_tags(self.fused_tags))
@@ -225,7 +227,9 @@ def load_assisted_candidates(
     fused_by_id = _fused_by_id(read_jsonl(run_path / "fused_suggestions.jsonl"))
     label_v2_by_id = _fused_by_id(read_jsonl(run_path / "label_v2_suggestions.jsonl"))
     candidates = [
-        _candidate_from_record(run_path, record, qwen_by_id=qwen_by_id, fused_by_id=fused_by_id, label_v2_by_id=label_v2_by_id)
+        _candidate_from_record(
+            run_path, record, qwen_by_id=qwen_by_id, fused_by_id=fused_by_id, label_v2_by_id=label_v2_by_id
+        )
         for record in records
         if _record_status(record) in statuses
     ]
@@ -249,7 +253,9 @@ def load_assisted_candidates(
             rng.shuffle(candidates)
             candidates = sorted(candidates[:n], key=lambda candidate: candidate.sprite_id)
     else:
-        candidates = sorted(candidates, key=lambda candidate: (-candidate_review_priority(candidate), candidate.sprite_id))
+        candidates = sorted(
+            candidates, key=lambda candidate: (-candidate_review_priority(candidate), candidate.sprite_id)
+        )
     return candidates
 
 
@@ -860,8 +866,16 @@ def _candidate_from_record(
 
     qwen = _mapping_or_none(auto_metadata.get("qwen_suggestion")) or dict(qwen_by_id.get(sprite_id, {}))
     fused_record = _mapping_or_none(fused_by_id.get(sprite_id)) or {}
-    fused = _mapping_or_none(auto_metadata.get("fused_suggestion")) or _mapping_or_none(fused_record.get("fused_suggestion")) or {}
-    quality = _mapping_or_none(auto_metadata.get("prefill_quality")) or _mapping_or_none(fused_record.get("prefill_quality")) or {}
+    fused = (
+        _mapping_or_none(auto_metadata.get("fused_suggestion"))
+        or _mapping_or_none(fused_record.get("fused_suggestion"))
+        or {}
+    )
+    quality = (
+        _mapping_or_none(auto_metadata.get("prefill_quality"))
+        or _mapping_or_none(fused_record.get("prefill_quality"))
+        or {}
+    )
     label_v2_record = _mapping_or_none((label_v2_by_id or {}).get(sprite_id)) or {}
     candidate_object_names: tuple[str, ...] = ()
     alternative_object_names: tuple[str, ...] = ()
@@ -1052,7 +1066,9 @@ def _computed_correction_fields(record: Mapping[str, Any]) -> tuple[str, ...]:
             object_name=normalize_object_name(str(record.get("gold_object_name", record.get("object_name", "")))),
             tags=normalize_tags(tuple(str(value) for value in record.get("gold_tags", record.get("tags", ())) or ())),
             short_description=str(record.get("gold_short_description", record.get("short_description", ""))),
-            materials=normalize_tags(tuple(str(value) for value in record.get("gold_materials", record.get("materials", ())) or ())),
+            materials=normalize_tags(
+                tuple(str(value) for value in record.get("gold_materials", record.get("materials", ())) or ())
+            ),
             mood=normalize_tags(tuple(str(value) for value in record.get("gold_mood", record.get("mood", ())) or ())),
             prefill=prefill,
         )

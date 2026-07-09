@@ -251,9 +251,7 @@ def create_dedupe_report(options: DedupeReportOptions) -> DedupeReport:
 
     exact_groups = _exact_duplicate_groups(records)
     near_groups = (
-        _near_duplicate_groups(records, threshold=options.near_duplicate_threshold)
-        if options.near_duplicate
-        else []
+        _near_duplicate_groups(records, threshold=options.near_duplicate_threshold) if options.near_duplicate else []
     )
     duplicate_ids = _duplicate_value_map(records, value_name="id")
     duplicate_source_paths = _duplicate_value_map(records, value_name="source_path")
@@ -309,9 +307,7 @@ def load_dedupe_report_json(path: str | Path) -> DedupeReport:
         exact_groups=[DuplicateGroup(**group) for group in data["exact_groups"]],
         near_groups=[NearDuplicateGroup(**group) for group in data["near_groups"]],
         duplicate_ids={str(key): list(value) for key, value in data["duplicate_ids"].items()},
-        duplicate_source_paths={
-            str(key): list(value) for key, value in data["duplicate_source_paths"].items()
-        },
+        duplicate_source_paths={str(key): list(value) for key, value in data["duplicate_source_paths"].items()},
         failed=[FailedDedupeRecord(**record) for record in data["failed"]],
         options=dict(data["options"]),
     )
@@ -360,8 +356,7 @@ def render_dedupe_report_markdown(report: DedupeReport) -> str:
     if report.exact_groups:
         for group in report.exact_groups:
             lines.append(
-                f"| {group.kind} | {len(group.ids)} | {_yes_no(group.crosses_splits)} | "
-                f"{', '.join(group.ids)} |"
+                f"| {group.kind} | {len(group.ids)} | {_yes_no(group.crosses_splits)} | {', '.join(group.ids)} |"
             )
     else:
         lines.append("| None | 0 | no |  |")
@@ -444,7 +439,7 @@ def save_dedupe_report_markdown(report: DedupeReport, path: str | Path) -> None:
     output_path.write_text(render_dedupe_report_markdown(report), encoding="utf-8")
 
 
-def _update_array_hash(digest: "hashlib._Hash", name: str, array: np.ndarray) -> None:
+def _update_array_hash(digest: hashlib._Hash, name: str, array: np.ndarray) -> None:
     contiguous = np.ascontiguousarray(array)
     header = {
         "name": name,
@@ -456,7 +451,7 @@ def _update_array_hash(digest: "hashlib._Hash", name: str, array: np.ndarray) ->
     _update_bytes_hash(digest, contiguous.tobytes())
 
 
-def _update_bytes_hash(digest: "hashlib._Hash", data: bytes) -> None:
+def _update_bytes_hash(digest: hashlib._Hash, data: bytes) -> None:
     digest.update(len(data).to_bytes(8, byteorder="big", signed=False))
     digest.update(data)
 
@@ -635,9 +630,7 @@ def _near_duplicate_groups(
     for component in components:
         component_records = [records[index] for index in sorted(component, key=lambda i: records[i].id)]
         component_ids = {record.id for record in component_records}
-        component_pairs = [
-            pair for pair in pairs if pair["a"] in component_ids and pair["b"] in component_ids
-        ]
+        component_pairs = [pair for pair in pairs if pair["a"] in component_ids and pair["b"] in component_ids]
         if len(component_records) < 2 or not component_pairs:
             continue
 
@@ -685,11 +678,7 @@ def _duplicate_value_map(records: list[DedupeSpriteRecord], *, value_name: str) 
         if value is None:
             continue
         grouped[str(value)].append(record.bundle_dir)
-    return {
-        key: sorted(bundle_dirs)
-        for key, bundle_dirs in sorted(grouped.items())
-        if len(bundle_dirs) >= 2
-    }
+    return {key: sorted(bundle_dirs) for key, bundle_dirs in sorted(grouped.items()) if len(bundle_dirs) >= 2}
 
 
 def _unique_splits(records: list[DedupeSpriteRecord]) -> list[str]:
@@ -792,9 +781,7 @@ def _write_near_groups_file(path: Path, groups: list[NearDuplicateGroup]) -> Non
         for sprite_id, bundle_dir in zip(group.ids, group.bundle_dirs):
             lines.append(f"{sprite_id}\t{bundle_dir}")
         for pair in group.pairs:
-            lines.append(
-                f"pair\t{pair['a']}\t{pair['b']}\tdistance={pair['distance']}"
-            )
+            lines.append(f"pair\t{pair['a']}\t{pair['b']}\tdistance={pair['distance']}")
         lines.append("")
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 

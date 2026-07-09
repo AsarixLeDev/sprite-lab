@@ -93,13 +93,9 @@ def build_harvest_report_data(
     categories = Counter(sprite.final_item.category for sprite in harvested)
     tags = Counter(tag for sprite in harvested for tag in sprite.final_item.tags)
     palette_sizes = Counter(
-        sprite.final_item.palette_size
-        for sprite in harvested
-        if sprite.final_item.palette_size is not None
+        sprite.final_item.palette_size for sprite in harvested if sprite.final_item.palette_size is not None
     )
-    image_sizes = Counter(
-        f"{sprite.candidate.width}x{sprite.candidate.height}" for sprite in harvested
-    )
+    image_sizes = Counter(f"{sprite.candidate.width}x{sprite.candidate.height}" for sprite in harvested)
 
     warnings: list[str] = []
     for source in sources:

@@ -37,8 +37,8 @@ from spritelab.training.v2_phase0_eval import (
     write_summary_markdown,
 )
 
-
 # ── Preset resolution ───────────────────────────────────────────────────────
+
 
 def test_resolve_preset_params_v1() -> None:
     p = resolve_preset_params("v1")
@@ -75,6 +75,7 @@ def test_resolve_preset_params_unknown() -> None:
 
 
 # ── Parse helpers ───────────────────────────────────────────────────────────
+
 
 def test_parse_seeds_default() -> None:
     assert parse_seeds("") == (20260723, 20260724, 20260725)
@@ -117,6 +118,7 @@ def test_parse_factored_grid_basic() -> None:
 
 
 # ── Build run plan ──────────────────────────────────────────────────────────
+
 
 def test_build_run_plan_v1_cell_has_correct_params() -> None:
     config = V2Phase0EvalConfig(
@@ -250,9 +252,16 @@ def test_build_run_plan_unknown_preset_skipped() -> None:
 
 # ── Manifest metadata helpers ────────────────────────────────────────────────
 
-def _write_fake_manifest(cell_dir: Path, *, export_preset: str = "", factored_cfg: bool = False,
-                         cfg_base_scale: float | None = None, cfg_color_scale: float | None = None,
-                         sample_count: int = 8) -> None:
+
+def _write_fake_manifest(
+    cell_dir: Path,
+    *,
+    export_preset: str = "",
+    factored_cfg: bool = False,
+    cfg_base_scale: float | None = None,
+    cfg_color_scale: float | None = None,
+    sample_count: int = 8,
+) -> None:
     cell_dir.mkdir(parents=True, exist_ok=True)
     lines = []
     for i in range(sample_count):
@@ -270,9 +279,16 @@ def _write_fake_manifest(cell_dir: Path, *, export_preset: str = "", factored_cf
 
 
 def _write_fake_qa(cell_dir: Path) -> None:
-    (cell_dir / "generated_qa_report.json").write_text(json.dumps({
-        "errors": [], "warnings": [], "ok": True, "sample_count": 8,
-    }))
+    (cell_dir / "generated_qa_report.json").write_text(
+        json.dumps(
+            {
+                "errors": [],
+                "warnings": [],
+                "ok": True,
+                "sample_count": 8,
+            }
+        )
+    )
 
 
 def test_read_manifest_metadata_v1() -> None:
@@ -284,8 +300,9 @@ def test_read_manifest_metadata_v1() -> None:
 
 
 def test_read_manifest_metadata_v1_1() -> None:
-    _write_fake_manifest(Path("/tmp/fake_v1_1"), export_preset="v1.1", factored_cfg=True,
-                         cfg_base_scale=2.5, cfg_color_scale=3.0)
+    _write_fake_manifest(
+        Path("/tmp/fake_v1_1"), export_preset="v1.1", factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0
+    )
     meta = _read_manifest_metadata(Path("/tmp/fake_v1_1"))
     assert meta is not None
     assert meta["export_preset"] == "v1.1"
@@ -301,26 +318,35 @@ def test_verify_cell_metadata_passes_v1(tmp_path: Path) -> None:
 
 
 def test_verify_cell_metadata_passes_v1_1(tmp_path: Path) -> None:
-    _write_fake_manifest(tmp_path, export_preset="v1.1", factored_cfg=True,
-                         cfg_base_scale=2.5, cfg_color_scale=3.0)
-    cell = RunCell(mode="preset_v1_1_seed1", export_preset="v1.1", seed=1,
-                   factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0)
+    _write_fake_manifest(tmp_path, export_preset="v1.1", factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0)
+    cell = RunCell(
+        mode="preset_v1_1_seed1",
+        export_preset="v1.1",
+        seed=1,
+        factored_cfg=True,
+        cfg_base_scale=2.5,
+        cfg_color_scale=3.0,
+    )
     verify_cell_metadata(cell, tmp_path)  # should not raise
 
 
 def test_verify_cell_metadata_fails_mismatched_factored_cfg(tmp_path: Path) -> None:
     """Manifest has v1.1 export_preset but factored_cfg=False; cell expects True."""
-    _write_fake_manifest(tmp_path, export_preset="v1.1", factored_cfg=False,
-                         cfg_base_scale=2.5, cfg_color_scale=3.0)
-    cell = RunCell(mode="preset_v1_1_seed1", export_preset="v1.1", seed=1,
-                   factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0)
+    _write_fake_manifest(tmp_path, export_preset="v1.1", factored_cfg=False, cfg_base_scale=2.5, cfg_color_scale=3.0)
+    cell = RunCell(
+        mode="preset_v1_1_seed1",
+        export_preset="v1.1",
+        seed=1,
+        factored_cfg=True,
+        cfg_base_scale=2.5,
+        cfg_color_scale=3.0,
+    )
     with pytest.raises(RuntimeError, match="factored_cfg mismatch"):
         verify_cell_metadata(cell, tmp_path)
 
 
 def test_verify_cell_metadata_fails_mismatched_export_preset(tmp_path: Path) -> None:
-    _write_fake_manifest(tmp_path, export_preset="v1.1", factored_cfg=True,
-                         cfg_base_scale=2.5, cfg_color_scale=3.0)
+    _write_fake_manifest(tmp_path, export_preset="v1.1", factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0)
     cell = RunCell(mode="preset_v1_seed1", export_preset="v1", seed=1)
     with pytest.raises(RuntimeError, match="export_preset mismatch"):
         verify_cell_metadata(cell, tmp_path)
@@ -333,20 +359,32 @@ def test_count_manifest_records(tmp_path: Path) -> None:
 
 # ── Skip-sampling-if-exists validation ──────────────────────────────────────
 
+
 def test_skip_cell_dir_is_valid_when_metadata_matches(tmp_path: Path) -> None:
-    _write_fake_manifest(tmp_path, export_preset="v1.1", factored_cfg=True,
-                         cfg_base_scale=2.5, cfg_color_scale=3.0)
+    _write_fake_manifest(tmp_path, export_preset="v1.1", factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0)
     _write_fake_qa(tmp_path)
-    cell = RunCell(mode="preset_v1_1_seed1", export_preset="v1.1", seed=1,
-                   factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0)
+    cell = RunCell(
+        mode="preset_v1_1_seed1",
+        export_preset="v1.1",
+        seed=1,
+        factored_cfg=True,
+        cfg_base_scale=2.5,
+        cfg_color_scale=3.0,
+    )
     assert _skip_cell_dir_is_valid(cell, tmp_path) is True
 
 
 def test_skip_cell_dir_is_invalid_when_metadata_mismatches(tmp_path: Path) -> None:
     _write_fake_manifest(tmp_path, export_preset="v1", factored_cfg=False)
     _write_fake_qa(tmp_path)
-    cell = RunCell(mode="preset_v1_1_seed1", export_preset="v1.1", seed=1,
-                   factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0)
+    cell = RunCell(
+        mode="preset_v1_1_seed1",
+        export_preset="v1.1",
+        seed=1,
+        factored_cfg=True,
+        cfg_base_scale=2.5,
+        cfg_color_scale=3.0,
+    )
     assert _skip_cell_dir_is_valid(cell, tmp_path) is False
 
 
@@ -358,60 +396,99 @@ def test_skip_cell_dir_is_invalid_when_no_qa(tmp_path: Path) -> None:
 
 # ── Collect metrics from synthetic output files ─────────────────────────────
 
-def _write_fake_run_outputs(run_dir: Path, *, sample_count: int = 96,
-                            export_preset: str = "v1", factored_cfg: bool = False,
-                            cfg_base_scale: float | None = None,
-                            cfg_color_scale: float | None = None) -> None:
+
+def _write_fake_run_outputs(
+    run_dir: Path,
+    *,
+    sample_count: int = 96,
+    export_preset: str = "v1",
+    factored_cfg: bool = False,
+    cfg_base_scale: float | None = None,
+    cfg_color_scale: float | None = None,
+) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     lines = []
     for i in range(sample_count):
-        lines.append(json.dumps({
-            "sample_id": f"sample_{i:06d}",
-            "prompt": f"prompt {i}",
-            "prompt_id": f"prompt_{i:04d}",
-            "export_preset": export_preset,
-            "factored_cfg": factored_cfg,
-            "cfg_base_scale": cfg_base_scale,
-            "cfg_color_scale": cfg_color_scale,
-        }))
+        lines.append(
+            json.dumps(
+                {
+                    "sample_id": f"sample_{i:06d}",
+                    "prompt": f"prompt {i}",
+                    "prompt_id": f"prompt_{i:04d}",
+                    "export_preset": export_preset,
+                    "factored_cfg": factored_cfg,
+                    "cfg_base_scale": cfg_base_scale,
+                    "cfg_color_scale": cfg_color_scale,
+                }
+            )
+        )
     (run_dir / "generated_manifest.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    (run_dir / "generated_qa_report.json").write_text(json.dumps({
-        "errors": [], "warnings": ["sample_000000: generated sprite is fully transparent"],
-        "checks": {}, "ok": True, "sample_count": sample_count,
-    }))
+    (run_dir / "generated_qa_report.json").write_text(
+        json.dumps(
+            {
+                "errors": [],
+                "warnings": ["sample_000000: generated sprite is fully transparent"],
+                "checks": {},
+                "ok": True,
+                "sample_count": sample_count,
+            }
+        )
+    )
     review_dir = run_dir / "review"
     review_dir.mkdir(parents=True, exist_ok=True)
-    (review_dir / "generated_review_report.json").write_text(json.dumps({
-        "sample_count": sample_count,
-        "overall": {
-            "count": sample_count,
-            "median_visible_color_count": 12.0,
-            "warning_counts": {"touches_border": 49, "too_many_rare_colors": 0, "single_blob": 29},
-            "total_warnings": 130,
-        },
-        "errors": [],
-    }))
-    (run_dir / "prompt_faithfulness_report.json").write_text(json.dumps({
-        "sample_count": sample_count,
-        "category_consistency_rate": 0.8068,
-        "category_consistency_ci95": [0.72, 0.88],
-        "color_consistency_rate": 0.8438,
-        "color_consistency_ci95": [0.76, 0.91],
-        "repeated_silhouette_rate": 0.0,
-        "generic_blob_collapse_rate": 0.3021,
-        "generic_potion_collapse_rate": 0.0521,
-        "near_copy_rate": 0.0,
-        "source_selection": {"mode": "all", "source_count_used": 928, "source_candidate_hash": "083d55be9803"},
-        "nearest_source_summary": {"p10_distance": 0.15},
-    }))
-    (run_dir / "generation_report.json").write_text(json.dumps({
-        "palette_projection": {"applied": True, "method": "deterministic_kmeans",
-                               "target_colors": 16, "min_pixel_share": 0.01,
-                               "mean_rgb_mae_visible": 0.03, "destructive_rate": 0.0},
-    }))
-    (run_dir / "palette_projection_report.json").write_text(json.dumps({
-        "median_visible_color_count_before": 32.0, "median_visible_color_count_after": 12.0,
-    }))
+    (review_dir / "generated_review_report.json").write_text(
+        json.dumps(
+            {
+                "sample_count": sample_count,
+                "overall": {
+                    "count": sample_count,
+                    "median_visible_color_count": 12.0,
+                    "warning_counts": {"touches_border": 49, "too_many_rare_colors": 0, "single_blob": 29},
+                    "total_warnings": 130,
+                },
+                "errors": [],
+            }
+        )
+    )
+    (run_dir / "prompt_faithfulness_report.json").write_text(
+        json.dumps(
+            {
+                "sample_count": sample_count,
+                "category_consistency_rate": 0.8068,
+                "category_consistency_ci95": [0.72, 0.88],
+                "color_consistency_rate": 0.8438,
+                "color_consistency_ci95": [0.76, 0.91],
+                "repeated_silhouette_rate": 0.0,
+                "generic_blob_collapse_rate": 0.3021,
+                "generic_potion_collapse_rate": 0.0521,
+                "near_copy_rate": 0.0,
+                "source_selection": {"mode": "all", "source_count_used": 928, "source_candidate_hash": "083d55be9803"},
+                "nearest_source_summary": {"p10_distance": 0.15},
+            }
+        )
+    )
+    (run_dir / "generation_report.json").write_text(
+        json.dumps(
+            {
+                "palette_projection": {
+                    "applied": True,
+                    "method": "deterministic_kmeans",
+                    "target_colors": 16,
+                    "min_pixel_share": 0.01,
+                    "mean_rgb_mae_visible": 0.03,
+                    "destructive_rate": 0.0,
+                },
+            }
+        )
+    )
+    (run_dir / "palette_projection_report.json").write_text(
+        json.dumps(
+            {
+                "median_visible_color_count_before": 32.0,
+                "median_visible_color_count_after": 12.0,
+            }
+        )
+    )
 
 
 def test_collect_run_metrics_from_synthetic_v1(tmp_path: Path) -> None:
@@ -427,10 +504,15 @@ def test_collect_run_metrics_from_synthetic_v1(tmp_path: Path) -> None:
 
 
 def test_collect_run_metrics_from_synthetic_v1_1(tmp_path: Path) -> None:
-    _write_fake_run_outputs(tmp_path, export_preset="v1.1", factored_cfg=True,
-                            cfg_base_scale=2.5, cfg_color_scale=3.0)
-    cell = RunCell(mode="preset_v1_1_seed20260723", export_preset="v1.1", seed=20260723,
-                   factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0)
+    _write_fake_run_outputs(tmp_path, export_preset="v1.1", factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0)
+    cell = RunCell(
+        mode="preset_v1_1_seed20260723",
+        export_preset="v1.1",
+        seed=20260723,
+        factored_cfg=True,
+        cfg_base_scale=2.5,
+        cfg_color_scale=3.0,
+    )
     metrics = collect_run_metrics(tmp_path, cell, 256)
     assert metrics.export_preset == "v1.1"
     assert metrics.factored_cfg is True
@@ -460,26 +542,35 @@ def test_collect_run_metrics_missing_files(tmp_path: Path) -> None:
 
 # ── Aggregate metrics ───────────────────────────────────────────────────────
 
-def _make_fake_metrics(mode: str, seed: int, category: float, color: float,
-                       export_preset: str | None = None,
-                       factored_cfg: bool = False) -> RunMetrics:
+
+def _make_fake_metrics(
+    mode: str, seed: int, category: float, color: float, export_preset: str | None = None, factored_cfg: bool = False
+) -> RunMetrics:
     return RunMetrics(
-        mode=mode, seed=seed, requested_max_samples=96, sample_count_generated=96,
-        review_sample_count=96, faithfulness_sample_count=96,
-        export_preset=export_preset, factored_cfg=factored_cfg,
-        qa_errors=0, median_visible_colors=12.0,
-        category_consistency=category, color_consistency=color,
-        repeated_silhouette_rate=0.0, blob_collapse_rate=0.30,
-        potion_collapse_rate=0.05, near_copy_rate=0.0, source_count_used=928,
+        mode=mode,
+        seed=seed,
+        requested_max_samples=96,
+        sample_count_generated=96,
+        review_sample_count=96,
+        faithfulness_sample_count=96,
+        export_preset=export_preset,
+        factored_cfg=factored_cfg,
+        qa_errors=0,
+        median_visible_colors=12.0,
+        category_consistency=category,
+        color_consistency=color,
+        repeated_silhouette_rate=0.0,
+        blob_collapse_rate=0.30,
+        potion_collapse_rate=0.05,
+        near_copy_rate=0.0,
+        source_count_used=928,
     )
 
 
 def test_aggregate_metrics_preserves_export_preset_and_factored() -> None:
     cells = [
-        _make_fake_metrics("preset_v1_seed20260723", 20260723, 0.81, 0.84,
-                           export_preset="v1", factored_cfg=False),
-        _make_fake_metrics("preset_v1_1_seed20260723", 20260723, 0.79, 0.87,
-                           export_preset="v1.1", factored_cfg=True),
+        _make_fake_metrics("preset_v1_seed20260723", 20260723, 0.81, 0.84, export_preset="v1", factored_cfg=False),
+        _make_fake_metrics("preset_v1_1_seed20260723", 20260723, 0.79, 0.87, export_preset="v1.1", factored_cfg=True),
     ]
     aggs = aggregate_metrics(cells)
     assert aggs["preset_v1"]["export_preset"] == "v1"
@@ -509,14 +600,23 @@ def test_base_mode_strips_seed_suffix() -> None:
 
 # ── Compute deltas ──────────────────────────────────────────────────────────
 
+
 def test_compute_deltas_nonzero_when_different() -> None:
     aggs = {
-        "preset_v1": {"color_consistency_mean": 0.840, "category_consistency_mean": 0.810,
-                       "rare_color_warning_rate_mean": 0.0, "blob_collapse_rate_mean": 0.302,
-                       "near_copy_rate_mean": 0.0},
-        "preset_v1_1": {"color_consistency_mean": 0.870, "category_consistency_mean": 0.791,
-                         "rare_color_warning_rate_mean": 0.003, "blob_collapse_rate_mean": 0.295,
-                         "near_copy_rate_mean": 0.0},
+        "preset_v1": {
+            "color_consistency_mean": 0.840,
+            "category_consistency_mean": 0.810,
+            "rare_color_warning_rate_mean": 0.0,
+            "blob_collapse_rate_mean": 0.302,
+            "near_copy_rate_mean": 0.0,
+        },
+        "preset_v1_1": {
+            "color_consistency_mean": 0.870,
+            "category_consistency_mean": 0.791,
+            "rare_color_warning_rate_mean": 0.003,
+            "blob_collapse_rate_mean": 0.295,
+            "near_copy_rate_mean": 0.0,
+        },
     }
     deltas = _compute_deltas(aggs)
     d = deltas["preset_v1_1"]
@@ -526,36 +626,62 @@ def test_compute_deltas_nonzero_when_different() -> None:
 
 # ── Decision rules ──────────────────────────────────────────────────────────
 
+
 def test_decide_v1_1_pass() -> None:
-    v1 = {"color_consistency_mean": 0.84, "category_consistency_mean": 0.81,
-          "rare_color_warning_rate_mean": 0.0, "blob_collapse_rate_mean": 0.302, "near_copy_rate_mean": 0.0}
-    v11 = {"color_consistency_mean": 0.88, "category_consistency_mean": 0.80,
-           "rare_color_warning_rate_mean": 0.0, "blob_collapse_rate_mean": 0.29,
-           "near_copy_rate_mean": 0.0, "qa_errors_total": 0}
+    v1 = {
+        "color_consistency_mean": 0.84,
+        "category_consistency_mean": 0.81,
+        "rare_color_warning_rate_mean": 0.0,
+        "blob_collapse_rate_mean": 0.302,
+        "near_copy_rate_mean": 0.0,
+    }
+    v11 = {
+        "color_consistency_mean": 0.88,
+        "category_consistency_mean": 0.80,
+        "rare_color_warning_rate_mean": 0.0,
+        "blob_collapse_rate_mean": 0.29,
+        "near_copy_rate_mean": 0.0,
+        "qa_errors_total": 0,
+    }
     assert decide_v1_1(v1, v11)["label"] == "pass"
 
 
 def test_decide_v1_1_fail_color() -> None:
     v1 = {"color_consistency_mean": 0.84}
-    v11 = {"color_consistency_mean": 0.83, "category_consistency_mean": 0.80,
-           "rare_color_warning_rate_mean": 0.0, "blob_collapse_rate_mean": 0.29,
-           "near_copy_rate_mean": 0.0, "qa_errors_total": 0}
+    v11 = {
+        "color_consistency_mean": 0.83,
+        "category_consistency_mean": 0.80,
+        "rare_color_warning_rate_mean": 0.0,
+        "blob_collapse_rate_mean": 0.29,
+        "near_copy_rate_mean": 0.0,
+        "qa_errors_total": 0,
+    }
     assert decide_v1_1(v1, v11)["label"] == "fail"
 
 
 def test_decide_v1_1_borderline() -> None:
     v1 = {"color_consistency_mean": 0.84}
-    v11 = {"color_consistency_mean": 0.868, "category_consistency_mean": 0.80,
-           "rare_color_warning_rate_mean": 0.0, "blob_collapse_rate_mean": 0.29,
-           "near_copy_rate_mean": 0.0, "qa_errors_total": 0}
+    v11 = {
+        "color_consistency_mean": 0.868,
+        "category_consistency_mean": 0.80,
+        "rare_color_warning_rate_mean": 0.0,
+        "blob_collapse_rate_mean": 0.29,
+        "near_copy_rate_mean": 0.0,
+        "qa_errors_total": 0,
+    }
     assert decide_v1_1(v1, v11)["label"] == "borderline"
 
 
 def test_decide_v1_1_qa_fail() -> None:
     v1 = {"color_consistency_mean": 0.84, "blob_collapse_rate_mean": 0.30, "near_copy_rate_mean": 0.0}
-    v11 = {"color_consistency_mean": 0.88, "category_consistency_mean": 0.80,
-           "rare_color_warning_rate_mean": 0.0, "blob_collapse_rate_mean": 0.29,
-           "near_copy_rate_mean": 0.0, "qa_errors_total": 1}
+    v11 = {
+        "color_consistency_mean": 0.88,
+        "category_consistency_mean": 0.80,
+        "rare_color_warning_rate_mean": 0.0,
+        "blob_collapse_rate_mean": 0.29,
+        "near_copy_rate_mean": 0.0,
+        "qa_errors_total": 1,
+    }
     assert decide_v1_1(v1, v11)["label"] == "fail"
 
 
@@ -565,37 +691,64 @@ def test_decide_v1_1_missing_agg() -> None:
 
 # ── Report writers ──────────────────────────────────────────────────────────
 
+
 def _sample_summary() -> dict:
     return {
         "meta": {
-            "checkpoint": "ckpt.pt", "prompts": "p.jsonl", "dataset": "ds/",
-            "max_samples": 96, "seeds": [20260723], "device": "cpu",
-            "out_dir": "out_dir/", "source_hash": "abc123",
+            "checkpoint": "ckpt.pt",
+            "prompts": "p.jsonl",
+            "dataset": "ds/",
+            "max_samples": 96,
+            "seeds": [20260723],
+            "device": "cpu",
+            "out_dir": "out_dir/",
+            "source_hash": "abc123",
         },
         "preset_definitions": {"v1": "v1 desc", "v1.1": "v1.1 desc"},
         "per_run": [
             {
-                "mode": "preset_v1_seed20260723", "seed": 20260723,
-                "export_preset": "v1", "factored_cfg": False,
-                "cfg_base_scale": None, "cfg_color_scale": None,
-                "requested_max_samples": 96, "sample_count_generated": 96,
-                "review_sample_count": 96, "faithfulness_sample_count": 96,
-                "qa_errors": 0, "qa_warnings": 1,
-                "median_visible_colors": 12.0, "rare_color_warning_rate": 0.0,
-                "touches_border_rate": 0.51, "category_consistency": 0.8068,
-                "category_ci95": [0.72, 0.88], "color_consistency": 0.8438,
-                "color_ci95": [0.76, 0.91], "repeated_silhouette_rate": 0.0,
-                "blob_collapse_rate": 0.3021, "potion_collapse_rate": 0.0521,
-                "near_copy_rate": 0.0, "p10_nearest_source_distance": 0.15,
-                "source_count_used": 928, "source_candidate_hash": "abc",
-                "mean_rgb_mae_visible": 0.03, "destructive_rate": 0.0,
+                "mode": "preset_v1_seed20260723",
+                "seed": 20260723,
+                "export_preset": "v1",
+                "factored_cfg": False,
+                "cfg_base_scale": None,
+                "cfg_color_scale": None,
+                "requested_max_samples": 96,
+                "sample_count_generated": 96,
+                "review_sample_count": 96,
+                "faithfulness_sample_count": 96,
+                "qa_errors": 0,
+                "qa_warnings": 1,
+                "median_visible_colors": 12.0,
+                "rare_color_warning_rate": 0.0,
+                "touches_border_rate": 0.51,
+                "category_consistency": 0.8068,
+                "category_ci95": [0.72, 0.88],
+                "color_consistency": 0.8438,
+                "color_ci95": [0.76, 0.91],
+                "repeated_silhouette_rate": 0.0,
+                "blob_collapse_rate": 0.3021,
+                "potion_collapse_rate": 0.0521,
+                "near_copy_rate": 0.0,
+                "p10_nearest_source_distance": 0.15,
+                "source_count_used": 928,
+                "source_candidate_hash": "abc",
+                "mean_rgb_mae_visible": 0.03,
+                "destructive_rate": 0.0,
             },
         ],
         "aggregates": {
-            "preset_v1": {"mode": "preset_v1", "run_count": 1, "export_preset": "v1",
-                          "factored_cfg": False, "qa_errors_total": 0,
-                          "category_consistency_mean": 0.8068, "color_consistency_mean": 0.8438,
-                          "source_count_used": 928, "source_candidate_hash": "abc"},
+            "preset_v1": {
+                "mode": "preset_v1",
+                "run_count": 1,
+                "export_preset": "v1",
+                "factored_cfg": False,
+                "qa_errors_total": 0,
+                "category_consistency_mean": 0.8068,
+                "color_consistency_mean": 0.8438,
+                "source_count_used": 928,
+                "source_candidate_hash": "abc",
+            },
         },
         "deltas_vs_v1": {},
         "decision": {"label": "pass", "explanation": "All criteria passed.", "criteria": {}},
@@ -641,9 +794,11 @@ def test_write_summary_csv_includes_new_columns(tmp_path: Path) -> None:
 
 # ── Prompt builder tests ────────────────────────────────────────────────────
 
+
 def _fake_manifest(path: Path, count: int = 50, seed: int = 42) -> None:
     """Write a minimal synthetic training manifest for prompt builder tests."""
     import random as _random
+
     rng = _random.Random(seed)
     categories = ["weapon", "armor", "item_icon", "tool", "material", "plant", "effect_icon"]
     objects_by_cat = {
@@ -700,14 +855,24 @@ def _fake_manifest(path: Path, count: int = 50, seed: int = 42) -> None:
 
 def test_prompt_builder_cli_accepts_subcommand() -> None:
     """The CLI parser accepts build-v2-eval-prompts as a valid subcommand."""
-    import argparse
     from spritelab.training.cli import main
 
     # Just verify the subcommand is recognized by the argument parser.
     # We can't run it without a real manifest, so test parser only.
     try:
-        main(["build-v2-eval-prompts", "--dataset", "ds", "--training-manifest", "manifest.jsonl",
-              "--out", "out.jsonl", "--target-count", "10"])
+        main(
+            [
+                "build-v2-eval-prompts",
+                "--dataset",
+                "ds",
+                "--training-manifest",
+                "manifest.jsonl",
+                "--out",
+                "out.jsonl",
+                "--target-count",
+                "10",
+            ]
+        )
     except (SystemExit, FileNotFoundError):
         pass  # expected when manifest doesn't exist
 
@@ -720,10 +885,8 @@ def test_prompt_builder_deterministic(tmp_path: Path) -> None:
     out1 = tmp_path / "prompts_v1.jsonl"
     out2 = tmp_path / "prompts_v2.jsonl"
 
-    config1 = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest,
-                                   out=out1, target_count=32, seed=42)
-    config2 = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest,
-                                   out=out2, target_count=32, seed=42)
+    config1 = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest, out=out1, target_count=32, seed=42)
+    config2 = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest, out=out2, target_count=32, seed=42)
 
     r1 = build_v2_eval_prompts(config1)
     r2 = build_v2_eval_prompts(config2)
@@ -740,13 +903,10 @@ def test_prompt_builder_respects_target_count(tmp_path: Path) -> None:
     out = tmp_path / "prompts.jsonl"
 
     for target in [16, 48, 128, 384]:
-        config = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest,
-                                      out=out, target_count=target, seed=7)
+        config = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest, out=out, target_count=target, seed=7)
         r = build_v2_eval_prompts(config)
         # Should be within 20% of target (families may not have enough combos)
-        assert abs(r["prompt_count"] - target) <= max(20, target * 0.3), (
-            f"target={target} got {r['prompt_count']}"
-        )
+        assert abs(r["prompt_count"] - target) <= max(20, target * 0.3), f"target={target} got {r['prompt_count']}"
         assert r["prompt_count"] > 0
 
 
@@ -756,8 +916,7 @@ def test_prompt_builder_no_duplicate_ids(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.jsonl"
     _fake_manifest(manifest, count=100, seed=5)
     out = tmp_path / "prompts.jsonl"
-    config = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest,
-                                  out=out, target_count=128, seed=99)
+    config = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest, out=out, target_count=128, seed=99)
     r = build_v2_eval_prompts(config)
 
     ids = []
@@ -774,8 +933,9 @@ def test_prompt_builder_report_has_coverage_counts(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.jsonl"
     _fake_manifest(manifest, count=100, seed=3)
     out = tmp_path / "prompts.jsonl"
-    config = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest,
-                                  out=out, target_count=128, seed=8, out_report=True)
+    config = V2EvalPromptsConfig(
+        dataset=tmp_path, training_manifest=manifest, out=out, target_count=128, seed=8, out_report=True
+    )
     r = build_v2_eval_prompts(config)
 
     assert "families" in r
@@ -787,14 +947,13 @@ def test_prompt_builder_report_has_coverage_counts(tmp_path: Path) -> None:
 
 
 def test_prompt_builder_rows_are_sampler_compatible(tmp_path: Path) -> None:
-    from spritelab.training.v2_eval_prompts import V2EvalPromptsConfig, build_v2_eval_prompts
     from spritelab.training.sample_generator import read_prompt_records
+    from spritelab.training.v2_eval_prompts import V2EvalPromptsConfig, build_v2_eval_prompts
 
     manifest = tmp_path / "manifest.jsonl"
     _fake_manifest(manifest, count=50, seed=99)
     out = tmp_path / "prompts.jsonl"
-    config = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest,
-                                  out=out, target_count=16, seed=42)
+    config = V2EvalPromptsConfig(dataset=tmp_path, training_manifest=manifest, out=out, target_count=16, seed=42)
     build_v2_eval_prompts(config)
 
     records = read_prompt_records(out, max_records=16)
@@ -806,39 +965,61 @@ def test_prompt_builder_rows_are_sampler_compatible(tmp_path: Path) -> None:
 
 
 def test_build_prompts_and_prompts_mutually_exclusive() -> None:
-    from spritelab.training.cli import main
-    from io import StringIO
     import sys
+    from io import StringIO
+
+    from spritelab.training.cli import main
 
     old_stdout = sys.stdout
     try:
         sys.stdout = StringIO()
         with pytest.raises(SystemExit):
-            main([
-                "run-v2-phase0-eval",
-                "--out", "test_out", "--checkpoint", "ckpt.pt",
-                "--prompts", "p.jsonl", "--dataset", "ds",
-                "--build-prompts", "--dry-run",
-            ])
+            main(
+                [
+                    "run-v2-phase0-eval",
+                    "--out",
+                    "test_out",
+                    "--checkpoint",
+                    "ckpt.pt",
+                    "--prompts",
+                    "p.jsonl",
+                    "--dataset",
+                    "ds",
+                    "--build-prompts",
+                    "--dry-run",
+                ]
+            )
     finally:
         sys.stdout = old_stdout
 
 
 def test_build_prompts_flag_accepted_on_dry_run() -> None:
-    from spritelab.training.cli import main
-    from io import StringIO
     import sys
+    from io import StringIO
+
+    from spritelab.training.cli import main
 
     old_stdout = sys.stdout
     buf = StringIO()
     try:
         sys.stdout = buf
-        main([
-            "run-v2-phase0-eval", "--dry-run",
-            "--out", "test_out", "--checkpoint", "ckpt.pt",
-            "--dataset", "ds",
-            "--build-prompts", "--prompt-count", "32", "--prompt-seed", "5",
-        ])
+        main(
+            [
+                "run-v2-phase0-eval",
+                "--dry-run",
+                "--out",
+                "test_out",
+                "--checkpoint",
+                "ckpt.pt",
+                "--dataset",
+                "ds",
+                "--build-prompts",
+                "--prompt-count",
+                "32",
+                "--prompt-seed",
+                "5",
+            ]
+        )
     finally:
         sys.stdout = old_stdout
     assert "Dry run" in buf.getvalue()
@@ -846,28 +1027,54 @@ def test_build_prompts_flag_accepted_on_dry_run() -> None:
 
 # ── CLI integration tests ───────────────────────────────────────────────────
 
+
 def test_cli_accepts_run_v2_phase0_eval_subcommand() -> None:
     from spritelab.training.cli import main
-    main(["run-v2-phase0-eval", "--dry-run",
-          "--out", "test_out", "--checkpoint", "ckpt.pt",
-          "--prompts", "p.jsonl", "--dataset", "ds"])
+
+    main(
+        [
+            "run-v2-phase0-eval",
+            "--dry-run",
+            "--out",
+            "test_out",
+            "--checkpoint",
+            "ckpt.pt",
+            "--prompts",
+            "p.jsonl",
+            "--dataset",
+            "ds",
+        ]
+    )
 
 
 def test_cli_dry_run_shows_export_preset() -> None:
-    from spritelab.training.cli import main
-    from io import StringIO
     import sys
+    from io import StringIO
+
+    from spritelab.training.cli import main
 
     old_stdout = sys.stdout
     buf = StringIO()
     try:
         sys.stdout = buf
-        main([
-            "run-v2-phase0-eval", "--dry-run",
-            "--out", "test_out", "--checkpoint", "ckpt.pt",
-            "--prompts", "p.jsonl", "--dataset", "ds",
-            "--presets", "v1,v1.1", "--seeds", "20260723",
-        ])
+        main(
+            [
+                "run-v2-phase0-eval",
+                "--dry-run",
+                "--out",
+                "test_out",
+                "--checkpoint",
+                "ckpt.pt",
+                "--prompts",
+                "p.jsonl",
+                "--dataset",
+                "ds",
+                "--presets",
+                "v1,v1.1",
+                "--seeds",
+                "20260723",
+            ]
+        )
     finally:
         sys.stdout = old_stdout
     output = buf.getvalue()
@@ -878,18 +1085,31 @@ def test_cli_dry_run_shows_export_preset() -> None:
 
 def test_cli_skip_sampling_flag_accepted() -> None:
     from spritelab.training.cli import main
-    main(["run-v2-phase0-eval", "--dry-run",
-          "--out", "test_out", "--checkpoint", "ckpt.pt",
-          "--prompts", "p.jsonl", "--dataset", "ds",
-          "--skip-sampling-if-exists"])
+
+    main(
+        [
+            "run-v2-phase0-eval",
+            "--dry-run",
+            "--out",
+            "test_out",
+            "--checkpoint",
+            "ckpt.pt",
+            "--prompts",
+            "p.jsonl",
+            "--dataset",
+            "ds",
+            "--skip-sampling-if-exists",
+        ]
+    )
 
 
 def test_cli_no_training_invoked() -> None:
     """Verify the v2 phase0 eval does not invoke any training command."""
-    from spritelab.training.v2_phase0_eval import run_v2_phase0_eval, V2Phase0EvalConfig
+    from spritelab.training.v2_phase0_eval import V2Phase0EvalConfig, run_v2_phase0_eval
 
-    config = V2Phase0EvalConfig(out=Path("test_out"), checkpoint=Path("ckpt.pt"),
-                                prompts=Path("p.jsonl"), dataset=Path("ds"), dry_run=True)
+    config = V2Phase0EvalConfig(
+        out=Path("test_out"), checkpoint=Path("ckpt.pt"), prompts=Path("p.jsonl"), dataset=Path("ds"), dry_run=True
+    )
     result = run_v2_phase0_eval(config)
     assert result["dry_run"] is True
     assert "planned_cells" in result
@@ -899,8 +1119,9 @@ def test_cli_no_training_invoked() -> None:
 
 
 def test_speed_optimizations_default_on() -> None:
-    config = V2Phase0EvalConfig(out=Path("test_out"), checkpoint=Path("ckpt.pt"),
-                                 prompts=Path("p.jsonl"), dataset=Path("ds"))
+    config = V2Phase0EvalConfig(
+        out=Path("test_out"), checkpoint=Path("ckpt.pt"), prompts=Path("p.jsonl"), dataset=Path("ds")
+    )
     assert config.speed_optimizations is True
 
 
@@ -909,7 +1130,7 @@ def test_speed_optimizations_default_applies_cudnn_and_tf32(monkeypatch: pytest.
     speed flags default ON: it resamples the same checkpoint/shape repeatedly
     across cells and seeds, so cuDNN autotuning pays for itself."""
     pytest.importorskip("torch", exc_type=ImportError)
-    from spritelab.training.v2_phase0_eval import run_v2_phase0_eval, V2Phase0EvalConfig
+    from spritelab.training.v2_phase0_eval import V2Phase0EvalConfig, run_v2_phase0_eval
 
     calls: list[dict[str, object]] = []
 
@@ -917,14 +1138,15 @@ def test_speed_optimizations_default_applies_cudnn_and_tf32(monkeypatch: pytest.
         calls.append(kwargs)
         raise RuntimeError("stop-after-speed-flags")
 
-    monkeypatch.setattr(
-        "spritelab.training.optim_utils.apply_backend_speed_flags", fake_apply_backend_speed_flags
-    )
+    monkeypatch.setattr("spritelab.training.optim_utils.apply_backend_speed_flags", fake_apply_backend_speed_flags)
 
     config = V2Phase0EvalConfig(
-        out=Path("test_out"), checkpoint=Path("ckpt.pt"),
-        prompts=Path("p.jsonl"), dataset=Path("ds"),
-        presets=("v1",), seeds=(1,),
+        out=Path("test_out"),
+        checkpoint=Path("ckpt.pt"),
+        prompts=Path("p.jsonl"),
+        dataset=Path("ds"),
+        presets=("v1",),
+        seeds=(1,),
     )
     with pytest.raises(RuntimeError, match="stop-after-speed-flags"):
         run_v2_phase0_eval(config)
@@ -933,7 +1155,7 @@ def test_speed_optimizations_default_applies_cudnn_and_tf32(monkeypatch: pytest.
 
 def test_speed_optimizations_disabled_via_config(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("torch", exc_type=ImportError)
-    from spritelab.training.v2_phase0_eval import run_v2_phase0_eval, V2Phase0EvalConfig
+    from spritelab.training.v2_phase0_eval import V2Phase0EvalConfig, run_v2_phase0_eval
 
     calls: list[dict[str, object]] = []
 
@@ -941,14 +1163,15 @@ def test_speed_optimizations_disabled_via_config(monkeypatch: pytest.MonkeyPatch
         calls.append(kwargs)
         raise RuntimeError("stop-after-speed-flags")
 
-    monkeypatch.setattr(
-        "spritelab.training.optim_utils.apply_backend_speed_flags", fake_apply_backend_speed_flags
-    )
+    monkeypatch.setattr("spritelab.training.optim_utils.apply_backend_speed_flags", fake_apply_backend_speed_flags)
 
     config = V2Phase0EvalConfig(
-        out=Path("test_out"), checkpoint=Path("ckpt.pt"),
-        prompts=Path("p.jsonl"), dataset=Path("ds"),
-        presets=("v1",), seeds=(1,),
+        out=Path("test_out"),
+        checkpoint=Path("ckpt.pt"),
+        prompts=Path("p.jsonl"),
+        dataset=Path("ds"),
+        presets=("v1",),
+        seeds=(1,),
         speed_optimizations=False,
     )
     with pytest.raises(RuntimeError, match="stop-after-speed-flags"):
@@ -959,7 +1182,6 @@ def test_speed_optimizations_disabled_via_config(monkeypatch: pytest.MonkeyPatch
 def test_cli_speed_optimizations_flag_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
     import spritelab.training.v2_phase0_eval as v2_phase0_eval
     from spritelab.training.cli import main as train_cli
-    from spritelab.training.v2_phase0_eval import V2Phase0EvalConfig
 
     captured: list[V2Phase0EvalConfig] = []
 
@@ -969,18 +1191,34 @@ def test_cli_speed_optimizations_flag_wiring(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(v2_phase0_eval, "run_v2_phase0_eval", fake_run)
 
-    train_cli([
-        "run-v2-phase0-eval",
-        "--out", "test_out", "--checkpoint", "ckpt.pt",
-        "--prompts", "p.jsonl", "--dataset", "ds",
-        "--no-speed-optimizations",
-    ])
+    train_cli(
+        [
+            "run-v2-phase0-eval",
+            "--out",
+            "test_out",
+            "--checkpoint",
+            "ckpt.pt",
+            "--prompts",
+            "p.jsonl",
+            "--dataset",
+            "ds",
+            "--no-speed-optimizations",
+        ]
+    )
     assert captured[0].speed_optimizations is False
 
     captured.clear()
-    train_cli([
-        "run-v2-phase0-eval",
-        "--out", "test_out", "--checkpoint", "ckpt.pt",
-        "--prompts", "p.jsonl", "--dataset", "ds",
-    ])
+    train_cli(
+        [
+            "run-v2-phase0-eval",
+            "--out",
+            "test_out",
+            "--checkpoint",
+            "ckpt.pt",
+            "--prompts",
+            "p.jsonl",
+            "--dataset",
+            "ds",
+        ]
+    )
     assert captured[0].speed_optimizations is True

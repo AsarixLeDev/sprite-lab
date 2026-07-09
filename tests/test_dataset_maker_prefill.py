@@ -7,6 +7,7 @@ from typing import Any
 from PIL import Image
 
 from spritelab.dataset_maker import prefill
+from spritelab.dataset_maker.gui import _prefill_blocked_warning, _prefill_report
 from spritelab.dataset_maker.model import DatasetMakerItem
 from spritelab.dataset_maker.prefill import (
     CachedPrefillBackend,
@@ -19,14 +20,13 @@ from spritelab.dataset_maker.prefill import (
     PrefillRequest,
     RuleBasedPrefillBackend,
     apply_suggestion_to_item,
+    build_qwen_prefill_prompt,
     compute_image_cache_key,
     create_prefill_backend,
-    build_qwen_prefill_prompt,
     image_to_data_url,
     parse_metadata_suggestion,
     prepare_vlm_image,
 )
-from spritelab.dataset_maker.gui import _prefill_blocked_warning, _prefill_report
 
 
 def test_prepare_vlm_image_upscales_with_nearest_neighbor() -> None:
@@ -488,7 +488,17 @@ def test_openai_compatible_backend_sends_json_schema_response_format(monkeypatch
     def fake_urlopen(request: Any, timeout: float) -> _FakeResponse:
         captured["payload"] = json.loads(request.data.decode("utf-8"))
         return _FakeResponse(
-            {"choices": [{"message": {"content": json.dumps({"category": "plant", "object_name": "fern", "uncertainty": "confident"})}}]}
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {"category": "plant", "object_name": "fern", "uncertainty": "confident"}
+                            )
+                        }
+                    }
+                ]
+            }
         )
 
     monkeypatch.setattr(prefill.urllib.request, "urlopen", fake_urlopen)
@@ -529,9 +539,15 @@ def test_openai_compatible_backend_falls_back_when_schema_rejected(monkeypatch) 
         payloads.append(payload)
         if "response_format" in payload:
             raise urllib.error.HTTPError(
-                request.full_url, 400, "Bad Request", None, _FakeErrorBody(b'{"error": "response_format is not supported"}')
+                request.full_url,
+                400,
+                "Bad Request",
+                None,
+                _FakeErrorBody(b'{"error": "response_format is not supported"}'),
             )
-        return _FakeResponse({"choices": [{"message": {"content": json.dumps({"category": "plant", "object_name": "fern"})}}]})
+        return _FakeResponse(
+            {"choices": [{"message": {"content": json.dumps({"category": "plant", "object_name": "fern"})}}]}
+        )
 
     monkeypatch.setattr(prefill.urllib.request, "urlopen", fake_urlopen)
     backend = OpenAICompatibleQwenPrefillBackend(PrefillConfig(enabled=True, structured_output="auto"))
@@ -553,9 +569,7 @@ def test_parse_metadata_suggestion_maps_uncertainty_to_confidence() -> None:
     assert suggestion.uncertainty == "likely"
     assert suggestion.confidence == 0.7
 
-    explicit = parse_metadata_suggestion(
-        json.dumps({"category": "plant", "uncertainty": "likely", "confidence": 0.42})
-    )
+    explicit = parse_metadata_suggestion(json.dumps({"category": "plant", "uncertainty": "likely", "confidence": 0.42}))
     assert explicit.confidence == 0.42
 
     invalid = parse_metadata_suggestion(json.dumps({"category": "plant", "uncertainty": "definitely"}))
@@ -587,12 +601,8 @@ def test_degenerate_detection_confident_unknown() -> None:
     assert not is_degenerate_suggestion(
         MetadataSuggestion(category="unknown", confidence=0.9, uncertainty="cannot_tell")
     )
-    assert not is_degenerate_suggestion(
-        MetadataSuggestion(category="plant", object_name="fern", confidence=0.9)
-    )
-    assert is_degenerate_suggestion(
-        MetadataSuggestion(category="plant", object_name="unknown_object", confidence=0.9)
-    )
+    assert not is_degenerate_suggestion(MetadataSuggestion(category="plant", object_name="fern", confidence=0.9))
+    assert is_degenerate_suggestion(MetadataSuggestion(category="plant", object_name="unknown_object", confidence=0.9))
 
 
 def test_degenerate_response_is_retried_and_not_cached(monkeypatch, tmp_path) -> None:
@@ -775,7 +785,7 @@ class _ScriptedBackend(MetadataPrefillBackend):
         return self.by_sample[request.sample_index]
 
 
-def _voted(by_sample: dict[int, MetadataSuggestion], **config_kwargs) -> tuple[MetadataSuggestion, "_ScriptedBackend"]:
+def _voted(by_sample: dict[int, MetadataSuggestion], **config_kwargs) -> tuple[MetadataSuggestion, _ScriptedBackend]:
     from spritelab.dataset_maker.prefill import SelfConsistencyBackend
 
     inner = _ScriptedBackend(by_sample)
@@ -885,7 +895,15 @@ def test_vote_sample_index_changes_cache_key_and_payload_seed(monkeypatch, tmp_p
         payload = json.loads(request.data.decode("utf-8"))
         seeds.append(payload["seed"])
         return _FakeResponse(
-            {"choices": [{"message": {"content": json.dumps({"category": "plant", "object_name": "fern", "uncertainty": "unsure"})}}]}
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps({"category": "plant", "object_name": "fern", "uncertainty": "unsure"})
+                        }
+                    }
+                ]
+            }
         )
 
     monkeypatch.setattr(prefill.urllib.request, "urlopen", fake_urlopen)
@@ -922,9 +940,7 @@ def test_openai_compatible_backend_uses_runpod_token_for_bearer_auth(monkeypatch
 
     def fake_urlopen(request: Any, timeout: float) -> _FakeResponse:
         captured["request"] = request
-        return _FakeResponse(
-            {"choices": [{"message": {"content": json.dumps({"category": "item_icon"})}}]}
-        )
+        return _FakeResponse({"choices": [{"message": {"content": json.dumps({"category": "item_icon"})}}]})
 
     monkeypatch.setattr(prefill.urllib.request, "urlopen", fake_urlopen)
     backend = OpenAICompatibleQwenPrefillBackend(
@@ -1085,7 +1101,7 @@ class _FakeResponse:
     def __init__(self, payload: dict[str, Any]) -> None:
         self.payload = payload
 
-    def __enter__(self) -> "_FakeResponse":
+    def __enter__(self) -> _FakeResponse:
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:

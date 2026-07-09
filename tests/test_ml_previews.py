@@ -8,7 +8,6 @@ import pytest
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from _ml_testdata import write_synthetic_dataset
-
 from spritelab.ml.dataset import SpriteBundleDataset
 from spritelab.ml.masking import FixedOpaqueMask
 from spritelab.ml.previews import decode_index_map_to_rgba, save_prediction_grid

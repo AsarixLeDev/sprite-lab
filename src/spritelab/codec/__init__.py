@@ -1,5 +1,6 @@
 """Sprite bundle codec helpers."""
 
+from spritelab.codec.alpha import extract_hard_alpha
 from spritelab.codec.bundle import (
     BUNDLE_SCHEMA_VERSION,
     CODEC_VERSION,
@@ -18,7 +19,6 @@ from spritelab.codec.canonical_palette import (
     compute_palette_slot_stats,
     remap_index_map,
 )
-from spritelab.codec.alpha import extract_hard_alpha
 from spritelab.codec.encode import encode_png_to_bundle, encode_rgba_image_to_bundle
 from spritelab.codec.index_map import build_index_map_from_palette
 from spritelab.codec.io import load_bundle, save_bundle
@@ -32,6 +32,7 @@ from spritelab.codec.quantize import (
     fit_oklab_kmeans,
     quantize_rgba_image_to_palette_indices,
 )
+from spritelab.codec.reconstruct import reconstruct_rgba, save_reconstructed_png
 from spritelab.codec.role_inference import (
     PaletteSlotRoleFeatures,
     RoleInferenceOptions,
@@ -45,19 +46,18 @@ from spritelab.codec.role_inference import (
     save_role_map_preview,
     validate_role_map,
 )
-from spritelab.codec.reconstruct import reconstruct_rgba, save_reconstructed_png
 from spritelab.codec.validate import assert_valid_bundle, validate_bundle
 
 __all__ = [
-    "CanonicalizationResult",
     "BUNDLE_SCHEMA_VERSION",
     "CODEC_VERSION",
     "INDEX_MASK",
     "INDEX_PAD",
     "INDEX_TRANSPARENT",
     "MAX_TRAINING_PALETTE_SLOTS",
-    "PaletteSlotStats",
+    "CanonicalizationResult",
     "PaletteSlotRoleFeatures",
+    "PaletteSlotStats",
     "QuantizationOptions",
     "QuantizationResult",
     "RoleInferenceOptions",
@@ -66,12 +66,12 @@ __all__ = [
     "SpriteMetadata",
     "apply_role_inference_to_bundle",
     "assert_valid_bundle",
+    "build_index_map_from_palette",
     "build_role_map_from_slot_roles",
     "canonical_palette_order",
     "canonicalize_bundle_palette",
-    "build_index_map_from_palette",
-    "compute_palette_slot_stats",
     "compute_palette_slot_role_features",
+    "compute_palette_slot_stats",
     "describe_role_inference",
     "encode_png_to_bundle",
     "encode_png_to_quantized_bundle",

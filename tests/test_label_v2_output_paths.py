@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from _harvest_testdata import make_sprite_png
-
 from spritelab.harvest.cli import main
 
 
@@ -14,13 +13,20 @@ def _make_run(tmp_path: Path) -> Path:
     main(
         [
             "import-dir",
-            "--dir", str(pngs),
-            "--run-name", "oga_cc0_food_arlantr",
-            "--run-root", str(run_root),
-            "--source-id", "oga_cc0_food_arlantr",
-            "--source-name", "Food Arlantr",
-            "--license", "cc0",
-            "--author", "Tester",
+            "--dir",
+            str(pngs),
+            "--run-name",
+            "oga_cc0_food_arlantr",
+            "--run-root",
+            str(run_root),
+            "--source-id",
+            "oga_cc0_food_arlantr",
+            "--source-name",
+            "Food Arlantr",
+            "--license",
+            "cc0",
+            "--author",
+            "Tester",
             "--user-confirmed-license",
         ]
     )

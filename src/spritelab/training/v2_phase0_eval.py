@@ -20,8 +20,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from spritelab.training.stats import wilson_confidence_interval
-
 # v1.1 factored-CFG constants. Must match generator_challenger.V1_1_CFG_BASE_SCALE
 # and V1_1_CFG_COLOR_SCALE so the harness gives identical results to the CLI
 # --export-preset v1.1 path.
@@ -33,8 +31,17 @@ V1_1_PRESET_NAMES: tuple[str, ...] = ("v1.1", "v1_1", "phase1_v1_1")
 
 # Must match generator_challenger.NULL_FIELD_CHOICES
 NULL_FIELD_CHOICES: tuple[str, ...] = (
-    "caption", "semantic", "category", "object_id", "base_object",
-    "colors", "materials", "shapes", "function", "style", "structured",
+    "caption",
+    "semantic",
+    "category",
+    "object_id",
+    "base_object",
+    "colors",
+    "materials",
+    "shapes",
+    "function",
+    "style",
+    "structured",
 )
 
 # ── Eval profiles ───────────────────────────────────────────────────────────
@@ -64,6 +71,7 @@ EXCLUDED_FAMILY_ANCHORS: str = "in_distribution_anchors"
 
 
 # ── Config dataclasses ──────────────────────────────────────────────────────
+
 
 @dataclass(frozen=True)
 class V2Phase0EvalConfig:
@@ -156,6 +164,7 @@ class RunMetrics:
 
 # ── Preset resolution (must match CLI _apply_export_preset_defaults) ────────
 
+
 def resolve_preset_params(preset: str) -> dict[str, Any]:
     """Return the canonical export_preset + factored-CFG settings for a preset name."""
     normalized = str(preset).strip().lower()
@@ -183,6 +192,7 @@ def resolve_preset_params(preset: str) -> dict[str, Any]:
 
 # ── Null-field helpers (pure, testable) ─────────────────────────────────────
 
+
 def parse_null_field_set_group(group: str) -> list[str]:
     """Split a '+' delimited group into individual field names.
 
@@ -195,9 +205,7 @@ def parse_null_field_set_group(group: str) -> list[str]:
     # Validate each field
     unknown = [p for p in parts if p not in NULL_FIELD_CHOICES]
     if unknown:
-        raise ValueError(
-            f"Unknown null-field value(s): {unknown!r}; expected only: {NULL_FIELD_CHOICES}"
-        )
+        raise ValueError(f"Unknown null-field value(s): {unknown!r}; expected only: {NULL_FIELD_CHOICES}")
     # Deduplicate while preserving order
     seen: set[str] = set()
     result: list[str] = []
@@ -238,6 +246,7 @@ def _sanitize_dirname(text: str) -> str:
 
 # ── Other parse helpers ─────────────────────────────────────────────────────
 
+
 def parse_seeds(seeds: str) -> tuple[int, ...]:
     parts = [token.strip() for token in str(seeds).split(",") if token.strip()]
     if not parts:
@@ -261,9 +270,9 @@ def parse_factored_grid(grid: str) -> list[dict[str, float]]:
     for segment in str(grid).split(";"):
         segment = segment.strip()
         if segment.startswith("base="):
-            base_scales = [float(v) for v in segment[len("base="):].split(",") if v.strip()]
+            base_scales = [float(v) for v in segment[len("base=") :].split(",") if v.strip()]
         elif segment.startswith("color="):
-            color_scales = [float(v) for v in segment[len("color="):].split(",") if v.strip()]
+            color_scales = [float(v) for v in segment[len("color=") :].split(",") if v.strip()]
     if not base_scales or not color_scales:
         return []
     result: list[dict[str, float]] = []
@@ -274,6 +283,7 @@ def parse_factored_grid(grid: str) -> list[dict[str, float]]:
 
 
 # ── Build run plan (pure, testable) ─────────────────────────────────────────
+
 
 def build_run_plan(config: V2Phase0EvalConfig) -> list[RunCell]:
     cells: list[RunCell] = []
@@ -335,6 +345,7 @@ def build_run_plan(config: V2Phase0EvalConfig) -> list[RunCell]:
 
 
 # ── Manifest metadata verification ──────────────────────────────────────────
+
 
 def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
@@ -405,17 +416,13 @@ def verify_cell_metadata(cell: RunCell, cell_dir: Path) -> None:
 
     if expected_ep and actual_ep and actual_ep != expected_ep:
         raise RuntimeError(
-            f"Manifest export_preset mismatch in {cell_dir}: "
-            f"expected {expected_ep!r}, got {actual_ep!r}"
+            f"Manifest export_preset mismatch in {cell_dir}: expected {expected_ep!r}, got {actual_ep!r}"
         )
 
     expected_fc = bool(cell.factored_cfg)
     actual_fc = bool(meta.get("factored_cfg"))
     if expected_fc != actual_fc:
-        raise RuntimeError(
-            f"Manifest factored_cfg mismatch in {cell_dir}: "
-            f"expected {expected_fc}, got {actual_fc}"
-        )
+        raise RuntimeError(f"Manifest factored_cfg mismatch in {cell_dir}: expected {expected_fc}, got {actual_fc}")
 
     if expected_fc:
         expected_base = cell.cfg_base_scale
@@ -423,8 +430,7 @@ def verify_cell_metadata(cell: RunCell, cell_dir: Path) -> None:
         if expected_base is not None and actual_base is not None:
             if abs(float(expected_base) - float(actual_base)) > 1e-6:
                 raise RuntimeError(
-                    f"Manifest cfg_base_scale mismatch in {cell_dir}: "
-                    f"expected {expected_base}, got {actual_base}"
+                    f"Manifest cfg_base_scale mismatch in {cell_dir}: expected {expected_base}, got {actual_base}"
                 )
 
         expected_color = cell.cfg_color_scale
@@ -432,8 +438,7 @@ def verify_cell_metadata(cell: RunCell, cell_dir: Path) -> None:
         if expected_color is not None and actual_color is not None:
             if abs(float(expected_color) - float(actual_color)) > 1e-6:
                 raise RuntimeError(
-                    f"Manifest cfg_color_scale mismatch in {cell_dir}: "
-                    f"expected {expected_color}, got {actual_color}"
+                    f"Manifest cfg_color_scale mismatch in {cell_dir}: expected {expected_color}, got {actual_color}"
                 )
 
     # Verify null-fields match
@@ -496,6 +501,7 @@ def _cell_outputs_exist(cell_dir: Path) -> bool:
 
 
 # ── Collect metrics from run output files ────────────────────────────────────
+
 
 def collect_run_metrics(
     run_dir: Path,
@@ -574,6 +580,7 @@ def collect_run_metrics(
 
 # ── Aggregate metrics across seeds ──────────────────────────────────────────
 
+
 def _safe_mean(values: list[float]) -> float | None:
     vals = [v for v in values if v is not None]
     return float(statistics.fmean(vals)) if vals else None
@@ -611,34 +618,74 @@ def _aggregate_cells(name: str, cells: list[RunMetrics]) -> dict[str, Any]:
         "qa_errors_mean": _safe_mean([float(c.qa_errors) for c in cells]),
         "qa_errors_total": sum(c.qa_errors for c in cells),
         "qa_warnings_mean": _safe_mean([float(c.qa_warnings) for c in cells]),
-        "median_visible_colors_mean": _safe_mean([c.median_visible_colors for c in cells if c.median_visible_colors is not None]),
-        "median_visible_colors_std": _safe_stdev([c.median_visible_colors for c in cells if c.median_visible_colors is not None]),
-        "median_visible_colors_min": _safe_min([c.median_visible_colors for c in cells if c.median_visible_colors is not None]),
-        "median_visible_colors_max": _safe_max([c.median_visible_colors for c in cells if c.median_visible_colors is not None]),
-        "rare_color_warning_rate_mean": _safe_mean([c.rare_color_warning_rate for c in cells if c.rare_color_warning_rate is not None]),
-        "rare_color_warning_rate_std": _safe_stdev([c.rare_color_warning_rate for c in cells if c.rare_color_warning_rate is not None]),
-        "touches_border_rate_mean": _safe_mean([c.touches_border_rate for c in cells if c.touches_border_rate is not None]),
-        "touches_border_rate_std": _safe_stdev([c.touches_border_rate for c in cells if c.touches_border_rate is not None]),
-        "category_consistency_mean": _safe_mean([c.category_consistency for c in cells if c.category_consistency is not None]),
-        "category_consistency_std": _safe_stdev([c.category_consistency for c in cells if c.category_consistency is not None]),
-        "category_consistency_min": _safe_min([c.category_consistency for c in cells if c.category_consistency is not None]),
-        "category_consistency_max": _safe_max([c.category_consistency for c in cells if c.category_consistency is not None]),
+        "median_visible_colors_mean": _safe_mean(
+            [c.median_visible_colors for c in cells if c.median_visible_colors is not None]
+        ),
+        "median_visible_colors_std": _safe_stdev(
+            [c.median_visible_colors for c in cells if c.median_visible_colors is not None]
+        ),
+        "median_visible_colors_min": _safe_min(
+            [c.median_visible_colors for c in cells if c.median_visible_colors is not None]
+        ),
+        "median_visible_colors_max": _safe_max(
+            [c.median_visible_colors for c in cells if c.median_visible_colors is not None]
+        ),
+        "rare_color_warning_rate_mean": _safe_mean(
+            [c.rare_color_warning_rate for c in cells if c.rare_color_warning_rate is not None]
+        ),
+        "rare_color_warning_rate_std": _safe_stdev(
+            [c.rare_color_warning_rate for c in cells if c.rare_color_warning_rate is not None]
+        ),
+        "touches_border_rate_mean": _safe_mean(
+            [c.touches_border_rate for c in cells if c.touches_border_rate is not None]
+        ),
+        "touches_border_rate_std": _safe_stdev(
+            [c.touches_border_rate for c in cells if c.touches_border_rate is not None]
+        ),
+        "category_consistency_mean": _safe_mean(
+            [c.category_consistency for c in cells if c.category_consistency is not None]
+        ),
+        "category_consistency_std": _safe_stdev(
+            [c.category_consistency for c in cells if c.category_consistency is not None]
+        ),
+        "category_consistency_min": _safe_min(
+            [c.category_consistency for c in cells if c.category_consistency is not None]
+        ),
+        "category_consistency_max": _safe_max(
+            [c.category_consistency for c in cells if c.category_consistency is not None]
+        ),
         "color_consistency_mean": _safe_mean([c.color_consistency for c in cells if c.color_consistency is not None]),
         "color_consistency_std": _safe_stdev([c.color_consistency for c in cells if c.color_consistency is not None]),
         "color_consistency_min": _safe_min([c.color_consistency for c in cells if c.color_consistency is not None]),
         "color_consistency_max": _safe_max([c.color_consistency for c in cells if c.color_consistency is not None]),
-        "repeated_silhouette_rate_mean": _safe_mean([c.repeated_silhouette_rate for c in cells if c.repeated_silhouette_rate is not None]),
-        "repeated_silhouette_rate_std": _safe_stdev([c.repeated_silhouette_rate for c in cells if c.repeated_silhouette_rate is not None]),
-        "blob_collapse_rate_mean": _safe_mean([c.blob_collapse_rate for c in cells if c.blob_collapse_rate is not None]),
-        "blob_collapse_rate_std": _safe_stdev([c.blob_collapse_rate for c in cells if c.blob_collapse_rate is not None]),
-        "potion_collapse_rate_mean": _safe_mean([c.potion_collapse_rate for c in cells if c.potion_collapse_rate is not None]),
-        "potion_collapse_rate_std": _safe_stdev([c.potion_collapse_rate for c in cells if c.potion_collapse_rate is not None]),
+        "repeated_silhouette_rate_mean": _safe_mean(
+            [c.repeated_silhouette_rate for c in cells if c.repeated_silhouette_rate is not None]
+        ),
+        "repeated_silhouette_rate_std": _safe_stdev(
+            [c.repeated_silhouette_rate for c in cells if c.repeated_silhouette_rate is not None]
+        ),
+        "blob_collapse_rate_mean": _safe_mean(
+            [c.blob_collapse_rate for c in cells if c.blob_collapse_rate is not None]
+        ),
+        "blob_collapse_rate_std": _safe_stdev(
+            [c.blob_collapse_rate for c in cells if c.blob_collapse_rate is not None]
+        ),
+        "potion_collapse_rate_mean": _safe_mean(
+            [c.potion_collapse_rate for c in cells if c.potion_collapse_rate is not None]
+        ),
+        "potion_collapse_rate_std": _safe_stdev(
+            [c.potion_collapse_rate for c in cells if c.potion_collapse_rate is not None]
+        ),
         "near_copy_rate_mean": _safe_mean([c.near_copy_rate for c in cells if c.near_copy_rate is not None]),
         "near_copy_rate_std": _safe_stdev([c.near_copy_rate for c in cells if c.near_copy_rate is not None]),
-        "p10_nearest_source_distance_mean": _safe_mean([c.p10_nearest_source_distance for c in cells if c.p10_nearest_source_distance is not None]),
+        "p10_nearest_source_distance_mean": _safe_mean(
+            [c.p10_nearest_source_distance for c in cells if c.p10_nearest_source_distance is not None]
+        ),
         "source_count_used": cells[0].source_count_used if cells else 0,
         "source_candidate_hash": cells[0].source_candidate_hash if cells else "",
-        "mean_rgb_mae_visible_mean": _safe_mean([c.mean_rgb_mae_visible for c in cells if c.mean_rgb_mae_visible is not None]),
+        "mean_rgb_mae_visible_mean": _safe_mean(
+            [c.mean_rgb_mae_visible for c in cells if c.mean_rgb_mae_visible is not None]
+        ),
         "destructive_rate_mean": _safe_mean([c.destructive_rate for c in cells if c.destructive_rate is not None]),
     }
 
@@ -662,6 +709,7 @@ def _base_mode(mode: str) -> str:
 
 
 # ── Decision rules ──────────────────────────────────────────────────────────
+
 
 def decide_v1_1(v1_agg: dict[str, Any] | None, v1_1_agg: dict[str, Any] | None) -> dict[str, Any]:
     if v1_agg is None or v1_1_agg is None:
@@ -756,6 +804,7 @@ def _profile_family_filter(families: tuple[str, ...]) -> tuple[str, ...]:
 
 # ── Profile aggregate helpers ───────────────────────────────────────────────
 
+
 def compute_profile_aggregates(
     breakdowns: dict[str, Any],
     profile: str,
@@ -806,9 +855,13 @@ def compute_profile_aggregates(
             # Sample-weighted
             total_n = sum(int(r.get("sample_count", 0)) for r in rows)
             if total_n == 0:
-                result[mode] = {"category_consistency_mean_weighted": None, "color_consistency_mean_weighted": None,
-                                "blob_collapse_rate_mean_weighted": None, "families_used": [],
-                                "sample_count_profiled": 0}
+                result[mode] = {
+                    "category_consistency_mean_weighted": None,
+                    "color_consistency_mean_weighted": None,
+                    "blob_collapse_rate_mean_weighted": None,
+                    "families_used": [],
+                    "sample_count_profiled": 0,
+                }
                 continue
             w_cat = 0.0
             w_col = 0.0
@@ -932,6 +985,7 @@ def decide_ood_core(
         expl = f"Checks: {checks}, passed: {passed}"
 
     return {"label": label, "explanation": expl, "criteria": criteria}
+
 
 def _load_prompt_lookup(prompts_path: Path) -> dict[str, dict[str, Any]]:
     """Return a dict mapping prompt_id to {family, category, color, object, base_object}."""
@@ -1105,8 +1159,14 @@ def _build_breakdown_table(
             "_mode": mode,
             group_key: gv,
             "sample_count": n,
-            "category_consistency": _safe_mean([1.0 for s in group_samples if s.get("category_consistent") is True] + [0.0 for s in group_samples if s.get("category_consistent") is False]),
-            "color_consistency": _safe_mean([1.0 for s in group_samples if s.get("color_consistent") is True] + [0.0 for s in group_samples if s.get("color_consistent") is False]),
+            "category_consistency": _safe_mean(
+                [1.0 for s in group_samples if s.get("category_consistent") is True]
+                + [0.0 for s in group_samples if s.get("category_consistent") is False]
+            ),
+            "color_consistency": _safe_mean(
+                [1.0 for s in group_samples if s.get("color_consistent") is True]
+                + [0.0 for s in group_samples if s.get("color_consistent") is False]
+            ),
             "blob_collapse_rate": sum(1 for s in group_samples if s.get("generic_blob_like")) / float(n) if n else 0.0,
         }
         # Delta vs preset_v1 baseline
@@ -1145,9 +1205,15 @@ def _write_breakdown_csv(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     columns = [
-        "_mode", group_key, "sample_count",
-        "category_consistency", "color_consistency", "blob_collapse_rate",
-        "delta_category", "delta_color", "delta_blob",
+        "_mode",
+        group_key,
+        "sample_count",
+        "category_consistency",
+        "color_consistency",
+        "blob_collapse_rate",
+        "delta_category",
+        "delta_color",
+        "delta_blob",
     ]
     header = ",".join(columns)
     lines = [header]
@@ -1158,6 +1224,7 @@ def _write_breakdown_csv(
 
 
 # ── Report writers ──────────────────────────────────────────────────────────
+
 
 def _fmt(val: Any) -> str:
     if val is None:
@@ -1178,15 +1245,34 @@ def write_summary_csv(summary: dict[str, Any], path: Path) -> None:
     per_run = summary.get("per_run") or []
     aggregates = summary.get("aggregates") or {}
     columns = [
-        "mode", "seed", "export_preset", "factored_cfg", "cfg_base_scale", "cfg_color_scale",
-        "null_fields", "null_field_set",
-        "requested_max_samples", "sample_count_generated", "review_sample_count", "faithfulness_sample_count",
-        "qa_errors", "qa_warnings",
-        "median_visible_colors", "rare_color_warning_rate", "touches_border_rate",
-        "category_consistency", "color_consistency", "repeated_silhouette_rate",
-        "blob_collapse_rate", "potion_collapse_rate", "near_copy_rate",
-        "p10_nearest_source_distance", "source_count_used", "source_candidate_hash",
-        "mean_rgb_mae_visible", "destructive_rate",
+        "mode",
+        "seed",
+        "export_preset",
+        "factored_cfg",
+        "cfg_base_scale",
+        "cfg_color_scale",
+        "null_fields",
+        "null_field_set",
+        "requested_max_samples",
+        "sample_count_generated",
+        "review_sample_count",
+        "faithfulness_sample_count",
+        "qa_errors",
+        "qa_warnings",
+        "median_visible_colors",
+        "rare_color_warning_rate",
+        "touches_border_rate",
+        "category_consistency",
+        "color_consistency",
+        "repeated_silhouette_rate",
+        "blob_collapse_rate",
+        "potion_collapse_rate",
+        "near_copy_rate",
+        "p10_nearest_source_distance",
+        "source_count_used",
+        "source_candidate_hash",
+        "mean_rgb_mae_visible",
+        "destructive_rate",
     ]
     header = ",".join(columns)
     lines = [header]
@@ -1224,40 +1310,47 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
         "",
     ]
     if meta.get("prompts_built"):
-        lines.append(f"- Prompts built: {meta.get('prompt_count', '')} (target: {meta.get('prompt_count_requested', meta.get('prompt_count', ''))})")
+        lines.append(
+            f"- Prompts built: {meta.get('prompt_count', '')} (target: {meta.get('prompt_count_requested', meta.get('prompt_count', ''))})"
+        )
         lines.append("")
     else:
         lines.append("")
 
     if preset_info:
-        lines.extend([
-            "## Preset Definitions",
-            "",
-            "| Preset | Description |",
-            "|---|---|",
-        ])
+        lines.extend(
+            [
+                "## Preset Definitions",
+                "",
+                "| Preset | Description |",
+                "|---|---|",
+            ]
+        )
         for name, desc in preset_info.items():
             lines.append(f"| `{name}` | {desc} |")
         lines.append("")
 
     if decision:
-        lines.extend([
-            "## Decision Summary",
-            "",
-            f"**v1.1 promotion/confirmation: `{decision.get('label', '')}`**",
-            f"{decision.get('explanation', '')}",
-            "",
-        ])
+        lines.extend(
+            [
+                "## Decision Summary",
+                "",
+                f"**v1.1 promotion/confirmation: `{decision.get('label', '')}`**",
+                f"{decision.get('explanation', '')}",
+                "",
+            ]
+        )
         criteria = decision.get("criteria") or {}
         if criteria:
-            lines.extend([
-                "| Criterion | Actual | Target | Status |",
-                "|---|---|---|---|",
-            ])
+            lines.extend(
+                [
+                    "| Criterion | Actual | Target | Status |",
+                    "|---|---|---|---|",
+                ]
+            )
             for name, info in sorted(criteria.items()):
                 lines.append(
-                    f"| {name} | {_fmt(info.get('actual'))} | {_fmt(info.get('target'))} | "
-                    f"`{info.get('status', '')}` |"
+                    f"| {name} | {_fmt(info.get('actual'))} | {_fmt(info.get('target'))} | `{info.get('status', '')}` |"
                 )
                 lines.append("")
 
@@ -1265,19 +1358,23 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
     profile_decs = summary.get("profile_decisions") or {}
     if profile_decs:
         for profile_name, pdec in profile_decs.items():
-            lines.extend([
-                f"### OOD-Core Decision (`{profile_name}`)",
-                "",
-                f"**Label: `{pdec.get('label', '')}`**",
-                f"{pdec.get('explanation', '')}",
-                "",
-            ])
+            lines.extend(
+                [
+                    f"### OOD-Core Decision (`{profile_name}`)",
+                    "",
+                    f"**Label: `{pdec.get('label', '')}`**",
+                    f"{pdec.get('explanation', '')}",
+                    "",
+                ]
+            )
             pc = pdec.get("criteria") or {}
             if pc:
-                lines.extend([
-                    "| Criterion | Actual | Target | Status |",
-                    "|---|---|---|---|",
-                ])
+                lines.extend(
+                    [
+                        "| Criterion | Actual | Target | Status |",
+                        "|---|---|---|---|",
+                    ]
+                )
                 for name, info in sorted(pc.items()):
                     lines.append(
                         f"| {name} | {_fmt(info.get('actual'))} | {_fmt(info.get('target'))} | "
@@ -1285,12 +1382,14 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                     )
                 lines.append("")
 
-    lines.extend([
-        "## Per-Run Results",
-        "",
-        "| Mode | Seed | Preset | Factored | Null Fields | Gen | Review | Faith | QA Err | Colors | Rare % | Touch % | Category | Color | Repeated % | Blob % | Potion % | NearCopy % | p10 |",
-        "|---|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
-    ])
+    lines.extend(
+        [
+            "## Per-Run Results",
+            "",
+            "| Mode | Seed | Preset | Factored | Null Fields | Gen | Review | Faith | QA Err | Colors | Rare % | Touch % | Category | Color | Repeated % | Blob % | Potion % | NearCopy % | p10 |",
+            "|---|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
     for run in per_run:
         fc_str = "yes" if run.get("factored_cfg") else "no"
         nf_str = str(run.get("null_fields") or run.get("null_field_set") or "")
@@ -1299,52 +1398,62 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
         faith_str = str(run.get("faithfulness_sample_count", ""))
         lines.append(
             "| "
-            + " | ".join([
-                f"`{_md_escape(str(run.get('mode', '')))}`",
-                str(run.get("seed", "")),
-                str(run.get("export_preset") or ""),
-                fc_str,
-                _md_escape(nf_str),
-                gen_str,
-                rev_str,
-                faith_str,
-                str(run.get("qa_errors", "")),
-                _fmt(run.get("median_visible_colors")),
-                _fmt(_pct(run.get("rare_color_warning_rate"))),
-                _fmt(_pct(run.get("touches_border_rate"))),
-                _fmt(run.get("category_consistency")),
-                _fmt(run.get("color_consistency")),
-                _fmt(_pct(run.get("repeated_silhouette_rate"))),
-                _fmt(_pct(run.get("blob_collapse_rate"))),
-                _fmt(_pct(run.get("potion_collapse_rate"))),
-                _fmt(_pct(run.get("near_copy_rate"))),
-                _fmt(run.get("p10_nearest_source_distance")),
-            ])
+            + " | ".join(
+                [
+                    f"`{_md_escape(str(run.get('mode', '')))}`",
+                    str(run.get("seed", "")),
+                    str(run.get("export_preset") or ""),
+                    fc_str,
+                    _md_escape(nf_str),
+                    gen_str,
+                    rev_str,
+                    faith_str,
+                    str(run.get("qa_errors", "")),
+                    _fmt(run.get("median_visible_colors")),
+                    _fmt(_pct(run.get("rare_color_warning_rate"))),
+                    _fmt(_pct(run.get("touches_border_rate"))),
+                    _fmt(run.get("category_consistency")),
+                    _fmt(run.get("color_consistency")),
+                    _fmt(_pct(run.get("repeated_silhouette_rate"))),
+                    _fmt(_pct(run.get("blob_collapse_rate"))),
+                    _fmt(_pct(run.get("potion_collapse_rate"))),
+                    _fmt(_pct(run.get("near_copy_rate"))),
+                    _fmt(run.get("p10_nearest_source_distance")),
+                ]
+            )
             + " |"
         )
 
-    lines.extend([
-        "",
-        "## Aggregate Results",
-        "",
-        "| Mode | Runs | Colors (mean +/- std) | Category (mean +/- std) | Color (mean +/- std) | Repeated % | Blob % | Potion % | NearCopy % | QA Err Total |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Aggregate Results",
+            "",
+            "| Mode | Runs | Colors (mean +/- std) | Category (mean +/- std) | Color (mean +/- std) | Repeated % | Blob % | Potion % | NearCopy % | QA Err Total |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
     for mode_name, agg in sorted(aggregates.items()):
         lines.append(
             "| "
-            + " | ".join([
-                f"`{_md_escape(str(mode_name))}`",
-                str(agg.get("run_count", "")),
-                _fmt_mean_std(agg.get("median_visible_colors_mean"), agg.get("median_visible_colors_std")),
-                _fmt_mean_std(agg.get("category_consistency_mean"), agg.get("category_consistency_std")),
-                _fmt_mean_std(agg.get("color_consistency_mean"), agg.get("color_consistency_std")),
-                _fmt_mean_std(_pct(agg.get("repeated_silhouette_rate_mean")), _pct(agg.get("repeated_silhouette_rate_std"))),
-                _fmt_mean_std(_pct(agg.get("blob_collapse_rate_mean")), _pct(agg.get("blob_collapse_rate_std"))),
-                _fmt_mean_std(_pct(agg.get("potion_collapse_rate_mean")), _pct(agg.get("potion_collapse_rate_std"))),
-                _fmt_mean_std(_pct(agg.get("near_copy_rate_mean")), _pct(agg.get("near_copy_rate_std"))),
-                str(agg.get("qa_errors_total", "")),
-            ])
+            + " | ".join(
+                [
+                    f"`{_md_escape(str(mode_name))}`",
+                    str(agg.get("run_count", "")),
+                    _fmt_mean_std(agg.get("median_visible_colors_mean"), agg.get("median_visible_colors_std")),
+                    _fmt_mean_std(agg.get("category_consistency_mean"), agg.get("category_consistency_std")),
+                    _fmt_mean_std(agg.get("color_consistency_mean"), agg.get("color_consistency_std")),
+                    _fmt_mean_std(
+                        _pct(agg.get("repeated_silhouette_rate_mean")), _pct(agg.get("repeated_silhouette_rate_std"))
+                    ),
+                    _fmt_mean_std(_pct(agg.get("blob_collapse_rate_mean")), _pct(agg.get("blob_collapse_rate_std"))),
+                    _fmt_mean_std(
+                        _pct(agg.get("potion_collapse_rate_mean")), _pct(agg.get("potion_collapse_rate_std"))
+                    ),
+                    _fmt_mean_std(_pct(agg.get("near_copy_rate_mean")), _pct(agg.get("near_copy_rate_std"))),
+                    str(agg.get("qa_errors_total", "")),
+                ]
+            )
             + " |"
         )
 
@@ -1354,13 +1463,17 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
         family_tbl = breakdowns_dict.get("by_family") or []
         if family_tbl:
             mode_order = list_tbl_mode_keys(family_tbl)
-            lines.extend([
-                "",
-                "## Breakdown by Prompt Family",
-                "",
-                "| Family | " + " | ".join(f"`{m}` Cat | `{m}` Color | `{m}` Blob | D Cat | D Color |" for m in mode_order) + " |",
-                "|---:|" + "---:|".join([""] * (len(mode_order) * 6)) + " |",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "## Breakdown by Prompt Family",
+                    "",
+                    "| Family | "
+                    + " | ".join(f"`{m}` Cat | `{m}` Color | `{m}` Blob | D Cat | D Color |" for m in mode_order)
+                    + " |",
+                    "|---:|" + "---:|".join([""] * (len(mode_order) * 6)) + " |",
+                ]
+            )
             # Group rows by family
             by_family: dict[str, list[dict[str, Any]]] = {}
             for row in family_tbl:
@@ -1371,13 +1484,17 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                 for m in mode_order:
                     mode_row = next((r for r in rows if r.get("_mode") == m), None)
                     if mode_row:
-                        family_cols.extend([
-                            _fmt(mode_row.get("category_consistency")),
-                            _fmt(mode_row.get("color_consistency")),
-                            _fmt(_pct(mode_row.get("blob_collapse_rate"))),
-                            _fmt(mode_row.get("delta_category")) if mode_row.get("delta_category") is not None else "",
-                            _fmt(mode_row.get("delta_color")) if mode_row.get("delta_color") is not None else "",
-                        ])
+                        family_cols.extend(
+                            [
+                                _fmt(mode_row.get("category_consistency")),
+                                _fmt(mode_row.get("color_consistency")),
+                                _fmt(_pct(mode_row.get("blob_collapse_rate"))),
+                                _fmt(mode_row.get("delta_category"))
+                                if mode_row.get("delta_category") is not None
+                                else "",
+                                _fmt(mode_row.get("delta_color")) if mode_row.get("delta_color") is not None else "",
+                            ]
+                        )
                     else:
                         family_cols.extend(["", "", "", "", ""])
                 lines.append(" | ".join(family_cols) + " |")
@@ -1386,64 +1503,74 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
     profile_aggs = summary.get("profile_aggregates") or {}
     if profile_aggs:
         for profile_name, pa in profile_aggs.items():
-            lines.extend([
-                "",
-                f"### Profile Aggregate (`{profile_name}`, weighting=`{summary.get('profile_weighting', 'family')}`)",
-                "",
-                "| Mode | Families | Profiled Samples | Category (weighted) | Color (weighted) | Blob (weighted) |",
-                "|---|---:|---:|---:|---:|---:|",
-            ])
+            lines.extend(
+                [
+                    "",
+                    f"### Profile Aggregate (`{profile_name}`, weighting=`{summary.get('profile_weighting', 'family')}`)",
+                    "",
+                    "| Mode | Families | Profiled Samples | Category (weighted) | Color (weighted) | Blob (weighted) |",
+                    "|---|---:|---:|---:|---:|---:|",
+                ]
+            )
             for mode, agg in sorted(pa.items()):
                 fams = ", ".join(str(f) for f in agg.get("families_used", []))
                 lines.append(
                     "| "
-                    + " | ".join([
-                        f"`{_md_escape(str(mode))}`",
-                        _md_escape(fams),
-                        str(agg.get("sample_count_profiled", "")),
-                        _fmt(agg.get("category_consistency_mean_weighted")),
-                        _fmt(agg.get("color_consistency_mean_weighted")),
-                        _fmt(agg.get("blob_collapse_rate_mean_weighted")),
-                    ])
+                    + " | ".join(
+                        [
+                            f"`{_md_escape(str(mode))}`",
+                            _md_escape(fams),
+                            str(agg.get("sample_count_profiled", "")),
+                            _fmt(agg.get("category_consistency_mean_weighted")),
+                            _fmt(agg.get("color_consistency_mean_weighted")),
+                            _fmt(agg.get("blob_collapse_rate_mean_weighted")),
+                        ]
+                    )
                     + " |"
                 )
 
     if deltas:
-        lines.extend([
-            "",
-            "## Deltas vs `v1` Baseline",
-            "",
-            "| Mode | Color Delta | Category Delta | Rare Delta | Blob Delta | NearCopy Delta |",
-            "|---|---:|---:|---:|---:|---:|",
-        ])
+        lines.extend(
+            [
+                "",
+                "## Deltas vs `v1` Baseline",
+                "",
+                "| Mode | Color Delta | Category Delta | Rare Delta | Blob Delta | NearCopy Delta |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
         for mode_name, delta in sorted(deltas.items()):
             lines.append(
                 "| "
-                + " | ".join([
-                    f"`{_md_escape(str(mode_name))}`",
-                    _fmt(delta.get("color_consistency_mean_delta")),
-                    _fmt(delta.get("category_consistency_mean_delta")),
-                    _fmt(delta.get("rare_color_warning_rate_mean_delta")),
-                    _fmt(delta.get("blob_collapse_rate_mean_delta")),
-                    _fmt(delta.get("near_copy_rate_mean_delta")),
-                ])
+                + " | ".join(
+                    [
+                        f"`{_md_escape(str(mode_name))}`",
+                        _fmt(delta.get("color_consistency_mean_delta")),
+                        _fmt(delta.get("category_consistency_mean_delta")),
+                        _fmt(delta.get("rare_color_warning_rate_mean_delta")),
+                        _fmt(delta.get("blob_collapse_rate_mean_delta")),
+                        _fmt(delta.get("near_copy_rate_mean_delta")),
+                    ]
+                )
                 + " |"
             )
 
     report_mode = "report-only harvest" if summary.get("meta", {}).get("report_only") else ""
-    lines.extend([
-        "",
-        "## Caveats",
-        "",
-        "- Metrics are computed from small sample sizes; confidence intervals reflect binomial uncertainty at that n.",
-        "- No training was run; this is a no-training presets-and-conditioning-ablation evaluation.",
-        "- Results should not be interpreted as statistical proof of superiority without larger-n confirmations.",
-        f"- Requested `max_samples` may exceed available prompts; actual generated count is reported in the Gen/Review/Faith columns.",
-        f"- Report mode: {report_mode}" if report_mode else "",
-        "",
-        f"Generated contact sheets and reports are in `{meta.get('out_dir', '')}`.",
-        "",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Caveats",
+            "",
+            "- Metrics are computed from small sample sizes; confidence intervals reflect binomial uncertainty at that n.",
+            "- No training was run; this is a no-training presets-and-conditioning-ablation evaluation.",
+            "- Results should not be interpreted as statistical proof of superiority without larger-n confirmations.",
+            "- Requested `max_samples` may exceed available prompts; actual generated count is reported in the Gen/Review/Faith columns.",
+            f"- Report mode: {report_mode}" if report_mode else "",
+            "",
+            f"Generated contact sheets and reports are in `{meta.get('out_dir', '')}`.",
+            "",
+        ]
+    )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1487,7 +1614,12 @@ def _compute_deltas(aggregates: dict[str, Any]) -> dict[str, Any]:
         ):
             v1_val = v1_agg.get(key)
             other_val = agg.get(key)
-            if v1_val is not None and other_val is not None and isinstance(v1_val, (int, float)) and isinstance(other_val, (int, float)):
+            if (
+                v1_val is not None
+                and other_val is not None
+                and isinstance(v1_val, (int, float))
+                and isinstance(other_val, (int, float))
+            ):
                 delta[f"{key}_delta"] = float(other_val) - float(v1_val)
             else:
                 delta[f"{key}_delta"] = None
@@ -1496,6 +1628,7 @@ def _compute_deltas(aggregates: dict[str, Any]) -> dict[str, Any]:
 
 
 # ── Main orchestration ──────────────────────────────────────────────────────
+
 
 def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
     cells = build_run_plan(config)
@@ -1609,7 +1742,9 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
             if config.allow_partial_report:
                 print(f"Warning: {msg}. Proceeding with partial report.")
             else:
-                raise RuntimeError(f"{msg}. Use --allow-partial-report to proceed, or --skip-sampling-if-exists to generate them.")
+                raise RuntimeError(
+                    f"{msg}. Use --allow-partial-report to proceed, or --skip-sampling-if-exists to generate them."
+                )
     else:
         for cell in cells:
             cell_dir = runs_dir / cell.mode
@@ -1658,17 +1793,19 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
                 print(f"  Sampled to {cell_dir}")
 
                 verify_cell_metadata(cell, cell_dir)
-                print(f"  Metadata verification: OK (export_preset={cell.export_preset}, factored_cfg={cell.factored_cfg}, null_fields={cell.null_fields})")
+                print(
+                    f"  Metadata verification: OK (export_preset={cell.export_preset}, factored_cfg={cell.factored_cfg}, null_fields={cell.null_fields})"
+                )
 
             # QA
-            print(f"  Running QA...")
+            print("  Running QA...")
             qa_result = qa_generated_sprites(cell_dir)
             qa_errors = len(qa_result.errors)
             qa_warnings = len(qa_result.warnings)
             print(f"  QA: errors={qa_errors} warnings={qa_warnings}")
 
             # Review
-            print(f"  Running review...")
+            print("  Running review...")
             review_result = review_generated_sprites(
                 GeneratedReviewConfig(
                     generated_dir=cell_dir,
@@ -1679,7 +1816,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
             )
 
             # Prompt faithfulness
-            print(f"  Running prompt faithfulness...")
+            print("  Running prompt faithfulness...")
             faith_report = run_prompt_faithfulness(
                 PromptFaithfulnessConfig(
                     generated=cell_dir,
@@ -1721,9 +1858,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
     profile_aggregates: dict[str, Any] = {}
     profile_decisions: dict[str, Any] = {}
     if config.eval_profile != "all" and breakdowns:
-        pa = compute_profile_aggregates(
-            breakdowns, config.eval_profile, config.profile_weighting, aggregates
-        )
+        pa = compute_profile_aggregates(breakdowns, config.eval_profile, config.profile_weighting, aggregates)
         if pa:
             profile_aggregates[config.eval_profile] = pa
             v1_prof = pa.get("preset_v1")
@@ -1797,8 +1932,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
         "preset_definitions": {
             "v1": "Phase 1 EMA checkpoint, CFG 3.0, 30 steps, k16 deterministic palette projection.",
             "v1.1": (
-                "v1 base settings plus factored CFG: base_scale=2.5, color_scale=3.0. "
-                "Optional color-strong preset."
+                "v1 base settings plus factored CFG: base_scale=2.5, color_scale=3.0. Optional color-strong preset."
             ),
         },
         "per_run": per_run,
@@ -1819,7 +1953,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
     write_summary_csv(summary, csv_path)
     write_summary_markdown(summary, md_path)
 
-    print(f"\n--- Summary ---")
+    print("\n--- Summary ---")
     print(f"JSON: {json_path}")
     print(f"CSV:  {csv_path}")
     print(f"MD:   {md_path}")

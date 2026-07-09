@@ -1,10 +1,13 @@
 from _harvest_testdata import make_sprite_png
-
 from spritelab.harvest.filename_rules_v2 import suggest_from_filename_v2
 from spritelab.harvest.label_candidates import candidate_objects_for_record
 from spritelab.harvest.label_fusion_v2 import FusionThresholds
 from spritelab.harvest.label_schema import LabelSuggestion, label_suggestion_to_json
-from spritelab.harvest.label_v2_pipeline import build_label_v2_record, format_label_v2_run_report, summarize_label_v2_records
+from spritelab.harvest.label_v2_pipeline import (
+    build_label_v2_record,
+    format_label_v2_run_report,
+    summarize_label_v2_records,
+)
 
 
 def _record(filename: str, source_id: str = "oga_496_rpg_icons_32fix") -> dict[str, str]:

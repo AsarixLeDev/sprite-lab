@@ -64,7 +64,9 @@ class DatasetMakerItem:
         object.__setattr__(self, "source_name", str(self.source_name).strip())
         object.__setattr__(self, "license", normalize_category(str(self.license)))
         object.__setattr__(self, "author", str(self.author).strip())
-        object.__setattr__(self, "quality_issues", tuple(str(issue).strip() for issue in self.quality_issues if str(issue).strip()))
+        object.__setattr__(
+            self, "quality_issues", tuple(str(issue).strip() for issue in self.quality_issues if str(issue).strip())
+        )
 
         split = self.split
         if split is not None:
@@ -79,7 +81,9 @@ def validate_dataset_maker_item(item: DatasetMakerItem) -> list[str]:
     if not item.sprite_id:
         errors.append("sprite_id must be non-empty.")
     elif not _SAFE_ID_RE.fullmatch(item.sprite_id):
-        errors.append("sprite_id must start with a letter or digit and contain only lowercase letters, digits, _, ., or -.")
+        errors.append(
+            "sprite_id must start with a letter or digit and contain only lowercase letters, digits, _, ., or -."
+        )
 
     if item.status not in ALLOWED_STATUSES:
         errors.append(f"status must be one of: {', '.join(sorted(ALLOWED_STATUSES))}.")

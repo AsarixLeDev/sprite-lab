@@ -4,8 +4,8 @@ import random
 from pathlib import Path
 
 import pytest
-from _semantic_dataset import default_specs, make_semantic_dataset
 
+from _semantic_dataset import default_specs, make_semantic_dataset
 from spritelab.dataset_maker.training_manifest import (
     CAPTION_POLICIES,
     SCHEMA_VERSION,
@@ -124,13 +124,33 @@ def test_captions_do_not_invent_unrelated_object_terms() -> None:
     rng = random.Random("seed")
     variants = sample_caption_variants(record, policy="mixed", rng=rng, count=12)
     allowed = {
-        "32x32", "pixel", "art", "fantasy", "rpg", "icon", "centered", "made", "of",
-        "outline", "transparent", "background", "item",
+        "32x32",
+        "pixel",
+        "art",
+        "fantasy",
+        "rpg",
+        "icon",
+        "centered",
+        "made",
+        "of",
+        "outline",
+        "transparent",
+        "background",
+        "item",
     }
     allowed.update(record.open_name.split())
     allowed.update(record.base_object.split("_"))
     attrs = record.attributes
-    for group in (attrs.colors, attrs.materials, attrs.shapes, attrs.effects, attrs.state, attrs.function, attrs.mood, attrs.parts):
+    for group in (
+        attrs.colors,
+        attrs.materials,
+        attrs.shapes,
+        attrs.effects,
+        attrs.state,
+        attrs.function,
+        attrs.mood,
+        attrs.parts,
+    ):
         for value in group:
             allowed.update(value.split("_"))
     for variant in variants:
@@ -147,12 +167,7 @@ def test_semantic_dropout_never_removes_all_meaning() -> None:
         text = variant.caption.lower()
         assert text.strip()
         # every caption keeps a noun: base object, open name, or a category/icon word
-        assert (
-            base in text
-            or record.open_name.lower() in text
-            or "icon" in text
-            or record.category in text
-        )
+        assert base in text or record.open_name.lower() in text or "icon" in text or record.category in text
 
 
 def test_dropout_mask_is_recorded(tmp_path: Path) -> None:
@@ -165,9 +180,7 @@ def test_dropout_mask_is_recorded(tmp_path: Path) -> None:
         mask = row["dropout_mask"]
         assert any(key.startswith("kept_") for key in mask)
     # at least some rows actually drop the colour
-    dropped_color = [
-        row for row in result.rows if row["conditioning"]["dropped_attributes"].get("colors")
-    ]
+    dropped_color = [row for row in result.rows if row["conditioning"]["dropped_attributes"].get("colors")]
     assert dropped_color
 
 
