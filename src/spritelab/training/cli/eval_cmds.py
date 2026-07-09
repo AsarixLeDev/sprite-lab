@@ -172,6 +172,12 @@ def _register_run_v2_phase0_eval(subparsers: argparse._SubParsersAction) -> None
         help="Profile weighting method. 'family' gives equal weight to each prompt family. "
         "'sample' weights by sample count. Default: family.",
     )
+    v2_phase0.add_argument(
+        "--guidance-surgery-grid",
+        action="store_true",
+        default=False,
+        help="Include v2 Phase 2 Exp A guidance surgery variants (rgb-only, late-window, object-id scale).",
+    )
     v2_phase0.set_defaults(func=_run_run_v2_phase0_eval)
 
 
@@ -223,6 +229,7 @@ def _run_run_v2_phase0_eval(parsed: argparse.Namespace) -> None:
             speed_optimizations=parsed.speed_optimizations,
             eval_profile=parsed.eval_profile,
             profile_weighting=parsed.profile_weighting,
+            guidance_surgery_grid=parsed.guidance_surgery_grid,
         )
     )
     if not parsed.dry_run:

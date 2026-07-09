@@ -104,6 +104,7 @@ class V2Phase0EvalConfig:
     speed_optimizations: bool = True
     eval_profile: str = "all"
     profile_weighting: str = "family"
+    guidance_surgery_grid: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,11 @@ class RunCell:
     factored_cfg: bool = False
     cfg_base_scale: float | None = None
     cfg_color_scale: float | None = None
+    # v2 Phase 2 Exp A: guidance surgery
+    color_guidance_rgb_only: bool = False
+    color_guidance_start_t: float = 0.0
+    color_guidance_ramp_t: float = 0.0
+    object_id_scale: float = 1.0
 
 
 @dataclass
@@ -282,6 +288,95 @@ def parse_factored_grid(grid: str) -> list[dict[str, float]]:
     return result
 
 
+GUIDANCE_SURGERY_MODES: tuple[dict[str, Any], ...] = (
+    {
+        "mode": "preset_v1",
+        "export_preset": "v1",
+        "factored_cfg": False,
+        "cfg_base_scale": None,
+        "cfg_color_scale": None,
+        "color_guidance_rgb_only": False,
+        "color_guidance_start_t": 0.0,
+        "color_guidance_ramp_t": 0.0,
+        "object_id_scale": 1.0,
+    },
+    {
+        "mode": "rgb_late_0_4",
+        "export_preset": "v1.1",
+        "factored_cfg": True,
+        "cfg_base_scale": 2.5,
+        "cfg_color_scale": 3.0,
+        "color_guidance_rgb_only": True,
+        "color_guidance_start_t": 0.4,
+        "color_guidance_ramp_t": 0.0,
+        "object_id_scale": 1.0,
+    },
+    {
+        "mode": "rgb_late_0_5",
+        "export_preset": "v1.1",
+        "factored_cfg": True,
+        "cfg_base_scale": 2.5,
+        "cfg_color_scale": 3.0,
+        "color_guidance_rgb_only": True,
+        "color_guidance_start_t": 0.5,
+        "color_guidance_ramp_t": 0.0,
+        "object_id_scale": 1.0,
+    },
+    {
+        "mode": "rgb_late_0_6",
+        "export_preset": "v1.1",
+        "factored_cfg": True,
+        "cfg_base_scale": 2.5,
+        "cfg_color_scale": 3.0,
+        "color_guidance_rgb_only": True,
+        "color_guidance_start_t": 0.6,
+        "color_guidance_ramp_t": 0.0,
+        "object_id_scale": 1.0,
+    },
+    {
+        "mode": "rgb_late_0_5_obj0_75",
+        "export_preset": "v1.1",
+        "factored_cfg": True,
+        "cfg_base_scale": 2.5,
+        "cfg_color_scale": 3.0,
+        "color_guidance_rgb_only": True,
+        "color_guidance_start_t": 0.5,
+        "color_guidance_ramp_t": 0.0,
+        "object_id_scale": 0.75,
+    },
+    {
+        "mode": "rgb_late_0_5_obj0_5",
+        "export_preset": "v1.1",
+        "factored_cfg": True,
+        "cfg_base_scale": 2.5,
+        "cfg_color_scale": 3.0,
+        "color_guidance_rgb_only": True,
+        "color_guidance_start_t": 0.5,
+        "color_guidance_ramp_t": 0.0,
+        "object_id_scale": 0.5,
+    },
+)
+
+
+def _add_guidance_surgery_cells(cells: list[RunCell], config: V2Phase0EvalConfig) -> None:
+    for entry in GUIDANCE_SURGERY_MODES:
+        for seed in config.seeds:
+            cells.append(
+                RunCell(
+                    mode=f"{entry['mode']}_seed{seed}",
+                    export_preset=entry["export_preset"],
+                    seed=seed,
+                    factored_cfg=bool(entry["factored_cfg"]),
+                    cfg_base_scale=entry["cfg_base_scale"],
+                    cfg_color_scale=entry["cfg_color_scale"],
+                    color_guidance_rgb_only=bool(entry["color_guidance_rgb_only"]),
+                    color_guidance_start_t=float(entry["color_guidance_start_t"]),
+                    color_guidance_ramp_t=float(entry["color_guidance_ramp_t"]),
+                    object_id_scale=float(entry["object_id_scale"]),
+                )
+            )
+
+
 # ── Build run plan (pure, testable) ─────────────────────────────────────────
 
 
@@ -305,6 +400,9 @@ def build_run_plan(config: V2Phase0EvalConfig) -> list[RunCell]:
                     cfg_color_scale=params["cfg_color_scale"],
                 )
             )
+
+    if config.guidance_surgery_grid:
+        _add_guidance_surgery_cells(cells, config)
 
     if config.include_ablations and config.null_field_sets:
         for nfs_token in config.null_field_sets:

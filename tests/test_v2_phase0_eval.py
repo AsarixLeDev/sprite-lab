@@ -1222,3 +1222,82 @@ def test_cli_speed_optimizations_flag_wiring(monkeypatch: pytest.MonkeyPatch) ->
         ]
     )
     assert captured[0].speed_optimizations is True
+
+
+# ── v2 Phase 2 Exp A: guidance surgery grid tests ────────────────────────────
+
+
+def test_cli_accepts_guidance_surgery_grid() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--guidance-surgery-grid", action="store_true", default=False)
+    parsed = parser.parse_args(["--guidance-surgery-grid"])
+    assert parsed.guidance_surgery_grid is True
+    parsed2 = parser.parse_args([])
+    assert parsed2.guidance_surgery_grid is False
+
+
+def test_guidance_surgery_modes_has_six_entries() -> None:
+    from spritelab.training.v2_phase0_eval import GUIDANCE_SURGERY_MODES
+
+    modes = [e["mode"] for e in GUIDANCE_SURGERY_MODES]
+    assert len(modes) == 6
+    assert "preset_v1" in modes
+    assert "rgb_late_0_5" in modes
+    assert "rgb_late_0_5_obj0_5" in modes
+
+
+def test_build_run_plan_includes_guidance_surgery_cells() -> None:
+    from spritelab.training.v2_phase0_eval import V2Phase0EvalConfig, build_run_plan
+
+    config = V2Phase0EvalConfig(
+        out=Path("out"),
+        checkpoint=Path("c.pt"),
+        dataset=Path("ds"),
+        presets=("v1",),
+        prompts=None,
+        seeds=(20260723,),
+        guidance_surgery_grid=True,
+    )
+    cells = build_run_plan(config)
+    modes = {c.mode for c in cells}
+    assert "preset_v1_seed20260723" in modes
+    assert "rgb_late_0_5_seed20260723" in modes
+    assert "rgb_late_0_5_obj0_5_seed20260723" in modes
+    # 1 preset + 6 guidance modes = 7 cells per seed
+    assert len(cells) == 7
+
+
+def test_guidance_cells_have_expected_metadata() -> None:
+    from spritelab.training.v2_phase0_eval import V2Phase0EvalConfig, build_run_plan
+
+    config = V2Phase0EvalConfig(
+        out=Path("out"),
+        checkpoint=Path("c.pt"),
+        dataset=Path("ds"),
+        presets=("v1",),
+        prompts=None,
+        seeds=(20260723,),
+        guidance_surgery_grid=True,
+    )
+    cells = build_run_plan(config)
+    rgb_cell = next(c for c in cells if c.mode == "rgb_late_0_5_seed20260723")
+    assert rgb_cell.export_preset == "v1.1"
+    assert rgb_cell.factored_cfg is True
+    assert rgb_cell.color_guidance_rgb_only is True
+    assert rgb_cell.color_guidance_start_t == pytest.approx(0.5)
+    assert rgb_cell.color_guidance_ramp_t == pytest.approx(0.0)
+    assert rgb_cell.object_id_scale == pytest.approx(1.0)
+
+    obj_cell = next(c for c in cells if c.mode == "rgb_late_0_5_obj0_75_seed20260723")
+    assert obj_cell.object_id_scale == pytest.approx(0.75)
+
+
+def test_v2_eval_harvest_handles_missing_guidance_dir(tmp_path: Path) -> None:
+    """Report-only with --allow-partial-report should not raise when a guidance dir is missing."""
+    from spritelab.training.v2_phase0_eval import _cell_outputs_exist
+
+    cell_dir = tmp_path / "runs" / "rgb_late_0_5_seed20260723"
+    # Don't create the directory
+    assert not _cell_outputs_exist(cell_dir)
