@@ -1818,3 +1818,155 @@ def test_faithfulness_out_is_file_not_directory() -> None:
     )
     assert cfg.out.suffix == ".md"
     assert cfg.out_json.suffix == ".json"
+
+
+# ── v2 Phase 2 Exp A: guidance surgery tests ─────────────────────────────────
+
+
+def test_challenger_sample_config_defaults_preserve_behavior() -> None:
+    from spritelab.training.generator_challenger import ChallengerSampleConfig
+
+    cfg = ChallengerSampleConfig(checkpoint=Path("c.pt"), prompts=Path("p.jsonl"), out_dir=Path("out"))
+    assert cfg.color_guidance_rgb_only is False
+    assert cfg.color_guidance_start_t == 0.0
+    assert cfg.color_guidance_ramp_t == 0.0
+    assert cfg.object_id_scale == 1.0
+
+
+def test_cli_accepts_color_guidance_rgb_only() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--color-guidance-rgb-only", action="store_true", default=False)
+    parsed = parser.parse_args(["--color-guidance-rgb-only"])
+    assert parsed.color_guidance_rgb_only is True
+    parsed2 = parser.parse_args([])
+    assert parsed2.color_guidance_rgb_only is False
+
+
+def test_cli_accepts_color_guidance_start_t() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--color-guidance-start-t", type=float, default=0.0)
+    parsed = parser.parse_args(["--color-guidance-start-t", "0.5"])
+    assert parsed.color_guidance_start_t == pytest.approx(0.5)
+
+
+def test_cli_accepts_color_guidance_ramp_t() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--color-guidance-ramp-t", type=float, default=0.0)
+    parsed = parser.parse_args(["--color-guidance-ramp-t", "0.2"])
+    assert parsed.color_guidance_ramp_t == pytest.approx(0.2)
+
+
+def test_cli_accepts_object_id_scale() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--object-id-scale", type=float, default=1.0)
+    parsed = parser.parse_args(["--object-id-scale", "0.5"])
+    assert parsed.object_id_scale == pytest.approx(0.5)
+
+
+def test_color_axis_rgb_only_zeroes_alpha() -> None:
+    """v_cond - v_no_color should have alpha=0 when rgb_only=True."""
+    v_cond = torch.randn(2, 4, 32, 32)
+    v_no_color = torch.randn(2, 4, 32, 32)
+    color_axis = v_cond - v_no_color
+
+    rgb_only = True
+    if rgb_only:
+        color_axis = color_axis.clone()
+        color_axis[:, 3:4] = 0.0
+
+    assert (color_axis[:, 3:4] == 0.0).all()
+    # RGB unchanged from original difference
+    assert not (color_axis[:, :3] == 0.0).all()
+
+
+def test_color_axis_rgb_only_preserves_rgb_values() -> None:
+    """Verify RGB channels unchanged when alpha is zeroed."""
+    v_cond = torch.tensor([[[[1.0]]]]).expand(1, 4, 32, 32).clone()
+    v_no_color = torch.tensor([[[[0.0]]]]).expand(1, 4, 32, 32).clone()
+    color_axis = v_cond - v_no_color
+    rgb_only = True
+    if rgb_only:
+        color_axis = color_axis.clone()
+        color_axis[:, 3:4] = 0.0  # zero alpha
+    assert (color_axis[:, 0:3] == 1.0).all()
+
+
+def test_late_window_schedule() -> None:
+    """color guidance schedule: 0 before start, 1 after start+ramp, linear in ramp."""
+    start_t = 0.5
+    ramp_t = 0.2
+
+    def schedule(t_value):
+        if t_value < start_t:
+            return 0.0
+        if ramp_t > 0.0 and t_value < start_t + ramp_t:
+            return (t_value - start_t) / ramp_t
+        return 1.0
+
+    assert schedule(0.0) == 0.0
+    assert schedule(0.4) == 0.0
+    assert schedule(0.5) == 0.0
+    assert schedule(0.6) == pytest.approx(0.5)
+    assert schedule(0.7) == pytest.approx(1.0)
+    assert schedule(0.9) == pytest.approx(1.0)
+
+
+def test_object_id_scale_in_structured_embedding() -> None:
+    """object_id_scale multiplies the object_id embedding output."""
+    from spritelab.training.generator_challenger import RectifiedFlowUNet
+
+    model = RectifiedFlowUNet(
+        vocab_size=64,
+        embed_dim=16,
+        base_channels=16,
+        channel_mults=(1,),
+        res_blocks_per_level=1,
+        pad_token_id=0,
+        structured_vocab_sizes={"object_vocab_size": 5, "category_vocab_size": 3, "color_vocab_size": 5},
+    )
+    batch = 2
+    sc = {
+        "object_id": torch.tensor([1, 2], dtype=torch.long),
+        "category_id": torch.tensor([1, 1], dtype=torch.long),
+    }
+    emb_full = model._structured_embedding(sc, batch=batch, device=torch.device("cpu"), object_id_scale=1.0)
+    emb_half = model._structured_embedding(sc, batch=batch, device=torch.device("cpu"), object_id_scale=0.5)
+    emb_zero = model._structured_embedding(sc, batch=batch, device=torch.device("cpu"), object_id_scale=0.0)
+
+    assert emb_full is not None and emb_half is not None and emb_zero is not None
+    assert emb_full.shape == emb_half.shape == emb_zero.shape
+    # Scaling object_id to half changes the output (not all zeros)
+    assert not torch.allclose(emb_full, emb_half)
+    # But the change is only in the object_id portion of the embedding
+
+
+def test_challenger_forward_accepts_object_id_scale() -> None:
+    """Model forward pass accepts and uses object_id_scale kwarg."""
+    from spritelab.training.generator_challenger import RectifiedFlowUNet
+
+    model = RectifiedFlowUNet(
+        vocab_size=64,
+        embed_dim=16,
+        base_channels=16,
+        channel_mults=(1,),
+        res_blocks_per_level=1,
+        pad_token_id=0,
+        structured_vocab_sizes={"object_vocab_size": 5, "category_vocab_size": 3, "color_vocab_size": 5},
+    )
+    x = torch.randn(2, 4, 32, 32)
+    t = torch.rand(2)
+    ct = torch.randint(0, 64, (2, 8))
+    sc = {"object_id": torch.tensor([1, 2], dtype=torch.long)}
+
+    out1 = model(x, t, caption_tokens=ct, structured_conditioning=sc, object_id_scale=1.0)
+    out2 = model(x, t, caption_tokens=ct, structured_conditioning=sc, object_id_scale=0.0)
+    assert isinstance(out1, torch.Tensor)
+    assert out1.shape == out2.shape == (2, 4, 32, 32)

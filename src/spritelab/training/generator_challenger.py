@@ -251,6 +251,11 @@ class ChallengerSampleConfig:
     cfg_base_scale: float | None = None
     cfg_color_scale: float | None = None
     null_fields: str = ""
+    # v2 Phase 2 Exp A: sampling-only guidance surgery (default-off, see docs/...)
+    color_guidance_rgb_only: bool = False
+    color_guidance_start_t: float = 0.0
+    color_guidance_ramp_t: float = 0.0
+    object_id_scale: float = 1.0
 
 
 class RectifiedFlowUNet(_ModuleBase):
@@ -390,6 +395,7 @@ class RectifiedFlowUNet(_ModuleBase):
         semantic_tokens: Any | None = None,
         structured_conditioning: Mapping[str, Any] | None = None,
         return_aux: bool = False,
+        object_id_scale: float = 1.0,
     ) -> Any:
         th, _nn_mod = _require_torch()
         emb = self._conditioning_embedding(
@@ -397,6 +403,7 @@ class RectifiedFlowUNet(_ModuleBase):
             caption_tokens=caption_tokens,
             semantic_tokens=semantic_tokens,
             structured_conditioning=structured_conditioning,
+            object_id_scale=object_id_scale,
         )
         h = self.input(x)
         skips: list[Any] = []
@@ -446,6 +453,7 @@ class RectifiedFlowUNet(_ModuleBase):
         caption_tokens: Any,
         semantic_tokens: Any | None,
         structured_conditioning: Mapping[str, Any] | None,
+        object_id_scale: float = 1.0,
     ) -> Any:
         th, _nn_mod = _require_torch()
         batch = int(caption_tokens.shape[0])
@@ -455,7 +463,12 @@ class RectifiedFlowUNet(_ModuleBase):
             semantic_cond = self._mean_pool_tokens(semantic_tokens)
         caption_cond = self._mean_pool_tokens(caption_tokens)
         pieces = [caption_cond, semantic_cond]
-        structured_cond = self._structured_embedding(structured_conditioning, batch=batch, device=caption_tokens.device)
+        structured_cond = self._structured_embedding(
+            structured_conditioning,
+            batch=batch,
+            device=caption_tokens.device,
+            object_id_scale=object_id_scale,
+        )
         if structured_cond is not None:
             pieces.append(structured_cond)
         cond = self.cond_mlp(th.cat(pieces, dim=1))
@@ -513,6 +526,7 @@ class RectifiedFlowUNet(_ModuleBase):
         *,
         batch: int,
         device: Any,
+        object_id_scale: float = 1.0,
     ) -> Any | None:
         if not self.structured_vocab_sizes:
             return None
@@ -524,7 +538,10 @@ class RectifiedFlowUNet(_ModuleBase):
                 ids = th.zeros(batch, dtype=th.long, device=device)
             else:
                 ids = value.to(device=device, dtype=th.long).reshape(batch)
-            pieces.append(embedding(ids))
+            emb = embedding(ids)
+            if field == "object_id" and object_id_scale != 1.0:
+                emb = emb * float(object_id_scale)
+            pieces.append(emb)
         for field, projection in self.structured_multi_hot_projections.items():
             value = None if structured_conditioning is None else structured_conditioning.get(field)
             width = int(projection.in_features)
@@ -1220,6 +1237,10 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
                 cfg_base_scale=config.cfg_base_scale,
                 cfg_color_scale=config.cfg_color_scale,
                 color_token_ids=color_token_ids,
+                color_guidance_rgb_only=config.color_guidance_rgb_only,
+                color_guidance_start_t=config.color_guidance_start_t,
+                color_guidance_ramp_t=config.color_guidance_ramp_t,
+                object_id_scale=config.object_id_scale,
             )
         rgba_np = np.moveaxis(rgba_batch.detach().cpu().numpy().astype(np.float32), 1, -1)
         for item_index, prompt_record in enumerate(batch_records):
@@ -1250,6 +1271,10 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
                 "cfg_base_scale": None if config.cfg_base_scale is None else float(config.cfg_base_scale),
                 "cfg_color_scale": None if config.cfg_color_scale is None else float(config.cfg_color_scale),
                 "null_fields": list(null_fields),
+                "color_guidance_rgb_only": bool(config.color_guidance_rgb_only),
+                "color_guidance_start_t": float(config.color_guidance_start_t),
+                "color_guidance_ramp_t": float(config.color_guidance_ramp_t),
+                "object_id_scale": float(config.object_id_scale),
             }
             record = write_generated_sprite_artifacts(
                 sprite,
@@ -1747,6 +1772,10 @@ def integrate_rectified_flow(
     cfg_base_scale: float | None = None,
     cfg_color_scale: float | None = None,
     color_token_ids: Sequence[int] | None = None,
+    color_guidance_rgb_only: bool = False,
+    color_guidance_start_t: float = 0.0,
+    color_guidance_ramp_t: float = 0.0,
+    object_id_scale: float = 1.0,
 ) -> Any:
     """Integrate the rectified-flow ODE, optionally with factored (base/color) CFG.
 
@@ -1755,6 +1784,17 @@ def integrate_rectified_flow(
     When ``factored_cfg`` is True, guidance is split into a base term (uncond -> color-
     stripped conditioning) and a color term (color-stripped -> full conditioning), each
     with its own scale; see docs/v2_phase0_diagnostics.md.
+
+    v2 Phase 2 Exp A — sampling-only guidance surgery (all defaults-off):
+
+    * ``color_guidance_rgb_only``: zero the alpha channel of the color-axis
+      guidance term ``v_cond - v_no_color``, so color guidance affects RGB
+      only and does not disturb alpha/silhouette.
+    * ``color_guidance_start_t`` / ``color_guidance_ramp_t``: apply color
+      guidance only after a flow-time threshold (late-window).  Flow-time *t*
+      runs from ~0.017 (near clean) to ~0.983 (near noise) for 30 steps;
+      colour guidance is active when ``t >= color_guidance_start_t``, with
+      an optional linear ramp of width ``color_guidance_ramp_t``.
     """
     th, _nn_mod = _require_torch()
     model.eval()
@@ -1769,6 +1809,10 @@ def integrate_rectified_flow(
 
     no_color_caption = no_color_semantic = no_color_structured = None
     base_scale = color_scale = 0.0
+    start_t = float(color_guidance_start_t)
+    ramp_t = max(0.0, float(color_guidance_ramp_t))
+    rgb_only = bool(color_guidance_rgb_only)
+    obj_scale = float(object_id_scale)
     if factored_cfg:
         base_scale = float(cfg_scale if cfg_base_scale is None else cfg_base_scale)
         color_scale = float(cfg_scale if cfg_color_scale is None else cfg_color_scale)
@@ -1795,6 +1839,7 @@ def integrate_rectified_flow(
             caption_tokens=caption_tokens,
             semantic_tokens=semantic_tokens,
             structured_conditioning=structured_conditioning,
+            object_id_scale=obj_scale,
         )
         if factored_cfg:
             v_uncond = model(
@@ -1803,6 +1848,7 @@ def integrate_rectified_flow(
                 caption_tokens=uncond_caption,
                 semantic_tokens=uncond_semantic,
                 structured_conditioning=uncond_structured,
+                object_id_scale=obj_scale,
             )
             v_no_color = model(
                 x,
@@ -1810,8 +1856,22 @@ def integrate_rectified_flow(
                 caption_tokens=no_color_caption,
                 semantic_tokens=no_color_semantic,
                 structured_conditioning=no_color_structured,
+                object_id_scale=obj_scale,
             )
-            velocity = v_uncond + base_scale * (v_no_color - v_uncond) + color_scale * (v_cond - v_no_color)
+            # ── guidance surgery ──
+            color_axis = v_cond - v_no_color  # (B, 4, 32, 32)
+            if rgb_only:
+                color_axis = color_axis.clone()
+                color_axis[:, 3:4] = 0.0  # zero alpha channel only
+
+            effective_color_scale = color_scale
+            if start_t > 0.0:
+                if t_value < start_t:
+                    effective_color_scale = 0.0
+                elif ramp_t > 0.0 and t_value < start_t + ramp_t:
+                    effective_color_scale = color_scale * ((t_value - start_t) / ramp_t)
+
+            velocity = v_uncond + base_scale * (v_no_color - v_uncond) + effective_color_scale * color_axis
         elif use_cfg:
             v_uncond = model(
                 x,

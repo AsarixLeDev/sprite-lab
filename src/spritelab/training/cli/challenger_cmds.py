@@ -175,6 +175,31 @@ def _register_sample_generator_challenger(subparsers: argparse._SubParsersAction
     )
     _add_palette_projection_sampling_arguments(sample_challenger)
     _add_v2_phase0_diagnostic_arguments(sample_challenger)
+    # v2 Phase 2 Exp A: sampling-only guidance surgery
+    sample_challenger.add_argument(
+        "--color-guidance-rgb-only",
+        action="store_true",
+        default=False,
+        help="Zero the alpha channel of the factored-CFG color-axis guidance term (Phase 2 Exp A).",
+    )
+    sample_challenger.add_argument(
+        "--color-guidance-start-t",
+        type=float,
+        default=0.0,
+        help="Flow-time threshold for late-window colour guidance (Phase 2 Exp A).",
+    )
+    sample_challenger.add_argument(
+        "--color-guidance-ramp-t",
+        type=float,
+        default=0.0,
+        help="Linear ramp width after start_t for colour guidance (Phase 2 Exp A).",
+    )
+    sample_challenger.add_argument(
+        "--object-id-scale",
+        type=float,
+        default=1.0,
+        help="Scale object_id conditioning embedding toward zero (Phase 2 Exp A).",
+    )
     sample_challenger.set_defaults(func=_run_sample_generator_challenger)
 
 
@@ -183,6 +208,17 @@ def _run_sample_generator_challenger(parsed: argparse.Namespace) -> None:
         ChallengerSampleConfig,
         run_sample_generator_challenger,
     )
+
+    # Validate Phase 2 Exp A flags
+    start_t = float(getattr(parsed, "color_guidance_start_t", 0.0))
+    ramp_t = float(getattr(parsed, "color_guidance_ramp_t", 0.0))
+    obj_scale = float(getattr(parsed, "object_id_scale", 1.0))
+    if not 0.0 <= start_t <= 1.0:
+        raise SystemExit(f"--color-guidance-start-t must be in [0, 1], got {start_t}")
+    if ramp_t < 0.0:
+        raise SystemExit(f"--color-guidance-ramp-t must be >= 0, got {ramp_t}")
+    if obj_scale < 0.0:
+        raise SystemExit(f"--object-id-scale must be >= 0, got {obj_scale}")
 
     report = run_sample_generator_challenger(ChallengerSampleConfig(**_parsed_config_kwargs(parsed)))
     print(f"Generated samples: {report['sample_count']}")
