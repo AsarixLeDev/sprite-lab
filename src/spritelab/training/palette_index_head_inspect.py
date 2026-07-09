@@ -12,10 +12,10 @@ try:
 except ImportError:
     torch = None
 
+from spritelab.training.checkpoint_io import load_checkpoint as _load_checkpoint
 from spritelab.training.conditioning import apply_conditioning_mode
 from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch
-from spritelab.training.eval_baseline import move_batch_to_device, resolve_device
-from spritelab.training.eval_generator import _load_checkpoint
+from spritelab.training.device import move_batch_to_device, resolve_device
 from spritelab.training.generator_challenger import (
     RectifiedFlowUNet,
     _structured_conditioning_from_batch,

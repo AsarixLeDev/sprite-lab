@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from spritelab.training.sample_generator import read_prompt_records
+from spritelab.training.prompt_records import read_prompt_records
 from spritelab.training.v1_gallery import (
     DEFAULT_V1_CHECKPOINT,
     OFFICIAL_V1_STATEMENT,

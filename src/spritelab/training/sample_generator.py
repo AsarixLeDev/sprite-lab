@@ -16,13 +16,14 @@ try:
 except ImportError:  # pragma: no cover - exercised when torch is absent or broken.
     torch = None  # type: ignore[assignment]
 
+from spritelab.training.checkpoint_io import load_checkpoint as _load_checkpoint
+from spritelab.training.checkpoint_io import tokenizer_from_checkpoint as _tokenizer_from_checkpoint
 from spritelab.training.conditioning import (
     apply_conditioning_mode,
     checkpoint_conditioning_mode,
     checkpoint_semantic_max_length,
 )
-from spritelab.training.eval_baseline import resolve_device
-from spritelab.training.eval_generator import _load_checkpoint, _tokenizer_from_checkpoint
+from spritelab.training.device import resolve_device
 from spritelab.training.generated_canonicalizer import (
     build_generation_contact_sheet,
     canonicalize_generated_rgba,
@@ -30,6 +31,7 @@ from spritelab.training.generated_canonicalizer import (
     write_generation_reports,
 )
 from spritelab.training.generator_models import TinyCaptionSpriteGenerator
+from spritelab.training.prompt_records import read_prompt_records  # migrated, re-export
 
 
 def _require_torch() -> Any:
@@ -209,36 +211,6 @@ def run_sample_generator(config: SampleGeneratorConfig) -> dict[str, Any]:
             encoding="utf-8",
         )
     return report
-
-
-def read_prompt_records(path: str | Path, *, max_records: int | None = None) -> list[dict[str, Any]]:
-    """Read eval prompt JSONL while preserving metadata fields."""
-
-    path = Path(path)
-    if max_records is not None and int(max_records) <= 0:
-        return []
-    records: list[dict[str, Any]] = []
-    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"{path}:{line_no}: invalid JSON: {exc}") from exc
-        if isinstance(value, str):
-            record = {"prompt": value, "prompt_id": f"prompt_{line_no:04d}"}
-        elif isinstance(value, dict):
-            record = dict(value)
-            record["prompt"] = str(record.get("prompt") or record.get("caption") or "")
-            record.setdefault("prompt_id", f"prompt_{line_no:04d}")
-        else:
-            raise ValueError(f"{path}:{line_no}: expected JSON object or string")
-        if not str(record.get("prompt", "")).strip():
-            raise ValueError(f"{path}:{line_no}: prompt is empty")
-        records.append(record)
-        if max_records is not None and len(records) >= int(max_records):
-            break
-    return records
 
 
 def _outputs_to_rgba(outputs: dict[str, Any]) -> np.ndarray:

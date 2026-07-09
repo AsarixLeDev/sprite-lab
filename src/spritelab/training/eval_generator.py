@@ -13,6 +13,8 @@ try:
 except ImportError:  # pragma: no cover - exercised when torch is absent or broken.
     torch = None  # type: ignore[assignment]
 
+from spritelab.training.checkpoint_io import load_checkpoint as _load_checkpoint
+from spritelab.training.checkpoint_io import tokenizer_from_checkpoint as _tokenizer_from_checkpoint
 from spritelab.training.conditioning import (
     DEFAULT_CONDITIONING_MODE,
     apply_conditioning_mode,
@@ -25,7 +27,7 @@ from spritelab.training.eval_baseline import move_batch_to_device, resolve_devic
 from spritelab.training.generator_losses import rgba_generator_loss
 from spritelab.training.generator_models import TinyCaptionSpriteGenerator
 from spritelab.training.rgba import save_rgba_contact_sheet
-from spritelab.training.tokenization import SPECIAL_TOKENS, SpriteTextTokenizer
+from spritelab.training.tokenization import SpriteTextTokenizer
 
 
 def _require_torch() -> Any:
@@ -228,25 +230,6 @@ def generate_prompt_batch(
     with th.no_grad():
         outputs = model(**model_inputs, noise=model.sample_noise(len(prompts), device=device, seed=seed))
     return outputs
-
-
-def _load_checkpoint(checkpoint: str | Path) -> dict[str, Any]:
-    th = _require_torch()
-    try:
-        return th.load(Path(checkpoint), map_location="cpu", weights_only=False)
-    except TypeError:
-        return th.load(Path(checkpoint), map_location="cpu")
-
-
-def _tokenizer_from_checkpoint(checkpoint: Mapping[str, Any]) -> SpriteTextTokenizer:
-    data = checkpoint.get("vocab")
-    if not isinstance(data, Mapping):
-        raise ValueError("checkpoint does not contain a tokenizer vocabulary")
-    token_to_id = {str(token): int(index) for token, index in dict(data["token_to_id"]).items()}
-    for index, token in enumerate(SPECIAL_TOKENS):
-        if token_to_id.get(token) != index:
-            raise ValueError(f"vocabulary special token {token!r} must have id {index}")
-    return SpriteTextTokenizer(token_to_id=token_to_id, max_length=int(data.get("max_length", 32)))
 
 
 def _read_prompt_records(path: Path, *, max_records: int | None = None) -> list[dict[str, Any]]:

@@ -20,13 +20,14 @@ try:
 except ImportError:  # pragma: no cover - exercised when torch is absent or broken.
     torch = None  # type: ignore[assignment]
 
+from spritelab.training.checkpoint_io import load_checkpoint as _load_checkpoint
+from spritelab.training.checkpoint_io import tokenizer_from_checkpoint as _tokenizer_from_checkpoint
 from spritelab.training.conditioning import (
     apply_conditioning_mode,
     checkpoint_conditioning_mode,
     checkpoint_semantic_max_length,
 )
-from spritelab.training.eval_baseline import resolve_device
-from spritelab.training.eval_generator import _load_checkpoint, _tokenizer_from_checkpoint
+from spritelab.training.device import resolve_device
 from spritelab.training.framing_metrics import image_to_rgba_array
 from spritelab.training.generated_canonicalizer import (
     build_generation_contact_sheet,
@@ -35,7 +36,7 @@ from spritelab.training.generated_canonicalizer import (
     write_generation_reports,
 )
 from spritelab.training.generator_models import TinyCaptionSpriteGenerator
-from spritelab.training.sample_generator import read_prompt_records
+from spritelab.training.prompt_records import read_prompt_records
 from spritelab.training.structured_conditioning import (
     MULTI_HOT_FIELDS,
     StructuredConditioningVocab,

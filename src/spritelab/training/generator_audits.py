@@ -25,9 +25,10 @@ from spritelab.training.ood_prompts import OodCompositionalPromptConfig, build_o
 from spritelab.training.overfit_subset import OverfitSubsetSelection, select_overfit_subset
 from spritelab.training.palette_swap import DEFAULT_SWAP_FAMILIES_TEXT as PALETTE_SWAP_DEFAULT_FAMILIES
 from spritelab.training.prompt_faithfulness import PromptFaithfulnessConfig, run_prompt_faithfulness
+from spritelab.training.prompt_records import read_prompt_records
 from spritelab.training.prompt_sensitivity import PromptSensitivityConfig, run_prompt_sensitivity
 from spritelab.training.rgba import npz_row_to_rgba
-from spritelab.training.sample_generator import SampleGeneratorConfig, read_prompt_records, run_sample_generator
+from spritelab.training.sample_generator import SampleGeneratorConfig, run_sample_generator
 from spritelab.training.source_match_review import SourceMatchReviewConfig, run_source_match_review
 from spritelab.training.structured_conditioning import structured_prompt_summary
 from spritelab.training.train_generator import GeneratorTrainConfig, run_generator_training

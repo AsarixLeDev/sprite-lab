@@ -20,6 +20,8 @@ except ImportError:  # pragma: no cover - exercised when torch is absent or brok
     torch = None  # type: ignore[assignment]
     nn = None  # type: ignore[assignment]
 
+from spritelab.training.checkpoint_io import load_checkpoint as _load_checkpoint
+from spritelab.training.checkpoint_io import tokenizer_from_checkpoint as _tokenizer_from_checkpoint
 from spritelab.training.conditioning import (
     CONDITIONING_MODES,
     DEFAULT_CONDITIONING_MODE,
@@ -29,8 +31,7 @@ from spritelab.training.conditioning import (
     validate_conditioning_mode,
 )
 from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch, read_jsonl
-from spritelab.training.eval_baseline import move_batch_to_device, resolve_device
-from spritelab.training.eval_generator import _load_checkpoint, _tokenizer_from_checkpoint
+from spritelab.training.device import move_batch_to_device, resolve_device
 from spritelab.training.generated_canonicalizer import (
     build_generation_contact_sheet,
     canonicalize_generated_rgba,
@@ -57,9 +58,9 @@ from spritelab.training.palette_swap import (
     estimate_applied,
 )
 from spritelab.training.progress import StepProgressBar
+from spritelab.training.prompt_records import read_prompt_records
 from spritelab.training.prompt_sensitivity import COLOR_WORDS
 from spritelab.training.rgba import save_rgba_contact_sheet
-from spritelab.training.sample_generator import read_prompt_records
 from spritelab.training.structured_conditioning import (
     MULTI_HOT_FIELDS,
     STRUCTURED_BATCH_KEYS,

@@ -1194,7 +1194,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     _apply_export_preset_defaults(parsed, raw_argv)
     try:
         if parsed.subcommand == "inspect-data":
-            from spritelab.training.train_baseline import inspect_training_data, print_inspection
+            from spritelab.training.inspect_data import inspect_training_data, print_inspection
 
             summary = inspect_training_data(
                 dataset_dir=parsed.dataset,

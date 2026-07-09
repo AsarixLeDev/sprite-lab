@@ -317,10 +317,4 @@ def _palette_rgb_float(palette: np.ndarray) -> np.ndarray:
     return np.clip(rgb, 0.0, 1.0).astype(np.float32, copy=False)
 
 
-def describe_array(array: np.ndarray) -> dict[str, Any]:
-    value = np.asarray(array)
-    result: dict[str, Any] = {"shape": list(value.shape), "dtype": str(value.dtype)}
-    if value.size and value.dtype.kind in "biuf?":
-        result["min"] = float(value.min()) if value.dtype.kind == "f" else int(value.min())
-        result["max"] = float(value.max()) if value.dtype.kind == "f" else int(value.max())
-    return result
+from spritelab.training.inspect_data import describe_array  # noqa: E402, F401 — migrated, re-export

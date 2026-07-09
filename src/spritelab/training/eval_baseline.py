@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover - exercised when torch is absent or brok
     torch = None  # type: ignore[assignment]
 
 from spritelab.training.data import SpriteTrainingDataset, collate_sprite_batch
+from spritelab.training.device import move_batch_to_device, resolve_device  # migrated, re-export
 from spritelab.training.losses import sprite_reconstruction_loss
 from spritelab.training.models import SpriteCondAutoencoder
 from spritelab.training.tokenization import SpriteTextTokenizer
@@ -23,13 +24,6 @@ def _require_torch() -> Any:
     if torch is None:
         raise RuntimeError("PyTorch is required for spritelab baseline evaluation.")
     return torch
-
-
-def resolve_device(device: str) -> Any:
-    th = _require_torch()
-    if device == "auto":
-        return th.device("cuda" if th.cuda.is_available() else "cpu")
-    return th.device(device)
 
 
 def evaluate_baseline_checkpoint(
@@ -111,14 +105,6 @@ def evaluate_baseline_checkpoint(
             )
         save_reconstruction_sheet(first_batch, outputs, out_path / "reconstructions.png")
     return report
-
-
-def move_batch_to_device(batch: dict[str, Any], device: Any, *, non_blocking: bool = False) -> dict[str, Any]:
-    th = _require_torch()
-    moved: dict[str, Any] = {}
-    for key, value in batch.items():
-        moved[key] = value.to(device, non_blocking=non_blocking) if isinstance(value, th.Tensor) else value
-    return moved
 
 
 def evaluate_model(model: Any, loader: Any, *, device: Any) -> dict[str, float]:

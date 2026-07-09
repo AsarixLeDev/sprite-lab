@@ -26,7 +26,7 @@ from spritelab.training.generator_challenger import (
     run_sample_generator_challenger,
 )
 from spritelab.training.ood_prompts import OodCompositionalPromptConfig, build_ood_compositional_prompts
-from spritelab.training.sample_generator import read_prompt_records
+from spritelab.training.prompt_records import read_prompt_records
 
 SCHEMA_VERSION = "v1_gallery_v1.0"
 
