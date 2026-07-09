@@ -1,4 +1,7 @@
-"""Fuse filename-rule and Qwen metadata suggestions deterministically."""
+"""Legacy v1 labeling internals; used only by qwen-prefill/assisted-golden flows.
+
+New code uses label_fusion_v2. Fuse filename-rule and Qwen metadata suggestions deterministically.
+"""
 
 from __future__ import annotations
 

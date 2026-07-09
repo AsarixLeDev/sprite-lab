@@ -2,20 +2,10 @@
 
 from __future__ import annotations
 
-import random
-
-from _harvest_testdata import make_sprite_png
-from spritelab.harvest.catalog import write_jsonl
 from spritelab.harvest.filename_rules import (
     filename_suggestion_to_dict,
     metadata_suggestions_differ,
     parse_filename_metadata,
-)
-from spritelab.harvest.prefill_review_gui import (
-    _preview_image,
-    _resolve_image_path,
-    load_prefill_review_items,
-    random_mismatch_index,
 )
 
 
@@ -152,48 +142,3 @@ def test_filename_rules_detect_missing_qwen_suggestion() -> None:
     filename_suggestion = parse_filename_metadata("sprite", filename="I_C_Banana.png")
 
     assert metadata_suggestions_differ(filename_suggestion, {}) == ("missing_qwen_suggestion",)
-
-
-def test_prefill_review_loads_run_and_random_mismatch(tmp_path) -> None:
-    run_dir = tmp_path / "run"
-    png_path = make_sprite_png(run_dir / "I_C_Banana.png")
-    write_jsonl(
-        run_dir / "imported.jsonl",
-        [
-            {
-                "sprite_id": "oga_496_rpg_icons_32fix_i_c_banana",
-                "final_png_path": str(png_path),
-                "relative_path": "I_C_Banana.png",
-                "auto_metadata": {
-                    "qwen_suggestion": {
-                        "category": "item_icon",
-                        "object_name": "apple",
-                        "tags": ["apple"],
-                    }
-                },
-            }
-        ],
-    )
-
-    items = load_prefill_review_items(run_dir)
-
-    assert len(items) == 1
-    assert items[0].filename_suggestion.object_name == "banana"
-    assert items[0].qwen_suggestion["object_name"] == "apple"
-    assert items[0].mismatch_reasons
-    assert random_mismatch_index(items, rng=random.Random(1337)) == 0
-
-
-def test_prefill_review_resolves_project_relative_image_paths(tmp_path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    run_dir = tmp_path / "harvest_runs" / "run"
-    png_path = make_sprite_png(tmp_path / "data_sources" / "fixed" / "I_C_Banana.png")
-    record = {"final_png_path": "data_sources\\fixed\\I_C_Banana.png"}
-
-    resolved = _resolve_image_path(run_dir, record)
-    preview = _preview_image(resolved)
-
-    assert resolved == png_path.resolve()
-    assert preview is not None
-    assert preview.mode == "RGB"
-    assert preview.size == (256, 256)

@@ -1,4 +1,7 @@
-"""Deterministic filename-derived metadata suggestions for harvested sprites."""
+"""Legacy v1 labeling internals; used only by qwen-prefill/assisted-golden flows.
+
+New code uses filename_rules_v2. Deterministic filename-derived metadata suggestions for harvested sprites.
+"""
 
 from __future__ import annotations
 

@@ -164,37 +164,3 @@ def test_assisted_golden_sample_cli_writes_candidates(tmp_path, capsys):
     rows = [json.loads(line) for line in (run / "golden_candidates.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 1
     assert "suggested_category" in rows[0]
-
-
-def test_filename_prefill_cli_outputs_filename_rule_json(capsys):
-    main(
-        [
-            "filename-prefill",
-            "--sprite-id",
-            "oga_496_rpg_icons_32fix_i_c_banana",
-            "--filename",
-            "I_C_Banana.png",
-        ]
-    )
-
-    data = json.loads(capsys.readouterr().out)
-    assert data["source"] == "filename_rules"
-    assert data["category"] == "item_icon"
-    assert data["object_name"] == "banana"
-    assert data["tags"] == ["banana", "fruit", "food", "consumable"]
-
-
-def test_fuse_prefill_cli_writes_fused_suggestions(tmp_path, capsys):
-    main(_import_dir_args(tmp_path))
-    run = tmp_path / "harvest_runs" / "run_dir"
-    out = run / "fused.jsonl"
-
-    main(["fuse-prefill", "--run", str(run), "--out", str(out)])
-
-    output = capsys.readouterr().out
-    assert "Suggestions: 2" in output
-    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 2
-    assert "filename_suggestion" in rows[0]
-    assert "fused_suggestion" in rows[0]
-    assert "prefill_quality" in rows[0]

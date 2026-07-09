@@ -1,4 +1,7 @@
-"""Duplicate grouping so each unique sprite image is VLM-labeled once."""
+"""Legacy v1 labeling internals; used only by qwen-prefill/assisted-golden flows.
+
+New code uses label_dedupe. Duplicate grouping so each unique sprite image is VLM-labeled once.
+"""
 
 from __future__ import annotations
 

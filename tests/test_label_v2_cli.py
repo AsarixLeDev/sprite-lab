@@ -105,11 +105,3 @@ def test_golden_lint_cli_writes_fix_suggestions(tmp_path, capsys) -> None:
     main(["golden-lint", "--golden", str(golden), "--fix", "--out", str(out)])
     assert "Golden lint issues" in capsys.readouterr().out
     assert out.exists()
-
-
-def test_old_fuse_prefill_help_still_works(capsys) -> None:
-    try:
-        main(["fuse-prefill", "--help"])
-    except SystemExit as exc:
-        assert exc.code == 0
-    assert "--min-qwen-confidence" in capsys.readouterr().out

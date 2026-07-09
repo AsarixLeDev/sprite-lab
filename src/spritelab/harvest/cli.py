@@ -43,28 +43,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     _add_qwen_prefill_args(prefill)
 
-    filename_prefill = subparsers.add_parser("filename-prefill", help="Suggest metadata from sprite filenames.")
-    filename_source = filename_prefill.add_mutually_exclusive_group(required=True)
-    filename_source.add_argument("--run", type=Path)
-    filename_source.add_argument("--sprite-id")
-    filename_prefill.add_argument("--filename", default="")
-    filename_prefill.add_argument("--out", type=Path)
-
-    prefill_review = subparsers.add_parser(
-        "prefill-review", help="Launch a tiny GUI to compare Qwen and filename suggestions."
-    )
-    prefill_review.add_argument("--run", required=True, type=Path)
-    prefill_review.add_argument("--host", default="127.0.0.1")
-    prefill_review.add_argument("--port", type=int)
-
-    fuse_prefill = subparsers.add_parser(
-        "fuse-prefill", help="Fuse filename-rule and Qwen prefill suggestions for a run."
-    )
-    fuse_prefill.add_argument("--run", required=True, type=Path)
-    fuse_prefill.add_argument("--out", type=Path)
-    fuse_prefill.add_argument("--min-qwen-confidence", type=float, default=0.55)
-    fuse_prefill.add_argument("--fusion-policy", default="weighted")
-
     label_v2 = subparsers.add_parser("label-v2", help="Run filename/source-first safe label v2 suggestions.")
     _add_label_v2_args(label_v2, include_vlm_args=True)
 
@@ -184,12 +162,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         default="needs_review_first",
         choices=["needs_review_first", "random", "source_order", "uncertain_first", "unlabeled_first"],
     )
-
-    prefill_eval = subparsers.add_parser("prefill-eval", help="Evaluate prefill suggestions against golden labels.")
-    prefill_eval.add_argument("--run", required=True, type=Path)
-    prefill_eval.add_argument("--fused", type=Path, help="Defaults to <run>/fused_suggestions.jsonl.")
-    prefill_eval.add_argument("--golden", type=Path, help="Defaults to <run>/golden_labels.jsonl.")
-    prefill_eval.add_argument("--out", type=Path, help="Defaults to <run>/prefill_eval.json.")
 
     policy = subparsers.add_parser("apply-policy", help="Apply a bulk accept/quarantine/reject policy.")
     policy.add_argument("--run", required=True, type=Path)
@@ -355,12 +327,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         _run_import(parsed, kind="url")
     elif parsed.subcommand in {"qwen-prefill", "qwen_prefill"}:
         _run_qwen_prefill(parsed)
-    elif parsed.subcommand == "filename-prefill":
-        _run_filename_prefill(parsed)
-    elif parsed.subcommand == "prefill-review":
-        _run_prefill_review(parsed)
-    elif parsed.subcommand == "fuse-prefill":
-        _run_fuse_prefill(parsed)
     elif parsed.subcommand == "label-v2":
         _run_label_v2(parsed)
     elif parsed.subcommand == "fuse-prefill-v2":
@@ -391,8 +357,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         _run_assisted_golden_sample(parsed)
     elif parsed.subcommand == "assisted-golden":
         _run_assisted_golden(parsed)
-    elif parsed.subcommand == "prefill-eval":
-        _run_prefill_eval(parsed)
     elif parsed.subcommand == "apply-policy":
         _run_apply_policy(parsed)
     elif parsed.subcommand == "dataset-qa":
@@ -702,95 +666,6 @@ def _run_qwen_prefill(parsed: argparse.Namespace) -> None:
     print(f"Propagated exact duplicates: {propagation_counts['propagated_exact_duplicates']}")
     print(f"Propagated near duplicates: {propagation_counts['propagated_near_duplicates']}")
     for bucket, count in sorted(quality_counts.items()):
-        print(f"{bucket}: {count}")
-
-
-def _run_filename_prefill(parsed: argparse.Namespace) -> None:
-    import json
-
-    from spritelab.harvest.catalog import read_jsonl, write_jsonl
-    from spritelab.harvest.filename_rules import filename_suggestion_to_dict, parse_filename_metadata
-
-    if parsed.run is None:
-        suggestion = parse_filename_metadata(parsed.sprite_id, filename=parsed.filename or None)
-        print(json.dumps(filename_suggestion_to_dict(suggestion), sort_keys=True))
-        return
-
-    run_dir = Path(parsed.run)
-    records = []
-    for record in read_jsonl(run_dir / "imported.jsonl"):
-        filename = Path(str(record.get("relative_path") or record.get("final_png_path", ""))).name
-        suggestion = parse_filename_metadata(str(record.get("sprite_id", "")), filename=filename)
-        records.append(
-            {
-                "sprite_id": record.get("sprite_id", ""),
-                "filename": filename,
-                **filename_suggestion_to_dict(suggestion),
-            }
-        )
-    output_path = parsed.out or (run_dir / "filename_suggestions.jsonl")
-    write_jsonl(output_path, records)
-    print(f"Wrote: {output_path}")
-    print(f"Suggestions: {len(records)}")
-
-
-def _run_prefill_review(parsed: argparse.Namespace) -> None:
-    from spritelab.harvest.prefill_review_gui import launch_prefill_review_gui
-
-    try:
-        launch_prefill_review_gui(parsed.run, host=parsed.host, port=parsed.port)
-    except RuntimeError as exc:
-        if "requires gradio" not in str(exc):
-            raise
-        print(str(exc))
-        raise SystemExit(1) from exc
-
-
-def _run_fuse_prefill(parsed: argparse.Namespace) -> None:
-    from spritelab.harvest.catalog import read_jsonl, write_jsonl
-    from spritelab.harvest.filename_rules import filename_suggestion_to_dict, parse_filename_metadata
-    from spritelab.harvest.prefill_fusion import fuse_prefill_suggestions, summarize_prefill_quality
-
-    run_dir = Path(parsed.run)
-    qwen_by_id = {
-        str(record.get("sprite_id", "")): {key: value for key, value in record.items() if key != "sprite_id"}
-        for record in read_jsonl(run_dir / "qwen_suggestions.jsonl")
-    }
-    records = []
-    for record in read_jsonl(run_dir / "imported.jsonl"):
-        sprite_id = str(record.get("sprite_id", ""))
-        auto_metadata = record.get("auto_metadata") if isinstance(record.get("auto_metadata"), dict) else {}
-        filename = Path(str(record.get("relative_path") or record.get("final_png_path", ""))).name
-        filename_suggestion = parse_filename_metadata(sprite_id, filename=filename)
-        filename_dict = dict(
-            auto_metadata.get("filename_suggestion") or filename_suggestion_to_dict(filename_suggestion)
-        )
-        qwen_suggestion = dict(auto_metadata.get("qwen_suggestion") or qwen_by_id.get(sprite_id, {}))
-        adjudication = (
-            auto_metadata.get("adjudication") if isinstance(auto_metadata.get("adjudication"), dict) else None
-        )
-        fused = fuse_prefill_suggestions(
-            filename_suggestion,
-            qwen_suggestion,
-            min_qwen_confidence=parsed.min_qwen_confidence,
-            fusion_policy=parsed.fusion_policy,
-            adjudication=adjudication,
-        )
-        records.append(
-            {
-                "sprite_id": sprite_id,
-                "filename": filename,
-                "filename_suggestion": filename_dict,
-                "qwen_suggestion": qwen_suggestion,
-                "fused_suggestion": fused.fused_suggestion,
-                "prefill_quality": fused.prefill_quality,
-            }
-        )
-    output_path = parsed.out or (run_dir / "fused_suggestions.jsonl")
-    write_jsonl(output_path, records)
-    print(f"Wrote: {output_path}")
-    print(f"Suggestions: {len(records)}")
-    for bucket, count in summarize_prefill_quality(records).items():
         print(f"{bucket}: {count}")
 
 
@@ -1166,42 +1041,6 @@ def _run_assisted_golden(parsed: argparse.Namespace) -> None:
             raise
         print(str(exc))
         raise SystemExit(1) from exc
-
-
-def _run_prefill_eval(parsed: argparse.Namespace) -> None:
-    import json
-
-    from spritelab.harvest.catalog import read_jsonl
-    from spritelab.harvest.golden import load_golden_labels
-    from spritelab.harvest.prefill_eval import evaluate_prefill, format_eval_report
-
-    run_dir = Path(parsed.run)
-    golden_path = parsed.golden or (run_dir / "golden_labels.jsonl")
-    fused_path = parsed.fused or (run_dir / "fused_suggestions.jsonl")
-    golden = load_golden_labels(golden_path)
-    if not golden:
-        print(
-            f"No golden labels found at {golden_path}. Run `harvest golden-sample` then `harvest golden-label` first."
-        )
-        raise SystemExit(1)
-    fused_records = read_jsonl(fused_path)
-    if not fused_records:
-        print(
-            f"No fused suggestions found at {fused_path}. Run `harvest qwen-prefill` or `harvest fuse-prefill` first."
-        )
-        raise SystemExit(1)
-
-    result = evaluate_prefill(golden, fused_records)
-    result["golden_path"] = str(golden_path)
-    result["fused_path"] = str(fused_path)
-    from spritelab.dataset_maker.prefill import PROMPT_VERSION
-
-    result["prompt_version"] = PROMPT_VERSION
-    output_path = parsed.out or (run_dir / "prefill_eval.json")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(format_eval_report(result))
-    print(f"\nWrote: {output_path}")
 
 
 def _run_apply_policy(parsed: argparse.Namespace) -> None:
