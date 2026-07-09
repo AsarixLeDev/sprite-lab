@@ -10,6 +10,7 @@ from typing import Any
 
 from spritelab.harvest.label_candidates import FOOD_CANDIDATES, GEM_CANDIDATES, GENERIC_OBJECT_NAMES, TOOL_CANDIDATES
 from spritelab.harvest.label_taxonomy import normalize_category, normalize_object_name, normalize_tags
+from spritelab.utils.jsonl import write_jsonl  # noqa: F401 — migrated, re-export
 
 FOOD_OBJECTS = frozenset(FOOD_CANDIDATES)
 GEM_OBJECTS = frozenset((*GEM_CANDIDATES, "gem", "ruby", "sapphire", "emerald", "diamond", "amethyst", "crystal"))
