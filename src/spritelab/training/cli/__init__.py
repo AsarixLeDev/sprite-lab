@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections.abc import Sequence
 
@@ -11,7 +12,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(
         prog="python -m spritelab train",
-        description="Semantic-manifest training inspection, baseline training, generator training, and evaluation.",
+        description="Semantic-manifest training inspection, training, and evaluation.",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", default=False, help="Enable DEBUG-level diagnostic logging."
     )
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
@@ -36,6 +40,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     from spritelab.training.cli._args import _apply_export_preset_defaults
 
     parsed = parser.parse_args(raw_argv)
+    logging.basicConfig(
+        level=logging.DEBUG if parsed.verbose else logging.WARNING,
+        format="%(levelname)s [%(name)s] %(message)s",
+    )
     _apply_export_preset_defaults(parsed, raw_argv)
     try:
         parsed.func(parsed)

@@ -81,6 +81,7 @@ def _parsed_config_kwargs(parsed: argparse.Namespace) -> dict[str, object]:
     values = vars(parsed).copy()
     values.pop("subcommand", None)
     values.pop("func", None)
+    values.pop("verbose", None)
     return values
 
 

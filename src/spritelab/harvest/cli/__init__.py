@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections.abc import Sequence
 
@@ -12,6 +13,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -m spritelab harvest",
         description="License-aware dataset harvester.",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", default=False, help="Enable DEBUG-level diagnostic logging."
     )
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
@@ -32,6 +36,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     dataset_cmds.register(subparsers)
 
     parsed = parser.parse_args(raw_argv)
+    logging.basicConfig(
+        level=logging.DEBUG if parsed.verbose else logging.WARNING,
+        format="%(levelname)s [%(name)s] %(message)s",
+    )
     try:
         parsed.func(parsed)
     except RuntimeError as exc:

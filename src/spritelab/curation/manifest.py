@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -11,6 +12,8 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_STATUSES = ("accepted", "rejected", "quarantine", "needs_fix")
 ALLOWED_REASONS = (
@@ -367,6 +370,7 @@ def _bundle_id_from_metadata(bundle_dir: Path) -> str:
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except Exception:
+        logger.warning("Failed to load metadata from %s", metadata_path, exc_info=True)
         return bundle_dir.name
     sprite_id = metadata.get("id")
     return str(sprite_id) if sprite_id else bundle_dir.name

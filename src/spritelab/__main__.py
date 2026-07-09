@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Callable, Sequence
 
@@ -111,6 +112,13 @@ _COMMANDS: dict[str, Handler] = {
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
+
+    if args and args[0] in ("-v", "--verbose"):
+        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s [%(name)s] %(message)s")
+        args = args[1:]
+    else:
+        logging.basicConfig(level=logging.WARNING, format="%(levelname)s [%(name)s] %(message)s")
+
     if not args:
         print(_usage())
         raise SystemExit(2)

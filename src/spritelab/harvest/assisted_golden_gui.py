@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -29,6 +30,8 @@ from spritelab.harvest.assisted_golden import (
     write_golden_candidates_jsonl,
 )
 from spritelab.harvest.sources import utc_timestamp
+
+logger = logging.getLogger(__name__)
 
 ORDER_MODES = (
     "needs_review_first",
@@ -710,6 +713,7 @@ def _preview_image(path: Path, scale: int = 10) -> Image.Image | None:
         with Image.open(path) as image:
             rgba = image.convert("RGBA")
     except Exception:
+        logger.warning("Failed to load preview image from %s", path, exc_info=True)
         return None
     preview = rgba.resize((rgba.width * scale, rgba.height * scale), Image.Resampling.NEAREST)
     checker = _checkerboard(preview.size)

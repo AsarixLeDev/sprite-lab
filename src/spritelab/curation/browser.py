@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -24,6 +25,8 @@ from spritelab.curation.manifest import (
     discover_bundle_ids,
     load_latest_curation,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -257,6 +260,7 @@ def _load_metadata(bundle_path: Path) -> dict[str, Any]:
     try:
         return json.loads((bundle_path / "metadata.json").read_text(encoding="utf-8"))
     except Exception:
+        logger.warning("Failed to load metadata from %s", bundle_path, exc_info=True)
         return {}
 
 
@@ -267,6 +271,7 @@ def _load_quality_issues(path: str | Path | None) -> dict[str, tuple[str, ...]]:
     try:
         data = json.loads(report_path.read_text(encoding="utf-8"))
     except Exception:
+        logger.warning("Failed to load quality report from %s", report_path, exc_info=True)
         return {}
     issues: dict[str, tuple[str, ...]] = {}
     for record in data.get("records", []):
@@ -283,6 +288,7 @@ def _load_dedupe_groups(path: str | Path | None) -> dict[str, str]:
     try:
         data = json.loads(report_path.read_text(encoding="utf-8"))
     except Exception:
+        logger.warning("Failed to load dedupe report from %s", report_path, exc_info=True)
         return {}
 
     groups: dict[str, list[str]] = {}
