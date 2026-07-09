@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from spritelab.harvest.label_schema import LabelSuggestion
 from spritelab.harvest.label_taxonomy import normalize_object_name, normalize_tag, normalize_tags
+from spritelab.harvest.sheet_specializations import is_rpg_496_profile
 from spritelab.harvest.source_profiles import SourceProfile
 
 if TYPE_CHECKING:
@@ -416,7 +417,7 @@ def candidate_objects_for_record(
 ) -> tuple[str, ...]:
     """Return source/profile candidate object names for weak sheet cells."""
 
-    if profile.name == "oga_496_rpg_icons":
+    if is_rpg_496_profile(profile):
         return _rpg_496_candidates(record, filename_suggestion)
 
     exact = exact_sheet_object_for_record(record, profile)
@@ -446,7 +447,7 @@ def specialize_496_rpg_object(
 ) -> Rpg496ObjectSpecialization:
     """Return a conservative 496-RPG specific object/category refinement."""
 
-    if profile.name != "oga_496_rpg_icons":
+    if not is_rpg_496_profile(profile):
         return Rpg496ObjectSpecialization()
 
     prefix, subtype, semantic = _rpg_496_parts(record, parsed_tokens)

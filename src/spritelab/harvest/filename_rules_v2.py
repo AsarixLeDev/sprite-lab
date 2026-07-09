@@ -17,6 +17,7 @@ from spritelab.harvest.label_taxonomy import (
     normalize_tag,
     normalize_tags,
 )
+from spritelab.harvest.sheet_specializations import is_rpg_496_profile
 from spritelab.harvest.source_profiles import SourceProfile, detect_source_profile
 
 
@@ -449,7 +450,7 @@ def suggest_from_filename_v2(record: Mapping[str, Any]) -> FilenameRuleResult:
             f"known sheet-cell map for source profile {profile.name}",
             alias_used=False,
         )
-    elif profile.name == "oga_496_rpg_icons":
+    elif is_rpg_496_profile(profile):
         suggestion, confidence, reason = _suggest_rpg_icon(parsed_tokens, profile)
     else:
         object_name, confidence, reason, alias_used = _choose_object(parsed_tokens, profile)
@@ -651,7 +652,7 @@ def _is_known_object(name: str, profile: SourceProfile) -> bool:
         return True
     if name in _JEWELRY_OBJECTS or name in _KEY_OBJECTS:
         return True
-    if profile.name == "oga_496_rpg_icons" and name in _RPG_MAIN_TOKENS:
+    if is_rpg_496_profile(profile) and name in _RPG_MAIN_TOKENS:
         return True
     return False
 

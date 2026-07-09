@@ -17,6 +17,8 @@ class SourceProfile:
     expected_category_bias: tuple[str, ...]
     known_path_tokens: tuple[str, ...]
     notes: str = ""
+    sheet_specialization: str | None = None
+    fusion_threshold_override: float | None = None
 
     @property
     def trusted_filename(self) -> bool:
@@ -105,6 +107,7 @@ _PROFILES: dict[str, SourceProfile] = {
         expected_category_bias=("item_icon", "weapon", "armor", "material", "effect_icon"),
         known_path_tokens=("oga", "496", "rpg", "icons", "32fix"),
         notes="Structured RPG icon prefixes such as W_, I_C_, S_.",
+        sheet_specialization="rpg_496",
     ),
     "generic_unknown": SourceProfile(
         name="generic_unknown",
@@ -163,12 +166,16 @@ def detect_source_profile(record: Mapping[str, Any]) -> SourceProfile:
 
 
 def source_profile_to_json(profile: SourceProfile) -> dict[str, Any]:
-    return {
+    result = {
         "name": profile.name,
         "domain": profile.domain,
         "filename_trust": profile.filename_trust,
-        "trusted_filename": profile.trusted_filename,
         "expected_category_bias": list(profile.expected_category_bias),
         "known_path_tokens": list(profile.known_path_tokens),
         "notes": profile.notes,
     }
+    if profile.sheet_specialization is not None:
+        result["sheet_specialization"] = profile.sheet_specialization
+    if profile.fusion_threshold_override is not None:
+        result["fusion_threshold_override"] = profile.fusion_threshold_override
+    return result

@@ -15,6 +15,7 @@ from spritelab.harvest.label_taxonomy import (
     object_name_token_f1,
     tag_overlap,
 )
+from spritelab.harvest.sheet_specializations import is_rpg_496_profile
 from spritelab.harvest.source_profiles import SourceProfile, is_exact_filename_trusted, is_prefix_family_trusted
 from spritelab.harvest.visual_facts import VisualFacts
 
@@ -25,6 +26,7 @@ class FusionThresholds:
     auto_vlm_threshold: float = 0.8
     agreement_token_f1: float = 0.8
     review_trusted_filename_conflicts: bool = False
+    filename_confidence_threshold: float = 0.65
 
 
 _GENERIC_OBJECTS = {
@@ -195,7 +197,7 @@ def fuse_label_v2(
     elif prefix_family_trusted:
         flags.append("prefix_family_trusted")
         flags.append("filename_family_not_exact")
-    if filename is None or filename.confidence < 0.65:
+    if filename is None or filename.confidence < thresholds.filename_confidence_threshold:
         flags.append("filename_weak")
     if visual_facts is not None and "small_content" in visual_facts.shape_hints:
         flags.append("small_content")
@@ -564,7 +566,7 @@ def _prefix_family_specialization_can_auto(
 ) -> bool:
     if filename is None or vlm is None:
         return False
-    if not is_prefix_family_trusted(profile) or profile.name != "oga_496_rpg_icons":
+    if not is_prefix_family_trusted(profile) or not is_rpg_496_profile(profile):
         return False
     flags = set(_rpg_496_specialization_flags(filename))
     if not flags:
@@ -881,11 +883,15 @@ def _vlm_can_win(
         return False
     if is_exact_filename_trusted(profile) and (filename is None or _low_information_filename(filename)):
         return False
-    if is_prefix_family_trusted(profile) and filename is not None and filename.confidence >= 0.65:
+    if (
+        is_prefix_family_trusted(profile)
+        and filename is not None
+        and filename.confidence >= thresholds.filename_confidence_threshold
+    ):
         return False
     filename_confidence = filename.confidence if filename is not None else 0.0
     return (
-        filename_confidence < 0.65
+        filename_confidence < thresholds.filename_confidence_threshold
         and vlm.confidence >= thresholds.auto_vlm_threshold
         and vlm.object_name not in _GENERIC_OBJECTS
     )
@@ -922,7 +928,7 @@ def _vlm_candidate_can_win(
     filename_weak = filename is None or filename_confidence < 0.65 or _low_information_filename(filename)
     if not filename_weak and not is_prefix_family_trusted(profile):
         return None
-    if vlm.confidence < min(thresholds.auto_vlm_threshold, 0.65):
+    if vlm.confidence < min(thresholds.auto_vlm_threshold, thresholds.filename_confidence_threshold):
         return None
     if candidate_match.kind == "primary":
         return vlm
