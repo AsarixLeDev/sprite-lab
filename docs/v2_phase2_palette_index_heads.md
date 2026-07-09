@@ -201,3 +201,96 @@ QA errors = 0
   consistently ordered, this may need Hungarian matching in a future phase.
 * Sampling and export (k16 projection) are unchanged; the heads are
   training-only.
+
+---
+
+## Final Results
+
+### Current best checkpoint
+
+```
+experiments\challenger_full_v4_v2_phase2_palette_index\train_25k\checkpoint_last_ema.pt
+```
+
+### Recommended export settings
+
+```powershell
+--export-preset v1
+--cfg-scale 3.0
+--sample-steps 30
+--max-colors 16
+```
+
+Continuous output + k16 deterministic palette projection.
+
+### Rejected options
+
+* **v1.1 / factored CFG** — trades category for color. On Phase 2, v1.1 OOD-core: color +0.049, category -0.073. Not a default.
+* **Head decode export** — using predicted index + palette to reconstruct sprites sharply reduces color consistency (0.719 → 0.510) without improving blob rate. Rejected.
+
+### OOD-core result (384 prompts, family-weighted)
+
+| Metric | Release baseline | v2 palette/index | Delta |
+|--------|-----------------|------------------|-------|
+| Category | 0.5666 | 0.6510 | **+0.0844** |
+| Color | 0.7144 | 0.7326 | +0.0182 |
+| Blob | 0.4345 | 0.2704 | **-0.1641** |
+
+Interpretation: main gain is structure/blob reduction. Color improves modestly. Object/color disentanglement remains unresolved.
+
+### v1.1 / factored CFG on Phase 2
+
+| Preset | All prompts | OOD-core |
+|--------|-------------|----------|
+| v1 | baseline | baseline |
+| v1.1 color delta | +0.0349 | +0.0491 |
+| v1.1 category delta | -0.0407 | -0.0734 |
+
+Decision: do not promote v1.1 for Phase 2. It remains a color-control tradeoff, not a default.
+
+### Head inspection (32 batches, CUDA)
+
+| Metric | Value |
+|--------|-------|
+| Index visible-pixel accuracy | 0.9192 |
+| Index top-2 accuracy | 0.9823 |
+| Index cross-entropy | 0.2178 |
+| Palette RGB MAE | 0.0755 |
+| Palette RGB MSE | 0.0115 |
+| Palette presence F1 | 0.9876 |
+| Predicted active slots | 9.11 |
+| Target active slots | 9.10 |
+
+Interpretation: heads are learning useful discrete structure. Keep them as auxiliary training losses.
+
+### Decode probe (96 samples, cfg=3.0, 30 steps)
+
+| Variant | Category | Color | Blob | Potion | Med colors |
+|---------|----------|-------|------|--------|-----------|
+| continuous\_v1\_projected | 0.833 | 0.719 | 0.240 | 0.000 | 14 |
+| head\_index\_pred\_palette | 0.815 | 0.510 | 0.240 | 0.000 | 10 |
+| head\_index\_projected\_palette | 0.815 | 0.448 | 0.240 | 0.031 | 10 |
+
+Decision: **reject head decode as an export path.** It sharply reduces color consistency without improving blob rate or any other metric. Continue using continuous output + v1 k16 projection for export.
+
+### Training losses
+
+```text
+loss_index_head:        0.0268
+loss_palette_head:      0.0941
+loss_palette_presence:  1.2138
+```
+
+### Decision summary
+
+* **Adopt** Phase 2 palette/index auxiliary losses for training (improves OOD-core structure/blob).
+* **Reject** head decode export (hurts color, no blob gain).
+* **Reject** v1.1 / factored CFG for Phase 2 (category regression).
+* **Export**: continue k16 deterministic palette projection from continuous RGBA.
+
+### Recommended next direction
+
+* Do not train more conditioning-only variants.
+* Investigate better palette RGB supervision or color-slot alignment.
+* Investigate color disentanglement without sacrificing OOD-core category.
+* Consider palette presence loss tuning (current BCE 1.2138 is high).
