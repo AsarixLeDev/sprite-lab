@@ -108,6 +108,7 @@ _PROFILES: dict[str, SourceProfile] = {
         known_path_tokens=("oga", "496", "rpg", "icons", "32fix"),
         notes="Structured RPG icon prefixes such as W_, I_C_, S_.",
         sheet_specialization="rpg_496",
+        fusion_threshold_override=0.65,
     ),
     "generic_unknown": SourceProfile(
         name="generic_unknown",

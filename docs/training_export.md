@@ -78,7 +78,7 @@ role entropy, or high palette-size variance.
 Palette report:
 
 ```bash
-python -m spritelab training palette-report \
+python -m spritelab palette-report \
   --bundles outputs/bundles \
   --curation curation.jsonl \
   --out reports/palette_semantics_report.md \
@@ -88,7 +88,7 @@ python -m spritelab training palette-report \
 Training export:
 
 ```bash
-python -m spritelab training export \
+python -m spritelab export-training \
   --bundles outputs/bundles \
   --curation curation.jsonl \
   --out datasets/v0 \
@@ -105,5 +105,5 @@ python -m spritelab training export \
 Rebuild readiness report for an export:
 
 ```bash
-python -m spritelab training readiness --export datasets/v0
+python -m spritelab readiness --export datasets/v0
 ```

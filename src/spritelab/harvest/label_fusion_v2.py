@@ -191,13 +191,14 @@ def fuse_label_v2(
     provenance: dict[str, str | list[str]] = {}
     exact_filename_trusted = is_exact_filename_trusted(profile)
     prefix_family_trusted = is_prefix_family_trusted(profile)
+    filename_confidence_threshold = _filename_confidence_threshold(profile, thresholds)
 
     if exact_filename_trusted:
         flags.append("filename_trusted")
     elif prefix_family_trusted:
         flags.append("prefix_family_trusted")
         flags.append("filename_family_not_exact")
-    if filename is None or filename.confidence < thresholds.filename_confidence_threshold:
+    if filename is None or filename.confidence < filename_confidence_threshold:
         flags.append("filename_weak")
     if visual_facts is not None and "small_content" in visual_facts.shape_hints:
         flags.append("small_content")
@@ -459,7 +460,7 @@ def fuse_label_v2(
         )
 
     safe = _fallback_prefill(filename, vlm, visual_facts, profile=profile)
-    if filename is None or filename.confidence < 0.65:
+    if filename is None or filename.confidence < filename_confidence_threshold:
         flags.append("filename_weak")
     if conflict_reasons:
         flags.append("needs_review_conflict")
@@ -496,6 +497,14 @@ def _result(
         provenance=provenance,
         review_priority=review_priority,
     )
+
+
+def _filename_confidence_threshold(profile: SourceProfile, thresholds: FusionThresholds) -> float:
+    """Return a source-specific filename-confidence gate when one is declared."""
+
+    if profile.fusion_threshold_override is not None:
+        return profile.fusion_threshold_override
+    return thresholds.filename_confidence_threshold
 
 
 def _trusted_filename_wins(
@@ -883,15 +892,16 @@ def _vlm_can_win(
         return False
     if is_exact_filename_trusted(profile) and (filename is None or _low_information_filename(filename)):
         return False
+    filename_confidence_threshold = _filename_confidence_threshold(profile, thresholds)
     if (
         is_prefix_family_trusted(profile)
         and filename is not None
-        and filename.confidence >= thresholds.filename_confidence_threshold
+        and filename.confidence >= filename_confidence_threshold
     ):
         return False
     filename_confidence = filename.confidence if filename is not None else 0.0
     return (
-        filename_confidence < thresholds.filename_confidence_threshold
+        filename_confidence < filename_confidence_threshold
         and vlm.confidence >= thresholds.auto_vlm_threshold
         and vlm.object_name not in _GENERIC_OBJECTS
     )
@@ -925,10 +935,13 @@ def _vlm_candidate_can_win(
     if _profile_category(vlm.category, profile) == "unknown":
         return None
     filename_confidence = filename.confidence if filename is not None else 0.0
-    filename_weak = filename is None or filename_confidence < 0.65 or _low_information_filename(filename)
+    filename_confidence_threshold = _filename_confidence_threshold(profile, thresholds)
+    filename_weak = (
+        filename is None or filename_confidence < filename_confidence_threshold or _low_information_filename(filename)
+    )
     if not filename_weak and not is_prefix_family_trusted(profile):
         return None
-    if vlm.confidence < min(thresholds.auto_vlm_threshold, thresholds.filename_confidence_threshold):
+    if vlm.confidence < min(thresholds.auto_vlm_threshold, filename_confidence_threshold):
         return None
     if candidate_match.kind == "primary":
         return vlm

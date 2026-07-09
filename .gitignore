@@ -42,3 +42,5 @@ venv/
 /*.csv
 /*.jsonl
 /scratch*/
+/out.report.json
+/out_report.md

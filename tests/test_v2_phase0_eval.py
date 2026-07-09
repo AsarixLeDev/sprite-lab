@@ -291,19 +291,19 @@ def _write_fake_qa(cell_dir: Path) -> None:
     )
 
 
-def test_read_manifest_metadata_v1() -> None:
-    _write_fake_manifest(Path("/tmp/fake_v1"), export_preset="v1", factored_cfg=False)
-    meta = _read_manifest_metadata(Path("/tmp/fake_v1"))
+def test_read_manifest_metadata_v1(tmp_path: Path) -> None:
+    cell_dir = tmp_path / "fake_v1"
+    _write_fake_manifest(cell_dir, export_preset="v1", factored_cfg=False)
+    meta = _read_manifest_metadata(cell_dir)
     assert meta is not None
     assert meta["export_preset"] == "v1"
     assert meta["factored_cfg"] is False
 
 
-def test_read_manifest_metadata_v1_1() -> None:
-    _write_fake_manifest(
-        Path("/tmp/fake_v1_1"), export_preset="v1.1", factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0
-    )
-    meta = _read_manifest_metadata(Path("/tmp/fake_v1_1"))
+def test_read_manifest_metadata_v1_1(tmp_path: Path) -> None:
+    cell_dir = tmp_path / "fake_v1_1"
+    _write_fake_manifest(cell_dir, export_preset="v1.1", factored_cfg=True, cfg_base_scale=2.5, cfg_color_scale=3.0)
+    meta = _read_manifest_metadata(cell_dir)
     assert meta is not None
     assert meta["export_preset"] == "v1.1"
     assert meta["factored_cfg"] is True

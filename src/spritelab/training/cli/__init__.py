@@ -43,6 +43,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     logging.basicConfig(
         level=logging.DEBUG if parsed.verbose else logging.WARNING,
         format="%(levelname)s [%(name)s] %(message)s",
+        force=True,
     )
     _apply_export_preset_defaults(parsed, raw_argv)
     try:

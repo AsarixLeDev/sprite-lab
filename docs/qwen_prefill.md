@@ -148,75 +148,37 @@ Use `--no-propagate-dups` to disable exact duplicate propagation. Propagated row
 carry `prefill_propagated_from`; near-duplicate propagation also scales Qwen
 confidence down by 10% and adds the `propagated_near_dup` quality flag.
 
-## Filename-rule comparison
+## Label v2 fusion and review
 
-For RPG icon packs with coded names, deterministic filename rules can produce a second metadata suggestion without calling Qwen:
+The retired `filename-prefill`, `fuse-prefill`, and `prefill-review` commands
+are replaced by source-aware label v2. It preserves the Qwen response as
+evidence, treats trustworthy source filenames as the primary authority, and
+marks unresolved conflicts for review.
 
-```powershell
-python -m spritelab harvest filename-prefill `
-  --sprite-id oga_496_rpg_icons_32fix_i_c_banana `
-  --filename I_C_Banana.png
-```
-
-For a whole harvest run:
+To combine an existing Qwen prefill run with label v2:
 
 ```powershell
-python -m spritelab harvest filename-prefill `
+python -m spritelab harvest fuse-prefill-v2 `
   --run harvest_runs\pack_run `
-  --out harvest_runs\pack_run\filename_suggestions.jsonl
+  --out harvest_runs\pack_run\label_v2_suggestions.jsonl
 ```
 
-The filename-rule output uses `source: "filename_rules"` and includes `object_name`, `category`, `tags`, `materials`, `mood`, `short_description`, and `confidence`.
-
-## Filename rules and fusion
-
-For harvest runs, Sprite Lab computes the filename-rule suggestion alongside the
-blind Qwen suggestion. If both disagree and the filename parse is strong enough,
-the forced-choice adjudication call can compare both candidates.
-
-Each prefilled sprite stores three suggestions:
-
-- `filename_suggestion`: deterministic filename parse.
-- `qwen_suggestion`: raw Qwen metadata suggestion.
-- `fused_suggestion`: deterministic merge used for automatic metadata updates.
-
-Fusion prefers high-confidence filename rules when Qwen is unknown or ambiguous,
-prefers Qwen when it gives clear visual evidence against a weak filename parse,
-and marks unresolved disagreements as `needs_review`.
-
-To rebuild fused suggestions after an existing Qwen run:
+For deterministic labels without a VLM request:
 
 ```powershell
-python -m spritelab harvest fuse-prefill `
+python -m spritelab harvest label-v2 `
   --run harvest_runs\pack_run `
-  --out harvest_runs\pack_run\fused_suggestions.jsonl
+  --no-vlm
 ```
 
-Quality buckets include:
-
-- `request_failure`
-- `invalid_json`
-- `warning_only`
-- `low_confidence`
-- `filename_qwen_conflict`
-- `fused_automatically`
-- `needs_review`
-
-## Qwen review GUI
-
-Launch the tiny review GUI to see each sprite image next to filename, Qwen, and fused suggestions:
+Review uncertain suggestions in the assisted golden GUI:
 
 ```powershell
-python -m spritelab harvest prefill-review `
+python -m spritelab harvest assisted-golden `
   --run harvest_runs\pack_run `
   --host 127.0.0.1 `
   --port 7861
 ```
-
-Use the random jump buttons to inspect filename/Qwen conflicts, low Qwen
-confidence, weak filename parses, and automatically fused samples. The GUI shows
-the prefill quality bucket and conflict reason so review work starts with the
-most uncertain sprites.
 
 ## CLI examples
 

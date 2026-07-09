@@ -54,12 +54,10 @@ This document is not legal advice; the tool preserves metadata and warns.
 2. sheets are sliced automatically (32×32 default, 16×16 or custom grids supported;
    small tiles can be center-padded to 32×32);
 3. rule-based autolabel runs during import (path/pack-name keywords);
-4. filename-rule suggestions are computed from coded sprite names when useful;
-5. `qwen-prefill` batches VLM suggestions with filename hints, retries weak
-   responses, and writes fused suggestions with an on-disk cache keyed by image
-   hash, so re-runs resume where they stopped;
-6. `fuse-prefill` can rebuild deterministic filename/Qwen fusion for an
-   existing run;
+4. `label-v2` creates source-aware filename suggestions for coded sprite names;
+5. `qwen-prefill` optionally batches VLM suggestions with retries and an
+   on-disk cache keyed by image hash, so re-runs resume where they stopped;
+6. `fuse-prefill-v2` safely combines existing Qwen output with label-v2;
 7. `apply-policy` bulk-accepts/quarantines/rejects;
 8. sample-review in the GUI (paginated browsing, previews on demand);
 9. `export` writes the dataset.
@@ -137,20 +135,15 @@ python -m spritelab harvest qwen_prefill \
 #   --propagate-near-dups       # opt in to perceptual near-duplicate propagation
 #   --near-dup-threshold 2
 
-# Deterministic filename-rule suggestions for the run
-python -m spritelab harvest filename-prefill \
+# Safely combine existing Qwen suggestions with source-aware label-v2 rules.
+python -m spritelab harvest fuse-prefill-v2 \
   --run harvest_runs\kenney_generic_items \
-  --out harvest_runs\kenney_generic_items\filename_suggestions.jsonl
+  --out harvest_runs\kenney_generic_items\label_v2_suggestions.jsonl
 
-# Rebuild deterministic filename/Qwen fusion after an existing Qwen run
-python -m spritelab harvest fuse-prefill \
+# For deterministic source-aware labels without a VLM request:
+python -m spritelab harvest label-v2 \
   --run harvest_runs\kenney_generic_items \
-  --out harvest_runs\kenney_generic_items\fused_suggestions.jsonl
-
-# Visual review: sprite image + filename + Qwen + fused suggestions
-python -m spritelab harvest prefill-review \
-  --run harvest_runs\kenney_generic_items \
-  --host 127.0.0.1 --port 7861
+  --no-vlm
 
 # Assisted golden correction GUI
 python -m spritelab harvest assisted-golden \
@@ -237,7 +230,7 @@ Workflow:
 5. Add notes for ambiguous or bad crops.
 6. Stop any time; labels autosave.
 7. Resume later with the same command.
-8. Run `prefill-eval`.
+8. Run `prefill-eval-v2`.
 
 Fields: `category`, `object_name`, `tags`, and `notes`.
 
