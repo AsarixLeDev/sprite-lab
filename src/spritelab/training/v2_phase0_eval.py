@@ -37,6 +37,31 @@ NULL_FIELD_CHOICES: tuple[str, ...] = (
     "colors", "materials", "shapes", "function", "style", "structured",
 )
 
+# ── Eval profiles ───────────────────────────────────────────────────────────
+
+OOD_CORE_FAMILIES: tuple[str, ...] = (
+    "object_color_pairs",
+    "rare_combos",
+    "style_stress",
+)
+
+OOD_PLUS_GRID_FAMILIES: tuple[str, ...] = (
+    "category_color_grid",
+    "object_color_pairs",
+    "rare_combos",
+    "style_stress",
+)
+
+ALL_PROFILE_FAMILIES: tuple[str, ...] = ()
+
+EVAL_PROFILES: dict[str, tuple[str, ...]] = {
+    "all": ALL_PROFILE_FAMILIES,
+    "ood_core": OOD_CORE_FAMILIES,
+    "ood_plus_grid": OOD_PLUS_GRID_FAMILIES,
+}
+
+EXCLUDED_FAMILY_ANCHORS: str = "in_distribution_anchors"
+
 
 # ── Config dataclasses ──────────────────────────────────────────────────────
 
@@ -63,6 +88,14 @@ class V2Phase0EvalConfig:
     prompt_seed: int = 20260706
     report_only: bool = False
     allow_partial_report: bool = False
+    # This harness never trains (no optimizer/EMA), so only the backend conv/matmul
+    # flags from optim_utils.apply_backend_speed_flags apply; unlike every training
+    # subcommand, they default ON here since sampling repeats the same fixed
+    # checkpoint/shape across many cells and seeds. --no-speed-optimizations restores
+    # the plain (numerically stricter) path.
+    speed_optimizations: bool = True
+    eval_profile: str = "all"
+    profile_weighting: str = "family"
 
 
 @dataclass(frozen=True)
@@ -714,6 +747,416 @@ def decide_v1_1(v1_agg: dict[str, Any] | None, v1_1_agg: dict[str, Any] | None) 
     return {"label": label, "explanation": explanation, "criteria": criteria}
 
 
+def _profile_family_filter(families: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the effective family filter for an eval profile."""
+    if not families:
+        return tuple()
+    return families
+
+
+# ── Profile aggregate helpers ───────────────────────────────────────────────
+
+def compute_profile_aggregates(
+    breakdowns: dict[str, Any],
+    profile: str,
+    weighting: str,
+    all_prompt_aggregates: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute per-profile aggregates from breakdown data.
+
+    Uses family tables to compute profile-filtered metrics.
+    Returns a dict of {mode_name: {metric_name: value}}.
+    """
+    families = EVAL_PROFILES.get(profile, ALL_PROFILE_FAMILIES)
+    family_tbl = breakdowns.get("by_family") or []
+    if not family_tbl or not families:
+        return {}
+
+    # Filter to selected families
+    filtered = [r for r in family_tbl if r.get("prompt_family") in families]
+
+    result: dict[str, dict[str, Any]] = {}
+    by_mode: dict[str, list[dict[str, Any]]] = {}
+    for row in filtered:
+        m = str(row.get("_mode", ""))
+        by_mode.setdefault(m, []).append(row)
+
+    for mode, rows in sorted(by_mode.items()):
+        if weighting == "family":
+            # Family-weighted: average per-family means equally
+            cat_vals: list[float] = []
+            col_vals: list[float] = []
+            blob_vals: list[float] = []
+            for r in rows:
+                v = r.get("category_consistency")
+                if v is not None:
+                    cat_vals.append(float(v))
+                v = r.get("color_consistency")
+                if v is not None:
+                    col_vals.append(float(v))
+                blob_vals.append(float(r.get("blob_collapse_rate", 0.0)))
+            result[mode] = {
+                "category_consistency_mean_weighted": _safe_mean(cat_vals) if cat_vals else None,
+                "color_consistency_mean_weighted": _safe_mean(col_vals) if col_vals else None,
+                "blob_collapse_rate_mean_weighted": _safe_mean(blob_vals) if blob_vals else None,
+                "families_used": list({str(r.get("prompt_family")) for r in rows}),
+                "sample_count_profiled": sum(int(r.get("sample_count", 0)) for r in rows),
+            }
+        else:
+            # Sample-weighted
+            total_n = sum(int(r.get("sample_count", 0)) for r in rows)
+            if total_n == 0:
+                result[mode] = {"category_consistency_mean_weighted": None, "color_consistency_mean_weighted": None,
+                                "blob_collapse_rate_mean_weighted": None, "families_used": [],
+                                "sample_count_profiled": 0}
+                continue
+            w_cat = 0.0
+            w_col = 0.0
+            w_blob = 0.0
+            for r in rows:
+                n = int(r.get("sample_count", 0))
+                v = r.get("category_consistency")
+                if v is not None:
+                    w_cat += float(v) * n
+                v = r.get("color_consistency")
+                if v is not None:
+                    w_col += float(v) * n
+                w_blob += float(r.get("blob_collapse_rate", 0.0)) * n
+            result[mode] = {
+                "category_consistency_mean_weighted": w_cat / total_n if total_n else None,
+                "color_consistency_mean_weighted": w_col / total_n if total_n else None,
+                "blob_collapse_rate_mean_weighted": w_blob / total_n if total_n else None,
+                "families_used": list({str(r.get("prompt_family")) for r in rows}),
+                "sample_count_profiled": total_n,
+            }
+
+    return result
+
+
+def decide_ood_core(
+    baseline_agg: dict[str, Any] | None,
+    candidate_agg: dict[str, Any] | None,
+    all_prompt_agg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """OOD-core profile decision for candidate vs baseline.
+
+    Labels: pass, borderline, fail, color_tradeoff, not_applicable.
+    """
+    if baseline_agg is None or candidate_agg is None or not baseline_agg or not candidate_agg:
+        return {"label": "not_applicable", "explanation": "Missing profile data.", "criteria": {}}
+
+    b_cat = baseline_agg.get("category_consistency_mean_weighted")
+    b_col = baseline_agg.get("color_consistency_mean_weighted")
+    b_blob = baseline_agg.get("blob_collapse_rate_mean_weighted")
+
+    c_cat = candidate_agg.get("category_consistency_mean_weighted")
+    c_col = candidate_agg.get("color_consistency_mean_weighted")
+    c_blob = candidate_agg.get("blob_collapse_rate_mean_weighted")
+
+    def _ok(v: Any) -> bool:
+        return v is not None and isinstance(v, (int, float)) and math.isfinite(float(v))
+
+    criteria: dict[str, dict[str, Any]] = {}
+    passed = 0
+    failed = 0
+    borderline = 0
+    checks = 0
+
+    def _check(name: str, actual: Any, target: Any, *, comparison: str) -> str:
+        nonlocal passed, failed, borderline, checks
+        checks += 1
+        if not _ok(actual) or not _ok(target):
+            criteria[name] = {"actual": actual, "target": target, "status": "unknown"}
+            return "unknown"
+        av = float(actual)
+        tv = float(target)
+        criteria[name] = {"actual": av, "target": tv, "status": "checking"}
+        if comparison == ">=":
+            ok = av >= tv
+        elif comparison == "<=":
+            ok = av <= tv
+        elif comparison == "==":
+            ok = av == tv
+        else:
+            ok = False
+        margin = abs(av - tv)
+        if not ok:
+            if margin < 0.025:
+                borderline += 1
+                criteria[name]["status"] = "borderline"
+                return "borderline"
+            failed += 1
+            criteria[name]["status"] = "fail"
+            return "fail"
+        passed += 1
+        criteria[name]["status"] = "pass"
+        return "pass"
+
+    if _ok(b_cat) and _ok(c_cat):
+        _check("ood_category", c_cat, float(b_cat) + 0.03, comparison=">=")
+    if _ok(b_col) and _ok(c_col):
+        _check("ood_color", c_col, float(b_col) + 0.03, comparison=">=")
+    if _ok(b_blob) and _ok(c_blob):
+        _check("ood_blob", c_blob, b_blob, comparison="<=")
+
+    # Detect color_tradeoff: color improves >= 0.03 but category drops > 0.02
+    if _ok(b_cat) and _ok(c_cat) and _ok(b_col) and _ok(c_col):
+        cat_drop = float(b_cat) - float(c_cat)
+        col_gain = float(c_col) - float(b_col)
+        if col_gain >= 0.03 and cat_drop > 0.02 and failed == 0:
+            criteria["color_tradeoff"] = {
+                "color_gain": col_gain,
+                "category_drop": cat_drop,
+                "status": "info",
+            }
+            return {
+                "label": "color_tradeoff",
+                "explanation": (
+                    f"Color improved by {col_gain:.4f} but category dropped by {cat_drop:.4f}. "
+                    f"This is a color-control tradeoff, not a categorical improvement."
+                ),
+                "criteria": criteria,
+            }
+
+    if failed > 0:
+        label = "fail"
+        expl = f"{failed} criterion(s) failed."
+    elif borderline > 0 and passed > 0:
+        label = "borderline"
+        expl = f"{borderline} criterion(s) borderline within CI/noise margin."
+    elif passed >= checks:
+        label = "pass"
+        expl = "All OOD-core criteria passed."
+    else:
+        label = "not_applicable"
+        expl = f"Checks: {checks}, passed: {passed}"
+
+    return {"label": label, "explanation": expl, "criteria": criteria}
+
+def _load_prompt_lookup(prompts_path: Path) -> dict[str, dict[str, Any]]:
+    """Return a dict mapping prompt_id to {family, category, color, object, base_object}."""
+    lookup: dict[str, dict[str, Any]] = {}
+    if not prompts_path.is_file():
+        return lookup
+    for line in prompts_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        pid = str(row.get("prompt_id") or "").strip()
+        if not pid:
+            continue
+        colors = row.get("colors") or []
+        lookup[pid] = {
+            "prompt_family": str(row.get("prompt_family") or ""),
+            "category": str(row.get("category") or ""),
+            "color": str(colors[0]) if colors else "",
+            "object_name": str(row.get("object_name") or ""),
+            "base_object": str(row.get("base_object") or ""),
+        }
+    return lookup
+
+
+def _category_color_key(category: str, color: str) -> str:
+    return f"{category}_{color}" if category and color else (category or color or "unknown")
+
+
+def _compute_breakdowns(
+    cells: list[RunMetrics],
+    prompts_path: Path,
+    aggregates: dict[str, Any],
+    summaries_dir: Path,
+) -> dict[str, Any]:
+    """Compute per-group breakdown metrics and write CSV/JSON files.
+
+    Returns a dict with keys: by_family, by_category, by_color,
+    by_category_color, by_object, by_base_object.
+    """
+    prompt_lookup = _load_prompt_lookup(prompts_path)
+    if not prompt_lookup:
+        print("  Note: no prompt metadata available for breakdowns")
+        return {}
+
+    # Collect per-run sample-level data
+    run_samples: list[dict[str, Any]] = []
+
+    for cell in cells:
+        run_dir = cell.out_dir
+        faith_path = run_dir / "prompt_faithfulness_report.json"
+        faith = _read_json(faith_path)
+        if not faith:
+            continue
+
+        faith_samples = faith.get("samples") if isinstance(faith.get("samples"), list) else []
+        faith_idx: dict[str, dict[str, Any]] = {}
+        for s in faith_samples:
+            pid = str(s.get("prompt_id") or "")
+            if pid:
+                faith_idx[pid] = dict(s)
+
+        # Read generated manifest for sample_id matching
+        manifest_path = run_dir / "generated_manifest.jsonl"
+        manifest_by_pid: dict[str, dict[str, Any]] = {}
+        gen_count = 0
+        if manifest_path.is_file():
+            for line in manifest_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                pid = str(rec.get("prompt_id") or "").strip()
+                if pid:
+                    gen_count += 1
+                    manifest_by_pid[pid] = dict(rec)
+
+        for pid, prompt_meta in prompt_lookup.items():
+            faith_sample = faith_idx.get(pid, {})
+            row = {
+                "run_mode": cell.mode,
+                "seed": cell.seed,
+                "prompt_family": prompt_meta["prompt_family"],
+                "category": prompt_meta["category"],
+                "color": prompt_meta["color"],
+                "category_color": _category_color_key(prompt_meta["category"], prompt_meta["color"]),
+                "object_name": prompt_meta["object_name"],
+                "base_object": prompt_meta["base_object"],
+                "category_consistent": faith_sample.get("category_consistent"),
+                "color_consistent": faith_sample.get("color_consistent"),
+                "generic_blob_like": faith_sample.get("generic_blob_like"),
+                "sample_id": faith_sample.get("sample_id") or manifest_by_pid.get(pid, {}).get("sample_id", ""),
+            }
+            run_samples.append(row)
+
+    if not run_samples:
+        print("  Note: no per-sample data available for breakdowns")
+        return {}
+
+    # Group keys to compute breakdowns
+    group_keys = ["prompt_family", "category", "color", "category_color", "object_name", "base_object"]
+    group_names = {
+        "prompt_family": "by_family",
+        "category": "by_category",
+        "color": "by_color",
+        "category_color": "by_category_color",
+        "object_name": "by_object",
+        "base_object": "by_base_object",
+    }
+
+    aggregate_scalars = {k: v for k, v in aggregates.items()}
+
+    result: dict[str, Any] = {}
+    for gk in group_keys:
+        tbl = _build_breakdown_table(run_samples, gk, aggregate_scalars)
+        if tbl:
+            out_key = group_names[gk]
+            result[out_key] = tbl
+            csv_path = summaries_dir / f"phase0_eval_breakdown_{out_key}.csv"
+            _write_breakdown_csv(tbl, csv_path, gk, list_tbl_mode_keys(tbl))
+
+    json_path = summaries_dir / "phase0_eval_breakdowns.json"
+    json_path.write_text(json.dumps(result, indent=2, sort_keys=False, default=str) + "\n", encoding="utf-8")
+
+    return result
+
+
+def list_tbl_mode_keys(tbl: list[dict[str, Any]]) -> list[str]:
+    """Return the sorted mode names present in a breakdown table."""
+    modes: set[str] = set()
+    for row in tbl:
+        m = row.get("_mode", "")
+        if m:
+            modes.add(m)
+    return sorted(modes)
+
+
+def _build_breakdown_table(
+    samples: list[dict[str, Any]],
+    group_key: str,
+    aggregates: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build one breakdown table (list of rows) grouped by *group_key*.
+
+    Each row is keyed by (base_mode, group_value).  Rows include sample_count
+    and metric means per group.
+    """
+    # Group samples by (base_mode, group_value)
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for s in samples:
+        base = _base_mode(str(s.get("run_mode", "")))
+        gv = str(s.get(group_key) or "").strip()
+        if not gv:
+            continue
+        groups.setdefault((base, gv), []).append(s)
+
+    rows: list[dict[str, Any]] = []
+    for (mode, gv), group_samples in sorted(groups.items()):
+        n = len(group_samples)
+        row: dict[str, Any] = {
+            "_mode": mode,
+            group_key: gv,
+            "sample_count": n,
+            "category_consistency": _safe_mean([1.0 for s in group_samples if s.get("category_consistent") is True] + [0.0 for s in group_samples if s.get("category_consistent") is False]),
+            "color_consistency": _safe_mean([1.0 for s in group_samples if s.get("color_consistent") is True] + [0.0 for s in group_samples if s.get("color_consistent") is False]),
+            "blob_collapse_rate": sum(1 for s in group_samples if s.get("generic_blob_like")) / float(n) if n else 0.0,
+        }
+        # Delta vs preset_v1 baseline
+        v1_agg = aggregates.get("preset_v1")
+        if v1_agg and mode != "preset_v1":
+            v1_cat = v1_agg.get("category_consistency_mean")
+            v1_col = v1_agg.get("color_consistency_mean")
+            v1_blob = v1_agg.get("blob_collapse_rate_mean")
+            if row["category_consistency"] is not None and v1_cat is not None:
+                row["delta_category"] = float(row["category_consistency"]) - float(v1_cat)
+            else:
+                row["delta_category"] = None
+            if row["color_consistency"] is not None and v1_col is not None:
+                row["delta_color"] = float(row["color_consistency"]) - float(v1_col)
+            else:
+                row["delta_color"] = None
+            if row["blob_collapse_rate"] is not None and v1_blob is not None:
+                row["delta_blob"] = float(row["blob_collapse_rate"]) - float(v1_blob)
+            else:
+                row["delta_blob"] = None
+        else:
+            row["delta_category"] = None
+            row["delta_color"] = None
+            row["delta_blob"] = None
+
+        rows.append(row)
+
+    return rows
+
+
+def _write_breakdown_csv(
+    rows: list[dict[str, Any]],
+    path: Path,
+    group_key: str,
+    mode_order: list[str],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "_mode", group_key, "sample_count",
+        "category_consistency", "color_consistency", "blob_collapse_rate",
+        "delta_category", "delta_color", "delta_blob",
+    ]
+    header = ",".join(columns)
+    lines = [header]
+    for row in rows:
+        values = [str(row.get(col, "")).replace(",", ";").replace("\n", " ") for col in columns]
+        lines.append(",".join(values))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 # ── Report writers ──────────────────────────────────────────────────────────
 
 def _fmt(val: Any) -> str:
@@ -816,7 +1259,31 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                     f"| {name} | {_fmt(info.get('actual'))} | {_fmt(info.get('target'))} | "
                     f"`{info.get('status', '')}` |"
                 )
-            lines.append("")
+                lines.append("")
+
+    # Profile decision summary
+    profile_decs = summary.get("profile_decisions") or {}
+    if profile_decs:
+        for profile_name, pdec in profile_decs.items():
+            lines.extend([
+                f"### OOD-Core Decision (`{profile_name}`)",
+                "",
+                f"**Label: `{pdec.get('label', '')}`**",
+                f"{pdec.get('explanation', '')}",
+                "",
+            ])
+            pc = pdec.get("criteria") or {}
+            if pc:
+                lines.extend([
+                    "| Criterion | Actual | Target | Status |",
+                    "|---|---|---|---|",
+                ])
+                for name, info in sorted(pc.items()):
+                    lines.append(
+                        f"| {name} | {_fmt(info.get('actual'))} | {_fmt(info.get('target'))} | "
+                        f"`{info.get('status', '')}` |"
+                    )
+                lines.append("")
 
     lines.extend([
         "## Per-Run Results",
@@ -880,6 +1347,66 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
             ])
             + " |"
         )
+
+    # Family breakdown table
+    breakdowns_dict = summary.get("breakdowns") or {}
+    if breakdowns_dict:
+        family_tbl = breakdowns_dict.get("by_family") or []
+        if family_tbl:
+            mode_order = list_tbl_mode_keys(family_tbl)
+            lines.extend([
+                "",
+                "## Breakdown by Prompt Family",
+                "",
+                "| Family | " + " | ".join(f"`{m}` Cat | `{m}` Color | `{m}` Blob | D Cat | D Color |" for m in mode_order) + " |",
+                "|---:|" + "---:|".join([""] * (len(mode_order) * 6)) + " |",
+            ])
+            # Group rows by family
+            by_family: dict[str, list[dict[str, Any]]] = {}
+            for row in family_tbl:
+                f = str(row.get("prompt_family") or "")
+                by_family.setdefault(f, []).append(row)
+            for family, rows in sorted(by_family.items()):
+                family_cols = [f"`{_md_escape(family)}`"]
+                for m in mode_order:
+                    mode_row = next((r for r in rows if r.get("_mode") == m), None)
+                    if mode_row:
+                        family_cols.extend([
+                            _fmt(mode_row.get("category_consistency")),
+                            _fmt(mode_row.get("color_consistency")),
+                            _fmt(_pct(mode_row.get("blob_collapse_rate"))),
+                            _fmt(mode_row.get("delta_category")) if mode_row.get("delta_category") is not None else "",
+                            _fmt(mode_row.get("delta_color")) if mode_row.get("delta_color") is not None else "",
+                        ])
+                    else:
+                        family_cols.extend(["", "", "", "", ""])
+                lines.append(" | ".join(family_cols) + " |")
+
+    # Profile aggregate tables
+    profile_aggs = summary.get("profile_aggregates") or {}
+    if profile_aggs:
+        for profile_name, pa in profile_aggs.items():
+            lines.extend([
+                "",
+                f"### Profile Aggregate (`{profile_name}`, weighting=`{summary.get('profile_weighting', 'family')}`)",
+                "",
+                "| Mode | Families | Profiled Samples | Category (weighted) | Color (weighted) | Blob (weighted) |",
+                "|---|---:|---:|---:|---:|---:|",
+            ])
+            for mode, agg in sorted(pa.items()):
+                fams = ", ".join(str(f) for f in agg.get("families_used", []))
+                lines.append(
+                    "| "
+                    + " | ".join([
+                        f"`{_md_escape(str(mode))}`",
+                        _md_escape(fams),
+                        str(agg.get("sample_count_profiled", "")),
+                        _fmt(agg.get("category_consistency_mean_weighted")),
+                        _fmt(agg.get("color_consistency_mean_weighted")),
+                        _fmt(agg.get("blob_collapse_rate_mean_weighted")),
+                    ])
+                    + " |"
+                )
 
     if deltas:
         lines.extend([
@@ -997,7 +1524,15 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
             ChallengerSampleConfig,
             run_sample_generator_challenger,
         )
+        from spritelab.training.optim_utils import apply_backend_speed_flags
         from spritelab.training.prompt_faithfulness import PromptFaithfulnessConfig, run_prompt_faithfulness
+
+        # Every cell/seed resamples the same checkpoint at the same fixed shape, so
+        # cuDNN algorithm search pays for itself across the whole run; a no-op on CPU.
+        apply_backend_speed_flags(
+            cudnn_benchmark=config.speed_optimizations,
+            tf32=config.speed_optimizations,
+        )
 
     out_dir = Path(config.out)
     runs_dir = out_dir / "runs"
@@ -1173,11 +1708,28 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
     aggregates = aggregate_metrics(all_metrics)
     deltas = _compute_deltas(aggregates)
 
-    # Decision
+    # Breakdowns by prompt family / category / color / object / base_object
+    breakdowns = _compute_breakdowns(all_metrics, prompts_path, aggregates, summaries_dir)
+
+    # Decision (need v1_agg/v11_agg for profile decision too)
     v1_cells = [m for m in all_metrics if _base_mode(m.mode) == "preset_v1"]
     v11_cells = [m for m in all_metrics if _base_mode(m.mode) == "preset_v1_1"]
     v1_agg = aggregates.get("preset_v1")
     v11_agg = aggregates.get("preset_v1_1")
+
+    # Profile-specific aggregates (ood_core / ood_plus_grid)
+    profile_aggregates: dict[str, Any] = {}
+    profile_decisions: dict[str, Any] = {}
+    if config.eval_profile != "all" and breakdowns:
+        pa = compute_profile_aggregates(
+            breakdowns, config.eval_profile, config.profile_weighting, aggregates
+        )
+        if pa:
+            profile_aggregates[config.eval_profile] = pa
+            v1_prof = pa.get("preset_v1")
+            v11_prof = pa.get("preset_v1_1")
+            profile_decisions[config.eval_profile] = decide_ood_core(v1_prof, v11_prof, v1_agg)
+
     decision = decide_v1_1(v1_agg, v11_agg)
 
     per_run = [
@@ -1253,6 +1805,11 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
         "aggregates": aggregates,
         "deltas_vs_v1": deltas,
         "decision": decision,
+        "breakdowns": {k: v for k, v in breakdowns.items() if v} if breakdowns else {},
+        "profile_aggregates": profile_aggregates,
+        "profile_decisions": profile_decisions,
+        "eval_profile": config.eval_profile,
+        "profile_weighting": config.profile_weighting,
     }
 
     json_path = summaries_dir / "phase0_eval_summary.json"

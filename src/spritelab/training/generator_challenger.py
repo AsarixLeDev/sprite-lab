@@ -44,6 +44,8 @@ from spritelab.training.palette_swap import (
 )
 from spritelab.training.optim_utils import (
     amp_autocast,
+    apply_backend_speed_flags,
+    build_adamw,
     build_lr_scheduler,
     clip_gradients,
     dataloader_perf_kwargs,
@@ -175,6 +177,25 @@ class ChallengerTrainConfig:
     grad_clip: float = 0.0
     lr_schedule: str = "none"
     lr_warmup_steps: int = 0
+    # Opt-in training-loop speed knobs (see docs/training_speed_notes.md). Every
+    # field here is a no-op at its default: metrics_every=1 syncs every step
+    # (unchanged), fused_adamw/cudnn_benchmark/tf32 default off, and
+    # eval_max_batches=0 evaluates the full loader as before.
+    metrics_every: int = 1
+    fused_adamw: bool = False
+    cudnn_benchmark: bool = False
+    tf32: bool = False
+    eval_max_batches: int = 0
+    # v2 Phase 1 conditioning architecture (default-off; see docs/v2_phase1_conditioning.md)
+    film_conditioning: bool = False
+    bottleneck_attention: bool = False
+    structured_field_dropout_rates: dict[str, float] | None = None
+    # v2 Phase 2 palette/index auxiliary heads (default-off; see docs/v2_phase2_palette_index_heads.md)
+    index_head_loss_weight: float = 0.0
+    palette_head_loss_weight: float = 0.0
+    palette_presence_loss_weight: float = 0.0
+    index_head_warmup_steps: int = 0
+    palette_head_use_gt_palette_prob: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -224,6 +245,8 @@ class RectifiedFlowUNet(_ModuleBase):
         res_blocks_per_level: int = 2,
         pad_token_id: int = 0,
         structured_vocab_sizes: Mapping[str, int] | None = None,
+        film_conditioning: bool = False,
+        bottleneck_attention: bool = False,
     ) -> None:
         th, nn_mod = _require_torch()
         del th
@@ -235,6 +258,8 @@ class RectifiedFlowUNet(_ModuleBase):
         self.res_blocks_per_level = int(res_blocks_per_level)
         self.pad_token_id = int(pad_token_id)
         self.structured_vocab_sizes = _normalize_structured_vocab_sizes(structured_vocab_sizes)
+        self.film_conditioning = bool(film_conditioning)
+        self.bottleneck_attention = bool(bottleneck_attention)
 
         channels = [max(8, self.base_channels * value) for value in self.channel_mults]
         emb_dim = max(self.embed_dim, self.base_channels * 4)
@@ -256,18 +281,27 @@ class RectifiedFlowUNet(_ModuleBase):
         for level, channel in enumerate(channels):
             blocks = nn_mod.ModuleList()
             for block_index in range(max(1, self.res_blocks_per_level)):
-                blocks.append(_ResidualBlock(current if block_index == 0 else channel, channel, emb_dim))
+                blocks.append(_ResidualBlock(current if block_index == 0 else channel, channel, emb_dim, film=self.film_conditioning))
             down = nn_mod.Conv2d(channel, channel, kernel_size=3, stride=2, padding=1) if level < len(channels) - 1 else None
             self.downs.append(nn_mod.ModuleDict({"blocks": blocks, "down": down or nn_mod.Identity()}))
             current = channel
-        self.mid = nn_mod.ModuleList([_ResidualBlock(current, current, emb_dim), _ResidualBlock(current, current, emb_dim)])
+        self.mid = nn_mod.ModuleList([
+            _ResidualBlock(current, current, emb_dim, film=self.film_conditioning),
+            _ResidualBlock(current, current, emb_dim, film=self.film_conditioning),
+        ])
+        # v2 Phase 1: optional lightweight bottleneck self-attention (default-off)
+        # Placed here so *current* still holds the bottleneck channel count.
+        if self.bottleneck_attention:
+            self.bottleneck_attn = _SelfAttentionBlock(current, num_heads=4)
+        else:
+            self.bottleneck_attn = None
         self.ups = nn_mod.ModuleList()
         for level in reversed(range(len(channels) - 1)):
             skip_channel = channels[level]
             blocks = nn_mod.ModuleList()
-            blocks.append(_ResidualBlock(current + skip_channel, skip_channel, emb_dim))
+            blocks.append(_ResidualBlock(current + skip_channel, skip_channel, emb_dim, film=self.film_conditioning))
             for _ in range(max(0, self.res_blocks_per_level - 1)):
-                blocks.append(_ResidualBlock(skip_channel, skip_channel, emb_dim))
+                blocks.append(_ResidualBlock(skip_channel, skip_channel, emb_dim, film=self.film_conditioning))
             self.ups.append(
                 nn_mod.ModuleDict(
                     {
@@ -287,6 +321,22 @@ class RectifiedFlowUNet(_ModuleBase):
         )
         self._time_embedding_dim = emb_dim
 
+        # v2 Phase 2: palette/index auxiliary heads (always present, losses default-off)
+        K = 16
+        bottleneck_channels = channels[-1]
+        self._bottleneck_pool = nn_mod.AdaptiveAvgPool2d(1)
+        self.palette_head_rgb = nn_mod.Sequential(
+            nn_mod.Linear(bottleneck_channels, 128),
+            nn_mod.SiLU(),
+            nn_mod.Linear(128, K * 3),
+        )
+        self.palette_head_presence = nn_mod.Sequential(
+            nn_mod.Linear(bottleneck_channels, 128),
+            nn_mod.SiLU(),
+            nn_mod.Linear(128, K),
+        )
+        self.index_head = nn_mod.Conv2d(current, K, kernel_size=1)
+
     def config(self) -> dict[str, Any]:
         return {
             "vocab_size": self.vocab_size,
@@ -296,6 +346,8 @@ class RectifiedFlowUNet(_ModuleBase):
             "res_blocks_per_level": self.res_blocks_per_level,
             "pad_token_id": self.pad_token_id,
             "structured_vocab_sizes": dict(self.structured_vocab_sizes) if self.structured_vocab_sizes else None,
+            "film_conditioning": self.film_conditioning,
+            "bottleneck_attention": self.bottleneck_attention,
         }
 
     def forward(
@@ -306,6 +358,7 @@ class RectifiedFlowUNet(_ModuleBase):
         caption_tokens: Any,
         semantic_tokens: Any | None = None,
         structured_conditioning: Mapping[str, Any] | None = None,
+        return_aux: bool = False,
     ) -> Any:
         th, _nn_mod = _require_torch()
         emb = self._conditioning_embedding(
@@ -322,8 +375,12 @@ class RectifiedFlowUNet(_ModuleBase):
             if level < len(self.downs) - 1:
                 skips.append(h)
                 h = down["down"](h)
+        # Bottleneck: save for palette head
+        bottleneck_h = h
         for block in self.mid:
             h = block(h, emb)
+        if self.bottleneck_attn is not None:
+            h = self.bottleneck_attn(h)
         for up in self.ups:
             h = up["up"](h)
             skip = skips.pop()
@@ -332,7 +389,24 @@ class RectifiedFlowUNet(_ModuleBase):
             h = th.cat([h, skip], dim=1)
             for block in up["blocks"]:
                 h = block(h, emb)
-        return self.output(h)
+        # h is now the final feature map before output
+        output_rgba = self.output(h)
+
+        if not return_aux:
+            return output_rgba
+
+        # v2 Phase 2 auxiliary outputs
+        b_feat = self._bottleneck_pool(bottleneck_h).flatten(1)  # (B, C_bottleneck)
+        palette_rgb = self.palette_head_rgb(b_feat).view(-1, 16, 3)  # (B, 16, 3)
+        palette_presence = self.palette_head_presence(b_feat)  # (B, 16) logits
+        index_logits = self.index_head(h)  # (B, 16, H, W)
+
+        return {
+            "velocity": output_rgba,
+            "palette_rgb": palette_rgb,
+            "palette_presence_logits": palette_presence,
+            "index_logits": index_logits,
+        }
 
     def _conditioning_embedding(
         self,
@@ -431,8 +505,32 @@ class RectifiedFlowUNet(_ModuleBase):
         return th.cat(pieces, dim=1)
 
 
+class _SelfAttentionBlock(_ModuleBase):
+    """Lightweight multi-head self-attention for the U-Net bottleneck (v2 Phase 1)."""
+
+    def __init__(self, channels: int, *, num_heads: int = 4) -> None:
+        _th, nn_mod = _require_torch()
+        super().__init__()
+        self.norm = nn_mod.LayerNorm(channels)
+        self.attn = nn_mod.MultiheadAttention(
+            embed_dim=channels,
+            num_heads=num_heads,
+            batch_first=True,
+        )
+
+    def forward(self, x: Any) -> Any:
+        # x: (B, C, H, W)
+        b, c, h, w = x.shape
+        residual = x
+        x = x.reshape(b, c, h * w).permute(0, 2, 1)  # (B, HW, C)
+        x = self.norm(x)
+        x, _ = self.attn(x, x, x)
+        x = x.permute(0, 2, 1).reshape(b, c, h, w)
+        return residual + x
+
+
 class _ResidualBlock(_ModuleBase):
-    def __init__(self, in_channels: int, out_channels: int, emb_dim: int) -> None:
+    def __init__(self, in_channels: int, out_channels: int, emb_dim: int, *, film: bool = False) -> None:
         _th, nn_mod = _require_torch()
         super().__init__()
         self.norm1 = _group_norm(in_channels)
@@ -442,11 +540,25 @@ class _ResidualBlock(_ModuleBase):
         self.conv2 = nn_mod.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
         self.skip = nn_mod.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn_mod.Identity()
         self.act = nn_mod.SiLU()
+        self._film = bool(film)
+        if self._film:
+            self.emb_scale1 = nn_mod.Linear(emb_dim, out_channels)
+            self.emb_shift1 = nn_mod.Linear(emb_dim, out_channels)
+            self.emb_scale2 = nn_mod.Linear(emb_dim, out_channels)
+            self.emb_shift2 = nn_mod.Linear(emb_dim, out_channels)
+            # Initialize scale near zero, shift comparable to additive path
+            nn_mod.init.zeros_(self.emb_scale1.weight)
+            nn_mod.init.zeros_(self.emb_scale2.weight)
 
     def forward(self, x: Any, emb: Any) -> Any:
         h = self.conv1(self.act(self.norm1(x)))
-        h = h + self.emb(emb).unsqueeze(-1).unsqueeze(-1)
+        if self._film:
+            h = h * (1.0 + self.emb_scale1(emb).unsqueeze(-1).unsqueeze(-1)) + self.emb_shift1(emb).unsqueeze(-1).unsqueeze(-1)
+        else:
+            h = h + self.emb(emb).unsqueeze(-1).unsqueeze(-1)
         h = self.conv2(self.act(self.norm2(h)))
+        if self._film:
+            h = h * (1.0 + self.emb_scale2(emb).unsqueeze(-1).unsqueeze(-1)) + self.emb_shift2(emb).unsqueeze(-1).unsqueeze(-1)
         return h + self.skip(x)
 
 
@@ -512,6 +624,9 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
     th, _nn_mod = _require_torch()
     if str(config.architecture).lower() != "rectified_flow":
         raise ValueError("only --architecture rectified_flow is supported")
+    metrics_every = int(config.metrics_every)
+    if metrics_every < 1:
+        raise ValueError("metrics_every must be >= 1")
     started = time.perf_counter()
     _set_seed(config.seed)
     device = resolve_device(config.device)
@@ -623,10 +738,16 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "pad_token_id": tokenizer.pad_id,
         "structured_vocab_sizes": None if structured_vocab is None else structured_vocab.sizes(),
     }
-    model = RectifiedFlowUNet(**model_config).to(device)
-    optimizer = th.optim.AdamW(model.parameters(), lr=float(config.learning_rate))
+    model = RectifiedFlowUNet(
+        **model_config,
+        film_conditioning=config.film_conditioning,
+        bottleneck_attention=config.bottleneck_attention,
+    ).to(device)
+    optimizer = build_adamw(model.parameters(), lr=float(config.learning_rate), fused=config.fused_adamw)
     ema_enabled = float(config.ema_decay) > 0.0
     ema_state = _init_ema_state(model) if ema_enabled else None
+    ema_fast_cache = _init_ema_fast_state(ema_state, model) if ema_enabled else None
+    apply_backend_speed_flags(cudnn_benchmark=config.cudnn_benchmark, tf32=config.tf32)
     scheduler = build_lr_scheduler(
         optimizer,
         schedule=config.lr_schedule,
@@ -648,6 +769,14 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "structured_vocab_sizes": None if structured_vocab is None else structured_vocab.sizes(),
         "structured_fields_enabled": structured_vocab is not None,
         "structured_field_dropout": float(config.structured_field_dropout),
+        "structured_field_dropout_rates": _jsonable(config.structured_field_dropout_rates),
+        "film_conditioning": bool(config.film_conditioning),
+        "bottleneck_attention": bool(config.bottleneck_attention),
+        "index_head_loss_weight": float(config.index_head_loss_weight),
+        "palette_head_loss_weight": float(config.palette_head_loss_weight),
+        "palette_presence_loss_weight": float(config.palette_presence_loss_weight),
+        "index_head_warmup_steps": int(config.index_head_warmup_steps),
+        "palette_head_use_gt_palette_prob": float(config.palette_head_use_gt_palette_prob),
         "ema_enabled": ema_enabled,
         "ema_decay": float(config.ema_decay),
         "foreground_rgb_loss_weight": float(config.foreground_rgb_loss_weight),
@@ -669,6 +798,7 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         background_rgb_loss_weight=config.background_rgb_loss_weight,
         palette_loss_weight=config.palette_loss_weight,
         palette_loss_temperature=config.palette_loss_temperature,
+        max_batches=config.eval_max_batches,
     )
     metrics_path = out_dir / "train_metrics.jsonl"
     metrics_path.write_text("", encoding="utf-8")
@@ -699,35 +829,42 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
                         conditioning_mode=conditioning_mode,
                         cfg_dropout=config.cfg_dropout,
                         structured_field_dropout=config.structured_field_dropout,
+                        structured_field_dropout_rates=config.structured_field_dropout_rates,
                         pad_token_id=tokenizer.pad_id,
                         foreground_rgb_loss_weight=config.foreground_rgb_loss_weight,
                         background_rgb_loss_weight=config.background_rgb_loss_weight,
                         palette_loss_weight=config.palette_loss_weight,
                         palette_loss_temperature=config.palette_loss_temperature,
+                        index_head_loss_weight=config.index_head_loss_weight,
+                        palette_head_loss_weight=config.palette_head_loss_weight,
+                        palette_presence_loss_weight=config.palette_presence_loss_weight,
+                        global_step=step,
+                        index_head_warmup_steps=config.index_head_warmup_steps,
                     )
                     loss = losses["loss"]
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 clip_gradients(model, config.grad_clip)
                 optimizer.step()
-                if ema_state is not None:
-                    _update_ema_state(ema_state, model, decay=float(config.ema_decay))
+                if ema_fast_cache is not None:
+                    _update_ema_state_fast(ema_fast_cache, decay=float(config.ema_decay))
                 if scheduler is not None:
                     scheduler.step()
                 step += 1
-                last_loss = float(loss.detach().cpu())
-                loss_metrics = _loss_metrics(losses)
-                last_loss_components = dict(loss_metrics)
-                progress.update(step, last_loss, lr=float(optimizer.param_groups[0]["lr"]))
-                _write_jsonl_line(
-                    metrics_handle,
-                    {
-                        "step": step,
-                        **loss_metrics,
-                        "learning_rate": float(optimizer.param_groups[0]["lr"]),
-                        "elapsed_seconds": time.perf_counter() - started,
-                    },
-                )
+                if step % metrics_every == 0 or step >= config.max_steps:
+                    last_loss = float(loss.detach().cpu())
+                    loss_metrics = _loss_metrics(losses)
+                    last_loss_components = dict(loss_metrics)
+                    progress.update(step, last_loss, lr=float(optimizer.param_groups[0]["lr"]))
+                    _write_jsonl_line(
+                        metrics_handle,
+                        {
+                            "step": step,
+                            **loss_metrics,
+                            "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                            "elapsed_seconds": time.perf_counter() - started,
+                        },
+                    )
                 if config.sample_every > 0 and step % int(config.sample_every) == 0:
                     _write_challenger_sample_sheet(
                         model,
@@ -781,6 +918,7 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         background_rgb_loss_weight=config.background_rgb_loss_weight,
         palette_loss_weight=config.palette_loss_weight,
         palette_loss_temperature=config.palette_loss_temperature,
+        max_batches=config.eval_max_batches,
     )
     val_losses = (
         _evaluate_challenger_losses(
@@ -794,6 +932,7 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
             background_rgb_loss_weight=config.background_rgb_loss_weight,
             palette_loss_weight=config.palette_loss_weight,
             palette_loss_temperature=config.palette_loss_temperature,
+            max_batches=config.eval_max_batches,
         )
         if len(val_source)
         else None
@@ -1157,11 +1296,18 @@ def rectified_flow_loss(
     conditioning_mode: str,
     cfg_dropout: float,
     structured_field_dropout: float = 0.0,
+    structured_field_dropout_rates: Mapping[str, float] | None = None,
     pad_token_id: int,
     foreground_rgb_loss_weight: float = 1.0,
     background_rgb_loss_weight: float = 1.0,
     palette_loss_weight: float = 0.0,
     palette_loss_temperature: float = 0.05,
+    # v2 Phase 2
+    index_head_loss_weight: float = 0.0,
+    palette_head_loss_weight: float = 0.0,
+    palette_presence_loss_weight: float = 0.0,
+    global_step: int = 0,
+    index_head_warmup_steps: int = 0,
 ) -> Any:
     th, _nn_mod = _require_torch()
     target_rgba = batch["rgba"]
@@ -1183,14 +1329,32 @@ def rectified_flow_loss(
         inputs,
         dropout=structured_field_dropout,
         training=bool(model.training),
+        dropout_rates=structured_field_dropout_rates,
     )
-    pred = model(
-        xt,
-        t,
-        caption_tokens=inputs["caption_tokens"],
-        semantic_tokens=inputs["semantic_tokens"],
-        structured_conditioning=inputs.get("structured_conditioning"),
+
+    # Determine if aux heads should run
+    aux_active = (
+        (palette_head_loss_weight > 0.0 or palette_presence_loss_weight > 0.0)
+        or (index_head_loss_weight > 0.0 and global_step >= index_head_warmup_steps)
     )
+
+    if aux_active:
+        aux = model(
+            xt, t,
+            caption_tokens=inputs["caption_tokens"],
+            semantic_tokens=inputs["semantic_tokens"],
+            structured_conditioning=inputs.get("structured_conditioning"),
+            return_aux=True,
+        )
+        pred = aux["velocity"]
+    else:
+        pred = model(
+            xt, t,
+            caption_tokens=inputs["caption_tokens"],
+            semantic_tokens=inputs["semantic_tokens"],
+            structured_conditioning=inputs.get("structured_conditioning"),
+        )
+
     losses = _velocity_loss_components(
         pred,
         velocity,
@@ -1207,7 +1371,33 @@ def rectified_flow_loss(
     )
     palette_weight = float(palette_loss_weight)
     losses["loss_palette_aux"] = palette_aux
-    losses["loss"] = losses["loss_velocity"] + (palette_aux * palette_weight if palette_weight > 0.0 else palette_aux * 0.0)
+
+    # v2 Phase 2: palette and index head losses
+    zero = pred.sum() * 0.0
+    losses["loss_palette_head"] = zero
+    losses["loss_palette_presence"] = zero
+    losses["loss_index_head"] = zero
+    losses["index_head_active"] = False
+
+    if aux_active:
+        head_losses = _palette_head_loss(
+            aux["palette_rgb"], aux["palette_presence_logits"], batch
+        )
+        losses["loss_palette_head"] = head_losses["loss_palette_head"]
+        losses["loss_palette_presence"] = head_losses["loss_palette_presence"]
+
+        eff_index_weight = float(index_head_loss_weight) if global_step >= index_head_warmup_steps else 0.0
+        if eff_index_weight > 0.0:
+            losses["loss_index_head"] = _index_head_loss(aux["index_logits"], batch)
+            losses["index_head_active"] = True
+
+    total = losses["loss_velocity"] + (palette_aux * palette_weight if palette_weight > 0.0 else zero)
+    total = total + float(palette_head_loss_weight) * losses["loss_palette_head"]
+    total = total + float(palette_presence_loss_weight) * losses["loss_palette_presence"]
+    if global_step >= index_head_warmup_steps:
+        total = total + float(index_head_loss_weight) * losses["loss_index_head"]
+
+    losses["loss"] = total
     return losses
 
 
@@ -1252,16 +1442,22 @@ def _evaluate_challenger_losses(
     background_rgb_loss_weight: float = 1.0,
     palette_loss_weight: float = 0.0,
     palette_loss_temperature: float = 0.05,
+    max_batches: int = 0,
 ) -> dict[str, float]:
     th, _nn_mod = _require_torch()
     generator = th.Generator(device=device)
     generator.manual_seed(int(seed))
     totals: dict[str, float] = {}
     count = 0
+    batches_seen = 0
+    batch_cap = int(max_batches)
     was_training = bool(model.training)
     model.eval()
     with th.no_grad():
         for batch in loader:
+            if batch_cap > 0 and batches_seen >= batch_cap:
+                break
+            batches_seen += 1
             batch = move_batch_to_device(batch, device)
             target_rgba = batch["rgba"]
             target = target_rgba * 2.0 - 1.0
@@ -1337,6 +1533,95 @@ def _velocity_loss_components(
         "loss_rgb": loss_rgb,
         "loss_alpha": loss_alpha,
     }
+
+
+# v2 Phase 2: palette/index auxiliary losses ─────────────────────────────────
+
+def _palette_head_loss(
+    pred_rgb: Any,
+    pred_presence_logits: Any,
+    batch: dict[str, Any],
+) -> dict[str, Any]:
+    """Direct palette prediction: slot-aligned MSE + presence BCE.
+
+    Handles variable-sized ground-truth palettes by truncating or
+    zero-padding predictions to match the GT slot count.
+    """
+    th, _nn_mod = _require_torch()
+    zero = pred_rgb.sum() * 0.0
+    palette = batch.get("palette")
+    palette_mask = batch.get("palette_mask")
+    if palette is None or palette_mask is None:
+        return {"loss_palette_head": zero, "loss_palette_presence": zero}
+
+    gt_rgb = palette.to(dtype=pred_rgb.dtype, device=pred_rgb.device)
+    if gt_rgb.numel() and float(gt_rgb.detach().max().cpu()) > 1.0:
+        gt_rgb = gt_rgb / 255.0
+    gt_rgb = gt_rgb.clamp(0.0, 1.0)
+    gt_mask = palette_mask.to(device=pred_rgb.device, dtype=th.bool)
+
+    K_gt = gt_rgb.shape[1]
+    K_pred = pred_rgb.shape[1]
+
+    if K_pred != K_gt:
+        # Truncate or zero-pad predictions to match GT slot count
+        if K_pred > K_gt:
+            pred_rgb = pred_rgb[:, :K_gt]
+            pred_presence_logits = pred_presence_logits[:, :K_gt]
+        else:
+            # Pad with zeros (RGB) and large negative logits (presence)
+            pad_k = K_gt - K_pred
+            pred_rgb = th.cat([
+                pred_rgb,
+                th.zeros(pred_rgb.shape[0], pad_k, 3, device=pred_rgb.device, dtype=pred_rgb.dtype),
+            ], dim=1)
+            pred_presence_logits = th.cat([
+                pred_presence_logits,
+                th.full((pred_presence_logits.shape[0], pad_k), -10.0,
+                        device=pred_presence_logits.device, dtype=pred_presence_logits.dtype),
+            ], dim=1)
+
+    mse = ((pred_rgb - gt_rgb) ** 2).mean(dim=-1)  # (B, K_gt)
+    mse = mse.masked_select(gt_mask)
+    loss_rgb = mse.mean() if mse.numel() > 0 else zero
+
+    if pred_presence_logits.shape[-1] == gt_mask.shape[-1]:
+        bce = th.nn.functional.binary_cross_entropy_with_logits(
+            pred_presence_logits, gt_mask.float()
+        )
+    else:
+        bce = zero
+
+    return {"loss_palette_head": loss_rgb, "loss_palette_presence": bce}
+
+
+def _index_head_loss(
+    pred_logits: Any,
+    batch: dict[str, Any],
+) -> Any:
+    """Cross-entropy on visible pixel index map.
+
+    Clamps out-of-range GT indices to the maximum predicted class,
+    ignoring transparent/background pixels.
+    """
+    th, _nn_mod = _require_torch()
+    zero = pred_logits.sum() * 0.0
+    index_map = batch.get("index_map")
+    if index_map is None:
+        return zero
+
+    gt = index_map.to(device=pred_logits.device, dtype=th.long)
+    max_valid = pred_logits.shape[1] - 1
+
+    # Visible pixels only (index > 0 removes background/transparent)
+    visible = gt > 0
+    if not bool(visible.any()):
+        return zero
+
+    gt_clamped = gt.clamp(min=0, max=max_valid)
+    ce = th.nn.functional.cross_entropy(pred_logits, gt_clamped, reduction="none")
+    ce_masked = ce.masked_select(visible)
+    return ce_masked.mean() if ce_masked.numel() > 0 else zero
 
 
 def palette_soft_min_auxiliary_loss(
@@ -1663,6 +1948,12 @@ def _init_ema_state(model: RectifiedFlowUNet) -> dict[str, Any]:
 
 
 def _update_ema_state(ema_state: dict[str, Any], model: RectifiedFlowUNet, *, decay: float) -> None:
+    """Reference (one-tensor-at-a-time) EMA update.
+
+    Kept for external callers and as the ground truth ``_update_ema_state_fast``
+    is checked against in tests/test_training_speed_options.py. The training
+    hot loop uses the cached foreach path below instead.
+    """
     th, _nn_mod = _require_torch()
     clipped_decay = min(1.0, max(0.0, float(decay)))
     with th.no_grad():
@@ -1676,6 +1967,45 @@ def _update_ema_state(ema_state: dict[str, Any], model: RectifiedFlowUNet, *, de
                 target.mul_(clipped_decay).add_(current.to(device=target.device, dtype=target.dtype), alpha=1.0 - clipped_decay)
             else:
                 target.copy_(current.to(device=target.device, dtype=target.dtype))
+
+
+def _init_ema_fast_state(ema_state: dict[str, Any], model: RectifiedFlowUNet) -> dict[str, Any]:
+    """Cache tensor-pair references for ``_update_ema_state_fast``.
+
+    ``model.state_dict()`` values share storage with the model's own parameters
+    and buffers, and the training loop never reassigns those tensors after
+    ``model.to(device)`` (the optimizer mutates their storage in place), so
+    caching the references once here stays valid for the rest of the run. Do
+    not call this again mid-run unless the model's parameters/buffers are
+    replaced wholesale.
+    """
+    source = model.state_dict()
+    float_keys = [key for key, value in ema_state.items() if value.dtype.is_floating_point]
+    nonfloat_keys = [key for key in ema_state if key not in float_keys]
+    return {
+        "ema_float": [ema_state[key] for key in float_keys],
+        "src_float": [source[key] for key in float_keys],
+        "ema_nonfloat": [ema_state[key] for key in nonfloat_keys],
+        "src_nonfloat": [source[key] for key in nonfloat_keys],
+    }
+
+
+def _update_ema_state_fast(cache: dict[str, Any], *, decay: float) -> None:
+    """Foreach-batched EMA update; numerically identical to ``_update_ema_state``.
+
+    Two ``torch._foreach_*`` calls update every floating-point tensor in one
+    shot instead of a Python-level loop with ~2 kernel launches per tensor;
+    non-floating-point tensors (none currently, but handled for parity with
+    ``_update_ema_state``) are copied directly.
+    """
+    th, _nn_mod = _require_torch()
+    clipped_decay = min(1.0, max(0.0, float(decay)))
+    with th.no_grad():
+        if cache["ema_float"]:
+            th._foreach_mul_(cache["ema_float"], clipped_decay)
+            th._foreach_add_(cache["ema_float"], cache["src_float"], alpha=1.0 - clipped_decay)
+        for target, source in zip(cache["ema_nonfloat"], cache["src_nonfloat"]):
+            target.copy_(source)
 
 
 def _loss_metrics(losses: Mapping[str, Any]) -> dict[str, float]:
@@ -1762,25 +2092,39 @@ def _apply_structured_field_dropout(
     *,
     dropout: float,
     training: bool,
+    dropout_rates: Mapping[str, float] | None = None,
 ) -> dict[str, Any]:
+    """Apply per-group structured field dropout during training.
+
+    If ``dropout_rates`` is provided, it maps group names to per-group rates;
+    groups not listed fall back to the scalar ``dropout`` value.  Otherwise
+    every group uses the same scalar ``dropout`` (existing behaviour).
+    """
     th, _nn_mod = _require_torch()
-    probability = min(1.0, max(0.0, float(dropout)))
     structured = inputs.get("structured_conditioning")
-    if not training or probability <= 0.0 or not isinstance(structured, Mapping):
+    if not training or not isinstance(structured, Mapping):
         return inputs
 
     batch_size, device = _structured_batch_shape(structured)
     if batch_size <= 0 or device is None:
         return inputs
 
+    per_group: dict[str, float] = {}
+    if dropout_rates:
+        per_group = {str(k): float(v) for k, v in dropout_rates.items()}
+
     dropped: dict[str, Any] = {
         str(key): value.clone() if isinstance(value, th.Tensor) else value
         for key, value in structured.items()
     }
     any_masked = False
-    for _group_name, fields in STRUCTURED_DROPOUT_GROUPS:
+    for group_name, fields in STRUCTURED_DROPOUT_GROUPS:
         present_fields = [field for field in fields if isinstance(dropped.get(field), th.Tensor)]
         if not present_fields:
+            continue
+        group_rate = per_group.get(group_name, dropout)
+        probability = min(1.0, max(0.0, float(group_rate)))
+        if probability <= 0.0:
             continue
         mask = th.rand((batch_size,), device=device) < probability
         if not bool(mask.any()):

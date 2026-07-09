@@ -814,3 +814,563 @@ def test_null_field_choices_are_stable() -> None:
         "style",
         "structured",
     }
+
+
+# ── v2 Phase 1 conditioning architecture tests ──────────────────────────────
+
+def test_model_film_off_is_default_and_shapes_match() -> None:
+    model = RectifiedFlowUNet(
+        vocab_size=64, embed_dim=32, base_channels=32,
+        channel_mults=(1,), res_blocks_per_level=1,
+        pad_token_id=0, film_conditioning=False,
+    )
+    assert model.film_conditioning is False
+    cfg = model.config()
+    assert cfg["film_conditioning"] is False
+    x = torch.randn(2, 4, 32, 32)
+    t = torch.rand(2)
+    caps = torch.randint(0, 64, (2, 8))
+    out = model(x, t, caption_tokens=caps)
+    assert out.shape == (2, 4, 32, 32)
+
+
+def test_model_film_on_shapes_match() -> None:
+    model = RectifiedFlowUNet(
+        vocab_size=64, embed_dim=32, base_channels=32,
+        channel_mults=(1,), res_blocks_per_level=1,
+        pad_token_id=0, film_conditioning=True,
+    )
+    assert model.film_conditioning is True
+    cfg = model.config()
+    assert cfg["film_conditioning"] is True
+    x = torch.randn(2, 4, 32, 32)
+    t = torch.rand(2)
+    caps = torch.randint(0, 64, (2, 8))
+    out = model(x, t, caption_tokens=caps)
+    assert out.shape == (2, 4, 32, 32)
+
+
+def test_model_bottleneck_attention_on_shapes_match() -> None:
+    model = RectifiedFlowUNet(
+        vocab_size=64, embed_dim=32, base_channels=32,
+        channel_mults=(1, 2), res_blocks_per_level=1,
+        pad_token_id=0, bottleneck_attention=True,
+    )
+    assert model.bottleneck_attention is True
+    cfg = model.config()
+    assert cfg["bottleneck_attention"] is True
+    x = torch.randn(2, 4, 32, 32)
+    t = torch.rand(2)
+    caps = torch.randint(0, 64, (2, 8))
+    out = model(x, t, caption_tokens=caps)
+    assert out.shape == (2, 4, 32, 32)
+
+
+def test_model_film_and_attention_together() -> None:
+    model = RectifiedFlowUNet(
+        vocab_size=64, embed_dim=32, base_channels=32,
+        channel_mults=(1, 2), res_blocks_per_level=1,
+        pad_token_id=0, film_conditioning=True, bottleneck_attention=True,
+    )
+    assert model.film_conditioning is True
+    assert model.bottleneck_attention is True
+    x = torch.randn(2, 4, 32, 32)
+    t = torch.rand(2)
+    caps = torch.randint(0, 64, (2, 8))
+    out = model(x, t, caption_tokens=caps)
+    assert out.shape == (2, 4, 32, 32)
+
+
+def test_old_default_config_has_features_off() -> None:
+    config = ChallengerTrainConfig(
+        dataset_dir=Path("ds"), training_manifest=Path("m.jsonl"),
+        out_dir=Path("out"),
+    )
+    assert config.film_conditioning is False
+    assert config.bottleneck_attention is False
+    assert config.structured_field_dropout_rates is None
+
+
+def test_per_group_dropout_accepts_valid_string() -> None:
+    from spritelab.training.cli import _parse_dropout_rates
+    rates = _parse_dropout_rates("category=0.10,object_id=0.35,colors=0.15")
+    assert rates == {"category": 0.10, "object_id": 0.35, "colors": 0.15}
+
+
+def test_per_group_dropout_rejects_unknown_group() -> None:
+    from spritelab.training.cli import _parse_dropout_rates
+    with pytest.raises(ValueError, match="Unknown"):
+        _parse_dropout_rates("unknown=0.5")
+
+
+def test_per_group_dropout_rejects_invalid_rate() -> None:
+    from spritelab.training.cli import _parse_dropout_rates
+    with pytest.raises(ValueError, match="must be in"):
+        _parse_dropout_rates("category=1.5")
+    with pytest.raises(ValueError, match="must be in"):
+        _parse_dropout_rates("category=-0.5")
+
+
+def test_per_group_dropout_returns_none_for_empty() -> None:
+    from spritelab.training.cli import _parse_dropout_rates
+    assert _parse_dropout_rates(None) is None
+    assert _parse_dropout_rates("") is None
+
+
+def test_cli_accepts_film_conditioning_flag() -> None:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--film-conditioning", action="store_true", default=False)
+    parsed = parser.parse_args(["--film-conditioning"])
+    assert parsed.film_conditioning is True
+    parsed2 = parser.parse_args([])
+    assert parsed2.film_conditioning is False
+
+
+def test_cli_accepts_bottleneck_attention_flag() -> None:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bottleneck-attention", action="store_true", default=False)
+    parsed = parser.parse_args(["--bottleneck-attention"])
+    assert parsed.bottleneck_attention is True
+    parsed2 = parser.parse_args([])
+    assert parsed2.bottleneck_attention is False
+
+
+def test_cli_accepts_dropout_rates_flag() -> None:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--structured-field-dropout-rates", default=None)
+    parsed = parser.parse_args(["--structured-field-dropout-rates", "category=0.10,colors=0.15"])
+    assert parsed.structured_field_dropout_rates == "category=0.10,colors=0.15"
+    parsed2 = parser.parse_args([])
+    assert parsed2.structured_field_dropout_rates is None
+
+
+# ── v2 Phase 2: palette/index head tests ────────────────────────────────────
+
+def _dummy_batch(bs: int = 2) -> dict[str, Any]:
+    """Create a minimal batch with palette/index_map tensors."""
+    K = 16
+    H = W = 32
+    return {
+        "rgba": torch.rand(bs, 4, H, W),
+        "palette": torch.rand(bs, K, 3),
+        "palette_mask": torch.zeros(bs, K, dtype=torch.bool),
+        "index_map": torch.zeros(bs, H, W, dtype=torch.long),
+        "caption_tokens": torch.randint(0, 64, (bs, 8)),
+        "semantic_tokens": torch.randint(0, 64, (bs, 8)),
+    }
+
+
+def test_model_forward_returns_velocity_only_by_default() -> None:
+    model = RectifiedFlowUNet(
+        vocab_size=64, embed_dim=32, base_channels=32,
+        channel_mults=(1,), res_blocks_per_level=1, pad_token_id=0,
+    )
+    x = torch.randn(2, 4, 32, 32)
+    out = model(x, torch.rand(2), caption_tokens=torch.randint(0, 64, (2, 8)))
+    assert isinstance(out, torch.Tensor)
+    assert out.shape == (2, 4, 32, 32)
+
+
+def test_model_forward_return_aux_returns_dict() -> None:
+    model = RectifiedFlowUNet(
+        vocab_size=64, embed_dim=32, base_channels=32,
+        channel_mults=(1, 2), res_blocks_per_level=1, pad_token_id=0,
+    )
+    x = torch.randn(2, 4, 32, 32)
+    out = model(
+        x, torch.rand(2),
+        caption_tokens=torch.randint(0, 64, (2, 8)),
+        return_aux=True,
+    )
+    assert isinstance(out, dict)
+    assert "velocity" in out
+    assert out["velocity"].shape == (2, 4, 32, 32)
+    assert "palette_rgb" in out
+    assert out["palette_rgb"].shape == (2, 16, 3)
+    assert "palette_presence_logits" in out
+    assert out["palette_presence_logits"].shape == (2, 16)
+    assert "index_logits" in out
+    assert out["index_logits"].shape == (2, 16, 32, 32)
+
+
+def test_default_config_has_head_loss_weights_zero() -> None:
+    config = ChallengerTrainConfig(
+        dataset_dir=Path("ds"), training_manifest=Path("m.jsonl"),
+        out_dir=Path("out"),
+    )
+    assert config.index_head_loss_weight == 0.0
+    assert config.palette_head_loss_weight == 0.0
+    assert config.palette_presence_loss_weight == 0.0
+    assert config.index_head_warmup_steps == 0
+
+
+def test_loss_skips_heads_when_weights_zero() -> None:
+    """When all head weights are zero, only velocity + palette_aux losses appear."""
+    from spritelab.training.generator_challenger import rectified_flow_loss
+    model = RectifiedFlowUNet(
+        vocab_size=64, embed_dim=32, base_channels=32,
+        channel_mults=(1,), res_blocks_per_level=1, pad_token_id=0,
+    )
+    batch = _dummy_batch(bs=2)
+    losses = rectified_flow_loss(
+        model, batch,
+        conditioning_mode="caption_semantic",
+        cfg_dropout=0.0,
+        pad_token_id=0,
+        index_head_loss_weight=0.0,
+        palette_head_loss_weight=0.0,
+        palette_presence_loss_weight=0.0,
+    )
+    assert "loss_velocity" in losses
+    assert "loss_palette_aux" in losses
+    assert losses["index_head_active"] is False
+
+
+def test_palette_head_loss_finite() -> None:
+    from spritelab.training.generator_challenger import (
+        rectified_flow_loss,
+    )
+    model = RectifiedFlowUNet(
+        vocab_size=64, embed_dim=32, base_channels=32,
+        channel_mults=(1,), res_blocks_per_level=1, pad_token_id=0,
+    )
+    K = 16
+    batch = _dummy_batch(bs=2)
+    batch["palette_mask"] = torch.ones(2, K, dtype=torch.bool)
+    losses = rectified_flow_loss(
+        model, batch,
+        conditioning_mode="caption_semantic",
+        cfg_dropout=0.0,
+        pad_token_id=0,
+        palette_head_loss_weight=0.1,
+        palette_presence_loss_weight=0.05,
+        index_head_loss_weight=0.0,
+    )
+    assert "loss_palette_head" in losses
+    assert "loss_palette_presence" in losses
+    assert torch.isfinite(losses["loss_palette_head"])
+    assert torch.isfinite(losses["loss_palette_presence"])
+    # Total loss should be finite
+    assert torch.isfinite(losses["loss"])
+
+
+def test_index_head_loss_finite() -> None:
+    from spritelab.training.generator_challenger import (
+        rectified_flow_loss,
+    )
+    model = RectifiedFlowUNet(
+        vocab_size=64, embed_dim=32, base_channels=32,
+        channel_mults=(1,), res_blocks_per_level=1, pad_token_id=0,
+    )
+    batch = _dummy_batch(bs=2)
+    batch["index_map"] = torch.randint(0, 16, (2, 32, 32))
+    # Set some pixels as invisible
+    batch["rgba"][:, 3:4] = 0.0
+    losses = rectified_flow_loss(
+        model, batch,
+        conditioning_mode="caption_semantic",
+        cfg_dropout=0.0,
+        pad_token_id=0,
+        index_head_loss_weight=0.25,
+        palette_head_loss_weight=0.0,
+        palette_presence_loss_weight=0.0,
+        index_head_warmup_steps=0,
+    )
+    assert "loss_index_head" in losses
+    assert torch.isfinite(losses["loss_index_head"])
+    assert losses["index_head_active"] is True
+
+
+def test_index_head_inactive_before_warmup() -> None:
+    from spritelab.training.generator_challenger import (
+        rectified_flow_loss,
+    )
+    model = RectifiedFlowUNet(
+        vocab_size=64, embed_dim=32, base_channels=32,
+        channel_mults=(1,), res_blocks_per_level=1, pad_token_id=0,
+    )
+    batch = _dummy_batch(bs=2)
+    losses = rectified_flow_loss(
+        model, batch,
+        conditioning_mode="caption_semantic",
+        cfg_dropout=0.0,
+        pad_token_id=0,
+        index_head_loss_weight=0.25,
+        palette_head_loss_weight=0.0,
+        palette_presence_loss_weight=0.0,
+        global_step=50,
+        index_head_warmup_steps=100,
+    )
+    assert losses["index_head_active"] is False
+
+
+# ── v2 Phase 2: palette/index head inspection tests ──────────────────────────
+
+
+def test_cli_accepts_inspect_palette_index_heads() -> None:
+    import argparse
+    from spritelab.training.cli import _add_speed_option_arguments
+
+    parser = argparse.ArgumentParser(prog="test")
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+    inspect = sub.add_parser("inspect-palette-index-heads")
+    inspect.add_argument("--checkpoint", required=True, type=Path)
+    inspect.add_argument("--dataset", required=True, type=Path)
+    inspect.add_argument("--training-manifest", required=True, type=Path)
+    inspect.add_argument("--out", required=True, type=Path)
+    inspect.add_argument("--device", default="cpu")
+    inspect.add_argument("--batch-size", type=int, default=32)
+    inspect.add_argument("--max-batches", type=int, default=32)
+    inspect.add_argument("--cudnn-benchmark", action="store_true", default=False)
+    inspect.add_argument("--tf32", action="store_true", default=False)
+
+    parsed = parser.parse_args(
+        [
+            "inspect-palette-index-heads",
+            "--checkpoint", "ckpt.pt",
+            "--dataset", "ds",
+            "--training-manifest", "manifest.jsonl",
+            "--out", "out",
+        ]
+    )
+    assert parsed.subcommand == "inspect-palette-index-heads"
+    assert parsed.device == "cpu"
+    assert parsed.cudnn_benchmark is False
+    assert parsed.tf32 is False
+
+
+def test_cli_accepts_speed_flags_for_inspect() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="test")
+    sub = parser.add_subparsers(dest="subcommand", required=True)
+    inspect = sub.add_parser("inspect-palette-index-heads")
+    inspect.add_argument("--checkpoint", required=True, type=Path)
+    inspect.add_argument("--dataset", required=True, type=Path)
+    inspect.add_argument("--training-manifest", required=True, type=Path)
+    inspect.add_argument("--out", required=True, type=Path)
+    inspect.add_argument("--device", default="cpu")
+    inspect.add_argument("--batch-size", type=int, default=32)
+    inspect.add_argument("--max-batches", type=int, default=32)
+    inspect.add_argument("--cudnn-benchmark", action="store_true", default=False)
+    inspect.add_argument("--tf32", action="store_true", default=False)
+
+    parsed = parser.parse_args(
+        [
+            "inspect-palette-index-heads",
+            "--checkpoint", "ckpt.pt",
+            "--dataset", "ds",
+            "--training-manifest", "manifest.jsonl",
+            "--out", "out",
+            "--cudnn-benchmark",
+            "--tf32",
+        ]
+    )
+    assert parsed.cudnn_benchmark is True
+    assert parsed.tf32 is True
+
+
+def test_inspect_index_metrics_visible_pixel_accuracy() -> None:
+    from spritelab.training.palette_index_head_inspect import compute_index_head_metrics
+
+    B, C, H, W = 2, 16, 32, 32
+    logits = torch.zeros(B, C, H, W)
+    target_indices = torch.tensor([0, 1]).view(B, 1, 1).expand(B, H, W)
+    for b in range(B):
+        logits[b, target_indices[b, 0, 0], :, :] = 10.0
+
+    alpha = torch.ones(B, 1, H, W) * 0.8
+
+    metrics = compute_index_head_metrics(logits, target_indices, alpha)
+    assert metrics.visible_pixel_accuracy == pytest.approx(1.0)
+    assert metrics.top2_accuracy == pytest.approx(1.0)
+    assert metrics.invalid_target_count == 0
+    assert metrics.visible_pixel_count == B * H * W
+
+
+def test_inspect_index_metrics_ignore_invisible() -> None:
+    from spritelab.training.palette_index_head_inspect import compute_index_head_metrics
+
+    B, C, H, W = 2, 16, 32, 32
+    logits = torch.zeros(B, C, H, W)
+    target_indices = torch.tensor([3, 5]).view(B, 1, 1).expand(B, H, W)
+
+    alpha = torch.zeros(B, 1, H, W)
+
+    metrics = compute_index_head_metrics(logits, target_indices, alpha)
+    assert metrics.visible_pixel_count == 0
+    assert metrics.ignored_pixel_count == B * H * W
+
+
+def test_inspect_palette_rgb_metrics_finite() -> None:
+    from spritelab.training.palette_index_head_inspect import compute_palette_rgb_metrics
+
+    B, K = 4, 16
+    predicted = torch.randn(B, K, 3)
+    target = torch.rand(B, K, 3)
+    mask = torch.ones(B, K, dtype=torch.bool)
+    mask[0, 0] = False
+    mask[1, 0] = False
+
+    metrics = compute_palette_rgb_metrics(predicted, target, mask)
+    assert metrics.mse > 0
+    assert metrics.mae > 0
+    assert torch.tensor(metrics.mse).isfinite()
+    assert torch.tensor(metrics.mae).isfinite()
+    assert metrics.active_slot_count_mean > 0
+
+
+def test_inspect_palette_rgb_zero_for_empty_mask() -> None:
+    from spritelab.training.palette_index_head_inspect import compute_palette_rgb_metrics
+
+    B, K = 4, 16
+    predicted = torch.randn(B, K, 3)
+    target = torch.rand(B, K, 3)
+    mask = torch.zeros(B, K, dtype=torch.bool)
+
+    metrics = compute_palette_rgb_metrics(predicted, target, mask)
+    assert metrics.mse == 0.0
+    assert metrics.mae == 0.0
+    assert metrics.active_slot_count_mean == 0.0
+
+
+def test_inspect_presence_metrics_finite() -> None:
+    from spritelab.training.palette_index_head_inspect import compute_palette_presence_metrics
+
+    B, K = 4, 16
+    logits = torch.randn(B, K)
+    mask = torch.ones(B, K, dtype=torch.bool)
+    mask[0, 0] = False
+    mask[0, 1] = False
+
+    metrics = compute_palette_presence_metrics(logits, mask)
+    assert 0.0 <= metrics.bce
+    assert 0.0 <= metrics.accuracy <= 1.0
+    assert 0.0 <= metrics.precision <= 1.0
+    assert 0.0 <= metrics.recall <= 1.0
+    assert 0.0 <= metrics.f1 <= 1.0
+    assert metrics.predicted_active_mean >= 0
+    assert metrics.target_active_mean >= 0
+
+
+def test_inspect_presence_perfect_prediction() -> None:
+    from spritelab.training.palette_index_head_inspect import compute_palette_presence_metrics
+
+    B, K = 2, 16
+    mask = torch.zeros(B, K, dtype=torch.bool)
+    mask[0, :4] = True
+    mask[1, :4] = True
+    logits = torch.where(mask, torch.tensor(5.0), torch.tensor(-5.0))
+
+    metrics = compute_palette_presence_metrics(logits, mask)
+    assert metrics.bce < 0.01
+    assert metrics.accuracy == pytest.approx(1.0)
+    assert metrics.precision == pytest.approx(1.0)
+    assert metrics.recall == pytest.approx(1.0)
+    assert metrics.f1 == pytest.approx(1.0)
+    assert metrics.predicted_active_mean == pytest.approx(metrics.target_active_mean)
+
+
+def test_inspect_report_writes_json_and_markdown(tmp_path: Path) -> None:
+    from spritelab.training.palette_index_head_inspect import (
+        _BatchMetrics,
+        _IndexMetrics,
+        _PalettePresenceMetrics,
+        _PaletteRGBMetrics,
+        PaletteIndexHeadInspectConfig,
+        write_inspect_report,
+    )
+
+    batch = _BatchMetrics(
+        index=_IndexMetrics(
+            visible_pixel_accuracy=0.95,
+            top2_accuracy=0.98,
+            cross_entropy=0.1,
+            visible_pixel_count=1000,
+        ),
+        palette_rgb=_PaletteRGBMetrics(mse=0.001, mae=0.02, active_slot_count_mean=4.5),
+        palette_presence=_PalettePresenceMetrics(
+            bce=0.3, accuracy=0.9, precision=0.85, recall=0.88, f1=0.86,
+            predicted_active_mean=5.0, target_active_mean=4.5,
+            false_positives_rate=0.05, false_negatives_rate=0.1,
+        ),
+    )
+
+    config = PaletteIndexHeadInspectConfig(
+        checkpoint=Path("ckpt.pt"),
+        dataset=Path("ds"),
+        training_manifest=Path("manifest.jsonl"),
+        out=tmp_path / "inspect_out",
+    )
+
+    json_path = write_inspect_report([batch], config, config.out)
+    assert json_path.exists()
+    assert json_path.suffix == ".json"
+
+    md_path = config.out / "palette_index_head_inspect.md"
+    assert md_path.exists()
+
+    report = json.loads(json_path.read_text(encoding="utf-8"))
+    assert report["aggregate"]["index_head"]["visible_pixel_accuracy"] == pytest.approx(0.95)
+
+    md_text = md_path.read_text(encoding="utf-8")
+    assert "0.9500" in md_text or "0.95" in md_text
+
+
+def test_inspect_cmd_fails_for_non_challenger_checkpoint(tmp_path: Path) -> None:
+    from spritelab.training.palette_index_head_inspect import (
+        PaletteIndexHeadInspectConfig,
+        run_inspect_palette_index_heads,
+    )
+
+    ckpt_path = tmp_path / "fake.pt"
+    torch.save({"model_type": "other_type"}, ckpt_path)
+
+    config = PaletteIndexHeadInspectConfig(
+        checkpoint=ckpt_path,
+        dataset=tmp_path / "ds",
+        training_manifest=tmp_path / "manifest.jsonl",
+        out=tmp_path / "out",
+        device="cpu",
+        batch_size=2,
+        max_batches=1,
+    )
+
+    with pytest.raises(SystemExit, match="generator_challenger"):
+        run_inspect_palette_index_heads(config)
+
+
+def test_inspect_unsupported_for_model_without_heads(tmp_path: Path) -> None:
+    class OldModel(torch.nn.Module):
+        def config(self):
+            return {"vocab_size": 64, "embed_dim": 32, "base_channels": 32,
+                    "channel_mults": [1], "res_blocks_per_level": 1,
+                    "pad_token_id": 0, "structured_vocab_sizes": None,
+                    "film_conditioning": False, "bottleneck_attention": False}
+        def forward(self, x, t, caption_tokens=None, semantic_tokens=None,
+                    structured_conditioning=None, return_aux=False):
+            return x[:, :4]
+
+    old = OldModel()
+    ckpt_path = tmp_path / "old_model.pt"
+    torch.save(
+        {
+            "model_type": "generator_challenger",
+            "architecture": "rectified_flow",
+            "model_state_dict": old.state_dict(),
+            "model_config": old.config(),
+            "vocab": {},
+            "conditioning_mode": "caption_semantic",
+        },
+        ckpt_path,
+    )
+
+    from spritelab.training.palette_index_head_inspect import (
+        PaletteIndexHeadInspectConfig,
+        _has_palette_index_heads,
+    )
+    assert not _has_palette_index_heads(old)
+

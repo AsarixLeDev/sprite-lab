@@ -51,10 +51,90 @@ def _normalize_export_preset(export_preset: str | None) -> str | None:
     return None
 
 
+def _parse_dropout_rates(raw: str | None) -> dict[str, float] | None:
+    """Parse a comma-separated per-group dropout rate string.
+
+    >>> _parse_dropout_rates("category=0.10,object_id=0.35,colors=0.15")
+    {"category": 0.10, "object_id": 0.35, "colors": 0.15}
+    """
+    if not raw or not str(raw).strip():
+        return None
+    result: dict[str, float] = {}
+    known_groups = {group[0] for group in (  # noqa: F841 — used below
+        ("category", ("category_id",)),
+        ("object_id", ("object_id",)),
+        ("base_object", ("base_object_id",)),
+        ("colors", ("primary_color_id", "color_multi_hot")),
+        ("materials", ("material_multi_hot",)),
+        ("shapes", ("shape_multi_hot",)),
+        ("function", ("function_multi_hot",)),
+        ("style", ("style_multi_hot",)),
+    )}
+    for token in str(raw).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "=" not in token:
+            raise ValueError(f"Invalid dropout rate format: {token!r}. Expected 'group=rate'.")
+        group, rate_str = token.split("=", 1)
+        group = group.strip()
+        rate_str = rate_str.strip()
+        if group not in known_groups:
+            raise ValueError(f"Unknown dropout group {group!r}. Expected one of {sorted(known_groups)}.")
+        try:
+            rate = float(rate_str)
+        except ValueError:
+            raise ValueError(f"Invalid dropout rate {rate_str!r} for group {group!r}.")
+        if rate < 0.0 or rate > 1.0:
+            raise ValueError(f"Dropout rate for {group!r} must be in [0, 1], got {rate}.")
+        result[group] = rate
+    return result if result else None
+
+
 def _parsed_config_kwargs(parsed: argparse.Namespace) -> dict[str, object]:
     values = vars(parsed).copy()
     values.pop("subcommand", None)
     return values
+
+
+def _add_speed_option_arguments(parser: argparse.ArgumentParser) -> None:
+    """Opt-in training-loop speed knobs; every default reproduces today's behaviour."""
+
+    parser.add_argument(
+        "--metrics-every",
+        type=int,
+        default=1,
+        help="Sync loss to Python and log a train_metrics.jsonl line every N steps "
+        "(the final step is always logged). 1 (default) logs every step, unchanged.",
+    )
+    parser.add_argument(
+        "--fused-adamw",
+        action="store_true",
+        default=False,
+        help="Use torch's fused AdamW kernel (CUDA only; falls back with a warning if unsupported). "
+        "Numerics can differ slightly from the default optimizer.",
+    )
+    parser.add_argument(
+        "--cudnn-benchmark",
+        action="store_true",
+        default=False,
+        help="Let cuDNN autotune convolution algorithms for the fixed input shapes/batch size. "
+        "First few steps are slower while it searches.",
+    )
+    parser.add_argument(
+        "--tf32",
+        action="store_true",
+        default=False,
+        help="Allow TF32 matmul/conv accumulation on Ampere+ GPUs. Minor effect expected when "
+        "--amp bf16 autocast is already enabled.",
+    )
+    parser.add_argument(
+        "--eval-max-batches",
+        type=int,
+        default=0,
+        help="Cap initial/final/val loss evaluation to this many batches; 0 (default) evaluates "
+        "the full loader, unchanged. A positive value only changes the *reported* loss estimates.",
+    )
 
 
 def _add_palette_swap_arguments(parser: argparse.ArgumentParser) -> None:
@@ -511,6 +591,41 @@ def main(argv: Sequence[str] | None = None) -> None:
     challenger.add_argument("--grad-clip", type=float, default=0.0, help="Clip gradient norm; 0 disables.")
     challenger.add_argument("--lr-schedule", choices=["none", "cosine"], default="none")
     challenger.add_argument("--lr-warmup-steps", type=int, default=0)
+    _add_speed_option_arguments(challenger)
+    challenger.add_argument(
+        "--film-conditioning", action="store_true", default=False,
+        help="Enable FiLM conditioning in residual blocks (v2 Phase 1)."
+    )
+    challenger.add_argument(
+        "--bottleneck-attention", action="store_true", default=False,
+        help="Enable lightweight self-attention at U-Net bottleneck (v2 Phase 1)."
+    )
+    challenger.add_argument(
+        "--structured-field-dropout-rates",
+        default=None,
+        help="Per-group structured dropout rates, e.g. 'category=0.10,object_id=0.35,colors=0.15'. "
+             "Overrides --structured-field-dropout for listed groups.",
+    )
+    challenger.add_argument(
+        "--index-head-loss-weight", type=float, default=0.0,
+        help="Weight for index map cross-entropy head loss (v2 Phase 2)."
+    )
+    challenger.add_argument(
+        "--palette-head-loss-weight", type=float, default=0.0,
+        help="Weight for palette slot MSE head loss (v2 Phase 2)."
+    )
+    challenger.add_argument(
+        "--palette-presence-loss-weight", type=float, default=0.0,
+        help="Weight for palette slot presence BCE head loss (v2 Phase 2)."
+    )
+    challenger.add_argument(
+        "--index-head-warmup-steps", type=int, default=0,
+        help="Index head loss inactive before this step (v2 Phase 2)."
+    )
+    challenger.add_argument(
+        "--palette-head-use-gt-palette-prob", type=float, default=1.0,
+        help="Probability of using GT palette vs predicted palette for training (v2 Phase 2)."
+    )
 
     palette_swap_review = subparsers.add_parser(
         "dataset-palette-swap-review",
@@ -751,6 +866,41 @@ def main(argv: Sequence[str] | None = None) -> None:
     audit_challenger_full.add_argument("--no-amp", action="store_false", dest="amp")
     audit_challenger_full.add_argument("--lr-schedule", choices=["none", "cosine"], default="cosine")
     audit_challenger_full.add_argument("--lr-warmup-steps", type=int, default=500)
+    _add_speed_option_arguments(audit_challenger_full)
+    audit_challenger_full.add_argument(
+        "--film-conditioning", action="store_true", default=False,
+        help="Enable FiLM conditioning in residual blocks (v2 Phase 1)."
+    )
+    audit_challenger_full.add_argument(
+        "--bottleneck-attention", action="store_true", default=False,
+        help="Enable lightweight self-attention at U-Net bottleneck (v2 Phase 1)."
+    )
+    audit_challenger_full.add_argument(
+        "--structured-field-dropout-rates",
+        default=None,
+        help="Per-group structured dropout rates, e.g. 'category=0.10,object_id=0.35,colors=0.15'. "
+             "Overrides --structured-field-dropout for listed groups.",
+    )
+    audit_challenger_full.add_argument(
+        "--index-head-loss-weight", type=float, default=0.0,
+        help="Weight for index map cross-entropy head loss (v2 Phase 2)."
+    )
+    audit_challenger_full.add_argument(
+        "--palette-head-loss-weight", type=float, default=0.0,
+        help="Weight for palette slot MSE head loss (v2 Phase 2)."
+    )
+    audit_challenger_full.add_argument(
+        "--palette-presence-loss-weight", type=float, default=0.0,
+        help="Weight for palette slot presence BCE head loss (v2 Phase 2)."
+    )
+    audit_challenger_full.add_argument(
+        "--index-head-warmup-steps", type=int, default=0,
+        help="Index head loss inactive before this step (v2 Phase 2)."
+    )
+    audit_challenger_full.add_argument(
+        "--palette-head-use-gt-palette-prob", type=float, default=1.0,
+        help="Probability of using GT palette vs predicted palette for training (v2 Phase 2)."
+    )
 
     build_ood = subparsers.add_parser(
         "build-ood-compositional-prompts",
@@ -903,6 +1053,27 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--prompt-seed", type=int, default=20260706,
         help="Seed for prompt building when --build-prompts is used. Default: 20260706."
     )
+    v2_phase0.add_argument(
+        "--speed-optimizations", action="store_true", default=True, dest="speed_optimizations",
+        help="Enable cuDNN autotuning + TF32 for sampling (CUDA only; no-op on CPU). "
+        "On by default since this harness resamples the same checkpoint/shape across "
+        "many cells and seeds; use --no-speed-optimizations for the plain numeric path."
+    )
+    v2_phase0.add_argument(
+        "--no-speed-optimizations", action="store_false", dest="speed_optimizations",
+    )
+    v2_phase0.add_argument(
+        "--eval-profile", default="all",
+        choices=["all", "ood_core", "ood_plus_grid"],
+        help="Evaluation profile. 'all' includes all prompt families. "
+             "'ood_core' excludes in-distribution anchors. Default: all."
+    )
+    v2_phase0.add_argument(
+        "--profile-weighting", default="family",
+        choices=["sample", "family"],
+        help="Profile weighting method. 'family' gives equal weight to each prompt family. "
+             "'sample' weights by sample count. Default: family."
+    )
 
     build_eval_prompts = subparsers.add_parser(
         "build-v2-eval-prompts",
@@ -959,6 +1130,21 @@ def main(argv: Sequence[str] | None = None) -> None:
     compare_families.add_argument("--dataset", required=True, type=Path)
     compare_families.add_argument("--prompts", required=True, type=Path)
     compare_families.add_argument("--out", required=True, type=Path, dest="out_dir")
+
+    inspect_palette_index = subparsers.add_parser(
+        "inspect-palette-index-heads",
+        help="Evaluate v2 Phase 2 palette/index auxiliary heads on dataset batches (no training).",
+    )
+    inspect_palette_index.add_argument("--checkpoint", required=True, type=Path)
+    inspect_palette_index.add_argument("--dataset", required=True, type=Path)
+    inspect_palette_index.add_argument("--training-manifest", required=True, type=Path)
+    inspect_palette_index.add_argument("--out", required=True, type=Path)
+    inspect_palette_index.add_argument("--device", default="cpu")
+    inspect_palette_index.add_argument("--batch-size", type=int, default=32)
+    inspect_palette_index.add_argument("--max-batches", type=int, default=32)
+    inspect_palette_index.add_argument("--split", default="train")
+    inspect_palette_index.add_argument("--cudnn-benchmark", action="store_true", default=False)
+    inspect_palette_index.add_argument("--tf32", action="store_true", default=False)
 
     parsed = parser.parse_args(raw_argv)
     _apply_export_preset_defaults(parsed, raw_argv)
@@ -1143,7 +1329,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         elif parsed.subcommand == "generator-challenger":
             from spritelab.training.generator_challenger import ChallengerTrainConfig, run_challenger_training
 
-            report = run_challenger_training(ChallengerTrainConfig(**_parsed_config_kwargs(parsed)))
+            kwargs = _parsed_config_kwargs(parsed)
+            dropout_rates = _parse_dropout_rates(kwargs.pop("structured_field_dropout_rates", None))
+            report = run_challenger_training(ChallengerTrainConfig(**kwargs, structured_field_dropout_rates=dropout_rates))
             print(f"Initial train loss: {report['initial_train_loss']:.6f}")
             print(f"Final train loss: {report['final_train_loss']:.6f}")
             if report["val_loss"] is not None:
@@ -1304,7 +1492,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 run_full_v4_challenger_audit,
             )
 
-            report = run_full_v4_challenger_audit(FullV4ChallengerAuditConfig(**_parsed_config_kwargs(parsed)))
+            kwargs = _parsed_config_kwargs(parsed)
+            dropout_rates = _parse_dropout_rates(kwargs.pop("structured_field_dropout_rates", None))
+            report = run_full_v4_challenger_audit(
+                FullV4ChallengerAuditConfig(**kwargs, structured_field_dropout_rates=dropout_rates)
+            )
             print(f"Decision: {report['decision']['code']}. {report['decision']['label']}")
             print(f"Markdown report: {parsed.out_dir / 'full_v4_challenger_audit.md'}")
             print(f"JSON report: {parsed.out_dir / 'full_v4_challenger_audit.json'}")
@@ -1401,6 +1593,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                     prompt_seed=parsed.prompt_seed,
                     report_only=parsed.report_only,
                     allow_partial_report=parsed.allow_partial_report,
+                    speed_optimizations=parsed.speed_optimizations,
+                    eval_profile=parsed.eval_profile,
+                    profile_weighting=parsed.profile_weighting,
                 )
             )
             if not parsed.dry_run:
@@ -1465,6 +1660,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             report = compare_generator_families(CompareGeneratorFamiliesConfig(**_parsed_config_kwargs(parsed)))
             print(f"Recommendation: {report['recommendation']}")
             print(f"Outputs written to {parsed.out_dir}")
+        elif parsed.subcommand == "inspect-palette-index-heads":
+            from spritelab.training.palette_index_head_inspect import (
+                PaletteIndexHeadInspectConfig,
+                run_inspect_palette_index_heads,
+            )
+
+            run_inspect_palette_index_heads(PaletteIndexHeadInspectConfig(**_parsed_config_kwargs(parsed)))
     except RuntimeError as exc:
         if "PyTorch is required" not in str(exc):
             raise

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import warnings
 from typing import Any
 
 try:  # torch is an optional project dependency.
@@ -58,6 +59,50 @@ def build_lr_scheduler(optimizer: Any, *, schedule: str, max_steps: int, warmup_
 
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     raise ValueError(f"unknown lr schedule: {schedule!r} (expected 'none' or 'cosine')")
+
+
+def build_adamw(params: Any, *, lr: float, fused: bool = False) -> Any:
+    """``AdamW`` with an opt-in fused CUDA kernel path.
+
+    ``fused=False`` (the default) constructs exactly today's ``torch.optim.AdamW``.
+    ``fused=True`` requests the fused kernel, which updates parameters with fewer,
+    larger CUDA kernel launches; its numerics can differ slightly from the
+    unfused path, so it is never selected implicitly. If the installed torch
+    build or device doesn't support ``fused=True`` (e.g. CPU-only), this falls
+    back to the unfused optimizer with a warning instead of raising.
+    """
+
+    if not fused:
+        return torch.optim.AdamW(params, lr=lr)
+    try:
+        return torch.optim.AdamW(params, lr=lr, fused=True)
+    except (RuntimeError, ValueError) as exc:
+        warnings.warn(f"fused AdamW unavailable ({exc}); falling back to fused=False", stacklevel=2)
+        return torch.optim.AdamW(params, lr=lr)
+
+
+def apply_backend_speed_flags(*, cudnn_benchmark: bool = False, tf32: bool = False) -> None:
+    """Opt-in cuDNN/TF32 backend flags; a no-op at the default ``False`` values.
+
+    ``cudnn_benchmark`` lets cuDNN autotune convolution algorithms for the
+    observed input shapes, which pays off when shapes and batch size stay fixed
+    (as they do here) at the cost of extra search time on the first few steps.
+    ``tf32`` allows TF32 matmul/conv accumulation on Ampere+ GPUs; since the
+    training forward pass already runs under bf16 autocast when ``--amp`` is
+    set, TF32 only affects the (already low-precision-tolerant) parts that run
+    outside autocast, so its effect is expected to be minor. At the defaults,
+    this function does not touch ``torch.backends`` at all.
+    """
+
+    if not cudnn_benchmark and not tf32:
+        return
+    if torch is None:
+        return
+    if cudnn_benchmark:
+        torch.backends.cudnn.benchmark = True
+    if tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
 
 def clip_gradients(model: Any, max_norm: float) -> None:

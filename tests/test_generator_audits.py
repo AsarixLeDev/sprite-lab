@@ -920,6 +920,13 @@ def test_full_v4_audit_cli_accepts_options(tmp_path: Path, monkeypatch: pytest.M
             "none",
             "--lr-warmup-steps",
             "0",
+            "--metrics-every",
+            "5",
+            "--fused-adamw",
+            "--cudnn-benchmark",
+            "--tf32",
+            "--eval-max-batches",
+            "3",
         ]
     )
 
@@ -955,6 +962,11 @@ def test_full_v4_audit_cli_accepts_options(tmp_path: Path, monkeypatch: pytest.M
     assert captured[0].project_palette_method == "deterministic_kmeans"
     assert captured[0].num_workers == 2
     assert captured[0].sample_batch_size == 8
+    assert captured[0].metrics_every == 5
+    assert captured[0].fused_adamw is True
+    assert captured[0].cudnn_benchmark is True
+    assert captured[0].tf32 is True
+    assert captured[0].eval_max_batches == 3
     assert captured[0].run_ood_compositional is True
     assert captured[0].ood_prompts == tmp_path / "ood.jsonl"
     assert captured[0].eval_checkpoints is True

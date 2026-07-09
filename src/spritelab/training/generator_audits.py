@@ -116,6 +116,23 @@ class FullV4ChallengerAuditConfig:
     amp: bool = True
     lr_schedule: str = "cosine"
     lr_warmup_steps: int = 500
+    # Opt-in training-loop speed knobs (see docs/training_speed_notes.md); every
+    # default here reproduces today's behaviour.
+    metrics_every: int = 1
+    fused_adamw: bool = False
+    cudnn_benchmark: bool = False
+    tf32: bool = False
+    eval_max_batches: int = 0
+    # v2 Phase 1 conditioning architecture (default-off)
+    film_conditioning: bool = False
+    bottleneck_attention: bool = False
+    structured_field_dropout_rates: dict[str, float] | None = None
+    # v2 Phase 2 palette/index auxiliary heads (default-off)
+    index_head_loss_weight: float = 0.0
+    palette_head_loss_weight: float = 0.0
+    palette_presence_loss_weight: float = 0.0
+    index_head_warmup_steps: int = 0
+    palette_head_use_gt_palette_prob: float = 1.0
 
 
 MICRO_OVERFIT_STEPS_PER_SPRITE = 188
@@ -629,6 +646,19 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
             amp=bool(config.amp),
             lr_schedule=str(config.lr_schedule),
             lr_warmup_steps=int(config.lr_warmup_steps),
+            metrics_every=int(config.metrics_every),
+            fused_adamw=bool(config.fused_adamw),
+            cudnn_benchmark=bool(config.cudnn_benchmark),
+            tf32=bool(config.tf32),
+            eval_max_batches=int(config.eval_max_batches),
+            film_conditioning=bool(config.film_conditioning),
+            bottleneck_attention=bool(config.bottleneck_attention),
+            structured_field_dropout_rates=config.structured_field_dropout_rates,
+            index_head_loss_weight=float(config.index_head_loss_weight),
+            palette_head_loss_weight=float(config.palette_head_loss_weight),
+            palette_presence_loss_weight=float(config.palette_presence_loss_weight),
+            index_head_warmup_steps=int(config.index_head_warmup_steps),
+            palette_head_use_gt_palette_prob=float(config.palette_head_use_gt_palette_prob),
         )
     )
     final_sample_checkpoint = train_dir / ("checkpoint_last_ema.pt" if config.sample_ema else "checkpoint_last.pt")
