@@ -9,7 +9,7 @@ import pytest
 torch = pytest.importorskip("torch", exc_type=ImportError)
 
 from spritelab.training.cli import main as train_cli
-from spritelab.training.generator_models import TinyCaptionSpriteGenerator
+from spritelab.training.generator_challenger import RectifiedFlowUNet
 from spritelab.training.prompt_sensitivity import (
     PromptSensitivityConfig,
     discover_prompt_pairs,
@@ -31,19 +31,21 @@ def _fake_checkpoint(path: Path) -> Path:
         ],
         max_length=8,
     )
-    model = TinyCaptionSpriteGenerator(
+    model = RectifiedFlowUNet(
         vocab_size=len(tokenizer),
         embed_dim=8,
-        latent_dim=4,
-        hidden_channels=8,
+        base_channels=16,
+        channel_mults=(1,),
+        res_blocks_per_level=1,
         pad_token_id=tokenizer.pad_id,
     )
     torch.save(
         {
+            "model_type": "generator_challenger",
             "model_state_dict": model.state_dict(),
             "model_config": model.config(),
             "vocab": tokenizer.to_json_dict(),
-            "checkpoint_type": "caption_rgba_generator_v0",
+            "checkpoint_type": "generator_challenger_rectified_flow_v0",
             "conditioning_mode": "caption_semantic",
             "train_config": {"conditioning_mode": "caption_semantic", "semantic_max_length": 12},
             "step": 0,

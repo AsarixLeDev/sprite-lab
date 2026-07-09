@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pytest
 from PIL import Image
 
 from spritelab.training.cli import main as train_cli
@@ -252,52 +251,3 @@ def test_prompt_faithfulness_runs_on_projected_directory(tmp_path: Path) -> None
     )
     assert report["sample_count"] == 1
     assert (out / "prompt_faithfulness_report.json").is_file()
-
-
-def test_sample_generator_projection_disabled_preserves_generated_artifacts(tmp_path: Path) -> None:
-    torch = pytest.importorskip("torch", exc_type=ImportError)
-    from spritelab.training.generator_models import TinyCaptionSpriteGenerator
-    from spritelab.training.sample_generator import SampleGeneratorConfig, run_sample_generator
-    from spritelab.training.tokenization import SpriteTextTokenizer
-
-    tokenizer = SpriteTextTokenizer.build(["red potion"], max_length=8)
-    model = TinyCaptionSpriteGenerator(
-        vocab_size=len(tokenizer),
-        embed_dim=8,
-        latent_dim=4,
-        hidden_channels=8,
-        pad_token_id=tokenizer.pad_id,
-    )
-    checkpoint = tmp_path / "checkpoint.pt"
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "model_config": model.config(),
-            "vocab": tokenizer.to_json_dict(),
-            "checkpoint_type": "caption_rgba_generator_v0",
-            "step": 0,
-        },
-        checkpoint,
-    )
-    prompts = _prompts(tmp_path / "sample_prompts.jsonl")
-    base_kwargs = {
-        "checkpoint": checkpoint,
-        "prompts": prompts,
-        "max_samples": 1,
-        "max_colors": 8,
-        "device": "cpu",
-        "seed": 123,
-        "noise_seed": 2000,
-        "batch_size": 1,
-    }
-    out_a = tmp_path / "generated_a"
-    out_b = tmp_path / "generated_b"
-    run_sample_generator(SampleGeneratorConfig(out_dir=out_a, **base_kwargs))
-    run_sample_generator(SampleGeneratorConfig(out_dir=out_b, project_palette=False, **base_kwargs))
-
-    assert (out_a / "generated_manifest.jsonl").read_text(encoding="utf-8") == (
-        out_b / "generated_manifest.jsonl"
-    ).read_text(encoding="utf-8")
-    manifest = json.loads((out_a / "generated_manifest.jsonl").read_text(encoding="utf-8").splitlines()[0])
-    for rel in manifest["paths"].values():
-        assert (out_a / rel).read_bytes() == (out_b / rel).read_bytes()

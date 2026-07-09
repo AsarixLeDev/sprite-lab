@@ -28,19 +28,8 @@ from spritelab.training.prompt_faithfulness import PromptFaithfulnessConfig, run
 from spritelab.training.prompt_records import read_prompt_records
 from spritelab.training.prompt_sensitivity import PromptSensitivityConfig, run_prompt_sensitivity
 from spritelab.training.rgba import npz_row_to_rgba
-from spritelab.training.sample_generator import SampleGeneratorConfig, run_sample_generator
 from spritelab.training.source_match_review import SourceMatchReviewConfig, run_source_match_review
 from spritelab.training.structured_conditioning import structured_prompt_summary
-from spritelab.training.train_generator import GeneratorTrainConfig, run_generator_training
-
-
-@dataclass(frozen=True)
-class RegressionGeneratorAuditConfig:
-    dataset: Path
-    training_manifest: Path
-    out_dir: Path
-    device: str = "cpu"
-    seed: int = 20260706
 
 
 @dataclass(frozen=True)
@@ -182,45 +171,6 @@ def default_micro_overfit_steps(
     return max(int(minimum_steps), raw_steps)
 
 
-REGRESSION_SPECS: tuple[dict[str, Any], ...] = (
-    {
-        "name": "overfit_16_sprites_no_margin",
-        "count": 16,
-        "steps": 3000,
-        "margin": False,
-        "batch_size": 8,
-        "step_count_source": "explicit_regression_specific",
-        "budget_note": "Regression-specific explicit budget retained for continuity.",
-    },
-    {
-        "name": "overfit_32_sprites_no_margin",
-        "count": 32,
-        "steps": 3000,
-        "margin": False,
-        "batch_size": 8,
-        "step_count_source": "explicit_regression_specific",
-        "budget_note": "Regression-specific explicit budget retained for continuity.",
-    },
-    {
-        "name": "overfit_32_sprites_with_margin",
-        "count": 32,
-        "steps": 3000,
-        "margin": True,
-        "batch_size": 8,
-        "step_count_source": "explicit_regression_specific",
-        "budget_note": "Regression-specific explicit budget retained for continuity.",
-    },
-    {
-        "name": "overfit_64_sprites_with_margin",
-        "count": 64,
-        "steps": 5000,
-        "margin": True,
-        "batch_size": 16,
-        "step_count_source": "explicit_regression_specific",
-        "budget_note": "Regression-specific explicit budget retained for continuity.",
-    },
-)
-
 CHALLENGER_SPECS: tuple[dict[str, Any], ...] = (
     {"name": "overfit_16_sprites", "count": 16, "batch_size": 8},
     {"name": "overfit_32_sprites", "count": 32, "batch_size": 8},
@@ -253,128 +203,6 @@ def _resolve_micro_overfit_budget(spec: Mapping[str, Any]) -> dict[str, Any]:
         "default_step_rounding": MICRO_OVERFIT_STEP_ROUNDING if count is not None else None,
         "budget_note": spec.get("budget_note"),
     }
-
-
-def run_regression_generator_audit(config: RegressionGeneratorAuditConfig) -> dict[str, Any]:
-    out_dir = Path(config.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    rows = read_jsonl(config.training_manifest)
-    runs = []
-    for spec in REGRESSION_SPECS:
-        budget = _resolve_micro_overfit_budget(spec)
-        selection = select_overfit_subset(
-            rows,
-            count=int(spec["count"]),
-            split="train",
-            seed=int(config.seed),
-            stratify="category",
-        )
-        prompt_file = out_dir / "prompts" / f"{spec['name']}.jsonl"
-        _write_subset_prompts(prompt_file, selection)
-        run_dir = out_dir / "runs" / str(spec["name"])
-        sprite_id_file = _write_overfit_sprite_id_file(
-            run_dir / "overfit_sprite_ids.json",
-            selection,
-            audit_type="regression_generator",
-            run_name=str(spec["name"]),
-            training_manifest=config.training_manifest,
-        )
-        generated_dir = out_dir / "generated" / str(spec["name"])
-        margin = bool(spec["margin"])
-        train_report = run_generator_training(
-            GeneratorTrainConfig(
-                dataset_dir=config.dataset,
-                training_manifest=config.training_manifest,
-                out_dir=run_dir,
-                batch_size=int(spec["batch_size"]),
-                max_steps=int(budget["steps"]),
-                device=config.device,
-                seed=int(config.seed),
-                sample_every=0,
-                save_every=0,
-                conditioning_mode="caption_semantic",
-                max_train_sprites=None,
-                sprite_id_list=sprite_id_file,
-                overfit_split="train",
-                validation_mode="same",
-                border_alpha_weight=0.5 if margin else 0.0,
-                center_weight=0.05 if margin else 0.0,
-                margin_band_weight=0.1 if margin else 0.0,
-                margin_band_size=1,
-            )
-        )
-        prompt_sprite_ids = _prompt_sprite_ids(prompt_file)
-        subset_check = _assert_overfit_subset_matches(
-            train_report,
-            prompt_sprite_ids,
-            run_name=str(spec["name"]),
-        )
-        sample_report = run_sample_generator(
-            SampleGeneratorConfig(
-                checkpoint=run_dir / "checkpoint_last.pt",
-                prompts=prompt_file,
-                out_dir=generated_dir,
-                max_samples=int(spec["count"]),
-                device=config.device,
-                seed=int(config.seed),
-                contact_sheet_labels="prompt_and_seed",
-            )
-        )
-        generated_subset_check = _assert_generated_targets_match_prompts(
-            generated_dir,
-            prompt_sprite_ids,
-            run_name=str(spec["name"]),
-        )
-        qa = qa_generated_sprites(generated_dir).to_json_dict()
-        review = review_generated_sprites(
-            GeneratedReviewConfig(
-                generated_dir=generated_dir,
-                out=generated_dir / "generated_review_report.md",
-                out_json=generated_dir / "generated_review_report.json",
-                out_dir=generated_dir / "review",
-                group_by="category",
-                compare_raw_indexed=True,
-            )
-        ).report
-        source_match = run_source_match_review(
-            SourceMatchReviewConfig(
-                generated=generated_dir,
-                dataset=config.dataset,
-                training_manifest=config.training_manifest,
-                out=generated_dir / "source_match",
-            )
-        )
-        source_match_subset_check = _assert_source_match_targets_match_prompts(
-            source_match,
-            prompt_sprite_ids,
-            run_name=str(spec["name"]),
-        )
-        runs.append(
-            _audit_run_summary(
-                spec,
-                budget=budget,
-                train_report=train_report,
-                sample_report=sample_report,
-                qa=qa,
-                review=review,
-                source_match=source_match,
-                overfit_subset=subset_check,
-                generated_target_subset=generated_subset_check,
-                source_match_target_subset=source_match_subset_check,
-                overfit_sprite_id_file=sprite_id_file,
-            )
-        )
-    report = {
-        "audit_type": "regression_generator",
-        "dataset": str(config.dataset),
-        "training_manifest": str(config.training_manifest),
-        "seed": int(config.seed),
-        "runs": runs,
-        "decision": _regression_decision(runs),
-        "config": {key: _jsonable(value) for key, value in asdict(config).items()},
-    }
-    _write_audit_report(out_dir, report, filename="audit_report")
-    return report
 
 
 def run_challenger_generator_audit(config: ChallengerGeneratorAuditConfig) -> dict[str, Any]:
@@ -3451,19 +3279,6 @@ def _run_status(
     if float(alpha) >= 0.85 and float(rgb_mae) <= 0.15 and float(near) >= 0.45:
         return "warn"
     return "fail"
-
-
-def _regression_decision(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    small = [run for run in runs if run.get("sprite_count") in (16, 32)]
-    can_overfit = any(str(run.get("status")) == "pass" for run in small)
-    return {
-        "can_micro_overfit": can_overfit,
-        "recommendation": (
-            "full-v4 failure is likely data/regularization/capacity/conditioning limited"
-            if can_overfit
-            else "regression architecture or objective is too weak for crisp memorization"
-        ),
-    }
 
 
 def _challenger_decision(runs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

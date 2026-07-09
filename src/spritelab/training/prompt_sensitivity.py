@@ -21,11 +21,8 @@ except ImportError:  # pragma: no cover - exercised when torch is absent or brok
     torch = None  # type: ignore[assignment]
 
 from spritelab.training.checkpoint_io import load_checkpoint as _load_checkpoint
-from spritelab.training.checkpoint_io import tokenizer_from_checkpoint as _tokenizer_from_checkpoint
 from spritelab.training.conditioning import (
     apply_conditioning_mode,
-    checkpoint_conditioning_mode,
-    checkpoint_semantic_max_length,
 )
 from spritelab.training.device import resolve_device
 from spritelab.training.framing_metrics import image_to_rgba_array
@@ -35,7 +32,6 @@ from spritelab.training.generated_canonicalizer import (
     write_generated_sprite_artifacts,
     write_generation_reports,
 )
-from spritelab.training.generator_models import TinyCaptionSpriteGenerator
 from spritelab.training.prompt_records import read_prompt_records
 from spritelab.training.structured_conditioning import (
     MULTI_HOT_FIELDS,
@@ -106,24 +102,20 @@ def run_prompt_sensitivity(config: PromptSensitivityConfig) -> dict[str, Any]:
     device = resolve_device(config.device)
 
     ckpt = _load_checkpoint(config.checkpoint)
-    if str(ckpt.get("model_type") or "") == "generator_challenger":
-        from spritelab.training.generator_challenger import load_challenger_prompt_adapter
-
-        model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_prompt_adapter(
-            ckpt,
-            device=device,
-            steps=30,
-            cfg_scale=1.0,
+    if str(ckpt.get("model_type") or "") != "generator_challenger":
+        raise ValueError(
+            f"Unsupported checkpoint model_type={ckpt.get('model_type')!r}. "
+            "Prompt sensitivity requires a generator_challenger checkpoint."
         )
-        structured_vocab = getattr(model, "structured_vocab", None)
-    else:
-        tokenizer = _tokenizer_from_checkpoint(ckpt)
-        conditioning_mode = checkpoint_conditioning_mode(ckpt)
-        semantic_max_length = checkpoint_semantic_max_length(ckpt)
-        model = TinyCaptionSpriteGenerator(**dict(ckpt["model_config"])).to(device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        model.eval()
-        structured_vocab = None
+    from spritelab.training.generator_challenger import load_challenger_prompt_adapter
+
+    model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_prompt_adapter(
+        ckpt,
+        device=device,
+        steps=30,
+        cfg_scale=1.0,
+    )
+    structured_vocab = getattr(model, "structured_vocab", None)
 
     prompts = read_prompt_records(config.prompts, max_records=config.max_prompts)
     if not prompts:
@@ -445,7 +437,7 @@ def format_prompt_sensitivity_markdown(report: Mapping[str, Any]) -> str:
 
 def _generate_prompt_set(
     *,
-    model: TinyCaptionSpriteGenerator,
+    model: Any,
     tokenizer: Any,
     prompt_records: Sequence[Mapping[str, Any]],
     out_dir: Path,
@@ -546,7 +538,7 @@ def _generate_prompt_set(
 
 def _generate_prompt_pairs(
     *,
-    model: TinyCaptionSpriteGenerator,
+    model: Any,
     tokenizer: Any,
     pairs: Sequence[Mapping[str, Any]],
     out_dir: Path,

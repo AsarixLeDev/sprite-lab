@@ -947,7 +947,7 @@ def test_prompt_builder_report_has_coverage_counts(tmp_path: Path) -> None:
 
 
 def test_prompt_builder_rows_are_sampler_compatible(tmp_path: Path) -> None:
-    from spritelab.training.sample_generator import read_prompt_records
+    from spritelab.training.prompt_records import read_prompt_records
     from spritelab.training.v2_eval_prompts import V2EvalPromptsConfig, build_v2_eval_prompts
 
     manifest = tmp_path / "manifest.jsonl"

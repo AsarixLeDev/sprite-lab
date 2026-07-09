@@ -11,17 +11,15 @@ from spritelab.training import generator_audits
 from spritelab.training.generator_audits import (
     ChallengerGeneratorAuditConfig,
     FullV4ChallengerAuditConfig,
-    RegressionGeneratorAuditConfig,
     build_balanced_eval_prompts,
     compare_challenger_conditioning_audits,
     decide_full_v4_challenger_audit,
     default_micro_overfit_steps,
     run_challenger_generator_audit,
     run_full_v4_challenger_audit,
-    run_regression_generator_audit,
 )
 from spritelab.training.overfit_subset import read_sprite_id_list
-from spritelab.training.sample_generator import read_prompt_records
+from spritelab.training.prompt_records import read_prompt_records
 
 
 def _write_manifest(path: Path, *, count: int = 6) -> list[dict[str, Any]]:
@@ -59,7 +57,6 @@ def _patch_common_audit_steps(monkeypatch: pytest.MonkeyPatch) -> None:
         )
         return {"sample_count": len(records)}
 
-    monkeypatch.setattr(generator_audits, "run_sample_generator", fake_sample)
     monkeypatch.setattr(generator_audits, "run_sample_generator_challenger", fake_sample)
     monkeypatch.setattr(
         generator_audits,
@@ -1356,45 +1353,6 @@ def test_full_v4_summary_extracts_current_review_schema_variants() -> None:
     assert faithfulness_summary["mean_nearest_source_distance"] == 0.42
 
 
-def test_regression_audit_trains_samples_and_source_matches_same_subset(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manifest = tmp_path / "training_manifest.jsonl"
-    _write_manifest(manifest)
-    _patch_common_audit_steps(monkeypatch)
-    monkeypatch.setattr(
-        generator_audits,
-        "REGRESSION_SPECS",
-        ({"name": "overfit_2", "count": 2, "steps": 1, "margin": False, "batch_size": 2},),
-    )
-    monkeypatch.setattr(generator_audits, "run_generator_training", _train_report_from_sprite_id_list)
-
-    report = run_regression_generator_audit(
-        RegressionGeneratorAuditConfig(
-            dataset=tmp_path / "dataset",
-            training_manifest=manifest,
-            out_dir=tmp_path / "audit",
-            device="cpu",
-            seed=123,
-        )
-    )
-
-    run = report["runs"][0]
-    persisted = json.loads((tmp_path / "audit" / "runs" / "overfit_2" / "overfit_sprite_ids.json").read_text())
-    assert run["subset_equality"] is True
-    assert run["overfit_subset"]["sets_equal"] is True
-    assert run["generated_target_subset"]["sets_equal"] is True
-    assert run["source_match_target_subset"]["sets_equal"] is True
-    assert run["steps"] == 1
-    assert run["steps_per_sprite"] == 0.5
-    assert run["train_row_count"] == 2
-    assert run["step_count_source"] == "explicit"
-    assert run["step_count_defaulted_from_helper"] is False
-    assert set(run["overfit_subset"]["train_sprite_ids"]) == set(persisted["sprite_ids"])
-    assert set(run["overfit_subset"]["prompt_sprite_ids"]) == set(persisted["sprite_ids"])
-
-
 def test_challenger_audit_trains_samples_and_source_matches_same_subset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1524,46 +1482,3 @@ def test_challenger_audit_explicit_step_override_still_wins(
     assert run["steps_per_sprite"] == 61.5
     assert run["step_count_source"] == "explicit"
     assert run["step_count_defaulted_from_helper"] is False
-
-
-def test_audit_fails_before_sampling_when_train_and_prompt_subsets_differ(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manifest = tmp_path / "training_manifest.jsonl"
-    _write_manifest(manifest)
-    sample_called = False
-    _patch_common_audit_steps(monkeypatch)
-    monkeypatch.setattr(
-        generator_audits,
-        "REGRESSION_SPECS",
-        ({"name": "overfit_2", "count": 2, "steps": 1, "margin": False, "batch_size": 2},),
-    )
-
-    def fake_train(config: Any) -> dict[str, Any]:
-        sprite_ids = read_sprite_id_list(config.sprite_id_list)
-        return {
-            "final_train_loss": 0.1,
-            "loss_decrease": 0.9,
-            "overfit_subset": {"sprite_ids": sprite_ids[1:]},
-        }
-
-    def fake_sample(config: Any) -> dict[str, Any]:
-        nonlocal sample_called
-        sample_called = True
-        return {"sample_count": 0}
-
-    monkeypatch.setattr(generator_audits, "run_generator_training", fake_train)
-    monkeypatch.setattr(generator_audits, "run_sample_generator", fake_sample)
-
-    with pytest.raises(ValueError, match="overfit subset mismatch"):
-        run_regression_generator_audit(
-            RegressionGeneratorAuditConfig(
-                dataset=tmp_path / "dataset",
-                training_manifest=manifest,
-                out_dir=tmp_path / "audit",
-                device="cpu",
-                seed=123,
-            )
-        )
-    assert sample_called is False

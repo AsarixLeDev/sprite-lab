@@ -13,7 +13,7 @@ from spritelab.dataset_maker.training_manifest import build_training_manifest, w
 from spritelab.training import generator_challenger, v1_gallery
 from spritelab.training.cli import main as train_cli
 from spritelab.training.generator_challenger import ChallengerTrainConfig, run_challenger_training
-from spritelab.training.sample_generator import read_prompt_records
+from spritelab.training.prompt_records import read_prompt_records
 from spritelab.training.v1_gallery import (
     BuildV1GalleryConfig,
     build_default_v1_gallery_prompts,

@@ -439,59 +439,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     inspect.add_argument("--batch-size", type=int, default=4)
     inspect.add_argument("--max-records", type=int)
 
-    baseline = subparsers.add_parser("baseline", help="Train the conditional autoencoder baseline.")
-    baseline.add_argument("--dataset", required=True, type=Path, dest="dataset_dir")
-    baseline.add_argument("--training-manifest", required=True, type=Path)
-    baseline.add_argument("--out", required=True, type=Path, dest="out_dir")
-    baseline.add_argument("--batch-size", type=int, default=16)
-    baseline.add_argument("--max-steps", type=int, default=200)
-    baseline.add_argument("--learning-rate", type=float, default=1e-3)
-    baseline.add_argument("--device", default="cpu")
-    baseline.add_argument("--seed", type=int, default=1337)
-    baseline.add_argument("--overfit-batches", type=int, default=0)
-    baseline.add_argument("--max-records", type=int)
-    baseline.add_argument("--num-workers", type=int, default=0)
-    baseline.add_argument("--amp", action="store_true", default=False, help="Enable bf16 autocast (CUDA only).")
-    baseline.add_argument("--grad-clip", type=float, default=0.0, help="Clip gradient norm; 0 disables.")
-    baseline.add_argument("--lr-schedule", choices=["none", "cosine"], default="none")
-    baseline.add_argument("--lr-warmup-steps", type=int, default=0)
-
-    generator = subparsers.add_parser("generator", help="Train the caption-conditioned RGBA generator.")
-    generator.add_argument("--dataset", required=True, type=Path, dest="dataset_dir")
-    generator.add_argument("--training-manifest", required=True, type=Path)
-    generator.add_argument("--out", required=True, type=Path, dest="out_dir")
-    generator.add_argument("--split", default="train")
-    generator.add_argument("--batch-size", type=int, default=32)
-    generator.add_argument("--max-steps", type=int, default=1000)
-    generator.add_argument("--lr", "--learning-rate", type=float, default=1e-3, dest="learning_rate")
-    generator.add_argument("--device", default="cpu")
-    generator.add_argument("--seed", type=int, default=123)
-    generator.add_argument("--overfit-batches", type=int, default=0)
-    generator.add_argument("--num-workers", type=int, default=0)
-    generator.add_argument("--latent-dim", type=int, default=32)
-    generator.add_argument("--embed-dim", type=int, default=32)
-    generator.add_argument("--hidden-channels", type=int, default=48)
-    generator.add_argument("--sample-every", type=int, default=20)
-    generator.add_argument("--save-every", type=int, default=100)
-    generator.add_argument("--caption-policy-filter")
-    generator.add_argument("--max-records", type=int)
-    generator.add_argument("--conditioning-mode", choices=CONDITIONING_MODES, default=DEFAULT_CONDITIONING_MODE)
-    generator.add_argument("--border-alpha-weight", type=float, default=0.0)
-    generator.add_argument("--alpha-coverage-weight", type=float, default=0.0)
-    generator.add_argument("--alpha-coverage-min", type=float)
-    generator.add_argument("--alpha-coverage-max", type=float)
-    generator.add_argument("--center-weight", type=float, default=0.0)
-    generator.add_argument("--margin-band-weight", type=float, default=0.0)
-    generator.add_argument("--margin-band-size", type=int, default=2)
-    generator.add_argument("--max-train-sprites", type=int)
-    generator.add_argument("--sprite-id-list", type=Path)
-    generator.add_argument("--overfit-split")
-    generator.add_argument("--validation-mode", choices=["auto", "val", "same", "none"], default="auto")
-    generator.add_argument("--amp", action="store_true", default=False, help="Enable bf16 autocast (CUDA only).")
-    generator.add_argument("--grad-clip", type=float, default=0.0, help="Clip gradient norm; 0 disables.")
-    generator.add_argument("--lr-schedule", choices=["none", "cosine"], default="none")
-    generator.add_argument("--lr-warmup-steps", type=int, default=0)
-
     make_overfit = subparsers.add_parser("make-overfit-subset", help="Write a deterministic sprite-id subset.")
     make_overfit.add_argument("--dataset", required=True, type=Path)
     make_overfit.add_argument("--training-manifest", required=True, type=Path)
@@ -500,51 +447,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     make_overfit.add_argument("--seed", type=int, default=123)
     make_overfit.add_argument("--split", default="train")
     make_overfit.add_argument("--stratify")
-
-    eval_parser = subparsers.add_parser("eval-baseline", help="Evaluate a baseline checkpoint.")
-    eval_parser.add_argument("--dataset", required=True, type=Path)
-    eval_parser.add_argument("--training-manifest", required=True, type=Path)
-    eval_parser.add_argument("--checkpoint", required=True, type=Path)
-    eval_parser.add_argument("--split", default="val")
-    eval_parser.add_argument("--out", required=True, type=Path)
-    eval_parser.add_argument("--batch-size", type=int, default=16)
-    eval_parser.add_argument("--device", default="cpu")
-    eval_parser.add_argument("--max-records", type=int)
-
-    eval_generator = subparsers.add_parser("eval-generator", help="Evaluate or sample a generator checkpoint.")
-    eval_generator.add_argument("--dataset", type=Path)
-    eval_generator.add_argument("--training-manifest", type=Path)
-    eval_generator.add_argument("--checkpoint", required=True, type=Path)
-    eval_generator.add_argument("--split", default="val")
-    eval_generator.add_argument("--prompts", type=Path)
-    eval_generator.add_argument("--out", required=True, type=Path)
-    eval_generator.add_argument("--batch-size", type=int, default=16)
-    eval_generator.add_argument("--device", default="cpu")
-    eval_generator.add_argument("--max-records", type=int)
-
-    sample_generator = subparsers.add_parser("sample-generator", help="Generate and canonicalize sprite samples.")
-    sample_generator.add_argument("--checkpoint", required=True, type=Path)
-    sample_generator.add_argument("--prompts", required=True, type=Path)
-    sample_generator.add_argument("--out", required=True, type=Path, dest="out_dir")
-    sample_generator.add_argument("--max-samples", type=int, default=64)
-    sample_generator.add_argument("--max-colors", type=int, default=32)
-    sample_generator.add_argument("--alpha-threshold", type=float, default=0.5)
-    sample_generator.add_argument("--device", default="cpu")
-    sample_generator.add_argument("--seed", type=int, default=123)
-    sample_generator.add_argument("--noise-seed", type=int)
-    sample_generator.add_argument("--dither", action="store_true", default=False)
-    sample_generator.add_argument("--no-dither", action="store_false", dest="dither")
-    sample_generator.add_argument("--write-raw-rgba", action="store_true", dest="write_raw_rgba", default=True)
-    sample_generator.add_argument("--no-write-raw-rgba", action="store_false", dest="write_raw_rgba")
-    sample_generator.add_argument("--write-hard-rgba", action="store_true", dest="write_hard_rgba", default=True)
-    sample_generator.add_argument("--no-write-hard-rgba", action="store_false", dest="write_hard_rgba")
-    sample_generator.add_argument("--batch-size", type=int, default=16)
-    sample_generator.add_argument(
-        "--contact-sheet-labels",
-        choices=["prompt", "prompt_and_seed", "prompt_and_nearest_source"],
-        default="prompt",
-    )
-    _add_palette_projection_sampling_arguments(sample_generator)
 
     project_palette = subparsers.add_parser(
         "project-generated-palette",
@@ -815,15 +717,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         choices=["auto", "all", "deterministic_first_n", "deterministic_balanced"],
         help="Deterministic source-candidate selection strategy.",
     )
-
-    audit_regression = subparsers.add_parser(
-        "audit-regression-generator", help="Run regression generator overfit audit."
-    )
-    audit_regression.add_argument("--dataset", required=True, type=Path)
-    audit_regression.add_argument("--training-manifest", required=True, type=Path)
-    audit_regression.add_argument("--out", required=True, type=Path, dest="out_dir")
-    audit_regression.add_argument("--device", default="cpu")
-    audit_regression.add_argument("--seed", type=int, default=20260706)
 
     audit_challenger = subparsers.add_parser("audit-challenger-generator", help="Run challenger generator audit.")
     audit_challenger.add_argument("--dataset", required=True, type=Path)
@@ -1204,79 +1097,6 @@ def main(argv: Sequence[str] | None = None) -> None:
                 max_records=parsed.max_records,
             )
             print_inspection(summary)
-        elif parsed.subcommand == "baseline":
-            from spritelab.training.train_baseline import BaselineTrainConfig, run_baseline_training
-
-            report = run_baseline_training(
-                BaselineTrainConfig(
-                    dataset_dir=parsed.dataset_dir,
-                    training_manifest=parsed.training_manifest,
-                    out_dir=parsed.out_dir,
-                    batch_size=parsed.batch_size,
-                    max_steps=parsed.max_steps,
-                    learning_rate=parsed.learning_rate,
-                    device=parsed.device,
-                    seed=parsed.seed,
-                    overfit_batches=parsed.overfit_batches,
-                    max_records=parsed.max_records,
-                    num_workers=parsed.num_workers,
-                    amp=parsed.amp,
-                    grad_clip=parsed.grad_clip,
-                    lr_schedule=parsed.lr_schedule,
-                    lr_warmup_steps=parsed.lr_warmup_steps,
-                )
-            )
-            print(f"Initial train loss: {report['initial_train_loss']:.6f}")
-            print(f"Final train loss: {report['final_train_loss']:.6f}")
-            if report["val_loss"] is not None:
-                print(f"Val loss: {report['val_loss']:.6f}")
-            print(f"Outputs written to {parsed.out_dir}")
-        elif parsed.subcommand == "generator":
-            from spritelab.training.train_generator import GeneratorTrainConfig, run_generator_training
-
-            report = run_generator_training(
-                GeneratorTrainConfig(
-                    dataset_dir=parsed.dataset_dir,
-                    training_manifest=parsed.training_manifest,
-                    out_dir=parsed.out_dir,
-                    split=parsed.split,
-                    batch_size=parsed.batch_size,
-                    max_steps=parsed.max_steps,
-                    learning_rate=parsed.learning_rate,
-                    device=parsed.device,
-                    seed=parsed.seed,
-                    overfit_batches=parsed.overfit_batches,
-                    num_workers=parsed.num_workers,
-                    latent_dim=parsed.latent_dim,
-                    embed_dim=parsed.embed_dim,
-                    hidden_channels=parsed.hidden_channels,
-                    sample_every=parsed.sample_every,
-                    save_every=parsed.save_every,
-                    caption_policy_filter=parsed.caption_policy_filter,
-                    max_records=parsed.max_records,
-                    conditioning_mode=parsed.conditioning_mode,
-                    border_alpha_weight=parsed.border_alpha_weight,
-                    alpha_coverage_weight=parsed.alpha_coverage_weight,
-                    alpha_coverage_min=parsed.alpha_coverage_min,
-                    alpha_coverage_max=parsed.alpha_coverage_max,
-                    center_weight=parsed.center_weight,
-                    margin_band_weight=parsed.margin_band_weight,
-                    margin_band_size=parsed.margin_band_size,
-                    max_train_sprites=parsed.max_train_sprites,
-                    sprite_id_list=parsed.sprite_id_list,
-                    overfit_split=parsed.overfit_split,
-                    validation_mode=parsed.validation_mode,
-                    amp=parsed.amp,
-                    grad_clip=parsed.grad_clip,
-                    lr_schedule=parsed.lr_schedule,
-                    lr_warmup_steps=parsed.lr_warmup_steps,
-                )
-            )
-            print(f"Initial train loss: {report['initial_train_loss']:.6f}")
-            print(f"Final train loss: {report['final_train_loss']:.6f}")
-            if report["val_loss"] is not None:
-                print(f"Val loss: {report['val_loss']:.6f}")
-            print(f"Outputs written to {parsed.out_dir}")
         elif parsed.subcommand == "make-overfit-subset":
             from spritelab.training.overfit_subset import make_overfit_subset
 
@@ -1292,73 +1112,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"Selected sprites: {report['selected_sprite_count']}")
             print(f"Selected rows: {report['selected_row_count']}")
             print(f"Output written to {parsed.out}")
-        elif parsed.subcommand == "eval-baseline":
-            from spritelab.training.eval_baseline import evaluate_baseline_checkpoint
-
-            report = evaluate_baseline_checkpoint(
-                dataset_dir=parsed.dataset,
-                training_manifest=parsed.training_manifest,
-                checkpoint=parsed.checkpoint,
-                split=parsed.split,
-                out_dir=parsed.out,
-                batch_size=parsed.batch_size,
-                device=parsed.device,
-                max_records=parsed.max_records,
-            )
-            print(f"Evaluated {report['records']} {report['split']} records.")
-            print(f"Loss: {report['loss']:.6f}")
-            print(f"Outputs written to {parsed.out}")
-        elif parsed.subcommand == "eval-generator":
-            from spritelab.training.eval_generator import evaluate_generator_checkpoint
-
-            report = evaluate_generator_checkpoint(
-                dataset_dir=parsed.dataset,
-                training_manifest=parsed.training_manifest,
-                checkpoint=parsed.checkpoint,
-                split=parsed.split,
-                prompts=parsed.prompts,
-                out_dir=parsed.out,
-                batch_size=parsed.batch_size,
-                device=parsed.device,
-                max_records=parsed.max_records,
-            )
-            if report["loss"] is not None:
-                print(f"Evaluated {report['records']} {report['split']} records.")
-                print(f"Loss: {report['loss']:.6f}")
-            if report["prompt_count"]:
-                print(
-                    f"Generated {report['prompt_samples_written']} prompt samples "
-                    f"from {report['prompt_count']} prompts."
-                )
-            print(f"Outputs written to {parsed.out}")
-        elif parsed.subcommand == "sample-generator":
-            from spritelab.training.sample_generator import SampleGeneratorConfig, run_sample_generator
-
-            report = run_sample_generator(
-                SampleGeneratorConfig(
-                    checkpoint=parsed.checkpoint,
-                    prompts=parsed.prompts,
-                    out_dir=parsed.out_dir,
-                    max_samples=parsed.max_samples,
-                    max_colors=parsed.max_colors,
-                    alpha_threshold=parsed.alpha_threshold,
-                    device=parsed.device,
-                    seed=parsed.seed,
-                    noise_seed=parsed.noise_seed,
-                    dither=parsed.dither,
-                    write_raw_rgba=parsed.write_raw_rgba,
-                    write_hard_rgba=parsed.write_hard_rgba,
-                    batch_size=parsed.batch_size,
-                    contact_sheet_labels=parsed.contact_sheet_labels,
-                    project_palette=parsed.project_palette,
-                    project_palette_target_colors=parsed.project_palette_target_colors,
-                    project_palette_min_pixel_share=parsed.project_palette_min_pixel_share,
-                    project_palette_method=parsed.project_palette_method,
-                )
-            )
-            print(f"Generated samples: {report['sample_count']}")
-            print(f"Max visible colors: {report['max_visible_color_count']}")
-            print(f"Outputs written to {parsed.out_dir}")
         elif parsed.subcommand == "project-generated-palette":
             from spritelab.training.palette_projection import PaletteProjectionConfig, project_generated_palette
 
@@ -1512,16 +1265,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"Prompt faithfulness samples: {report['sample_count']}")
             print(f"Repeated silhouette rate: {report.get('repeated_silhouette_rate')}")
             print(f"Outputs written to {parsed.out}")
-        elif parsed.subcommand == "audit-regression-generator":
-            from spritelab.training.generator_audits import (
-                RegressionGeneratorAuditConfig,
-                run_regression_generator_audit,
-            )
-
-            report = run_regression_generator_audit(RegressionGeneratorAuditConfig(**_parsed_config_kwargs(parsed)))
-            print(f"Runs completed: {len(report['runs'])}")
-            print(f"Recommendation: {report['decision']['recommendation']}")
-            print(f"Outputs written to {parsed.out_dir}")
         elif parsed.subcommand == "audit-challenger-generator":
             from spritelab.training.generator_audits import (
                 ChallengerGeneratorAuditConfig,
