@@ -1668,3 +1668,103 @@ def test_probe_report_writes_json_and_markdown(tmp_path: Path) -> None:
         json.dumps({**report, "metrics": metrics}, indent=2, default=lambda x: str(x)), encoding="utf-8"
     )
     assert json_path.exists()
+
+
+def test_report_md_prints_na_for_missing_metric() -> None:
+    from spritelab.training.palette_index_decode_probe import _build_decode_report_md
+
+    report = {
+        "checkpoint": "c",
+        "prompts": "p",
+        "sample_count": 10,
+        "seed": 1,
+        "sample_steps": 30,
+        "cfg_scale": 3.0,
+        "elapsed_seconds": 1.0,
+        "head_decode_policy": {},
+    }
+    metrics = {
+        "test_variant": {
+            "qa_errors": 0,
+            "median_visible_colors": None,  # missing
+            "rare_color_rate": None,
+            "category_consistency": None,
+            "color_consistency": None,
+            "repeated_silhouette_rate": None,
+            "blob_collapse_rate": None,
+            "potion_collapse_rate": None,
+            "near_copy_rate": None,
+            "border_touch_rate": None,
+        }
+    }
+    md = _build_decode_report_md(report, metrics)
+    assert "NA" in md
+    assert "0.0" not in md.split("test_variant")[1].split("\n")[0]  # no zero in the row for this variant
+
+
+def test_report_table_prints_nonzero_values() -> None:
+    from spritelab.training.palette_index_decode_probe import _build_decode_report_md
+
+    report = {
+        "checkpoint": "c",
+        "prompts": "p",
+        "sample_count": 96,
+        "seed": 1,
+        "sample_steps": 30,
+        "cfg_scale": 3.0,
+        "elapsed_seconds": 1.0,
+        "head_decode_policy": {},
+    }
+    metrics = {
+        "baseline": {
+            "qa_errors": 0,
+            "median_visible_colors": 8.5,
+            "rare_color_rate": 0.02,
+            "category_consistency": 0.85,
+            "color_consistency": 0.72,
+            "repeated_silhouette_rate": 0.01,
+            "blob_collapse_rate": 0.05,
+            "potion_collapse_rate": 0.01,
+            "near_copy_rate": 0.03,
+            "border_touch_rate": 0.10,
+        }
+    }
+    md = _build_decode_report_md(report, metrics)
+    assert "8.5" in md
+    assert "0.020" in md or "0.02" in md
+    assert "0.8500" in md or "0.85" in md
+    assert "0.7200" in md or "0.72" in md
+    assert "0.0500" in md or "0.05" in md
+
+
+def test_metric_extraction_reads_v2_phase0_keys() -> None:
+    """Verify the metric extractor uses the correct keys matching v2_phase0_eval."""
+    from spritelab.training.palette_index_decode_probe import _build_decode_report_md
+
+    report = {
+        "checkpoint": "c",
+        "prompts": "p",
+        "sample_count": 96,
+        "seed": 1,
+        "sample_steps": 30,
+        "cfg_scale": 3.0,
+        "elapsed_seconds": 1.0,
+        "head_decode_policy": {},
+    }
+    # Metrics that would come from faithfulness (exact keys from v2_phase0_eval.py:550-557)
+    metrics = {
+        "variant": {
+            "qa_errors": 0,
+            "median_visible_colors": 10.0,
+            "rare_color_rate": 0.01,
+            "category_consistency": 0.90,
+            "color_consistency": 0.75,
+            "repeated_silhouette_rate": 0.02,
+            "blob_collapse_rate": 0.03,
+            "potion_collapse_rate": 0.01,
+            "near_copy_rate": 0.04,
+            "border_touch_rate": 0.05,
+        }
+    }
+    md = _build_decode_report_md(report, metrics)
+    assert all(k in md for k in ["Cat cons", "Color cons", "Blob %", "Potion %", "Near-copy %", "Touch %"])

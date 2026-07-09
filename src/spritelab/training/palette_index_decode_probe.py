@@ -574,24 +574,43 @@ def _run_variant_metrics(vdir: Path, dataset: Path, prompts_path: Path) -> dict[
         pass
 
     overall = review.get("overall", {}) if isinstance(review, dict) else {}
+    warning_counts = overall.get("warning_counts", {}) if isinstance(overall, dict) else {}
+    sample_count = int(overall.get("sample_count", review.get("sample_count", faith.get("sample_count", 1))))
 
-    # Use actual review key names
+    def _rate(count_key: str) -> float | None:
+        count = warning_counts.get(count_key)
+        if count is None:
+            return None
+        return float(count) / max(sample_count, 1)
+
+    def _faith_rate(key: str) -> float | None:
+        val = faith.get(key)
+        return float(val) if val is not None else None
+
+    def _faith_or_overall(faith_key: str, overall_key: str) -> float | None:
+        val = faith.get(faith_key)
+        if val is not None:
+            return float(val)
+        val = overall.get(overall_key)
+        return float(val) if val is not None else None
+
     return {
         "qa_errors": qa_errors,
-        "median_visible_colors": float(
-            overall.get("median_visible_color_count", float(overall.get("median_visible_color_count_before", 0)))
-        ),
-        "rare_color_rate": float(overall.get("rare_color_warning_rate", 0)),
-        "category_consistency": float(
-            faith.get("category_consistency_rate", overall.get("category_consistency_mean", 0))
-        ),
-        "color_consistency": float(faith.get("color_consistency_rate", overall.get("color_consistency_mean", 0))),
-        "repeated_silhouette_rate": float(overall.get("repeated_silhouette_rate", 0)),
-        "blob_collapse_rate": float(overall.get("blob_collapse_rate", 0)),
-        "potion_collapse_rate": float(overall.get("potion_collapse_rate", 0)),
-        "near_copy_rate": float(overall.get("near_copy_rate", 0)),
-        "border_touch_rate": float(overall.get("touches_border_rate", 0)),
-        "nearest_source_distance_p10": float(faith.get("p10_nearest_source_distance", 0)),
+        "sample_count": sample_count,
+        "median_visible_colors": float(overall.get("median_visible_color_count"))
+        if overall.get("median_visible_color_count") is not None
+        else None,
+        "rare_color_rate": _rate("too_many_rare_colors"),
+        "category_consistency": _faith_or_overall("category_consistency_rate", "category_consistency_mean"),
+        "color_consistency": _faith_or_overall("color_consistency_rate", "color_consistency_mean"),
+        "repeated_silhouette_rate": _faith_rate("repeated_silhouette_rate"),
+        "blob_collapse_rate": _faith_rate("generic_blob_collapse_rate"),
+        "potion_collapse_rate": _faith_rate("generic_potion_collapse_rate"),
+        "near_copy_rate": _faith_rate("near_copy_rate"),
+        "border_touch_rate": _rate("touches_border"),
+        "nearest_source_distance_p10": float(faith.get("p10_nearest_source_distance"))
+        if faith.get("p10_nearest_source_distance") is not None
+        else None,
     }
 
 
@@ -640,6 +659,11 @@ def _build_decode_report_md(
     metrics: dict[str, dict[str, Any]],
     deltas: dict[str, list[dict[str, float]]] | None = None,
 ) -> str:
+    def _fmt_md(val: Any, fmt: str) -> str:
+        if val is None:
+            return "NA"
+        return f"{val:{fmt}}"
+
     policy = report.get("head_decode_policy", {})
     lines = [
         "# Palette / Index Decode Probe Report",
@@ -667,26 +691,32 @@ def _build_decode_report_md(
     ]
     for key, m in metrics.items():
         lines.append(
-            f"| `{key}` | {m.get('qa_errors', 0):d} | "
-            f"{m.get('median_visible_colors', 0):.1f} | "
-            f"{m.get('rare_color_rate', 0):.3f} | "
-            f"{m.get('category_consistency', 0):.4f} | "
-            f"{m.get('color_consistency', 0):.4f} | "
-            f"{m.get('repeated_silhouette_rate', 0):.4f} | "
-            f"{m.get('blob_collapse_rate', 0):.4f} | "
-            f"{m.get('potion_collapse_rate', 0):.4f} | "
-            f"{m.get('near_copy_rate', 0):.4f} | "
-            f"{m.get('border_touch_rate', 0):.4f} |"
+            f"| `{key}` | {m.get('qa_errors', 0)} | "
+            f"{_fmt_md(m.get('median_visible_colors'), '.1f')} | "
+            f"{_fmt_md(m.get('rare_color_rate'), '.3f')} | "
+            f"{_fmt_md(m.get('category_consistency'), '.4f')} | "
+            f"{_fmt_md(m.get('color_consistency'), '.4f')} | "
+            f"{_fmt_md(m.get('repeated_silhouette_rate'), '.4f')} | "
+            f"{_fmt_md(m.get('blob_collapse_rate'), '.4f')} | "
+            f"{_fmt_md(m.get('potion_collapse_rate'), '.4f')} | "
+            f"{_fmt_md(m.get('near_copy_rate'), '.4f')} | "
+            f"{_fmt_md(m.get('border_touch_rate'), '.4f')} |"
         )
 
     # Decode-specific stats
-    hd_keys = ["used_index_count_mean", "slot0_pixel_share", "index_entropy_mean", "continuous_alpha_visible_pct"]
-    for hk in hd_keys:
-        vals = {k: m.get(hk, 0) for k, m in metrics.items() if k != "continuous_v1_projected"}
-        if any(v for v in vals.values()):
+    hd_keys = [
+        ("used_index_count_mean", ".1f"),
+        ("slot0_pixel_share", ".4f"),
+        ("index_entropy_mean", ".4f"),
+        ("continuous_alpha_visible_pct", ".4f"),
+    ]
+    for hk, hfmt in hd_keys:
+        vals = {k: m.get(hk) for k, m in metrics.items() if k != "continuous_v1_projected"}
+        vals = {k: v for k, v in vals.items() if v is not None}
+        if vals:
             lines += ["", f"## {hk.replace('_', ' ').title()}", ""]
             for key, val in vals.items():
-                lines.append(f"- `{key}`: {val:.4f}")
+                lines.append(f"- `{key}`: {_fmt_md(val, hfmt)}")
 
     if deltas:
         lines += [
@@ -710,6 +740,7 @@ def _build_decode_report_md(
         "Head decode captures aux outputs on a separate post-sampling model call",
         "at t=0 (clean generated image). The continuous image's alpha mask (threshold 0.5)",
         "is used for head decode variants. Slot 0 is reserved for transparent pixels.",
+        "Metrics use the same keys as v2 Phase 0 eval (review.warning_counts + faithfulness rates).",
         "",
     ]
     return "\n".join(lines) + "\n"
