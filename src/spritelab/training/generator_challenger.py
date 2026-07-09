@@ -1866,10 +1866,14 @@ def integrate_rectified_flow(
 
             effective_color_scale = color_scale
             if start_t > 0.0:
-                if t_value < start_t:
+                # Late-window: active when t <= start_t (closer to clean image).
+                # Flow-time t goes from ~0.017 (near clean) to ~0.983 (near noise).
+                # Ramp window extends toward cleaner t: [start_t - ramp_t, start_t].
+                ramp_start = max(0.0, start_t - ramp_t)
+                if t_value > start_t:
                     effective_color_scale = 0.0
-                elif ramp_t > 0.0 and t_value < start_t + ramp_t:
-                    effective_color_scale = color_scale * ((t_value - start_t) / ramp_t)
+                elif ramp_t > 0.0 and t_value >= ramp_start:
+                    effective_color_scale = color_scale * ((start_t - t_value) / ramp_t)
 
             velocity = v_uncond + base_scale * (v_no_color - v_uncond) + effective_color_scale * color_axis
         elif use_cfg:

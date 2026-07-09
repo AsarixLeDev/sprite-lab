@@ -1900,23 +1900,34 @@ def test_color_axis_rgb_only_preserves_rgb_values() -> None:
 
 
 def test_late_window_schedule() -> None:
-    """color guidance schedule: 0 before start, 1 after start+ramp, linear in ramp."""
+    """Late-window color guidance: active for t <= start_t (closer to clean image).
+    t goes from ~0.017 (near clean) to ~0.983 (near noise).
+    start_t=0.5, ramp_t=0.2: ramp from t=0.5 to t=0.3, fully active for t <= 0.3."""
     start_t = 0.5
     ramp_t = 0.2
 
     def schedule(t_value):
-        if t_value < start_t:
+        ramp_start = max(0.0, start_t - ramp_t)
+        if t_value > start_t:
             return 0.0
-        if ramp_t > 0.0 and t_value < start_t + ramp_t:
-            return (t_value - start_t) / ramp_t
+        if ramp_t > 0.0 and t_value > ramp_start:
+            return (start_t - t_value) / ramp_t
         return 1.0
 
-    assert schedule(0.0) == 0.0
-    assert schedule(0.4) == 0.0
-    assert schedule(0.5) == 0.0
-    assert schedule(0.6) == pytest.approx(0.5)
-    assert schedule(0.7) == pytest.approx(1.0)
-    assert schedule(0.9) == pytest.approx(1.0)
+    assert schedule(0.9) == 0.0  # far noise end
+    assert schedule(0.51) == 0.0  # just past start
+    assert schedule(0.5) == 0.0  # at start (ramp starts decreasing from here)
+    assert schedule(0.4) == pytest.approx(0.5)  # halfway through ramp
+    assert schedule(0.3) == pytest.approx(1.0)  # at ramp end, fully active
+    assert schedule(0.01) == pytest.approx(1.0)  # near clean
+
+    # Hard switch (ramp=0): active for t <= 0.5, inactive for t > 0.5
+    def hard_schedule(t_value):
+        return 0.0 if t_value > 0.5 else 1.0
+
+    assert hard_schedule(0.6) == 0.0
+    assert hard_schedule(0.5) == 1.0
+    assert hard_schedule(0.1) == 1.0
 
 
 def test_object_id_scale_in_structured_embedding() -> None:
