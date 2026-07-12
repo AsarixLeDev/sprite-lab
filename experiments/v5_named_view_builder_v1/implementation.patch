@@ -1,0 +1,171 @@
+diff --git a/src/spritelab/dataset_v5/__init__.py b/src/spritelab/dataset_v5/__init__.py
+index a6cbd28..f432cc8 100644
+--- a/src/spritelab/dataset_v5/__init__.py
++++ b/src/spritelab/dataset_v5/__init__.py
+@@ -1,14 +1,40 @@
+ """Immutable multisource dataset-v5 assembly."""
+
++from importlib import import_module
++from typing import Any
++
+ from spritelab.dataset_v5.builder import BuilderConfig, build_dataset, canonical_rgba_sha256, verify_dataset
+ from spritelab.dataset_v5.policy_v2 import PolicyV2Config, build_policy_preview, verify_policy_preview
+
+ __all__ = [
+     "BuilderConfig",
++    "DatasetV5ViewError",
+     "PolicyV2Config",
+     "build_dataset",
+     "build_policy_preview",
++    "build_view",
+     "canonical_rgba_sha256",
++    "freeze_view",
++    "validate_contract",
+     "verify_dataset",
++    "verify_freeze",
+     "verify_policy_preview",
++    "verify_view",
++    "write_report",
+ ]
++
++_NAMED_VIEW_EXPORTS = {
++    "DatasetV5ViewError",
++    "build_view",
++    "freeze_view",
++    "validate_contract",
++    "verify_freeze",
++    "verify_view",
++    "write_report",
++}
++
++
++def __getattr__(name: str) -> Any:
++    if name not in _NAMED_VIEW_EXPORTS:
++        raise AttributeError(name)
++    return getattr(import_module("spritelab.dataset_v5.named_views"), name)
+diff --git a/src/spritelab/dataset_v5/cli.py b/src/spritelab/dataset_v5/cli.py
+index 1e7c687..6b17fed 100644
+--- a/src/spritelab/dataset_v5/cli.py
++++ b/src/spritelab/dataset_v5/cli.py
+@@ -14,6 +14,16 @@ from spritelab.dataset_v5.policy_v2 import (
+     verify_policy_preview,
+ )
+
++VIEW_NAMES = (
++    "v5_debug",
++    "v5_architecture",
++    "v5_scale_check",
++    "v5_eval_balanced",
++    "v5_source_ood",
++    "v5_open_set",
++    "v5_unlabeled",
++)
++
+
+ def main(argv: list[str] | None = None) -> int:
+     parser = argparse.ArgumentParser(prog="python -m spritelab.dataset_v5.cli")
+@@ -41,7 +51,35 @@ def main(argv: list[str] | None = None) -> int:
+     policy_verify.add_argument("--dataset", required=True)
+     compare = sub.add_parser("compare-policy-previews")
+     compare.add_argument("--dataset", action="append", required=True)
++
++    contract_validate = sub.add_parser("validate-contract", help="Validate the Dataset-v5 named-view contract.")
++    contract_validate.add_argument("--contract-root", type=Path, required=True)
++    contract_validate.add_argument("--output", type=Path)
++
++    view_build = sub.add_parser("build-view", help="Build a deterministic non-production Dataset-v5 named view.")
++    view_build.add_argument("--contract-root", type=Path, required=True)
++    view_build.add_argument("--view", choices=VIEW_NAMES, required=True)
++    view_build.add_argument("--policy", type=Path, required=True)
++    view_build.add_argument("--source-manifest", type=Path, action="append", required=True)
++    view_build.add_argument("--output", type=Path, required=True)
++
++    view_verify = sub.add_parser("verify-view", help="Verify a Dataset-v5 named view without modifying it.")
++    view_verify.add_argument("--contract-root", type=Path, required=True)
++    view_verify.add_argument("--view-root", type=Path, required=True)
++    view_verify.add_argument("--output", type=Path)
++
++    view_freeze = sub.add_parser("freeze-view", help="Freeze a complete, verified Dataset-v5 named view.")
++    view_freeze.add_argument("--contract-root", type=Path, required=True)
++    view_freeze.add_argument("--view-root", type=Path, required=True)
++    view_freeze.add_argument("--approved-decisions", type=Path, required=True)
++    view_freeze.add_argument("--command-line", required=True)
++
++    freeze_verify = sub.add_parser("verify-freeze", help="Verify a frozen Dataset-v5 named view.")
++    freeze_verify.add_argument("--view-root", type=Path, required=True)
++    freeze_verify.add_argument("--output", type=Path)
++
+     args = parser.parse_args(argv)
++
+     if args.command == "build":
+         result = build_dataset(
+             v4_dir=args.v4,
+@@ -62,8 +100,64 @@ def main(argv: list[str] | None = None) -> int:
+         )
+     elif args.command == "verify-policy-preview":
+         result = verify_policy_preview(Path(args.dataset))
+-    else:
++    elif args.command == "compare-policy-previews":
+         result = compare_policy_previews(args.dataset)
++    else:
++        from spritelab.dataset_v5.named_views import (
++            DatasetV5ViewError,
++            build_view,
++            freeze_view,
++            validate_contract,
++            verify_freeze,
++            verify_view,
++            write_report,
++        )
++
++        try:
++            report_output = getattr(args, "output", None)
++            if report_output is not None and report_output.exists():
++                raise DatasetV5ViewError(
++                    f"report output already exists: {report_output}",
++                    exit_code=20 if args.command == "build-view" else 2,
++                    reason_code=("existing_output_root" if args.command == "build-view" else "validation_failed"),
++                )
++            if args.command == "validate-contract":
++                result = validate_contract(args.contract_root, output_path=args.output)
++            elif args.command == "build-view":
++                result = build_view(
++                    args.contract_root,
++                    args.view,
++                    args.policy,
++                    tuple(args.source_manifest),
++                    args.output,
++                )
++            elif args.command == "verify-view":
++                result = verify_view(args.contract_root, args.view_root)
++                if args.output is not None:
++                    write_report(args.output, result)
++            elif args.command == "freeze-view":
++                result = freeze_view(
++                    args.contract_root,
++                    args.view_root,
++                    args.approved_decisions,
++                    args.command_line,
++                )
++            else:
++                result = verify_freeze(args.view_root)
++                if args.output is not None:
++                    write_report(args.output, result)
++        except DatasetV5ViewError as exc:
++            exit_code = 2 if args.command in {"validate-contract", "verify-view", "verify-freeze"} else exc.exit_code
++            failure = {
++                "error": str(exc),
++                "exit_code": exit_code,
++                "ok": False,
++                "reason_code": exc.reason_code,
++            }
++            print(json.dumps(failure, indent=2, sort_keys=True))
++            return exit_code
++        print(json.dumps(result, indent=2, sort_keys=True))
++        return 0 if result.get("ok") else 2
+     print(json.dumps(result, indent=2, sort_keys=True))
+     return 0 if result.get("ok") else 1
+
+warning: unable to access 'C:\Users\Mathieu/.config/git/ignore': Permission denied
+warning: in the working copy of 'src/spritelab/dataset_v5/__init__.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/spritelab/dataset_v5/cli.py', LF will be replaced by CRLF the next time Git touches it

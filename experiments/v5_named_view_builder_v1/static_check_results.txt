@@ -1,0 +1,9 @@
+===== ruff check =====
+All checks passed!
+
+===== ruff format --check =====
+4 files already formatted
+
+===== git diff --check =====
+warning: in the working copy of 'src/spritelab/dataset_v5/__init__.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/spritelab/dataset_v5/cli.py', LF will be replaced by CRLF the next time Git touches it

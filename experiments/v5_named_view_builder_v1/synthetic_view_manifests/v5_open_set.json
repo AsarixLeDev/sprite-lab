@@ -1,0 +1,102 @@
+{
+  "artist_counts": {
+    "artist_30": 1,
+    "artist_31": 1
+  },
+  "blob_store_frozen_hash_map": {
+    "blobs/451e491c39b2ddf40298ff7047e627b6ee284e93fe732a40e6c7ba5b481a9fac.rgba": "92ddb506e4d6b7338d314c2196f91eb4e8abe6dbc9b667312a44b469028b3577",
+    "blobs/6c9a6ef7479199c270101cda189d1eed94fbcd4a85c45b294fa0a8f72f621c6e.rgba": "be2c1337e11103500470464f88009526cfc88e25363b319daa7dfe864e5d2292"
+  },
+  "blob_store_identity": "content-addressed-canonical-rgba-v1",
+  "blob_store_sha256": "a7b8149a3bd8f60702715f6d7e4d0e80f1af8a07df4c09e4a1e2a0c64b69e5d5",
+  "category_counts": {
+    "\"weapon\"": 2
+  },
+  "code_identity": {
+    "dirty": false,
+    "git_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "contract_identity": {
+    "artifact_sha256": {
+      "dataset_v5_record.schema.json": "750ee76d04aa509b96bfbb7bae92d37d33f27fc91461e23762cb1d316422dab4",
+      "dataset_v5_supervision.schema.json": "1767fcb48d7cf0d16bcf0ec1782edb7916afcfb8bf3b823ece93caa5cda23d97",
+      "dataset_v5_view_manifest.schema.json": "40a10cc50ceab753c67906b3732c20a886f168351665899546e50fa17ab5ffc0",
+      "freeze_contract.json": "7eca2c7b10a416960134f1ca7f39cce871f32f0f69d28109b32c1e0cbca693a9",
+      "leakage_contract.json": "7c32e173798c3150796e6c91309727477eab0b8e792b0c1065fdf7a1fba64595",
+      "view_contracts.json": "72b31d0b51ea0e77af1a3163109186403723f7029320733d45b877621d15a597"
+    },
+    "version": "dataset_v5_view_contract_v1.0.0"
+  },
+  "contract_version": "dataset_v5_view_contract_v1.0.0",
+  "created_by_command": "dataset-v5 build-view --view v5_open_set --output <fresh-output>",
+  "example_only": true,
+  "freeze_boundary": {
+    "artifact_sha256": {
+      "blobs/451e491c39b2ddf40298ff7047e627b6ee284e93fe732a40e6c7ba5b481a9fac.rgba": "92ddb506e4d6b7338d314c2196f91eb4e8abe6dbc9b667312a44b469028b3577",
+      "blobs/6c9a6ef7479199c270101cda189d1eed94fbcd4a85c45b294fa0a8f72f621c6e.rgba": "be2c1337e11103500470464f88009526cfc88e25363b319daa7dfe864e5d2292",
+      "evaluation_manifest.jsonl": "070621376ca2281bd6bcc6d948b41962f029e987755f1c834c1e7b73babaf95d",
+      "excluded_record_manifest.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "license_provenance.jsonl": "4c3a02e3d5cc9a486733ee39d831c43f77595862454bd009cbf39060689b9d07",
+      "record_manifest.jsonl": "350860e808b55654c4e57ae2c8980794537ac845297173a3ee2781246cc65053",
+      "relation_manifest.json": "a80709f301f79ad56704850a3d68e45eacc8bee65fcc76fe160ea20c2769ff55",
+      "resolved_policy.json": "6b555c38ad617d4e81bb6c9f5c834d171b72e985bb2958ff425b3132c594e066",
+      "source_binding.json": "f585cb6b5dfd8d8802f2880cc8bb797cfb8be4756acbe4c23bcc4670351e5e8c",
+      "split_manifest.json": "dd0d7b39deed1f0e4f7ea298bfe98574dbfdc16c8bc15872cdecb13813e13d6d",
+      "validation_report.json": "690b4dca54bfc9aa26546acda39089073304266fc2e29e510814cf295adeb6e3",
+      "weight_manifest.jsonl": "3a0764d68c853da5eb6757d93a08cce2564d0bf127e74781793088299c6ebdf4"
+    },
+    "artifacts": [
+      "blobs/451e491c39b2ddf40298ff7047e627b6ee284e93fe732a40e6c7ba5b481a9fac.rgba",
+      "blobs/6c9a6ef7479199c270101cda189d1eed94fbcd4a85c45b294fa0a8f72f621c6e.rgba",
+      "evaluation_manifest.jsonl",
+      "excluded_record_manifest.jsonl",
+      "license_provenance.jsonl",
+      "record_manifest.jsonl",
+      "relation_manifest.json",
+      "resolved_policy.json",
+      "source_binding.json",
+      "split_manifest.json",
+      "validation_report.json",
+      "view_manifest.json",
+      "weight_manifest.jsonl"
+    ],
+    "complete": false,
+    "production_freeze_authorized": false
+  },
+  "hard_relation_validation": {
+    "crossing_count": 0,
+    "passed": true
+  },
+  "license_counts": {
+    "cc0": 2
+  },
+  "pack_counts": {
+    "pack_30": 1,
+    "pack_31": 1
+  },
+  "production_frozen": false,
+  "promotion_forbidden": true,
+  "record_count": 2,
+  "record_manifest_sha256": "350860e808b55654c4e57ae2c8980794537ac845297173a3ee2781246cc65053",
+  "schema_version": "dataset_v5_view_manifest_v1.0.0",
+  "source_artifact_sha256": {
+    "external-fixture/c5059e64eba8ca48/source_manifest.jsonl": "c5059e64eba8ca48821c2de93af8fd40edd9531e06d285720b98c71832384e82"
+  },
+  "source_artifacts": [
+    "external-fixture/c5059e64eba8ca48/source_manifest.jsonl"
+  ],
+  "split_counts": {
+    "open_set_test": 2
+  },
+  "suitability_counts": {
+    "accept": 2
+  },
+  "supervision_class_counts": {
+    "supervised_strong": 2
+  },
+  "unique_geometry_count": 2,
+  "unique_rgba_count": 2,
+  "view_name": "v5_open_set",
+  "view_purpose": "Measure intentional concept-level generalization to concepts absent from training.",
+  "view_status": "candidate"
+}

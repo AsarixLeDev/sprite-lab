@@ -1,0 +1,102 @@
+{
+  "artist_counts": {
+    "artist_20": 1,
+    "artist_21": 1
+  },
+  "blob_store_frozen_hash_map": {
+    "blobs/869b4a0fcbe2537d5e95de4ca70c4d073ebf7a92444f605d3c903a8714c8da8f.rgba": "de8bd2df4153f2602a589650666bd4c59d8bba5b96398cdce9f4b08af386bb22",
+    "blobs/cb22b1abe93c547bddb0ec7ab837aced47b7dc62798689a1c24cba7f3bdd88a8.rgba": "a8e88425731b53e26fa1866a759cf8801f73b6c330c7b6278a53bc199c843ddd"
+  },
+  "blob_store_identity": "content-addressed-canonical-rgba-v1",
+  "blob_store_sha256": "b86da20d4e33c103a192e3754d11e9fa0b6ee600ab0bb5fae78db61f4bf1c0bb",
+  "category_counts": {
+    "\"weapon\"": 2
+  },
+  "code_identity": {
+    "dirty": false,
+    "git_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "contract_identity": {
+    "artifact_sha256": {
+      "dataset_v5_record.schema.json": "750ee76d04aa509b96bfbb7bae92d37d33f27fc91461e23762cb1d316422dab4",
+      "dataset_v5_supervision.schema.json": "1767fcb48d7cf0d16bcf0ec1782edb7916afcfb8bf3b823ece93caa5cda23d97",
+      "dataset_v5_view_manifest.schema.json": "40a10cc50ceab753c67906b3732c20a886f168351665899546e50fa17ab5ffc0",
+      "freeze_contract.json": "7eca2c7b10a416960134f1ca7f39cce871f32f0f69d28109b32c1e0cbca693a9",
+      "leakage_contract.json": "7c32e173798c3150796e6c91309727477eab0b8e792b0c1065fdf7a1fba64595",
+      "view_contracts.json": "72b31d0b51ea0e77af1a3163109186403723f7029320733d45b877621d15a597"
+    },
+    "version": "dataset_v5_view_contract_v1.0.0"
+  },
+  "contract_version": "dataset_v5_view_contract_v1.0.0",
+  "created_by_command": "dataset-v5 build-view --view v5_source_ood --output <fresh-output>",
+  "example_only": true,
+  "freeze_boundary": {
+    "artifact_sha256": {
+      "blobs/869b4a0fcbe2537d5e95de4ca70c4d073ebf7a92444f605d3c903a8714c8da8f.rgba": "de8bd2df4153f2602a589650666bd4c59d8bba5b96398cdce9f4b08af386bb22",
+      "blobs/cb22b1abe93c547bddb0ec7ab837aced47b7dc62798689a1c24cba7f3bdd88a8.rgba": "a8e88425731b53e26fa1866a759cf8801f73b6c330c7b6278a53bc199c843ddd",
+      "evaluation_manifest.jsonl": "f68d12ced6beebc714e9e3663893bc2b973f302a6ddba7423e482adbf4190a8f",
+      "excluded_record_manifest.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "license_provenance.jsonl": "302c5d44b20f35803f66abecbbaceceb05b349cc8510c747c689d2c5424eab86",
+      "record_manifest.jsonl": "901383f1925994140e35a3f7ef636be485a97de8f6118aee47c276b2ec395c3e",
+      "relation_manifest.json": "78d54b4ea9702bf39a269fa634f0f1888582e76f9e82b3341794bfce1b19223f",
+      "resolved_policy.json": "d7ef188be9a9e0de891157ba302b5bae9c7a3ab7ec77696d268e168604c543f0",
+      "source_binding.json": "7a8956302d41c1bc159cee8fd18e12790b840662ba5f27bf4f0b5d4597c11515",
+      "split_manifest.json": "40f8dfb5b8f755f8d5d2bd8f5a7e503d322f7b7f742b99d33b7da2aeef943d6f",
+      "validation_report.json": "e58c7fb73380cb1c32be50460f1ba81254e4909d7b10caaa9105f25093685b42",
+      "weight_manifest.jsonl": "fa59edd7e5ad8d8c09bf603471c5cd86a207093b6720c267ceb3f48f2e96e6ac"
+    },
+    "artifacts": [
+      "blobs/869b4a0fcbe2537d5e95de4ca70c4d073ebf7a92444f605d3c903a8714c8da8f.rgba",
+      "blobs/cb22b1abe93c547bddb0ec7ab837aced47b7dc62798689a1c24cba7f3bdd88a8.rgba",
+      "evaluation_manifest.jsonl",
+      "excluded_record_manifest.jsonl",
+      "license_provenance.jsonl",
+      "record_manifest.jsonl",
+      "relation_manifest.json",
+      "resolved_policy.json",
+      "source_binding.json",
+      "split_manifest.json",
+      "validation_report.json",
+      "view_manifest.json",
+      "weight_manifest.jsonl"
+    ],
+    "complete": false,
+    "production_freeze_authorized": false
+  },
+  "hard_relation_validation": {
+    "crossing_count": 0,
+    "passed": true
+  },
+  "license_counts": {
+    "cc0": 2
+  },
+  "pack_counts": {
+    "held_pack_0": 1,
+    "held_pack_1": 1
+  },
+  "production_frozen": false,
+  "promotion_forbidden": true,
+  "record_count": 2,
+  "record_manifest_sha256": "901383f1925994140e35a3f7ef636be485a97de8f6118aee47c276b2ec395c3e",
+  "schema_version": "dataset_v5_view_manifest_v1.0.0",
+  "source_artifact_sha256": {
+    "external-fixture/e137a19119c7378f/source_manifest.jsonl": "e137a19119c7378f469290edf50cc3b8f97183290a2690a79462a412675cc3b9"
+  },
+  "source_artifacts": [
+    "external-fixture/e137a19119c7378f/source_manifest.jsonl"
+  ],
+  "split_counts": {
+    "source_ood_test": 2
+  },
+  "suitability_counts": {
+    "accept": 2
+  },
+  "supervision_class_counts": {
+    "supervised_strong": 2
+  },
+  "unique_geometry_count": 2,
+  "unique_rgba_count": 2,
+  "view_name": "v5_source_ood",
+  "view_purpose": "Measure generalization across an intentionally held-out source axis.",
+  "view_status": "candidate"
+}

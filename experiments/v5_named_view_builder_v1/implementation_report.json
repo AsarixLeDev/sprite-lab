@@ -1,0 +1,208 @@
+{
+  "contract_validation": {
+    "artifact_sha256": {
+      "dataset_v5_record.schema.json": "750ee76d04aa509b96bfbb7bae92d37d33f27fc91461e23762cb1d316422dab4",
+      "dataset_v5_supervision.schema.json": "1767fcb48d7cf0d16bcf0ec1782edb7916afcfb8bf3b823ece93caa5cda23d97",
+      "dataset_v5_view_manifest.schema.json": "40a10cc50ceab753c67906b3732c20a886f168351665899546e50fa17ab5ffc0",
+      "freeze_contract.json": "7eca2c7b10a416960134f1ca7f39cce871f32f0f69d28109b32c1e0cbca693a9",
+      "leakage_contract.json": "7c32e173798c3150796e6c91309727477eab0b8e792b0c1065fdf7a1fba64595",
+      "view_contracts.json": "72b31d0b51ea0e77af1a3163109186403723f7029320733d45b877621d15a597"
+    },
+    "commands": [
+      "build-view",
+      "freeze-view",
+      "validate-contract",
+      "verify-freeze",
+      "verify-view"
+    ],
+    "contract_root": "experiments/v5_view_contract_v1",
+    "contract_version": "dataset_v5_view_contract_v1.0.0",
+    "ok": true,
+    "production_freeze_authorized": false,
+    "runtime_semantic_validation_required": true,
+    "schema_version": "dataset_v5_contract_validation_report_v1.0.0",
+    "views": [
+      "v5_debug",
+      "v5_architecture",
+      "v5_scale_check",
+      "v5_eval_balanced",
+      "v5_source_ood",
+      "v5_open_set",
+      "v5_unlabeled"
+    ]
+  },
+  "dataset_v5_tests": {
+    "deselected": 1794,
+    "passed": 91,
+    "return_code": 0
+  },
+  "deterministic": true,
+  "focused_tests": {
+    "passed": 47,
+    "return_code": 0
+  },
+  "independent_builder_audit_required": true,
+  "production_builds": 0,
+  "production_freezes": 0,
+  "production_readiness": false,
+  "provider_calls": 0,
+  "schema_version": "dataset_v5_named_view_builder_report_v1.0.0",
+  "static_checks": {
+    "format": true,
+    "git_diff_check": true,
+    "ruff": true
+  },
+  "views": [
+    {
+      "build_ok": true,
+      "example_only": true,
+      "excluded_record_count": 0,
+      "production_blockers": [
+        "fresh independent Dataset-v5 builder audit is required",
+        "near-duplicate detector is not freeze-bound",
+        "source manifest hashes were not predeclared by policy",
+        "synthetic fixture cannot be production-frozen",
+        "translation/flip relation coverage is incomplete",
+        "v5_debug is permanently diagnostic and promotion-forbidden"
+      ],
+      "production_frozen": false,
+      "promotion_forbidden": true,
+      "record_count": 5,
+      "synthetic_freeze_kind": "synthetic_diagnostic",
+      "synthetic_freeze_ok": true,
+      "verify_ok": true,
+      "view_name": "v5_debug",
+      "view_status": "diagnostic"
+    },
+    {
+      "build_ok": true,
+      "example_only": true,
+      "excluded_record_count": 0,
+      "production_blockers": [
+        "fresh independent Dataset-v5 builder audit is required",
+        "near-duplicate detector is not freeze-bound",
+        "source manifest hashes were not predeclared by policy",
+        "synthetic fixture cannot be production-frozen",
+        "translation/flip relation coverage is incomplete",
+        "v5_architecture cannot authorize production training under the approved contract"
+      ],
+      "production_frozen": false,
+      "promotion_forbidden": true,
+      "record_count": 4,
+      "synthetic_freeze_kind": "synthetic_diagnostic",
+      "synthetic_freeze_ok": true,
+      "verify_ok": true,
+      "view_name": "v5_architecture",
+      "view_status": "candidate"
+    },
+    {
+      "build_ok": true,
+      "example_only": true,
+      "excluded_record_count": 0,
+      "production_blockers": [
+        "fresh independent Dataset-v5 builder audit is required",
+        "near-duplicate detector is not freeze-bound",
+        "scale-check policy has no exact architecture-core binding",
+        "source manifest hashes were not predeclared by policy",
+        "synthetic fixture cannot be production-frozen",
+        "translation/flip relation coverage is incomplete",
+        "v5_scale_check cannot authorize production training under the approved contract"
+      ],
+      "production_frozen": false,
+      "promotion_forbidden": true,
+      "record_count": 4,
+      "synthetic_freeze_kind": "synthetic_diagnostic",
+      "synthetic_freeze_ok": true,
+      "verify_ok": true,
+      "view_name": "v5_scale_check",
+      "view_status": "candidate"
+    },
+    {
+      "build_ok": true,
+      "example_only": true,
+      "excluded_record_count": 0,
+      "production_blockers": [
+        "evaluation minimum size is unapproved or unmet",
+        "fresh independent Dataset-v5 builder audit is required",
+        "near-duplicate detector is not freeze-bound",
+        "source manifest hashes were not predeclared by policy",
+        "synthetic fixture cannot be production-frozen",
+        "translation/flip relation coverage is incomplete"
+      ],
+      "production_frozen": false,
+      "promotion_forbidden": true,
+      "record_count": 2,
+      "synthetic_freeze_kind": "synthetic_diagnostic",
+      "synthetic_freeze_ok": true,
+      "verify_ok": true,
+      "view_name": "v5_eval_balanced",
+      "view_status": "candidate"
+    },
+    {
+      "build_ok": true,
+      "example_only": true,
+      "excluded_record_count": 0,
+      "production_blockers": [
+        "evaluation minimum size is unapproved or unmet",
+        "fresh independent Dataset-v5 builder audit is required",
+        "near-duplicate detector is not freeze-bound",
+        "source manifest hashes were not predeclared by policy",
+        "source-OOD scope is not singly policy-bound across included records",
+        "synthetic fixture cannot be production-frozen",
+        "translation/flip relation coverage is incomplete"
+      ],
+      "production_frozen": false,
+      "promotion_forbidden": true,
+      "record_count": 2,
+      "synthetic_freeze_kind": "synthetic_diagnostic",
+      "synthetic_freeze_ok": true,
+      "verify_ok": true,
+      "view_name": "v5_source_ood",
+      "view_status": "candidate"
+    },
+    {
+      "build_ok": true,
+      "example_only": true,
+      "excluded_record_count": 0,
+      "production_blockers": [
+        "evaluation minimum size is unapproved or unmet",
+        "fresh independent Dataset-v5 builder audit is required",
+        "near-duplicate detector is not freeze-bound",
+        "open-set alias/taxonomy closure is not freeze-bound",
+        "open-set taxonomy identity is not freeze-bound",
+        "source manifest hashes were not predeclared by policy",
+        "synthetic fixture cannot be production-frozen",
+        "translation/flip relation coverage is incomplete"
+      ],
+      "production_frozen": false,
+      "promotion_forbidden": true,
+      "record_count": 2,
+      "synthetic_freeze_kind": "synthetic_diagnostic",
+      "synthetic_freeze_ok": true,
+      "verify_ok": true,
+      "view_name": "v5_open_set",
+      "view_status": "candidate"
+    },
+    {
+      "build_ok": true,
+      "example_only": true,
+      "excluded_record_count": 0,
+      "production_blockers": [
+        "fresh independent Dataset-v5 builder audit is required",
+        "frozen-r2 one-to-one named adapter is not verified",
+        "near-duplicate detector is not freeze-bound",
+        "source manifest hashes were not predeclared by policy",
+        "synthetic fixture cannot be production-frozen",
+        "translation/flip relation coverage is incomplete"
+      ],
+      "production_frozen": false,
+      "promotion_forbidden": true,
+      "record_count": 2,
+      "synthetic_freeze_kind": "synthetic_diagnostic",
+      "synthetic_freeze_ok": true,
+      "verify_ok": true,
+      "view_name": "v5_unlabeled",
+      "view_status": "candidate"
+    }
+  ]
+}

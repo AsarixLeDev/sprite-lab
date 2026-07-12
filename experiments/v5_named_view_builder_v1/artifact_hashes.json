@@ -1,0 +1,25 @@
+{
+  "artifact_sha256": {
+    "cli_help.txt": "4fcca870e3e845c78148cc28acfb455a70606134c4dd4f7498003651b965d95d",
+    "command_log.txt": "c2ba0480154f8dc1562deca6d3a0820945d38003562caa711058feff9f332b73",
+    "deterministic_build_comparison.json": "0de54b8794049eb5a33500b348e4548cd756a26033edd10b01defe190af9efd9",
+    "freeze_tamper_matrix.json": "5f07e76867c8d015d4af914df232a5b5d6f77c8e225a5a216a3ae8a472969f45",
+    "frozen_hash_verification.json": "9cbe2fbaf74ad98a8ddf9d060b5f9ec66c3c3a7a6b438d8db1a5d4104ac04608",
+    "implementation.patch": "4b7dcaafe7f77a499cec60b1c43a73a934b67a9facffae2aa26a7af24fd42dfd",
+    "implementation_report.json": "50296cdf76a013a769c3ff98244228658f98f342903e848e6501134821241d47",
+    "implementation_report.md": "e112c2912edaeb7e6165dc96c8d8f2af10aef3897bf0af0ff05a7a5fef882a26",
+    "leakage_matrix.json": "4cbc59a4f9357c5d4e8d53a5973bf638bb1e4e085ad6788dea4acbf8edcecbb7",
+    "static_check_results.txt": "71bf25522c05f3f3280a2d949c6e83a14fa627116f94f2fe5e84c3d437d714f9",
+    "supervision_matrix.json": "8c2bfb6520b880c6f7c514e0ab71f81d9a5578865785c570ddda3b059987a582",
+    "synthetic_view_manifests/v5_architecture.json": "64f7f924be6c5d2c016c86f03fdcc7581f3c15bf3041f135e21fcee2b6308b46",
+    "synthetic_view_manifests/v5_debug.json": "13000683db3ca6e241ce40e54c4cdb46ff033512e2bcae446dc7122ed5de592a",
+    "synthetic_view_manifests/v5_eval_balanced.json": "ab0d00b844f8eee28f32e61955843bc1d72fa02d39992f1678d8bab1b602a382",
+    "synthetic_view_manifests/v5_open_set.json": "eb98da18d473e0ba93ad314c697b6824042da3857c21be784b52ff20beb10632",
+    "synthetic_view_manifests/v5_scale_check.json": "57b58b3fbbd19b6637a5d933daf159fc44e5d700f38f57283b86f91765943255",
+    "synthetic_view_manifests/v5_source_ood.json": "5d010c027032d3b6ff9910bebc074cbd338e9989a6bbc0dc8fe02f57c4e9fa98",
+    "synthetic_view_manifests/v5_unlabeled.json": "adc1bee3011daf9f747628a29ee2c5260762214066753551aa15071dd6d29fb8",
+    "test_results.txt": "b4b11de8fc77ea2b76e96df013c2ece3273ea82fdde92b8b32cef401e7e9619b",
+    "view_build_matrix.json": "06479bfaa198ed7b9b7737f9b9ad9a10c45f3ac13ab53fb99d4927aa8a42e575"
+  },
+  "schema_version": "dataset_v5_named_view_evidence_hashes_v1.0.0"
+}

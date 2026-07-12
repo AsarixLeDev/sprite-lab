@@ -1,0 +1,48 @@
+{
+  "approved_contract": {
+    "dataset_v5_record.schema.json": {
+      "actual_sha256": "750ee76d04aa509b96bfbb7bae92d37d33f27fc91461e23762cb1d316422dab4",
+      "expected_sha256": "750ee76d04aa509b96bfbb7bae92d37d33f27fc91461e23762cb1d316422dab4",
+      "match": true
+    },
+    "dataset_v5_supervision.schema.json": {
+      "actual_sha256": "1767fcb48d7cf0d16bcf0ec1782edb7916afcfb8bf3b823ece93caa5cda23d97",
+      "expected_sha256": "1767fcb48d7cf0d16bcf0ec1782edb7916afcfb8bf3b823ece93caa5cda23d97",
+      "match": true
+    },
+    "dataset_v5_view_manifest.schema.json": {
+      "actual_sha256": "40a10cc50ceab753c67906b3732c20a886f168351665899546e50fa17ab5ffc0",
+      "expected_sha256": "40a10cc50ceab753c67906b3732c20a886f168351665899546e50fa17ab5ffc0",
+      "match": true
+    },
+    "freeze_contract.json": {
+      "actual_sha256": "7eca2c7b10a416960134f1ca7f39cce871f32f0f69d28109b32c1e0cbca693a9",
+      "expected_sha256": "7eca2c7b10a416960134f1ca7f39cce871f32f0f69d28109b32c1e0cbca693a9",
+      "match": true
+    },
+    "leakage_contract.json": {
+      "actual_sha256": "7c32e173798c3150796e6c91309727477eab0b8e792b0c1065fdf7a1fba64595",
+      "expected_sha256": "7c32e173798c3150796e6c91309727477eab0b8e792b0c1065fdf7a1fba64595",
+      "match": true
+    },
+    "view_contracts.json": {
+      "actual_sha256": "72b31d0b51ea0e77af1a3163109186403723f7029320733d45b877621d15a597",
+      "expected_sha256": "72b31d0b51ea0e77af1a3163109186403723f7029320733d45b877621d15a597",
+      "match": true
+    }
+  },
+  "ok": true,
+  "production_view_or_freeze_created": false,
+  "unlabeled_pool_r2": {
+    "candidate_manifest.jsonl": {
+      "actual_sha256": "2f1316dbfb5ace0df1569894a83f15b9cd6b77383e5aaba98eda0b408a1f41cc",
+      "expected_sha256": "2f1316dbfb5ace0df1569894a83f15b9cd6b77383e5aaba98eda0b408a1f41cc",
+      "match": true
+    },
+    "freeze_manifest.json": {
+      "actual_sha256": "7209fd4b1fff96f7b5cf4cefd2dc09dbf945301973454a3db97b52de0bccb5ca",
+      "expected_sha256": "7209fd4b1fff96f7b5cf4cefd2dc09dbf945301973454a3db97b52de0bccb5ca",
+      "match": true
+    }
+  }
+}

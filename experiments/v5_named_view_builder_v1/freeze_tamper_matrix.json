@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "attack": "tampered record manifest",
+      "detected": true
+    },
+    {
+      "attack": "tampered view blob",
+      "detected": true
+    },
+    {
+      "attack": "tampered bound source manifest",
+      "detected": true
+    },
+    {
+      "attack": "tampered freeze exact command",
+      "detected": true
+    },
+    {
+      "attack": "tampered resolved-policy hash",
+      "detected": true
+    },
+    {
+      "attack": "tampered source-binding hash",
+      "detected": true
+    },
+    {
+      "attack": "unsupported freeze kind",
+      "detected": true
+    },
+    {
+      "attack": "partial auxiliary artifact rewrite",
+      "detected": true
+    },
+    {
+      "attack": "self-consistent record rewrite versus exact source replay",
+      "detected": true
+    },
+    {
+      "attack": "production code-identity spoof",
+      "detected": true
+    },
+    {
+      "attack": "production approval bypass",
+      "detected": true
+    },
+    {
+      "attack": "frozen-r2 hash mismatch",
+      "detected": true
+    }
+  ],
+  "focused_suite_passed": true,
+  "schema_version": "dataset_v5_freeze_tamper_matrix_v1.0.0"
+}

@@ -1,0 +1,116 @@
+{
+  "artist_counts": {
+    "artist_1": 1,
+    "artist_2": 1,
+    "artist_3": 1,
+    "artist_4": 1
+  },
+  "blob_store_frozen_hash_map": {
+    "blobs/125c3e7d4c462259a1f7393d64583bbc6c82f022e9e3c91b929d45a27601122d.rgba": "d5f045a49292c996babfd18653ac9d142a1c8228bb8cfa403d8c79613608b977",
+    "blobs/9a29f5926d63eb60bb1bf5e3ff5f650d2486ffc9d8ce3720d92287b02e0300f4.rgba": "fb37412f5afa5c998e5f53340788f419eff9f43048e1893259abfb7ef228f7c9",
+    "blobs/c0e1b31742e93fee7281ff9bc308ff2a69f19f835e74ee3eddd39067de2918a8.rgba": "7f48838ff1761560c9a95c985e49b8f123d7adc3b9e67e8bc2e7ff4303daaf9c",
+    "blobs/f353071772982936f5c8ea94957fcd9b131ad0f0ed2041db9ccc53f507a93fda.rgba": "f1d5a5d4364e30e307480b6f93fdefc91bab1c4dacff9994ea1028d028d3d8f4"
+  },
+  "blob_store_identity": "content-addressed-canonical-rgba-v1",
+  "blob_store_sha256": "4bfd8168b69138d3e895338c2cef5d2369a31906cc0481138fcef11719c0a05c",
+  "category_counts": {
+    "\"weapon\"": 3,
+    "null": 1
+  },
+  "code_identity": {
+    "dirty": false,
+    "git_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "contract_identity": {
+    "artifact_sha256": {
+      "dataset_v5_record.schema.json": "750ee76d04aa509b96bfbb7bae92d37d33f27fc91461e23762cb1d316422dab4",
+      "dataset_v5_supervision.schema.json": "1767fcb48d7cf0d16bcf0ec1782edb7916afcfb8bf3b823ece93caa5cda23d97",
+      "dataset_v5_view_manifest.schema.json": "40a10cc50ceab753c67906b3732c20a886f168351665899546e50fa17ab5ffc0",
+      "freeze_contract.json": "7eca2c7b10a416960134f1ca7f39cce871f32f0f69d28109b32c1e0cbca693a9",
+      "leakage_contract.json": "7c32e173798c3150796e6c91309727477eab0b8e792b0c1065fdf7a1fba64595",
+      "view_contracts.json": "72b31d0b51ea0e77af1a3163109186403723f7029320733d45b877621d15a597"
+    },
+    "version": "dataset_v5_view_contract_v1.0.0"
+  },
+  "contract_version": "dataset_v5_view_contract_v1.0.0",
+  "created_by_command": "dataset-v5 build-view --view v5_scale_check --output <fresh-output>",
+  "example_only": true,
+  "freeze_boundary": {
+    "artifact_sha256": {
+      "blobs/125c3e7d4c462259a1f7393d64583bbc6c82f022e9e3c91b929d45a27601122d.rgba": "d5f045a49292c996babfd18653ac9d142a1c8228bb8cfa403d8c79613608b977",
+      "blobs/9a29f5926d63eb60bb1bf5e3ff5f650d2486ffc9d8ce3720d92287b02e0300f4.rgba": "fb37412f5afa5c998e5f53340788f419eff9f43048e1893259abfb7ef228f7c9",
+      "blobs/c0e1b31742e93fee7281ff9bc308ff2a69f19f835e74ee3eddd39067de2918a8.rgba": "7f48838ff1761560c9a95c985e49b8f123d7adc3b9e67e8bc2e7ff4303daaf9c",
+      "blobs/f353071772982936f5c8ea94957fcd9b131ad0f0ed2041db9ccc53f507a93fda.rgba": "f1d5a5d4364e30e307480b6f93fdefc91bab1c4dacff9994ea1028d028d3d8f4",
+      "evaluation_manifest.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "excluded_record_manifest.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "license_provenance.jsonl": "da26a2e5b0d343f811811bf3cad6a2cf51b73e1f1c0982893a7fb81ae93c9608",
+      "record_manifest.jsonl": "4fb31152d2a503a003ceb4d859e339ebd7ac1aa11e892e36b457a3f59c75b0f7",
+      "relation_manifest.json": "6d234ad0b1093aad3d078aa3b897d584b198903e71a3995b13eebe06857a68a2",
+      "resolved_policy.json": "865e990b5b86d2e1f146e592af6bad57e525df771fcc3502be7712bdaaf29a26",
+      "source_binding.json": "4ea17502324f0709575ace8404e323c47b8f2d5dd1eca680afb1f8535b171231",
+      "split_manifest.json": "80259753d4d9f1f7e78394dee549bbaa5973680218209b94f9629694269468a6",
+      "validation_report.json": "8df22e042ec6b4188c1b9fa619dd645b3f3dcf08fefee2521f1be587ae2fd32a",
+      "weight_manifest.jsonl": "d459fe05779610b3d06e79c13106499fafc642f36dc9d23c5df76245f4bc1378"
+    },
+    "artifacts": [
+      "blobs/125c3e7d4c462259a1f7393d64583bbc6c82f022e9e3c91b929d45a27601122d.rgba",
+      "blobs/9a29f5926d63eb60bb1bf5e3ff5f650d2486ffc9d8ce3720d92287b02e0300f4.rgba",
+      "blobs/c0e1b31742e93fee7281ff9bc308ff2a69f19f835e74ee3eddd39067de2918a8.rgba",
+      "blobs/f353071772982936f5c8ea94957fcd9b131ad0f0ed2041db9ccc53f507a93fda.rgba",
+      "evaluation_manifest.jsonl",
+      "excluded_record_manifest.jsonl",
+      "license_provenance.jsonl",
+      "record_manifest.jsonl",
+      "relation_manifest.json",
+      "resolved_policy.json",
+      "source_binding.json",
+      "split_manifest.json",
+      "validation_report.json",
+      "view_manifest.json",
+      "weight_manifest.jsonl"
+    ],
+    "complete": false,
+    "production_freeze_authorized": false
+  },
+  "hard_relation_validation": {
+    "crossing_count": 0,
+    "passed": true
+  },
+  "license_counts": {
+    "cc0": 4
+  },
+  "pack_counts": {
+    "pack_1": 1,
+    "pack_2": 1,
+    "pack_3": 1,
+    "pack_4": 1
+  },
+  "production_frozen": false,
+  "promotion_forbidden": true,
+  "record_count": 4,
+  "record_manifest_sha256": "4fb31152d2a503a003ceb4d859e339ebd7ac1aa11e892e36b457a3f59c75b0f7",
+  "schema_version": "dataset_v5_view_manifest_v1.0.0",
+  "source_artifact_sha256": {
+    "external-fixture/d68f1177e5f327e7/source_manifest.jsonl": "d68f1177e5f327e78344260756e39d158fac4827c3066ba5161d2b85c6232cbc"
+  },
+  "source_artifacts": [
+    "external-fixture/d68f1177e5f327e7/source_manifest.jsonl"
+  ],
+  "split_counts": {
+    "train": 4
+  },
+  "suitability_counts": {
+    "accept": 4
+  },
+  "supervision_class_counts": {
+    "auxiliary_only": 1,
+    "supervised_strong": 1,
+    "supervised_weak": 1,
+    "unlabeled": 1
+  },
+  "unique_geometry_count": 4,
+  "unique_rgba_count": 4,
+  "view_name": "v5_scale_check",
+  "view_purpose": "Usable scale/performance check without implying final training fitness.",
+  "view_status": "candidate"
+}

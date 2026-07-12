@@ -1,0 +1,18 @@
+{
+  "adversarial_test_file": "tests/test_dataset_v5_named_views.py",
+  "classes": {
+    "auxiliary_only": "all semantic masks and weights are zero",
+    "supervised_strong": "active fields require known targets, calibrated uncertainty, calibration identity, and human/deterministic truth",
+    "supervised_weak": "active fields respect the policy cap; model-derived evidence must be calibrated",
+    "unlabeled": "all semantic masks and weights are zero and evaluation weight is zero"
+  },
+  "focused_suite_passed": true,
+  "noncontributing_states": [
+    "abstained",
+    "missing",
+    "not_applicable",
+    "oov",
+    "unknown"
+  ],
+  "schema_version": "dataset_v5_supervision_matrix_v1.0.0"
+}

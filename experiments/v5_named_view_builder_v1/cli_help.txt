@@ -1,0 +1,130 @@
+===== top-level =====
+usage: python -m spritelab.dataset_v5.cli [-h]
+                                          {build,verify,build-policy-preview,verify-policy-preview,compare-policy-previews,validate-contract,build-view,verify-view,freeze-view,verify-freeze} ...
+
+positional arguments:
+  {build,verify,build-policy-preview,verify-policy-preview,compare-policy-previews,validate-contract,build-view,verify-view,freeze-view,verify-freeze}
+    validate-contract   Validate the Dataset-v5 named-view contract.
+    build-view          Build a deterministic non-production Dataset-v5 named
+                        view.
+    verify-view         Verify a Dataset-v5 named view without modifying it.
+    freeze-view         Freeze a complete, verified Dataset-v5 named view.
+    verify-freeze       Verify a frozen Dataset-v5 named view.
+
+options:
+  -h, --help            show this help message and exit
+
+===== build =====
+usage: python -m spritelab.dataset_v5.cli build [-h] --config CONFIG --v4 V4
+                                                --harvest-root HARVEST_ROOT
+                                                --output OUTPUT
+                                                [--explicit-manifest EXPLICIT_MANIFEST]
+
+options:
+  -h, --help            show this help message and exit
+  --config CONFIG
+  --v4 V4
+  --harvest-root HARVEST_ROOT
+  --output OUTPUT
+  --explicit-manifest EXPLICIT_MANIFEST
+
+===== verify =====
+usage: python -m spritelab.dataset_v5.cli verify [-h] --dataset DATASET
+
+options:
+  -h, --help         show this help message and exit
+  --dataset DATASET
+
+===== build-policy-preview =====
+usage: python -m spritelab.dataset_v5.cli build-policy-preview
+       [-h] --config CONFIG --v4 V4 --harvest-root HARVEST_ROOT
+       --output OUTPUT [--explicit-manifest EXPLICIT_MANIFEST]
+       [--legacy-policy-config]
+
+options:
+  -h, --help            show this help message and exit
+  --config CONFIG
+  --v4 V4
+  --harvest-root HARVEST_ROOT
+  --output OUTPUT
+  --explicit-manifest EXPLICIT_MANIFEST
+  --legacy-policy-config
+                        explicitly resolve a legacy policy config using
+                        documented historical defaults
+
+===== verify-policy-preview =====
+usage: python -m spritelab.dataset_v5.cli verify-policy-preview
+       [-h] --dataset DATASET
+
+options:
+  -h, --help         show this help message and exit
+  --dataset DATASET
+
+===== compare-policy-previews =====
+usage: python -m spritelab.dataset_v5.cli compare-policy-previews
+       [-h] --dataset DATASET
+
+options:
+  -h, --help         show this help message and exit
+  --dataset DATASET
+
+===== validate-contract =====
+usage: python -m spritelab.dataset_v5.cli validate-contract
+       [-h] --contract-root CONTRACT_ROOT [--output OUTPUT]
+
+options:
+  -h, --help            show this help message and exit
+  --contract-root CONTRACT_ROOT
+  --output OUTPUT
+
+===== build-view =====
+usage: python -m spritelab.dataset_v5.cli build-view [-h]
+                                                     --contract-root CONTRACT_ROOT
+                                                     --view {v5_debug,v5_architecture,v5_scale_check,v5_eval_balanced,v5_source_ood,v5_open_set,v5_unlabeled}
+                                                     --policy POLICY
+                                                     --source-manifest SOURCE_MANIFEST
+                                                     --output OUTPUT
+
+options:
+  -h, --help            show this help message and exit
+  --contract-root CONTRACT_ROOT
+  --view {v5_debug,v5_architecture,v5_scale_check,v5_eval_balanced,v5_source_ood,v5_open_set,v5_unlabeled}
+  --policy POLICY
+  --source-manifest SOURCE_MANIFEST
+  --output OUTPUT
+
+===== verify-view =====
+usage: python -m spritelab.dataset_v5.cli verify-view [-h]
+                                                      --contract-root CONTRACT_ROOT
+                                                      --view-root VIEW_ROOT
+                                                      [--output OUTPUT]
+
+options:
+  -h, --help            show this help message and exit
+  --contract-root CONTRACT_ROOT
+  --view-root VIEW_ROOT
+  --output OUTPUT
+
+===== freeze-view =====
+usage: python -m spritelab.dataset_v5.cli freeze-view [-h]
+                                                      --contract-root CONTRACT_ROOT
+                                                      --view-root VIEW_ROOT
+                                                      --approved-decisions APPROVED_DECISIONS
+                                                      --command-line COMMAND_LINE
+
+options:
+  -h, --help            show this help message and exit
+  --contract-root CONTRACT_ROOT
+  --view-root VIEW_ROOT
+  --approved-decisions APPROVED_DECISIONS
+  --command-line COMMAND_LINE
+
+===== verify-freeze =====
+usage: python -m spritelab.dataset_v5.cli verify-freeze [-h]
+                                                        --view-root VIEW_ROOT
+                                                        [--output OUTPUT]
+
+options:
+  -h, --help            show this help message and exit
+  --view-root VIEW_ROOT
+  --output OUTPUT

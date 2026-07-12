@@ -1,0 +1,102 @@
+{
+  "artist_counts": {
+    "artist_10": 1,
+    "artist_11": 1
+  },
+  "blob_store_frozen_hash_map": {
+    "blobs/75b94f76eb6d16f677d4047ce9feda43dee6957bcd78e45a1b83fb24b4b78d9d.rgba": "3203ae256e5368b6319a853dd96d57ad623ca2ac087b75f5b657c684e8b74a3f",
+    "blobs/7f9dcac24f4b5e29ec93f93bb6155991d953c2f0be644d9e0db696ab37622f37.rgba": "9e9be1a6edfc4a4d93eeb4bab7bfac56231f3b67ef5d95b9b0db69696b38e674"
+  },
+  "blob_store_identity": "content-addressed-canonical-rgba-v1",
+  "blob_store_sha256": "64cda07843bfcbcb6de23cddff520bcafeb1f947a7d68e726fc2a043e7ee29f7",
+  "category_counts": {
+    "\"weapon\"": 2
+  },
+  "code_identity": {
+    "dirty": false,
+    "git_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "contract_identity": {
+    "artifact_sha256": {
+      "dataset_v5_record.schema.json": "750ee76d04aa509b96bfbb7bae92d37d33f27fc91461e23762cb1d316422dab4",
+      "dataset_v5_supervision.schema.json": "1767fcb48d7cf0d16bcf0ec1782edb7916afcfb8bf3b823ece93caa5cda23d97",
+      "dataset_v5_view_manifest.schema.json": "40a10cc50ceab753c67906b3732c20a886f168351665899546e50fa17ab5ffc0",
+      "freeze_contract.json": "7eca2c7b10a416960134f1ca7f39cce871f32f0f69d28109b32c1e0cbca693a9",
+      "leakage_contract.json": "7c32e173798c3150796e6c91309727477eab0b8e792b0c1065fdf7a1fba64595",
+      "view_contracts.json": "72b31d0b51ea0e77af1a3163109186403723f7029320733d45b877621d15a597"
+    },
+    "version": "dataset_v5_view_contract_v1.0.0"
+  },
+  "contract_version": "dataset_v5_view_contract_v1.0.0",
+  "created_by_command": "dataset-v5 build-view --view v5_eval_balanced --output <fresh-output>",
+  "example_only": true,
+  "freeze_boundary": {
+    "artifact_sha256": {
+      "blobs/75b94f76eb6d16f677d4047ce9feda43dee6957bcd78e45a1b83fb24b4b78d9d.rgba": "3203ae256e5368b6319a853dd96d57ad623ca2ac087b75f5b657c684e8b74a3f",
+      "blobs/7f9dcac24f4b5e29ec93f93bb6155991d953c2f0be644d9e0db696ab37622f37.rgba": "9e9be1a6edfc4a4d93eeb4bab7bfac56231f3b67ef5d95b9b0db69696b38e674",
+      "evaluation_manifest.jsonl": "907a5fc36ca3236df69a829cb484f0806d8611580fab1e3477d8d21b3526eaf2",
+      "excluded_record_manifest.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "license_provenance.jsonl": "77897deaf590a0fc7db5f520f8de3a3210a24d59e0214d660e6f1c4e666c98f3",
+      "record_manifest.jsonl": "51f6b09f3b93f9c261297ece9a4d06e3567dfa22d204de9b534c313561111fcc",
+      "relation_manifest.json": "fecdb5e1c1f8927e2883fd3b898984553e9576ce31d571c24b9d13b778f2ce25",
+      "resolved_policy.json": "023f053a328c01eaffa7e9d116ef490499580a0aaf57ff09994ccfea11545cce",
+      "source_binding.json": "b3be61d1c5113fa0cb75f6c95d5c7e78ff3cce95ed1346f199c0514865bd849a",
+      "split_manifest.json": "aa9fab52da6788204b962bb5b0f2310f657dd74b958ff244c8879f16e3afa87a",
+      "validation_report.json": "e886f25cba6e4febb74111a0261b8869817b75cff9aa9222e684832cb9112093",
+      "weight_manifest.jsonl": "1a4a920f545cb57c2d88995632dd6adfee1ca8e53d00101b3a90a43b82868228"
+    },
+    "artifacts": [
+      "blobs/75b94f76eb6d16f677d4047ce9feda43dee6957bcd78e45a1b83fb24b4b78d9d.rgba",
+      "blobs/7f9dcac24f4b5e29ec93f93bb6155991d953c2f0be644d9e0db696ab37622f37.rgba",
+      "evaluation_manifest.jsonl",
+      "excluded_record_manifest.jsonl",
+      "license_provenance.jsonl",
+      "record_manifest.jsonl",
+      "relation_manifest.json",
+      "resolved_policy.json",
+      "source_binding.json",
+      "split_manifest.json",
+      "validation_report.json",
+      "view_manifest.json",
+      "weight_manifest.jsonl"
+    ],
+    "complete": false,
+    "production_freeze_authorized": false
+  },
+  "hard_relation_validation": {
+    "crossing_count": 0,
+    "passed": true
+  },
+  "license_counts": {
+    "cc0": 2
+  },
+  "pack_counts": {
+    "pack_10": 1,
+    "pack_11": 1
+  },
+  "production_frozen": false,
+  "promotion_forbidden": true,
+  "record_count": 2,
+  "record_manifest_sha256": "51f6b09f3b93f9c261297ece9a4d06e3567dfa22d204de9b534c313561111fcc",
+  "schema_version": "dataset_v5_view_manifest_v1.0.0",
+  "source_artifact_sha256": {
+    "external-fixture/847ef9d04cd06e7c/source_manifest.jsonl": "847ef9d04cd06e7c4e33f2ac497cd9a159cd83d1614fd008127ee1a6fd3da3a4"
+  },
+  "source_artifacts": [
+    "external-fixture/847ef9d04cd06e7c/source_manifest.jsonl"
+  ],
+  "split_counts": {
+    "test": 2
+  },
+  "suitability_counts": {
+    "accept": 2
+  },
+  "supervision_class_counts": {
+    "supervised_strong": 2
+  },
+  "unique_geometry_count": 2,
+  "unique_rgba_count": 2,
+  "view_name": "v5_eval_balanced",
+  "view_purpose": "Human-truth evaluation with explicit strata and evaluation weights.",
+  "view_status": "candidate"
+}

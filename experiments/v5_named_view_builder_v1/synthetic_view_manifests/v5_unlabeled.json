@@ -1,0 +1,102 @@
+{
+  "artist_counts": {
+    "artist_40": 1,
+    "artist_41": 1
+  },
+  "blob_store_frozen_hash_map": {
+    "blobs/a25a1f6796d15bbb0a5656abb2b3aeecc9d229f71901138d310d3b6a2eb50e39.rgba": "1e47a470e91a7b5c81fbe2f7c5f2e3f937657f5aa145562085d64d17f09ceb3e",
+    "blobs/cd34f10c5e275b9134fc0a905401eb38163674f721d0d8856e0f2643569fe708.rgba": "f2df55b38b3889c55ccee9a2d7f5589700ae600c349bc8e64dbfe3eff803c2e8"
+  },
+  "blob_store_identity": "content-addressed-canonical-rgba-v1",
+  "blob_store_sha256": "3712d83260cc6ef2f30556353baa8d49550d8fee198906ae78bcc7e8033a4030",
+  "category_counts": {
+    "null": 2
+  },
+  "code_identity": {
+    "dirty": false,
+    "git_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "contract_identity": {
+    "artifact_sha256": {
+      "dataset_v5_record.schema.json": "750ee76d04aa509b96bfbb7bae92d37d33f27fc91461e23762cb1d316422dab4",
+      "dataset_v5_supervision.schema.json": "1767fcb48d7cf0d16bcf0ec1782edb7916afcfb8bf3b823ece93caa5cda23d97",
+      "dataset_v5_view_manifest.schema.json": "40a10cc50ceab753c67906b3732c20a886f168351665899546e50fa17ab5ffc0",
+      "freeze_contract.json": "7eca2c7b10a416960134f1ca7f39cce871f32f0f69d28109b32c1e0cbca693a9",
+      "leakage_contract.json": "7c32e173798c3150796e6c91309727477eab0b8e792b0c1065fdf7a1fba64595",
+      "view_contracts.json": "72b31d0b51ea0e77af1a3163109186403723f7029320733d45b877621d15a597"
+    },
+    "version": "dataset_v5_view_contract_v1.0.0"
+  },
+  "contract_version": "dataset_v5_view_contract_v1.0.0",
+  "created_by_command": "dataset-v5 build-view --view v5_unlabeled --output <fresh-output>",
+  "example_only": true,
+  "freeze_boundary": {
+    "artifact_sha256": {
+      "blobs/a25a1f6796d15bbb0a5656abb2b3aeecc9d229f71901138d310d3b6a2eb50e39.rgba": "1e47a470e91a7b5c81fbe2f7c5f2e3f937657f5aa145562085d64d17f09ceb3e",
+      "blobs/cd34f10c5e275b9134fc0a905401eb38163674f721d0d8856e0f2643569fe708.rgba": "f2df55b38b3889c55ccee9a2d7f5589700ae600c349bc8e64dbfe3eff803c2e8",
+      "evaluation_manifest.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "excluded_record_manifest.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "license_provenance.jsonl": "67f5e2d128b546d0e11c15e0631332a7bcf9bc2f617f6599c93505d8fb66bd4f",
+      "record_manifest.jsonl": "791e9df05a6420f2af5537fae8cc55884444b60a3e4d3d81b2a020b5c6ccdc89",
+      "relation_manifest.json": "4e0217447b55012c36ff19e9f25eef743d8e6a56a093a03eca3607b39d336c3b",
+      "resolved_policy.json": "df45c1dfee86a2bb54e5c7ddb62f7cec7bc2d43f936761d29247abfb65eaf498",
+      "source_binding.json": "5bd91c4b7931bda9283a6efc2e522c50df33902b27f33b62a3ef910a1b7db015",
+      "split_manifest.json": "efb940b507209e8f46ad62c5679e2b381e35e45a16307734617a7a56bc86b254",
+      "validation_report.json": "99f439ccd60cd1e572dc3077ec79325a77e2ddc6718d85312704d48096f63d65",
+      "weight_manifest.jsonl": "4dd4e06e2351cd22724e58bb2817f5536065e154727d35062d95613af928a37e"
+    },
+    "artifacts": [
+      "blobs/a25a1f6796d15bbb0a5656abb2b3aeecc9d229f71901138d310d3b6a2eb50e39.rgba",
+      "blobs/cd34f10c5e275b9134fc0a905401eb38163674f721d0d8856e0f2643569fe708.rgba",
+      "evaluation_manifest.jsonl",
+      "excluded_record_manifest.jsonl",
+      "license_provenance.jsonl",
+      "record_manifest.jsonl",
+      "relation_manifest.json",
+      "resolved_policy.json",
+      "source_binding.json",
+      "split_manifest.json",
+      "validation_report.json",
+      "view_manifest.json",
+      "weight_manifest.jsonl"
+    ],
+    "complete": false,
+    "production_freeze_authorized": false
+  },
+  "hard_relation_validation": {
+    "crossing_count": 0,
+    "passed": true
+  },
+  "license_counts": {
+    "cc0": 2
+  },
+  "pack_counts": {
+    "pack_40": 1,
+    "pack_41": 1
+  },
+  "production_frozen": false,
+  "promotion_forbidden": true,
+  "record_count": 2,
+  "record_manifest_sha256": "791e9df05a6420f2af5537fae8cc55884444b60a3e4d3d81b2a020b5c6ccdc89",
+  "schema_version": "dataset_v5_view_manifest_v1.0.0",
+  "source_artifact_sha256": {
+    "external-fixture/d5c36b2e190fdc6a/source_manifest.jsonl": "d5c36b2e190fdc6a8840d1649f035230d24612a58768657a13907730868f8395"
+  },
+  "source_artifacts": [
+    "external-fixture/d5c36b2e190fdc6a/source_manifest.jsonl"
+  ],
+  "split_counts": {
+    "unsplit": 2
+  },
+  "suitability_counts": {
+    "accept": 2
+  },
+  "supervision_class_counts": {
+    "unlabeled": 2
+  },
+  "unique_geometry_count": 2,
+  "unique_rgba_count": 2,
+  "view_name": "v5_unlabeled",
+  "view_purpose": "Licensed, provenance-verified records with no semantic target contribution.",
+  "view_status": "candidate"
+}

@@ -1,0 +1,17 @@
+C:\Python314\python.exe -m pytest tests/test_dataset_v5_named_views.py -q
+C:\Python314\python.exe -m pytest tests -q -k dataset_v5
+C:\Python314\python.exe -m ruff check src/spritelab/dataset_v5/named_views.py src/spritelab/dataset_v5/cli.py src/spritelab/dataset_v5/__init__.py tests/test_dataset_v5_named_views.py
+C:\Python314\python.exe -m ruff format --check src/spritelab/dataset_v5/named_views.py src/spritelab/dataset_v5/cli.py src/spritelab/dataset_v5/__init__.py tests/test_dataset_v5_named_views.py
+git diff --check
+C:\Python314\python.exe -m spritelab.dataset_v5.cli --help
+C:\Python314\python.exe -m spritelab.dataset_v5.cli build --help
+C:\Python314\python.exe -m spritelab.dataset_v5.cli verify --help
+C:\Python314\python.exe -m spritelab.dataset_v5.cli build-policy-preview --help
+C:\Python314\python.exe -m spritelab.dataset_v5.cli verify-policy-preview --help
+C:\Python314\python.exe -m spritelab.dataset_v5.cli compare-policy-previews --help
+C:\Python314\python.exe -m spritelab.dataset_v5.cli validate-contract --help
+C:\Python314\python.exe -m spritelab.dataset_v5.cli build-view --help
+C:\Python314\python.exe -m spritelab.dataset_v5.cli verify-view --help
+C:\Python314\python.exe -m spritelab.dataset_v5.cli freeze-view --help
+C:\Python314\python.exe -m spritelab.dataset_v5.cli verify-freeze --help
+git diff --no-ext-diff --binary HEAD -- src/spritelab/dataset_v5 tests/test_dataset_v5_named_views.py

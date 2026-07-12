@@ -1,0 +1,77 @@
+{
+  "adversarial_relations_tested": [
+    "declared_variant",
+    "exact_rgba",
+    "flip",
+    "geometry",
+    "hard_relation",
+    "ood_identity",
+    "recolor",
+    "sheet",
+    "translation"
+  ],
+  "all_adversarial_tests_passed": true,
+  "known_zero_crossing_relations": [
+    "alpha_masks",
+    "declared_variants",
+    "exact_decoded_rgba",
+    "flips_where_known",
+    "geometry_families",
+    "hard_relations",
+    "recolors",
+    "sheet_groups",
+    "translations"
+  ],
+  "schema_version": "dataset_v5_leakage_matrix_v1.0.0",
+  "view_results": [
+    {
+      "crossing_count": 0,
+      "passed": true,
+      "unknown_flip_count": 5,
+      "unknown_translation_count": 5,
+      "view_name": "v5_debug"
+    },
+    {
+      "crossing_count": 0,
+      "passed": true,
+      "unknown_flip_count": 4,
+      "unknown_translation_count": 4,
+      "view_name": "v5_architecture"
+    },
+    {
+      "crossing_count": 0,
+      "passed": true,
+      "unknown_flip_count": 4,
+      "unknown_translation_count": 4,
+      "view_name": "v5_scale_check"
+    },
+    {
+      "crossing_count": 0,
+      "passed": true,
+      "unknown_flip_count": 2,
+      "unknown_translation_count": 2,
+      "view_name": "v5_eval_balanced"
+    },
+    {
+      "crossing_count": 0,
+      "passed": true,
+      "unknown_flip_count": 2,
+      "unknown_translation_count": 2,
+      "view_name": "v5_source_ood"
+    },
+    {
+      "crossing_count": 0,
+      "passed": true,
+      "unknown_flip_count": 2,
+      "unknown_translation_count": 2,
+      "view_name": "v5_open_set"
+    },
+    {
+      "crossing_count": 0,
+      "passed": true,
+      "unknown_flip_count": 2,
+      "unknown_translation_count": 2,
+      "view_name": "v5_unlabeled"
+    }
+  ]
+}

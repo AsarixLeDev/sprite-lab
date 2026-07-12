@@ -1,0 +1,122 @@
+{
+  "artist_counts": {
+    "artist_1": 1,
+    "artist_2": 1,
+    "artist_3": 1,
+    "artist_4": 1,
+    "artist_5": 1
+  },
+  "blob_store_frozen_hash_map": {
+    "blobs/125c3e7d4c462259a1f7393d64583bbc6c82f022e9e3c91b929d45a27601122d.rgba": "d5f045a49292c996babfd18653ac9d142a1c8228bb8cfa403d8c79613608b977",
+    "blobs/1de80358da2ba90b391669b7073d8bcfc5270257bef279018b4d91a2047b4065.rgba": "18229efb4215f5b02b3c931af5b0ca16e825bd8fa986d38aafdc7ccc57938db6",
+    "blobs/9a29f5926d63eb60bb1bf5e3ff5f650d2486ffc9d8ce3720d92287b02e0300f4.rgba": "fb37412f5afa5c998e5f53340788f419eff9f43048e1893259abfb7ef228f7c9",
+    "blobs/c0e1b31742e93fee7281ff9bc308ff2a69f19f835e74ee3eddd39067de2918a8.rgba": "7f48838ff1761560c9a95c985e49b8f123d7adc3b9e67e8bc2e7ff4303daaf9c",
+    "blobs/f353071772982936f5c8ea94957fcd9b131ad0f0ed2041db9ccc53f507a93fda.rgba": "f1d5a5d4364e30e307480b6f93fdefc91bab1c4dacff9994ea1028d028d3d8f4"
+  },
+  "blob_store_identity": "content-addressed-canonical-rgba-v1",
+  "blob_store_sha256": "742766386f0621f2f8ccfc559ad075ec736ce49ae3aa7d1e8706ae99a09f9f21",
+  "category_counts": {
+    "\"weapon\"": 3,
+    "null": 2
+  },
+  "code_identity": {
+    "dirty": false,
+    "git_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "contract_identity": {
+    "artifact_sha256": {
+      "dataset_v5_record.schema.json": "750ee76d04aa509b96bfbb7bae92d37d33f27fc91461e23762cb1d316422dab4",
+      "dataset_v5_supervision.schema.json": "1767fcb48d7cf0d16bcf0ec1782edb7916afcfb8bf3b823ece93caa5cda23d97",
+      "dataset_v5_view_manifest.schema.json": "40a10cc50ceab753c67906b3732c20a886f168351665899546e50fa17ab5ffc0",
+      "freeze_contract.json": "7eca2c7b10a416960134f1ca7f39cce871f32f0f69d28109b32c1e0cbca693a9",
+      "leakage_contract.json": "7c32e173798c3150796e6c91309727477eab0b8e792b0c1065fdf7a1fba64595",
+      "view_contracts.json": "72b31d0b51ea0e77af1a3163109186403723f7029320733d45b877621d15a597"
+    },
+    "version": "dataset_v5_view_contract_v1.0.0"
+  },
+  "contract_version": "dataset_v5_view_contract_v1.0.0",
+  "created_by_command": "dataset-v5 build-view --view v5_debug --output <fresh-output>",
+  "example_only": true,
+  "freeze_boundary": {
+    "artifact_sha256": {
+      "blobs/125c3e7d4c462259a1f7393d64583bbc6c82f022e9e3c91b929d45a27601122d.rgba": "d5f045a49292c996babfd18653ac9d142a1c8228bb8cfa403d8c79613608b977",
+      "blobs/1de80358da2ba90b391669b7073d8bcfc5270257bef279018b4d91a2047b4065.rgba": "18229efb4215f5b02b3c931af5b0ca16e825bd8fa986d38aafdc7ccc57938db6",
+      "blobs/9a29f5926d63eb60bb1bf5e3ff5f650d2486ffc9d8ce3720d92287b02e0300f4.rgba": "fb37412f5afa5c998e5f53340788f419eff9f43048e1893259abfb7ef228f7c9",
+      "blobs/c0e1b31742e93fee7281ff9bc308ff2a69f19f835e74ee3eddd39067de2918a8.rgba": "7f48838ff1761560c9a95c985e49b8f123d7adc3b9e67e8bc2e7ff4303daaf9c",
+      "blobs/f353071772982936f5c8ea94957fcd9b131ad0f0ed2041db9ccc53f507a93fda.rgba": "f1d5a5d4364e30e307480b6f93fdefc91bab1c4dacff9994ea1028d028d3d8f4",
+      "evaluation_manifest.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "excluded_record_manifest.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "license_provenance.jsonl": "a571e0296ffaeac2f7e17e596a1d6746bac43987e644930fa41fd9212c8969fb",
+      "record_manifest.jsonl": "5d4d26db1bda104bb119dfdc9cf15779f321e0b968df294503690226840389e2",
+      "relation_manifest.json": "91427148e2d9ed172b39c5e153182ae002a7718334084a3b3fe99cf9e8ad36bd",
+      "resolved_policy.json": "c35f5ce748ab8958e3aeec42f17455ab3be43dac512fbcb624d94a00818d0998",
+      "source_binding.json": "d2f4ba68725906a1f6bb94c5f062086dea3e83b7844e7effddae6ee62bb1000c",
+      "split_manifest.json": "52b0bf23458bfec73dae0f42e5fa014120c49fb75246f212e55dbda8de092965",
+      "validation_report.json": "088ffeb115fa5f831819981a528269e462a2d642027d91fd2118520df07e495f",
+      "weight_manifest.jsonl": "ded7a0e69fff6cc1e0b8e4df6e936c9d37339452eec32e39ea3e2ed405da5055"
+    },
+    "artifacts": [
+      "blobs/125c3e7d4c462259a1f7393d64583bbc6c82f022e9e3c91b929d45a27601122d.rgba",
+      "blobs/1de80358da2ba90b391669b7073d8bcfc5270257bef279018b4d91a2047b4065.rgba",
+      "blobs/9a29f5926d63eb60bb1bf5e3ff5f650d2486ffc9d8ce3720d92287b02e0300f4.rgba",
+      "blobs/c0e1b31742e93fee7281ff9bc308ff2a69f19f835e74ee3eddd39067de2918a8.rgba",
+      "blobs/f353071772982936f5c8ea94957fcd9b131ad0f0ed2041db9ccc53f507a93fda.rgba",
+      "evaluation_manifest.jsonl",
+      "excluded_record_manifest.jsonl",
+      "license_provenance.jsonl",
+      "record_manifest.jsonl",
+      "relation_manifest.json",
+      "resolved_policy.json",
+      "source_binding.json",
+      "split_manifest.json",
+      "validation_report.json",
+      "view_manifest.json",
+      "weight_manifest.jsonl"
+    ],
+    "complete": false,
+    "production_freeze_authorized": false
+  },
+  "hard_relation_validation": {
+    "crossing_count": 0,
+    "passed": true
+  },
+  "license_counts": {
+    "cc0": 5
+  },
+  "pack_counts": {
+    "pack_1": 1,
+    "pack_2": 1,
+    "pack_3": 1,
+    "pack_4": 1,
+    "pack_5": 1
+  },
+  "production_frozen": false,
+  "promotion_forbidden": true,
+  "record_count": 5,
+  "record_manifest_sha256": "5d4d26db1bda104bb119dfdc9cf15779f321e0b968df294503690226840389e2",
+  "schema_version": "dataset_v5_view_manifest_v1.0.0",
+  "source_artifact_sha256": {
+    "external-fixture/aa88e790f296e7f5/source_manifest.jsonl": "aa88e790f296e7f53b27672dbdee793b19614e994b44322db794ae6b71a34d6a"
+  },
+  "source_artifacts": [
+    "external-fixture/aa88e790f296e7f5/source_manifest.jsonl"
+  ],
+  "split_counts": {
+    "train": 5
+  },
+  "suitability_counts": {
+    "accept": 4,
+    "quarantine": 1
+  },
+  "supervision_class_counts": {
+    "auxiliary_only": 1,
+    "supervised_strong": 1,
+    "supervised_weak": 1,
+    "unlabeled": 2
+  },
+  "unique_geometry_count": 5,
+  "unique_rgba_count": 5,
+  "view_name": "v5_debug",
+  "view_purpose": "Fast end-to-end diagnostics with broad failure-mode coverage, never production evidence.",
+  "view_status": "diagnostic"
+}
