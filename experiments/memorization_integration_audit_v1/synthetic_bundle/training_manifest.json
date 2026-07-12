@@ -1,0 +1,11 @@
+{
+  "records": [
+    {
+      "image": "experiments/memorization_integration_audit_v1/synthetic_bundle/training.ppm",
+      "row": 0,
+      "sprite_id": "synthetic-train-1"
+    }
+  ],
+  "schema_version": "sprite_lab_synthetic_training_manifest_v1",
+  "synthetic_only": true
+}

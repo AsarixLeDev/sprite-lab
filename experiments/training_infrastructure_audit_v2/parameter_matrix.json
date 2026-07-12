@@ -1,0 +1,36 @@
+{
+  "schema_version": "spritelab_training_parameter_matrix_v2",
+  "recomputed_from_production_constructor": true,
+  "absent": {
+    "parameter_count": 7929284,
+    "parameter_tensor_count": 151,
+    "auxiliary_parameter_count": 0,
+    "state_key_count": 151,
+    "auxiliary_state_key_count": 0,
+    "ema_key_count": 151,
+    "auxiliary_ema_key_count": 0,
+    "optimizer_parameter_member_count": 151,
+    "auxiliary_optimizer_member_count": 0,
+    "architecture_identity_hash": "16b9358a2cff5fb2e44eedf14ec58dd4bed286d54da05ad68f52c4e6e8209724",
+    "ordered_parameter_name_hash": "dbd916ad1eb94bbe0fc94c9672e300bf1119b9a7a6a6bc8d397eb38a6a9a9ff1",
+    "state_dict_key_hash": "dbd916ad1eb94bbe0fc94c9672e300bf1119b9a7a6a6bc8d397eb38a6a9a9ff1"
+  },
+  "palette_index": {
+    "parameter_count": 8004372,
+    "parameter_tensor_count": 161,
+    "auxiliary_parameter_count": 75088,
+    "state_key_count": 161,
+    "auxiliary_state_key_count": 10,
+    "ema_key_count": 161,
+    "auxiliary_ema_key_count": 10,
+    "optimizer_parameter_member_count": 161,
+    "auxiliary_optimizer_member_count": 10,
+    "architecture_identity_hash": "c42c94c20e0e3afaace9418ee02d54e52c878837712cabab06014fdf175afb86",
+    "ordered_parameter_name_hash": "d86637322e34a3c3d52ddf8c41df0a3e229cadfe4fce64ea0936284f51ade099",
+    "state_dict_key_hash": "d86637322e34a3c3d52ddf8c41df0a3e229cadfe4fce64ea0936284f51ade099"
+  },
+  "measured_parameter_difference": 75088,
+  "derived_auxiliary_parameter_count": 75088,
+  "difference_matches_owned_auxiliary_parameters": true,
+  "reported_difference_verified_without_trusting_prior_report": true
+}

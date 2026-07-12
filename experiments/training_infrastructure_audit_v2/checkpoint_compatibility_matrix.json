@@ -1,0 +1,15 @@
+{
+  "schema_version": "spritelab_training_checkpoint_compatibility_matrix_v2",
+  "rows": [
+    {"checkpoint": "absent", "requested_model": "absent", "expected": "allowed", "observed": "allowed", "result": "PASS"},
+    {"checkpoint": "palette_index", "requested_model": "palette_index", "expected": "allowed", "observed": "allowed", "result": "PASS"},
+    {"checkpoint": "palette_index", "requested_model": "absent", "expected": "blocked", "observed": "blocked", "result": "PASS"},
+    {"checkpoint": "absent", "requested_model": "palette_index", "expected": "blocked", "observed": "blocked", "result": "PASS"},
+    {"checkpoint": "legacy_missing_auxiliary", "requested_model": "headless", "expected": "blocked", "observed": "blocked", "result": "PASS"},
+    {"checkpoint": "legacy_missing_auxiliary", "requested_model": "legacy_evaluation_adapter", "expected": "evaluation_only", "observed": "evaluation_only_nonpromotable", "result": "PASS"},
+    {"checkpoint": "tampered_architecture_identity", "requested_model": "same", "expected": "blocked", "observed": "blocked", "result": "PASS"}
+  ],
+  "strict_state_loading": true,
+  "silent_auxiliary_tensor_drop": false,
+  "note": "Checkpoint-mode compatibility passes; the separate manifest-presence gap makes the overall safe-resume verdict fail."
+}

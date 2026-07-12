@@ -1,0 +1,97 @@
+{
+  "all_frozen_and_historical_hashes_unchanged": true,
+  "artifacts": [
+    {
+      "actual_sha256": "fe6053f38190279d2f7a1b56086711dcd7493af04173b1cc6d52a2e08dfbea10",
+      "expected_sha256": "fe6053f38190279d2f7a1b56086711dcd7493af04173b1cc6d52a2e08dfbea10",
+      "path": "experiments/challenger_full_v4_phase1/train_25k/checkpoint_last_ema.pt",
+      "role": "historical checkpoint",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "091f6f7031f254f51e7b746c35f03b360cbc24f144991c5d6e0e2f0f36e64904",
+      "expected_sha256": "091f6f7031f254f51e7b746c35f03b360cbc24f144991c5d6e0e2f0f36e64904",
+      "path": "experiments/generation_benchmark_v1/benchmark_manifest.json",
+      "role": "frozen benchmark manifest",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "8c0041240c5f6ca092434ca7a78bdfc42aee2ac506ec93478d0cb12d659f051f",
+      "expected_sha256": "8c0041240c5f6ca092434ca7a78bdfc42aee2ac506ec93478d0cb12d659f051f",
+      "path": "experiments/generation_benchmark_v1/baseline_smoke/summary.json",
+      "role": "historical memorization machine report",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "f385da206095d421744486f87d6557431a67a95ad9e39e5447857e2d8ec6e4d6",
+      "expected_sha256": "f385da206095d421744486f87d6557431a67a95ad9e39e5447857e2d8ec6e4d6",
+      "path": "experiments/generation_benchmark_v1/baseline_smoke/per_image_metrics.jsonl",
+      "role": "historical memorization per-image report",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "337d0071dc3129b2b499e4c1145a052ad9b679ac7c713ea7755a273a3d3c90a6",
+      "expected_sha256": "337d0071dc3129b2b499e4c1145a052ad9b679ac7c713ea7755a273a3d3c90a6",
+      "path": "experiments/challenger_full_v4_phase1/generated_eval/generated_manifest.jsonl",
+      "role": "historical generated manifest",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "f4c1413c550d8243b76b85d5c70f9484f7108aed292aac029afbd84a7c142f3b",
+      "expected_sha256": "f4c1413c550d8243b76b85d5c70f9484f7108aed292aac029afbd84a7c142f3b",
+      "path": "datasets/sprite_lab_multisource_v4/training_manifest.jsonl",
+      "role": "historical training manifest",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "6dc0647e5a73d9b41047ec84a9a5f4be565cc368bf4eebaf074f51dfe083fb45",
+      "expected_sha256": "6dc0647e5a73d9b41047ec84a9a5f4be565cc368bf4eebaf074f51dfe083fb45",
+      "path": "experiments/generation_benchmark_v1/exact_alpha_review/review_results.jsonl",
+      "role": "historical memorization review log",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "486e27c79dedb0ab01fdf450a10b0be593e36e8cbfa4d8eed353f921bcc43c69",
+      "expected_sha256": "486e27c79dedb0ab01fdf450a10b0be593e36e8cbfa4d8eed353f921bcc43c69",
+      "path": "experiments/generation_benchmark_v1/exact_alpha_review/review_summary.json",
+      "role": "historical memorization review summary",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "1e48a8d0cc3c744c03eb66978b8cafa1689007eab371cf701dab1aaddb7a771f",
+      "expected_sha256": "1e48a8d0cc3c744c03eb66978b8cafa1689007eab371cf701dab1aaddb7a771f",
+      "path": "experiments/memorization_detector_hardening_v1/detector_policy.json",
+      "role": "detector policy preview",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "5dc006da61fe6ef429cb91bc2a461b9298469286a2334947bebc19301de93023",
+      "expected_sha256": "5dc006da61fe6ef429cb91bc2a461b9298469286a2334947bebc19301de93023",
+      "path": "experiments/memorization_detector_hardening_v1/historical_reclassification.json",
+      "role": "historical detector-v2 reclassification",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "181f54a983cccb98203af7aca6b4927a49841f71cadb25a5e35bd67dc693df4b",
+      "expected_sha256": "181f54a983cccb98203af7aca6b4927a49841f71cadb25a5e35bd67dc693df4b",
+      "path": "experiments/memorization_promotion_remediation_v1/historical_candidate_evidence.json",
+      "role": "historical candidate evidence",
+      "unchanged": true
+    },
+    {
+      "actual_sha256": "90ea2fa0cfca6047ebf62cf9721b373d16d7dabc4a0d877fddd4376520d9bb06",
+      "expected_sha256": "90ea2fa0cfca6047ebf62cf9721b373d16d7dabc4a0d877fddd4376520d9bb06",
+      "path": "experiments/memorization_promotion_remediation_v1/historical_decision.json",
+      "role": "prior historical blocked decision",
+      "unchanged": true
+    }
+  ],
+  "historical_checkpoint_used_as_eligible_evidence": false,
+  "historical_inputs_modified": false,
+  "pin_sources": [
+    "experiments/memorization_promotion_remediation_v1/frozen_hash_verification.json",
+    "experiments/memorization_detector_hardening_v1/frozen_hash_verification.json",
+    "experiments/memorization_full_suite_readiness_audit_v1/frozen_hash_verification.json"
+  ],
+  "schema_version": "sprite_lab_memorization_integration_frozen_hash_verification_v1"
+}

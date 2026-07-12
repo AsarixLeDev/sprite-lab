@@ -1,0 +1,66 @@
+{
+  "schema_version": "sprite_lab_v5_remaining_blockers_v1",
+  "production_authorized": false,
+  "blockers_in_dependency_order": [
+    {
+      "order": 1,
+      "id": "independent_labeling_v4_audit",
+      "action": "Run a fresh independent audit of the Labeling-v4 remediation and rehearsal.",
+      "depends_on": []
+    },
+    {
+      "order": 2,
+      "id": "real_labeling_completion",
+      "action": "After independent clearance, complete real Wave-1 quality truth, freeze the source-bound queue, and perform authorized semantic preparation.",
+      "depends_on": ["independent_labeling_v4_audit"]
+    },
+    {
+      "order": 3,
+      "id": "independent_dataset_v5_builder_audit",
+      "action": "Run a fresh independent builder audit and resolve production membership, taxonomy, source-OOD, near-duplicate, and evaluation-policy decisions.",
+      "depends_on": ["real_labeling_completion"]
+    },
+    {
+      "order": 4,
+      "id": "final_dataset_and_model_identities",
+      "action": "Create and independently verify final frozen Dataset-v5 hashes and the final model-config hash.",
+      "depends_on": ["independent_dataset_v5_builder_audit"]
+    },
+    {
+      "order": 5,
+      "id": "training_infrastructure_remediation",
+      "action": "Fix missing resume-hard-field enforcement, runtime rebinding, campaign command/config identity, launch authorization, and complete aggregation; then independently audit.",
+      "depends_on": []
+    },
+    {
+      "order": 6,
+      "id": "evaluation_and_memorization_integration",
+      "action": "Implement and certify the evaluation contract and repair memorization gate/review semantics, evidence-class vocabulary, detector-policy identity, candidate evidence binding, and machine-report cross-checks.",
+      "depends_on": []
+    },
+    {
+      "order": 7,
+      "id": "ready_three_seed_campaign",
+      "action": "Build a ready, artifact-bound, independently certified three-seed campaign.",
+      "depends_on": ["final_dataset_and_model_identities", "training_infrastructure_remediation", "evaluation_and_memorization_integration"]
+    },
+    {
+      "order": 8,
+      "id": "real_training",
+      "action": "Run the authorized three-seed fixed-step campaign.",
+      "depends_on": ["ready_three_seed_campaign"]
+    },
+    {
+      "order": 9,
+      "id": "full_benchmark_and_reviews",
+      "action": "Generate the 54-output benchmark and complete bound v2 memorization reviews under the certified integration contract.",
+      "depends_on": ["real_training"]
+    },
+    {
+      "order": 10,
+      "id": "checkpoint_promotion",
+      "action": "Evaluate promotion only after every machine, identity, human-review, and campaign gate passes.",
+      "depends_on": ["full_benchmark_and_reviews"]
+    }
+  ]
+}

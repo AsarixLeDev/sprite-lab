@@ -1,0 +1,17 @@
+Phase 3 read-only training infrastructure audit command log
+
+1. Read the complete audited production and test files:
+   - src/spritelab/training/generator_challenger.py
+   - src/spritelab/training/experiment_system.py
+   - src/spritelab/training/campaign.py
+   - src/spritelab/training/cli/experiment_cmds.py
+   - tests/test_training_architecture_ablation.py
+   - tests/test_training_campaign.py
+2. CPU-only production construction with CUDA_VISIBLE_DEVICES=-1 and PYTHONDONTWRITEBYTECODE=1; recomputed parameter ownership and architecture hashes twice per mode.
+3. Focused test evidence: python -m pytest tests/test_training_architecture_ablation.py tests/test_training_campaign.py -q --basetemp <fresh OS-temporary directory>
+4. python -m ruff check <the six audited files>
+5. python -m ruff format --check <the six audited files>
+6. Captured in-process exact argparse help for train, campaign-plan, campaign-validate, campaign-status, and campaign-run.
+7. SHA-256 verification of the six audited files and historical CPU-only checkpoint evidence.
+
+Prohibited operations not run: real training, campaign execution, provider calls, CUDA initialization, network access, checkpoint mutation, production freeze, promotion.

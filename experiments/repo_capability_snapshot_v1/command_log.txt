@@ -1,0 +1,54 @@
+Sprite Lab repository capability snapshot v1
+Assembled: 2026-07-12T19:01:10+02:00
+Branch observed: codex/v5-next-milestone
+Commit observed before snapshot content: 861b9f1
+
+READ-ONLY INSPECTION
+- Read the attached mission and isolated the complete Phase-5 contract.
+- Confirmed experiments/repo_capability_snapshot_v1 did not exist before creation.
+- Inspected CLI registration for unlabeled-pool, Dataset-v5, Labeling-v4, campaign, memorization review, and promotion decision commands.
+- Enumerated the requested human-readable evidence reports and candidate/frozen dataset roots.
+- Read the final Labeling-v4 remediation, Dataset-v5 builder, readiness, weighting, training remediation, campaign, and memorization promotion reports.
+
+HELP-ONLY CLI PROBES
+- PASS: PYTHONPATH=src python -m spritelab.unlabeled_pool --help
+- PASS: PYTHONPATH=src python -m spritelab.dataset_v5.cli --help
+- PASS: PYTHONPATH=src python -m spritelab train --help
+- PASS: PYTHONPATH=src python -m spritelab train campaign-plan --help
+- PASS: PYTHONPATH=src python -m spritelab train campaign-validate --help
+- PASS: PYTHONPATH=src python -m spritelab train campaign-status --help
+- PASS: PYTHONPATH=src python -m spritelab train campaign-run --help
+- PASS: PYTHONPATH=src python -m spritelab eval --help
+- PASS: PYTHONPATH=src python -m spritelab eval promotion-decision --help
+- A first help-only probe used the obsolete nested form `train experiment campaign-*`; argparse rejected it with exit 2. It launched nothing and wrote nothing. The correct top-level `train campaign-*` forms above then passed.
+
+READ-ONLY VERIFICATION
+- PASS: PYTHONPATH=src python -m spritelab.unlabeled_pool verify --pool datasets/sprite_lab_unlabeled_pool_v1_r2
+  Result: ok=true, frozen=true, candidate_count=3233, geometry_family_count=1288, errors=[].
+- PASS: PYTHONPATH=src python -m spritelab.dataset_v5.cli verify --dataset datasets/sprite_lab_multisource_v5_preview
+  Result: ok=true, 45 training-loader rows, zero reported leakage crossings, immutable v4 binding unchanged.
+- PASS: PYTHONPATH=src python -m spritelab.dataset_v5.cli verify-policy-preview --dataset datasets/sprite_lab_multisource_v5_policy_v2_soft_balanced_preview
+  Result: ok=true, 759 training-loader rows, zero reported hard-relation, exact, recolor, variant, held-out-pack, or sheet crossings.
+- PASS: PYTHONPATH=src python -m spritelab.dataset_v5.cli verify-policy-preview --dataset datasets/sprite_lab_multisource_v5_policy_v2_core_plus_weighted_sampling_preview
+  Result: ok=true, 759 training-loader rows, zero reported hard-relation, exact, recolor, variant, held-out-pack, or sheet crossings. This is the current audited weighting baseline selected for safe_commands.ps1.
+- PASS: PYTHONPATH=src python -m spritelab.dataset_v5.cli validate-contract --contract-root experiments/v5_view_contract_v1
+  Result: ok=true, all six pinned contract artifacts matched, seven views reported, production_freeze_authorized=false.
+
+SNAPSHOT VALIDATION
+- PASS: PowerShell parser accepted safe_commands.ps1 with zero syntax errors.
+- PASS: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\experiments\repo_capability_snapshot_v1\safe_commands.ps1
+  Result: help-only probes, three frozen/preview verifiers, contract validation, and report discovery completed; tests were intentionally not run without -RunTests.
+- PASS: git diff --check -- experiments/repo_capability_snapshot_v1
+- PASS: all seven content files end with LF and contain no CR bytes.
+
+SAFETY ACCOUNTING
+- GUI launches: 0
+- Provider/network calls: 0
+- Generation runs: 0
+- Training runs: 0
+- Production Dataset-v5 builds/freezes: 0
+- Promotion actions: 0
+- CUDA initialization requested: false
+- Repository files modified outside experiments/repo_capability_snapshot_v1: 0 by this task
+
+The safe_commands.ps1 script deliberately repeats only help, read-only verification, and optional focused CPU-only tests. It never runs a GUI, provider inference, generation, training, production freeze, or promotion.

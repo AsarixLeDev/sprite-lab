@@ -1,0 +1,18 @@
+Phase 4 command log (network-free, CPU-only, read-only except this evidence directory)
+=====================================================================================
+
+1. Verified experiments/memorization_integration_audit_v1 did not exist; created it once and refused overwrite semantics.
+2. Read the five requested production modules and the three focused memorization test modules.
+3. Read prior memorization detector, promotion remediation, full-suite readiness, and historical hash evidence.
+4. Computed production detector policy/version/comparison hashes and historical artifact SHA-256 values.
+5. Constructed a text-only synthetic bundle under synthetic_bundle/ with a plain-text checkpoint identity, one-case benchmark, bound generated/training artifacts, candidate evidence, and one bound v2 clearing review.
+6. Ran production detector code on the synthetic images; observed exact_alpha_review_required, review_required, exact_rgba=false.
+7. Ran the real production promotion-decision CLI on the synthetic bundle with CUDA disabled. Exit 0; decision eligible; this is compatibility evidence only and authorizes nothing.
+8. Ran the same production CLI on the pinned historical bundle. Expected nonzero hold; decision artifact blocked/not_comparable.
+9. Ran OS-temporary boundary probes for detector-class vocabulary, changed detector-policy SHA, caller-matched unsupported policy version, and top-level candidate-file mutation.
+10. Ran focused CPU-only pytest with a unique OS-temporary basetemp: 40 passed in 1.27s.
+11. Ran scoped Ruff and Ruff format checks on the five audited production files; all passed.
+12. Ran git diff --check; passed.
+13. Rehashed all pinned historical/frozen inputs and compared them to prior pins; all unchanged.
+
+No network, provider, GUI, generation, training, CUDA, checkpoint-copy, or promotion command was run.

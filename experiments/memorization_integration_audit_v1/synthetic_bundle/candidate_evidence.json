@@ -1,0 +1,40 @@
+{
+  "benchmark_manifest_path": "experiments/memorization_integration_audit_v1/synthetic_bundle/benchmark_manifest.json",
+  "benchmark_manifest_sha256": "38eb2f1a2e2d902aa489b6ef5755d20e6316af7280828937af95890c722e44c6",
+  "checkpoint_path": "experiments/memorization_integration_audit_v1/synthetic_bundle/checkpoint.synthetic",
+  "checkpoint_sha256": "ddc41c36dd73e3cff3159b6053aa80e0747f152a9ac8d4ba4ae3a261bab73b23",
+  "comparison_method": "deterministic_rgba_alpha_occupancy_v2",
+  "comparison_parameters_sha256": "cdb809ff60ff0161882310d1b5ba07941e5109c003c8af39054532a72665c00c",
+  "detector_policy_sha256": "8d6288ab7748451c05e049195d863e5cda36ad840983ad2732c83a9835a758e2",
+  "detector_policy_version": "memorization_detector_v2",
+  "generated_manifest_path": "experiments/memorization_integration_audit_v1/synthetic_bundle/generated_manifest.json",
+  "generated_manifest_sha256": "4c625fd3018b660bfca9e2d23643f275b4130c8f104f9dbb37e045514d2ef520",
+  "generated_report_path": "experiments/memorization_integration_audit_v1/synthetic_bundle/generated_report.json",
+  "generated_report_sha256": "e2dd1fa205eff7c234dffff0c8282d57a3bda800622782aa2c66881832b0230b",
+  "machine_report_path": "experiments/memorization_integration_audit_v1/synthetic_bundle/machine_report.json",
+  "machine_report_sha256": "102d526df996c457ea0e7babf3b82c114daeafc34687398be77ddd06931493c9",
+  "pairs": [
+    {
+      "detector_policy_sha256": "8d6288ab7748451c05e049195d863e5cda36ad840983ad2732c83a9835a758e2",
+      "evidence_class": "exact_alpha_review_required",
+      "exact_rgba": false,
+      "generated_decoded_rgba_sha256": "3c6a19eca3c7e506204ed7ae036c33ecbb59cd6043d78860e1802f67ee1ffbba",
+      "generated_png_path": "experiments/memorization_integration_audit_v1/synthetic_bundle/generated.ppm",
+      "generated_png_sha256": "6d557029e3a7347a81767c6411cd5044113bb0c747385cd11044060aa22cd316",
+      "generated_sample_id": "synthetic-sample-1",
+      "noise_seed": 73100170,
+      "pair_id": "synthetic-sample-1__synthetic-train-1",
+      "prompt_id": "synthetic-case-1",
+      "seed": 731001,
+      "training_decoded_rgba_sha256": "498969a7b520c386606a03bdd3640bfaf780f60142d8125a2cad080133ccfdee",
+      "training_image_path": "experiments/memorization_integration_audit_v1/synthetic_bundle/training.ppm",
+      "training_row_or_index": 0,
+      "training_source_sprite_id": "synthetic-train-1"
+    }
+  ],
+  "schema_version": "sprite_lab_memorization_candidate_evidence_v1",
+  "synthetic_only": true,
+  "training_dataset_identity": "synthetic-training-manifest-sha256:ff2df7bf5c1c574988169a42c510fd863a679f935dae0a143752212c7f7ce505",
+  "training_manifest_path": "experiments/memorization_integration_audit_v1/synthetic_bundle/training_manifest.json",
+  "training_manifest_sha256": "ff2df7bf5c1c574988169a42c510fd863a679f935dae0a143752212c7f7ce505"
+}

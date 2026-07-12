@@ -1,0 +1,12 @@
+Final evidence state
+====================
+
+This file is contained by the third and final milestone commit, so that commit's SHA cannot be self-embedded.
+Branch: codex/v5-next-milestone
+HEAD before the self-containing evidence commit: 861b9f1
+Expected final commit subject: Add infrastructure audits and capability snapshot
+Expected final worktree state: clean
+Expected ahead-of-base count: 3 local commits
+Pushes performed: 0
+Resolve exact final HEAD: git rev-parse HEAD
+The final response records the verified post-commit SHA and worktree state.

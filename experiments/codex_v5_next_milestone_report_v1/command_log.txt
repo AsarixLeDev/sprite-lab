@@ -1,0 +1,60 @@
+Sprite Lab V5 next-milestone command log
+========================================
+
+REPOSITORY SAFETY
+- Confirmed integration/v5-pretraining at 19b6adca60a8ff2b6f09aaa25ab5a35901f37869.
+- Confirmed stable clean status twice before creating codex/v5-next-milestone.
+- No merge/rebase/reset/push performed.
+
+PHASE 1 - LABELING-V4
+- Ran focused two-pass tests: 64 passed.
+- Ran broader Labeling-v3/v4 selection: 432 passed, 1406 deselected.
+- Ran deterministic 100-record synthetic rehearsal twice: 80 queued, 20 excluded, byte-identical, provider calls 0.
+- Scoped Ruff and format checks passed.
+- Created commit 9795eb6.
+
+PHASE 2 - DATASET-V5
+- Validated all six pinned contract artifacts and unlabeled-r2 bindings.
+- Built and verified all seven named views twice in synthetic temporary roots; repeated artifacts were byte-identical.
+- Focused named-view tests: 47 passed.
+- Dataset-v5 keyword tests: 91 passed, 1794 deselected.
+- Scoped Ruff and format checks passed.
+- Created commit 861b9f1.
+
+PHASE 3 - TRAINING AUDIT
+- CPU-only construction recomputed 7,929,284 absent and 8,004,372 palette_index parameters; delta 75,088.
+- Focused tests: 51 passed.
+- Scoped Ruff and format checks: pass.
+- Training runs 0; campaign subprocess launches 0; CUDA initialized false.
+- Verdicts: architecture PASS, identity PASS, safe resume FAIL, campaign fairness FAIL, execution safety FAIL.
+
+PHASE 4 - MEMORIZATION INTEGRATION
+- Focused isolated tests: 40 passed.
+- Phase-6 keyword selection: 47 passed, 1838 deselected.
+- Synthetic production decision CLI: eligible as structural compatibility probe only.
+- Historical production decision CLI: blocked/not_comparable.
+- Scoped Ruff/format/diff checks: pass.
+- Training, generation, provider, promotion actions: 0.
+- Combined integration verdict: FAIL_NOT_CERTIFIED.
+
+PHASE 5 - CAPABILITY SNAPSHOT
+- PowerShell parser accepted safe_commands.ps1.
+- Ran safe_commands.ps1 without -RunTests: all help/read-only verifiers and contract validation passed.
+- A later direct .ps1 invocation was blocked by host execution policy; the tested powershell.exe -ExecutionPolicy Bypass -File form passes.
+- No GUI, provider, generation, training, production freeze, or promotion launched.
+
+PHASE 6 - INTEGRATION VALIDATION
+- Labeling-v4 targeted: 64 passed in 2.15s.
+- Dataset-v5 keyword: 91 passed, 1794 deselected in 5.16s.
+- Memorization/promotion keyword: 47 passed, 1838 deselected in 2.58s.
+- Training targeted: 51 passed in 2.86s.
+- Full suite: 1885 passed, 1 known warning in 34.55s.
+- Read-only unlabeled r2 verification: ok=true, frozen=true, 3233 candidates.
+- Read-only legacy Dataset-v5 preview verification: ok=true, leakage counts all zero.
+- Frozen-hash verification: 17/17 important pins matched before/after.
+- New warnings: 0.
+
+FINALIZATION
+- Intended third commit subject: Add infrastructure audits and capability snapshot.
+- No push requested or performed.
+- Exact next command: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\experiments\repo_capability_snapshot_v1\safe_commands.ps1

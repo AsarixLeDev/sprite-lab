@@ -1,0 +1,53 @@
+{
+  "schema_version": "sprite_lab_codex_v5_next_milestone_report_v1",
+  "branch": "codex/v5-next-milestone",
+  "base_commit": "19b6adca60a8ff2b6f09aaa25ab5a35901f37869",
+  "overall_result": "LOCAL_MILESTONE_COMPLETE_WITH_PRODUCTION_BLOCKERS",
+  "implemented": [
+    "Labeling-v4 two-pass safety remediation and adversarial coverage",
+    "Dataset-v5 seven-view named builder, verifier, and freeze tooling",
+    "training infrastructure read-only audit v2",
+    "memorization integration read-only audit v1",
+    "human-readable repository capability snapshot"
+  ],
+  "authorization": {
+    "real_labeling_v4_quality_review": false,
+    "production_dataset_v5_freeze": false,
+    "training": false,
+    "benchmark_generation": false,
+    "checkpoint_promotion": false
+  },
+  "tests": {
+    "phase6_targeted_passed": 253,
+    "full_suite_passed": 1885,
+    "failed": 0,
+    "skipped": 0,
+    "known_warnings": 1,
+    "new_warnings": 0
+  },
+  "audit_verdicts": {
+    "labeling_v4_local_remediation": "PASS_NOT_INDEPENDENT",
+    "dataset_v5_named_view_builder": "PASS_SYNTHETIC_NOT_INDEPENDENT",
+    "training_headless_architecture": "PASS",
+    "training_architecture_identity": "PASS",
+    "training_safe_resume": "FAIL",
+    "training_campaign_fairness": "FAIL",
+    "training_execution_safety": "FAIL",
+    "memorization_detector_v2_isolated": "PASS",
+    "memorization_promotion_decision_isolated": "PASS",
+    "memorization_combined_integration": "FAIL_NOT_CERTIFIED",
+    "frozen_hashes": "PASS"
+  },
+  "safety_counters": {
+    "provider_calls": 0,
+    "gpu_training_runs": 0,
+    "training_runs": 0,
+    "campaign_subprocess_launches": 0,
+    "generation_runs": 0,
+    "production_freezes": 0,
+    "promotion_actions": 0
+  },
+  "environment_note": "Direct .ps1 execution is blocked by the host policy; the tested ExecutionPolicy Bypass invocation succeeds.",
+  "next_command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\experiments\\repo_capability_snapshot_v1\\safe_commands.ps1",
+  "third_commit_sha": "SELF: resolve with git rev-parse HEAD"
+}

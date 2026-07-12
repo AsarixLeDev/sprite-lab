@@ -1,0 +1,64 @@
+{
+  "schema_version": "sprite_lab_v5_milestone_test_summary_v1",
+  "required_commands": [
+    {
+      "selection": "Labeling-v4 phase-6 focused",
+      "passed": 64,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 2.15
+    },
+    {
+      "selection": "Dataset-v5 keyword",
+      "passed": 91,
+      "failed": 0,
+      "skipped": 0,
+      "deselected": 1794,
+      "seconds": 5.16
+    },
+    {
+      "selection": "memorization or promotion keyword",
+      "passed": 47,
+      "failed": 0,
+      "skipped": 0,
+      "deselected": 1838,
+      "seconds": 2.58
+    },
+    {
+      "selection": "training architecture and campaign",
+      "passed": 51,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 2.86
+    },
+    {
+      "selection": "full repository",
+      "passed": 1885,
+      "failed": 0,
+      "skipped": 0,
+      "warnings": 1,
+      "seconds": 34.55
+    }
+  ],
+  "phase6_targeted_total": {
+    "passed": 253,
+    "failed": 0,
+    "skipped": 0,
+    "deselected_across_keyword_runs": 3632
+  },
+  "additional_evidence": {
+    "labeling_v3_v4_combined": "432 passed, 1406 deselected",
+    "dataset_v5_named_view_focused": "47 passed",
+    "memorization_phase4_focused": "40 passed"
+  },
+  "warning_summary": {
+    "known": "tests/test_ml_overfit_smoke.py::test_masked_loss_scalar - tensor with requires_grad converted to scalar",
+    "new_warning_count": 0
+  },
+  "environment_notes": [
+    "Direct safe_commands.ps1 invocation was blocked by Windows execution policy; the tested powershell.exe -ExecutionPolicy Bypass -File form passes."
+  ],
+  "ruff": "PASS_SCOPED",
+  "format_check": "PASS_SCOPED",
+  "diff_check": "PASS"
+}

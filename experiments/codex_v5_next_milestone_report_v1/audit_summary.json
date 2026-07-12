@@ -1,0 +1,76 @@
+{
+  "schema_version": "sprite_lab_v5_milestone_audit_summary_v1",
+  "audits": [
+    {
+      "name": "Labeling-v4 two-pass remediation",
+      "verdict": "PASS_NOT_INDEPENDENT",
+      "evidence": "experiments/label_v4_calibration_wave1/two_pass_remediation_v2/remediation_report.md",
+      "authorization": false
+    },
+    {
+      "name": "Dataset-v5 named-view builder",
+      "verdict": "PASS_SYNTHETIC_NOT_INDEPENDENT",
+      "evidence": "experiments/v5_named_view_builder_v1/implementation_report.md",
+      "authorization": false
+    },
+    {
+      "name": "Training infrastructure",
+      "verdicts": {
+        "headless_architecture": "PASS",
+        "architecture_identity": "PASS",
+        "safe_resume": "FAIL",
+        "campaign_fairness": "FAIL",
+        "execution_safety": "FAIL"
+      },
+      "evidence": "experiments/training_infrastructure_audit_v2/audit_report.md",
+      "authorization": false
+    },
+    {
+      "name": "Memorization integration",
+      "verdicts": {
+        "detector_v2_isolated": "PASS",
+        "promotion_decision_isolated": "PASS",
+        "combined_integration": "FAIL_NOT_CERTIFIED",
+        "identity_binding": "FAIL"
+      },
+      "evidence": "experiments/memorization_integration_audit_v1/audit_report.md",
+      "authorization": false
+    },
+    {
+      "name": "Human-readable capability snapshot",
+      "verdict": "PASS_CONSERVATIVE",
+      "evidence": "experiments/repo_capability_snapshot_v1/README.md"
+    }
+  ],
+  "frozen_hash_verification": {
+    "checked": 17,
+    "matched": 17,
+    "mismatched": 0,
+    "verified_before_and_after": true,
+    "groups": [
+      "Wave-1 audit selection and human truth",
+      "unlabeled pool r2",
+      "historical checkpoint",
+      "frozen benchmark manifest",
+      "historical memorization reports and reviews",
+      "legacy and current policy previews"
+    ],
+    "key_sha256": {
+      "wave1_audit_manifest_jsonl": "d1752ce5d9661d1ec7a1825252840392f7b4e47581a6e2ac1a8cbfc5e4d75017",
+      "wave1_human_truth": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "unlabeled_r2_candidate": "2f1316dbfb5ace0df1569894a83f15b9cd6b77383e5aaba98eda0b408a1f41cc",
+      "unlabeled_r2_freeze": "7209fd4b1fff96f7b5cf4cefd2dc09dbf945301973454a3db97b52de0bccb5ca",
+      "historical_checkpoint": "fe6053f38190279d2f7a1b56086711dcd7493af04173b1cc6d52a2e08dfbea10",
+      "benchmark_manifest": "091f6f7031f254f51e7b746c35f03b360cbc24f144991c5d6e0e2f0f36e64904",
+      "candidate_raking020_preview": "6936068946b52b6e19503760841b4755a89dc6fc4068277ed6bbb47cdc75e66e"
+    }
+  },
+  "safety": {
+    "cuda_initialized": false,
+    "provider_calls": 0,
+    "training_runs": 0,
+    "campaign_subprocess_launches": 0,
+    "generation_runs": 0,
+    "promotion_actions": 0
+  }
+}

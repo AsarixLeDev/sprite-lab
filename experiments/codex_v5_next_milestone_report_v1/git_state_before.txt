@@ -1,0 +1,12 @@
+Phase-0 repository state
+========================
+
+Repository: C:\Users\Mathieu\Documents\sprite-lab
+Starting branch: integration/v5-pretraining
+Starting/base commit: 19b6adca60a8ff2b6f09aaa25ab5a35901f37869
+Observed upstream: origin/integration/v5-pretraining at the same commit
+Worktree: clean and stable across two checks before branching
+Conflict markers: none observed
+Created working branch: codex/v5-next-milestone
+Pushes performed: 0
+Network/provider/GPU actions performed during phase 0: 0

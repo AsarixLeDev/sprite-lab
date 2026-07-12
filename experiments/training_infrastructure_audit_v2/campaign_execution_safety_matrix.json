@@ -1,0 +1,27 @@
+{
+  "schema_version": "spritelab_training_campaign_execution_safety_matrix_v2",
+  "monkeypatched_launch_seams": [
+    "spritelab.training.campaign.subprocess.run",
+    "campaign runner injection seam",
+    "training entry point seam"
+  ],
+  "required_paths": [
+    {"path": "campaign-plan", "training_started": false, "launches": 0, "result": "PASS"},
+    {"path": "campaign-validate", "training_started": false, "launches": 0, "result": "PASS"},
+    {"path": "campaign-status", "training_started": false, "launches": 0, "result": "PASS"},
+    {"path": "campaign-run without --execute", "training_started": false, "launches": 0, "result": "PASS_BLOCKED"},
+    {"path": "campaign-run without --confirm-execute", "training_started": false, "launches": 0, "result": "PASS_BLOCKED"},
+    {"path": "blocked campaign with both flags", "training_started": false, "launches": 0, "result": "PASS_BLOCKED"},
+    {"path": "placeholder identity with both flags", "training_started": false, "launches": 0, "result": "PASS_BLOCKED"},
+    {"path": "ready campaign with arbitrary unbound experiment_command", "training_started": false, "launches": 0, "result": "FAIL_STATIC", "detail": "validation accepts the unbound command and execution would pass it to the runner after flags"},
+    {"path": "ready campaign with baseline_launch_authorized=false", "training_started": false, "launches": 0, "result": "FAIL_STATIC", "detail": "plan can still be executable"}
+  ],
+  "test_coverage_gap": "No production end-to-end CLI zero-launch test covers all four campaign commands and all process seams.",
+  "observed_counters": {
+    "training_runs_started": 0,
+    "campaign_subprocess_launches": 0,
+    "cuda_initialized": false,
+    "provider_calls": 0
+  },
+  "verdict": "FAIL"
+}

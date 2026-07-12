@@ -1,0 +1,20 @@
+{
+  "artifacts": {
+    "architecture_matrix.json": "bbf4db28b778a5e212ad5fb71be7b8bf0db07d982ef87f87722e2569d1162a63",
+    "audit_report.json": "308c3a2b71c71522166b95be84e333033c6d5c12f6ec044ce8426bc7fa1b8a58",
+    "audit_report.md": "21c0006c8cb31e984ab25d70a0ce6a68418a4c36d3fcbf26ab236ecb9c0a0538",
+    "campaign_execution_safety_matrix.json": "298ba726c2ec7f886dbc785bbc223d73eed50f6afe57ab3ba30d44a2935aee13",
+    "campaign_fairness_matrix.json": "6a54e0b04fef83dc2921dcd3fe0512306d9a622756c999c3739eb790706b9f2b",
+    "checkpoint_compatibility_matrix.json": "48904ba546c63af7cee6623a466c835bfc5a64fdacce64a22f90b8edad0072b4",
+    "cli_help.txt": "3171f5fa4caf4dba7912b8c653ce5e70e06dd11fd142f25944365efe7a1fe44d",
+    "command_log.txt": "8d7d108258ac61c04a8b99eb847c5998cc2c2fe340e77c9c06c6d0d1b356a5d7",
+    "frozen_hash_verification.json": "0c1cf4b511cbccfb75f21e89ddeaa64b5ebf0e2244e87798e21a151a5b9630ff",
+    "parameter_matrix.json": "ba2768c7d0ee262a7e078e4c3503b019c9bc137c2a8296abd32fcd2a61ae78ea",
+    "resume_identity_matrix.json": "e08ed44b6b8d4858b5441d08fc502f26578dd90f42a3b4a25ff78b34f66068ab",
+    "static_check_results.txt": "af060900a09954bb695be5ee7c1a38420680e1308f4d35afebda5e5d0d28d925",
+    "test_results.txt": "489f021f3b42778967ec2fa857fe52d46c262b3d6bd964dd973f77687e9d5506"
+  },
+  "hash_algorithm": "sha256",
+  "schema_version": "spritelab_training_infrastructure_audit_artifact_hashes_v2",
+  "self_hash_policy": "artifact_hashes.json is excluded to avoid a circular self-hash"
+}

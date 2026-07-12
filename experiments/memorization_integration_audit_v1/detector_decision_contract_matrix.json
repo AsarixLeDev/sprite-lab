@@ -1,0 +1,131 @@
+{
+  "detector_policy_sha256": "8d6288ab7748451c05e049195d863e5cda36ad840983ad2732c83a9835a758e2",
+  "detector_policy_version": "memorization_detector_v2",
+  "detector_v2_cases": [
+    {
+      "case": "blank vs blank",
+      "detector_result": "exact_rgba_low_evidence_collision",
+      "evidence_strength": "low_evidence",
+      "hard_evidence": false,
+      "human_review_required": false,
+      "promotion_semantics": "warning only",
+      "verified": true
+    },
+    {
+      "case": "blank vs 2x2 foreground",
+      "detector_result": "no_material_match",
+      "evidence_strength": "none",
+      "hard_evidence": false,
+      "human_review_required": false,
+      "promotion_semantics": "not near-pixel evidence",
+      "verified": true
+    },
+    {
+      "case": "nontrivial exact RGBA",
+      "detector_result": "exact_rgba_nontrivial",
+      "evidence_strength": "hard",
+      "hard_evidence": true,
+      "human_review_required": false,
+      "promotion_semantics": "must hard block",
+      "integration_result": "fail_closed_but_not_comparable_because_decision_expects_exact_decoded_rgba",
+      "verified": true
+    },
+    {
+      "case": "exact alpha with different RGB",
+      "detector_result": "exact_alpha_review_required",
+      "evidence_strength": "review_required",
+      "hard_evidence": false,
+      "human_review_required": true,
+      "promotion_semantics": "human review required",
+      "integration_result": "production_machine_gate_fails_before_clearing_review_can_authorize",
+      "verified": true
+    },
+    {
+      "case": "translated nontrivial alpha",
+      "detector_result": "translation_alpha_review_required",
+      "evidence_strength": "review_required",
+      "hard_evidence": false,
+      "human_review_required": true,
+      "promotion_semantics": "human review required",
+      "integration_result": "production_machine_gate_fails_before_clearing_review_can_authorize",
+      "verified": true
+    },
+    {
+      "case": "generic sparse collision",
+      "detector_result": "generic_sparse_collision",
+      "evidence_strength": "low_evidence",
+      "hard_evidence": false,
+      "human_review_required": false,
+      "promotion_semantics": "warning, not hard proof",
+      "verified": true
+    },
+    {
+      "case": "unresolved review-required evidence",
+      "detector_gate_result": "manual_review_required_and_pass_false",
+      "decision_with_artificial_machine_pass": "manual_review_required",
+      "decision_with_real_machine_gate": "blocked",
+      "integration_result": "contradictory",
+      "verified": true
+    },
+    {
+      "case": "unsupported detector version",
+      "detector_result": "retrieve_neighbors_raises_and_suite_gate_fails",
+      "decision_result_when_caller_repeats_unknown_version": "eligible",
+      "integration_result": "unsupported_policy_not_fail_closed_at_decision_boundary",
+      "verified": true
+    }
+  ],
+  "promotion_outcomes": [
+    {
+      "scenario": "same_sprite_or_memorized",
+      "decision": "blocked",
+      "classification": "promotion_hold",
+      "verified_by": "test_same_or_memorized_blocks_when_machine_gates_pass"
+    },
+    {
+      "scenario": "uncertain with otherwise valid identities",
+      "decision": "manual_review_required",
+      "classification": "promotion_hold",
+      "verified_by": "test_outcome_is_authoritative_over_legacy_toggle"
+    },
+    {
+      "scenario": "missing review with otherwise valid identities",
+      "decision": "manual_review_required",
+      "classification": "promotion_hold",
+      "verified_by": "test_missing_review_fails_closed"
+    },
+    {
+      "scenario": "malformed review",
+      "decision": "blocked",
+      "classification": "not_comparable",
+      "verified_by": "test_malformed_wrong_schema_and_unknown_outcome_are_not_comparable"
+    },
+    {
+      "scenario": "review or input identity mismatch",
+      "decision": "blocked",
+      "classification": "not_comparable",
+      "verified_by": "test_bound_input_file_hash_mismatches_are_not_comparable and test_review_identity_hash_mismatches_are_not_comparable"
+    },
+    {
+      "scenario": "legacy v1 review",
+      "decision": "blocked",
+      "classification": "not_comparable",
+      "verified_by": "test_historical_v1_is_display_only_and_cannot_authorize"
+    },
+    {
+      "scenario": "machine gate failure plus clearing human review",
+      "decision": "blocked",
+      "classification": "promotion_hold",
+      "verified_by": "test_machine_gate_failure_cannot_be_cleared_by_human"
+    },
+    {
+      "scenario": "all accepted identities, machine pass, and conclusive clearing review",
+      "decision": "eligible",
+      "classification": "comparable",
+      "verified_by": "test_all_valid_and_conclusively_cleared_is_eligible_and_deterministic and synthetic CLI probe",
+      "qualification": "isolated decision-layer proof only; production suite cannot naturally produce the required machine-pass state for review-required evidence"
+    }
+  ],
+  "schema_version": "sprite_lab_memorization_detector_decision_contract_matrix_v1",
+  "verdict": "fail_not_certified"
+}

@@ -1,0 +1,50 @@
+{
+  "authorization": {
+    "checkpoint_promotion_authorized": false,
+    "real_checkpoint_used": false,
+    "scope": "synthetic compatibility probe only"
+  },
+  "bundle": {
+    "candidate_evidence_sha256": "36745974fb71f9cffb58212fc49ee4dbdcd6d1d326017d22d7288b0a4600b83a",
+    "detector_observation": {
+      "detector_policy_version": "memorization_detector_v2",
+      "evidence_class": "exact_alpha_review_required",
+      "evidence_strength": "review_required",
+      "exact_alpha": true,
+      "exact_rgba": false,
+      "requires_human_review": true
+    },
+    "path": "experiments/memorization_integration_audit_v1/synthetic_bundle",
+    "review_event_log_sha256": "471476bac2fa73ad11a057f5845542c839ff4172a716aa2e07928ab2b52c2cbd",
+    "synthetic_only": true
+  },
+  "command_result": {
+    "classification": "comparable",
+    "cleared_pairs": [
+      "synthetic-sample-1__synthetic-train-1"
+    ],
+    "decision": "eligible",
+    "decision_sha256": "deb87cd99a9e91a27397c0e08378912956b1108b7ce4be1c2a9de86896f8788c",
+    "eligible_for_promotion": true,
+    "exit_code": 0,
+    "identity_valid": true,
+    "input_bundle_sha256": "292e73f25c4a1c2dd2c3ee564de68f7f664b28177718a9f76e30034b7a765726",
+    "machine_gates_passed": true,
+    "output": "experiments/memorization_integration_audit_v1/synthetic_decision_output/promotion_decision.json",
+    "review_set_complete": true
+  },
+  "integration_interpretation": {
+    "accepted_by_current_decision_contract": true,
+    "eligible_is_not_an_authorization": true,
+    "semantically_reproducible_from_suite": false,
+    "why_not_reproducible": "suite.evaluate_gates makes review-required_count > 0 fail the machine gate, while decide_promotion makes any machine failure irreversible; the decision layer also does not cross-check the synthetic report's pass=true against review_required_count=1"
+  },
+  "safety": {
+    "cuda_initialized": false,
+    "generation_runs_started": 0,
+    "model_checkpoints_promoted": 0,
+    "provider_calls": 0,
+    "training_runs_started": 0
+  },
+  "schema_version": "sprite_lab_memorization_synthetic_bundle_result_v1"
+}

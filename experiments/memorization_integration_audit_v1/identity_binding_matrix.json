@@ -1,0 +1,81 @@
+{
+  "bindings": [
+    {
+      "identity": "checkpoint",
+      "enforcement": "path and file SHA-256",
+      "status": "enforced"
+    },
+    {
+      "identity": "benchmark manifest",
+      "enforcement": "path and file SHA-256",
+      "status": "enforced"
+    },
+    {
+      "identity": "machine scoring report",
+      "enforcement": "path and file SHA-256",
+      "status": "enforced",
+      "gap": "promotion pass is trusted and is not recomputed or cross-checked against memorization counts"
+    },
+    {
+      "identity": "generated report",
+      "enforcement": "path and file SHA-256",
+      "status": "enforced"
+    },
+    {
+      "identity": "generated manifest",
+      "enforcement": "path and file SHA-256 plus review-event hash binding when declared",
+      "status": "enforced"
+    },
+    {
+      "identity": "generated image",
+      "enforcement": "file SHA-256 and canonical decoded-RGBA SHA-256",
+      "status": "enforced"
+    },
+    {
+      "identity": "training dataset and manifest",
+      "enforcement": "dataset identity string, manifest path, and manifest file SHA-256",
+      "status": "enforced"
+    },
+    {
+      "identity": "training image",
+      "enforcement": "decoded-RGBA SHA-256 only when optional training_image_path is present",
+      "status": "partial",
+      "gap": "a candidate may omit training_image_path, leaving the claimed decoded hash without direct file verification"
+    },
+    {
+      "identity": "bound v2 review",
+      "enforcement": "required schema fields, canonical event hash, revision chain, pair identity, and artifact identities",
+      "status": "enforced"
+    },
+    {
+      "identity": "detector policy version",
+      "enforcement": "nonempty string and optional caller equality only",
+      "status": "not_sufficient",
+      "observed_probe": "memorization_detector_v999 was eligible when the caller repeated the same unsupported string"
+    },
+    {
+      "identity": "detector policy SHA-256",
+      "enforcement": "emitted by detector and suite but not validated by promotion decision or required by v2 review",
+      "status": "not_enforced",
+      "observed_probe": "changing the candidate policy SHA-256 to all zeroes remained eligible"
+    },
+    {
+      "identity": "comparison parameters",
+      "enforcement": "hash syntax and event equality, not equality to the production detector hash",
+      "status": "partial"
+    },
+    {
+      "identity": "candidate evidence hash in v2 review",
+      "enforcement": "canonical SHA-256 of the individual pair object",
+      "status": "misnamed_and_partial",
+      "gap": "candidate_evidence_sha256 does not hash the candidate evidence document; a top-level candidate-file change remained eligible"
+    },
+    {
+      "identity": "decision input bundle",
+      "enforcement": "whole candidate file, review log, and bound input hashes are included in output input_bundle_sha256",
+      "status": "output_bound_only"
+    }
+  ],
+  "schema_version": "sprite_lab_memorization_identity_binding_matrix_v1",
+  "verdict": "fail_not_certified"
+}

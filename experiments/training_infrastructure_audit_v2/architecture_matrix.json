@@ -1,0 +1,25 @@
+{
+  "schema_version": "spritelab_training_architecture_matrix_v2",
+  "configuration": {
+    "vocab_size": 64,
+    "embed_dim": 64,
+    "base_channels": 64,
+    "channel_mults": [1, 2, 4],
+    "res_blocks_per_level": 2,
+    "device": "cpu"
+  },
+  "rows": [
+    {"claim": "absent has no auxiliary modules", "result": "PASS", "observed_count": 0},
+    {"claim": "absent has no auxiliary parameters", "result": "PASS", "observed_count": 0},
+    {"claim": "absent has no auxiliary state keys", "result": "PASS", "observed_count": 0},
+    {"claim": "absent optimizer has no auxiliary members", "result": "PASS", "observed_count": 0},
+    {"claim": "absent EMA has no auxiliary keys", "result": "PASS", "observed_count": 0},
+    {"claim": "palette_index has all intended heads", "result": "PASS", "heads": ["palette_head_rgb", "palette_head_presence", "index_head"]},
+    {"claim": "palette_index heads remain physical at zero auxiliary loss", "result": "PASS", "source": "focused production test"},
+    {"claim": "same-mode repeated construction has stable identity", "result": "PASS"},
+    {"claim": "absent and palette_index identities differ", "result": "PASS"},
+    {"claim": "loss-only changes do not alter physical architecture identity", "result": "PASS"},
+    {"claim": "legacy omitted mode is true headless", "result": "PASS_AS_FALSE", "observed": "legacy palette_index adapter, promotion-ineligible"}
+  ],
+  "verdict": "PASS"
+}

@@ -1,0 +1,18 @@
+Phase 3 focused validation
+
+Command:
+  CUDA_VISIBLE_DEVICES=-1 python -m pytest tests/test_training_architecture_ablation.py tests/test_training_campaign.py -q --basetemp <fresh OS-temporary directory>
+
+Results:
+  tests/test_training_architecture_ablation.py: 18 passed
+  tests/test_training_campaign.py: 33 passed
+  combined: 51 passed, 0 failed, 0 skipped
+
+Important audit qualification:
+  Passing tests do not cover the jointly-missing resume-hard-field defect, unsafe=True without unsafe_record, or the campaign identity/command/config binding defects documented in the matrices. Test pass status does not change the FAIL verdicts.
+
+Safety:
+  real training runs started: 0
+  campaign subprocess launches: 0
+  CUDA initialized: false
+  provider calls: 0

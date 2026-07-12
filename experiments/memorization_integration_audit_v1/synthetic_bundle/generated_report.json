@@ -1,0 +1,8 @@
+{
+  "artifact_kind": "synthetic_generated_report",
+  "sample_ids": [
+    "synthetic-sample-1"
+  ],
+  "schema_version": "sprite_lab_synthetic_generated_report_v1",
+  "synthetic_only": true
+}

@@ -1,0 +1,50 @@
+{
+  "schema_version": "sprite_lab_v5_milestone_artifact_index_v1",
+  "milestone_artifacts": [
+    {
+      "area": "Labeling-v4",
+      "path": "experiments/label_v4_calibration_wave1/two_pass_remediation_v2/remediation_report.md",
+      "status": "local remediation pass; independent audit required"
+    },
+    {
+      "area": "Dataset-v5 named views",
+      "path": "experiments/v5_named_view_builder_v1/implementation_report.md",
+      "status": "synthetic implementation pass; independent builder audit required"
+    },
+    {
+      "area": "Training infrastructure",
+      "path": "experiments/training_infrastructure_audit_v2/audit_report.md",
+      "status": "architecture pass; resume/campaign/execution fail"
+    },
+    {
+      "area": "Memorization integration",
+      "path": "experiments/memorization_integration_audit_v1/audit_report.md",
+      "status": "isolated contracts pass; combined integration fail"
+    },
+    {
+      "area": "Operator capability snapshot",
+      "path": "experiments/repo_capability_snapshot_v1/README.md",
+      "status": "safe read-only operator entry point"
+    },
+    {
+      "area": "Final milestone report",
+      "path": "experiments/codex_v5_next_milestone_report_v1/final_report.md",
+      "status": "this report"
+    }
+  ],
+  "supporting_indexes": [
+    "experiments/repo_capability_snapshot_v1/current_artifact_index.md",
+    "experiments/v5_readiness_audit_v1/audit_report.md",
+    "experiments/v5_view_contract_v1/contract_report.md",
+    "experiments/training_evaluation_gate_contract_v1/contract_report.md",
+    "experiments/memorization_full_suite_readiness_audit_v1/audit_report.md"
+  ],
+  "frozen_inputs": [
+    "experiments/label_v4_calibration_wave1/audit_manifest.jsonl",
+    "experiments/label_v4_calibration_wave1/human_truth.jsonl",
+    "datasets/sprite_lab_unlabeled_pool_v1_r2/freeze_manifest.json",
+    "experiments/challenger_full_v4_phase1/train_25k/checkpoint_last_ema.pt",
+    "experiments/generation_benchmark_v1/benchmark_manifest.json",
+    "experiments/generation_benchmark_v1/exact_alpha_review/review_results.jsonl"
+  ]
+}

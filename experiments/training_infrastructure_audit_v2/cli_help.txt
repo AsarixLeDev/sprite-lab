@@ -1,0 +1,129 @@
+===== python -m spritelab train --help =====
+usage: python -m spritelab train [-h] [-v]
+                                 {inspect-data,make-overfit-subset,dataset-palette-swap-review,dataset-role-ramp-transplant-review,dataset-role-ramp-transplant-audit,generator-challenger,sample-generator-challenger,inspect-palette-index-heads,probe-palette-index-decode,experiment,campaign-plan,campaign-validate,campaign-run,campaign-status,generated-qa,generated-review,source-match-review,dataset-framing-review,prompt-faithfulness,compare-generated-runs,project-generated-palette,audit-challenger-generator,audit-challenger-full-v4,compare-challenger-conditioning-audits,build-ood-compositional-prompts,build-v1-gallery,v1-gallery-gui,build-v2-eval-prompts,prompt-sensitivity,run-v2-phase0-eval,monitor-training,compare-generator-families} ...
+
+Semantic-manifest training inspection, training, and evaluation.
+
+positional arguments:
+  {inspect-data,make-overfit-subset,dataset-palette-swap-review,dataset-role-ramp-transplant-review,dataset-role-ramp-transplant-audit,generator-challenger,sample-generator-challenger,inspect-palette-index-heads,probe-palette-index-decode,experiment,campaign-plan,campaign-validate,campaign-run,campaign-status,generated-qa,generated-review,source-match-review,dataset-framing-review,prompt-faithfulness,compare-generated-runs,project-generated-palette,audit-challenger-generator,audit-challenger-full-v4,compare-challenger-conditioning-audits,build-ood-compositional-prompts,build-v1-gallery,v1-gallery-gui,build-v2-eval-prompts,prompt-sensitivity,run-v2-phase0-eval,monitor-training,compare-generator-families}
+    inspect-data        Inspect training manifest and npz tensor contract.
+    make-overfit-subset
+                        Write a deterministic sprite-id subset.
+    dataset-palette-swap-review
+                        Sample and inspect palette-swap augmentation without
+                        training.
+    dataset-role-ramp-transplant-review
+                        Preview role-aligned real-ramp transplant augmentation
+                        without training.
+    dataset-role-ramp-transplant-audit
+                        Audit real-ramp transplant donor, prompt, pixel, and
+                        role consistency without training.
+    generator-challenger
+                        Train a conditional generator challenger.
+    sample-generator-challenger
+                        Sample and canonicalize a generator challenger.
+    inspect-palette-index-heads
+                        Evaluate v2 Phase 2 palette/index auxiliary heads on
+                        dataset batches (no training).
+    probe-palette-index-decode
+                        Generate samples with palette/index head decode
+                        variants (experimental probe, no training).
+    experiment          Manage reproducible generator experiments.
+    campaign-plan       Plan a versioned fixed-step three-seed campaign.
+    campaign-validate   Validate identities and fixed-step fairness.
+    campaign-run        Execute an already-ready campaign after explicit
+                        gates.
+    campaign-status     Audit run roots and artifact completeness without
+                        launch.
+    generated-qa        QA generated sprite sample folders.
+    generated-review    Deterministically review generated sprite sample
+                        structure.
+    source-match-review
+                        Review generated samples against source targets.
+    dataset-framing-review
+                        Review source sprite framing in exported training
+                        datasets.
+    prompt-faithfulness
+                        Run dataset-grounded prompt faithfulness diagnostics.
+    compare-generated-runs
+                        Compare two generated sprite sample folders.
+    project-generated-palette
+                        Project an existing generated folder to cleaner per-
+                        image palettes.
+    audit-challenger-generator
+                        Run challenger generator audit.
+    audit-challenger-full-v4
+                        Run the reproducible full-v4 challenger
+                        train/sample/diagnostic audit.
+    compare-challenger-conditioning-audits
+                        Compare baseline and structured full-v4 challenger
+                        audit reports.
+    build-ood-compositional-prompts
+                        Write the default color/object OOD compositional
+                        prompt set.
+    build-v1-gallery    Build the deterministic v1 demo/release gallery:
+                        prompts -> v1 preset sampling -> QA/review -> contact
+                        sheets -> report.
+    v1-gallery-gui      Launch the local v1 gallery GUI (requires the 'gradio'
+                        extra).
+    build-v2-eval-prompts
+                        Build a larger deterministic OOD/eval prompt suite for
+                        v2 Phase 0.
+    prompt-sensitivity  Generate controlled prompt/noise sensitivity samples
+                        and metrics.
+    run-v2-phase0-eval  Run the reproducible v2 Phase 0 no-training evaluation
+                        harness.
+    monitor-training    Live dashboard that tails train_metrics.jsonl for one
+                        or many runs.
+    compare-generator-families
+                        Compare regression baseline and challenger generated
+                        outputs.
+
+options:
+  -h, --help            show this help message and exit
+  -v, --verbose         Enable DEBUG-level diagnostic logging.
+
+===== python -m spritelab train campaign-plan --help =====
+usage: python -m spritelab train campaign-plan [-h] --config CONFIG --out OUT
+                                               [--plan-only]
+
+options:
+  -h, --help       show this help message and exit
+  --config CONFIG  Campaign specification JSON.
+  --out OUT        New campaign manifest path.
+  --plan-only      Plan only (the safe default).
+
+===== python -m spritelab train campaign-validate --help =====
+usage: python -m spritelab train campaign-validate [-h] --campaign CAMPAIGN
+                                                   [--out OUT]
+                                                   [--validate-only]
+
+options:
+  -h, --help           show this help message and exit
+  --campaign CAMPAIGN
+  --out OUT            Optional new validation report path.
+  --validate-only      Validate only; launch nothing.
+
+===== python -m spritelab train campaign-status --help =====
+usage: python -m spritelab train campaign-status [-h] --campaign CAMPAIGN
+                                                 [--campaign-artifact-root CAMPAIGN_ARTIFACT_ROOT]
+                                                 [--out OUT]
+
+options:
+  -h, --help            show this help message and exit
+  --campaign CAMPAIGN
+  --campaign-artifact-root CAMPAIGN_ARTIFACT_ROOT
+  --out OUT             Optional new status report path.
+
+===== python -m spritelab train campaign-run --help =====
+usage: python -m spritelab train campaign-run [-h] --campaign CAMPAIGN
+                                              [--execute] [--confirm-execute]
+                                              [--resume] [--unsafe-resume]
+
+options:
+  -h, --help           show this help message and exit
+  --campaign CAMPAIGN
+  --execute            Required explicit execution mode.
+  --confirm-execute    Required non-interactive launch confirmation.
+  --resume             Resume identity-verified partial runs.
+  --unsafe-resume      Rejected for fair-comparison campaigns.

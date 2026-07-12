@@ -1,0 +1,14 @@
+{
+  "algorithm": "sha256",
+  "files": {
+    "blocked_commands.md": "67e5d85c041dbda04a79b19576b75a97ac5c1d8ce53ce2f260d08b601afe1055",
+    "capability_matrix.md": "18d6841f4baea0e5569994ac609a77f637c720cca77cf837a93272f5f8f8f6e0",
+    "command_log.txt": "3094087139c4912c64452590b5052e1c213794f0cabb128c00c0252bf8ad099c",
+    "current_artifact_index.md": "ca1d7af1a51dc1dff6844498e82dbe1742ad1897687febfc5e06a541dfda2884",
+    "next_milestones.md": "51bfe602823828c071e4f6421fcd4935cd2565592236c1a474488282bba40fda",
+    "README.md": "84ebde0a874080bfb4ba8b15bac176064458880eb55fcf6c37672dbab1e278b0",
+    "safe_commands.ps1": "8c8842737b9f1ced7c0c86a99b740d70dca725ba7e0c23f0f16e16b30067560a"
+  },
+  "schema_version": "sprite_lab_repository_capability_snapshot_hashes_v1",
+  "self_excluded": true
+}

@@ -1,0 +1,44 @@
+{
+  "schema_version": "spritelab_training_infrastructure_audit_v2",
+  "scope": "read-only production and test audit",
+  "overall_verdict": "DO_NOT_AUTHORIZE_TRAINING",
+  "verdicts": {
+    "headless_architecture": "PASS",
+    "architecture_identity": "PASS",
+    "safe_resume": "FAIL",
+    "campaign_fairness": "FAIL",
+    "execution_safety": "FAIL"
+  },
+  "parameter_count_difference_recomputed": 75088,
+  "focused_tests": {
+    "passed": 51,
+    "failed": 0,
+    "skipped": 0
+  },
+  "safety_counters": {
+    "training_runs_started": 0,
+    "campaign_subprocess_launches": 0,
+    "cuda_initialized": false,
+    "provider_calls": 0
+  },
+  "critical_findings": [
+    "validate_resume_compatibility accepts two manifests when the same resume-hard fields are jointly missing, including {} -> {}.",
+    "validate_resume_compatibility(..., unsafe=True) can bypass mismatches without an unsafe_record and therefore without a recorded reason or revocation evidence.",
+    "Campaign identity is optional and excludes experiment_command and resolved_config_path; arbitrary commands and unbound resolved config content can validate.",
+    "A campaign can be executable while baseline_launch_authorized is false.",
+    "Campaign hashes are checked only for SHA-256 syntax, not rebound to source bytes.",
+    "Declared variables can waive protected fairness fields; architecture cell labels are not bound to physical model configs.",
+    "CFG and sampling-step fields are not required, an epoch field is accepted, artifact completeness is existence-only, resumability metadata is truthy-only, and aggregation can omit an entire cell while reporting complete.",
+    "The focused tests do not provide an end-to-end zero-launch CLI test for all campaign commands."
+  ],
+  "training_blockers": [
+    "safe-resume fail-closed defects",
+    "campaign identity, fairness, and execution-binding defects",
+    "final frozen Dataset-v5 hashes do not exist",
+    "final model-config hash does not exist",
+    "evaluation-contract implementation and certification remain incomplete",
+    "memorization integration certification remains required",
+    "a ready and independently certified three-seed campaign does not exist"
+  ],
+  "authorization_claimed": false
+}

@@ -1,0 +1,26 @@
+Phase 4 scoped static checks
+============================
+
+Audited files:
+  src/spritelab/evaluation/memorization.py
+  src/spritelab/evaluation/suite.py
+  src/spritelab/evaluation/memorization_review.py
+  src/spritelab/evaluation/promotion_decision.py
+  src/spritelab/evaluation/cli.py
+
+Ruff command:
+  python -m ruff check <five audited files>
+Result:
+  All checks passed!
+
+Formatting command:
+  python -m ruff format --check <five audited files>
+Result:
+  5 files already formatted
+
+Whitespace command:
+  git diff --check
+Result:
+  passed with no output
+
+No auto-formatting was run. Production and test files remain read-only.

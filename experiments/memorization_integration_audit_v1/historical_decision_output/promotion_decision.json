@@ -1,0 +1,39 @@
+{
+  "blocked_pairs": [],
+  "classification": "not_comparable",
+  "cleared_pairs": [],
+  "decision": "blocked",
+  "decision_sha256": "a05efed301338b84f3d4be923718651c3b76af3891a0aa8cc20fd18605e61fdc",
+  "eligible_for_promotion": false,
+  "hard_block_reasons": [
+    "existing machine-gate failure"
+  ],
+  "identity_valid": false,
+  "input_bundle_sha256": "38314506737e17e22c2c9150fab9f73d74d208e0806146b9d6f340a98ccbdde2",
+  "legacy_review_event_count": 9,
+  "machine_gates_passed": false,
+  "not_comparable_reasons": [
+    "historical reviews are unbound legacy events without promotion authority",
+    "incomplete full-suite evidence: machine report contains 8 of 54 expected samples"
+  ],
+  "pending_pairs": [
+    "sample_000000__oga_496_rpg_icons_32fix_a_armor04",
+    "sample_000001__oga_496_rpg_icons_32fix_s_bow01",
+    "sample_000002__oga_496_rpg_icons_32fix_ac_medal01",
+    "sample_000003__oga_496_rpg_icons_32fix_e_bones03",
+    "sample_000005__oga_cc0_tool_7soul1_rope",
+    "sample_000006__oga_496_rpg_icons_32fix_w_axe001",
+    "sample_000007__oga_496_rpg_icons_32fix_a_armor05"
+  ],
+  "pending_review_reasons": [
+    "missing required authoritative review: sample_000000__oga_496_rpg_icons_32fix_a_armor04",
+    "missing required authoritative review: sample_000001__oga_496_rpg_icons_32fix_s_bow01",
+    "missing required authoritative review: sample_000002__oga_496_rpg_icons_32fix_ac_medal01",
+    "missing required authoritative review: sample_000003__oga_496_rpg_icons_32fix_e_bones03",
+    "missing required authoritative review: sample_000005__oga_cc0_tool_7soul1_rope",
+    "missing required authoritative review: sample_000006__oga_496_rpg_icons_32fix_w_axe001",
+    "missing required authoritative review: sample_000007__oga_496_rpg_icons_32fix_a_armor05"
+  ],
+  "review_set_complete": false,
+  "schema_version": "sprite_lab_promotion_decision_v1"
+}

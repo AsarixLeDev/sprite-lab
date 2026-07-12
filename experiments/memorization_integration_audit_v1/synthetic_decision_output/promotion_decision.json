@@ -1,0 +1,20 @@
+{
+  "blocked_pairs": [],
+  "classification": "comparable",
+  "cleared_pairs": [
+    "synthetic-sample-1__synthetic-train-1"
+  ],
+  "decision": "eligible",
+  "decision_sha256": "deb87cd99a9e91a27397c0e08378912956b1108b7ce4be1c2a9de86896f8788c",
+  "eligible_for_promotion": true,
+  "hard_block_reasons": [],
+  "identity_valid": true,
+  "input_bundle_sha256": "292e73f25c4a1c2dd2c3ee564de68f7f664b28177718a9f76e30034b7a765726",
+  "legacy_review_event_count": 0,
+  "machine_gates_passed": true,
+  "not_comparable_reasons": [],
+  "pending_pairs": [],
+  "pending_review_reasons": [],
+  "review_set_complete": true,
+  "schema_version": "sprite_lab_promotion_decision_v1"
+}

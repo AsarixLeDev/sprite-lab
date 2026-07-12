@@ -1,0 +1,13 @@
+{
+  "cases": [
+    {
+      "case_id": "synthetic-case-1",
+      "prompt": "synthetic compatibility proof"
+    }
+  ],
+  "schema_version": "generation_benchmark_v1.0",
+  "seeds": [
+    731001
+  ],
+  "synthetic_only": true
+}

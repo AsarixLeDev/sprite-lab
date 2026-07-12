@@ -1,0 +1,20 @@
+{
+  "comparison_method": "deterministic_rgba_alpha_occupancy_v2",
+  "comparison_parameters_sha256": "cdb809ff60ff0161882310d1b5ba07941e5109c003c8af39054532a72665c00c",
+  "detector_policy_sha256": "8d6288ab7748451c05e049195d863e5cda36ad840983ad2732c83a9835a758e2",
+  "detector_policy_version": "memorization_detector_v2",
+  "promotion": {
+    "pass": true
+  },
+  "schema_version": "generation_benchmark_v1.0",
+  "summary": {
+    "memorization": {
+      "hard_evidence_count": 0,
+      "low_evidence_collision_count": 0,
+      "review_required_count": 1,
+      "unresolved_candidate_count": 1
+    },
+    "sample_count": 1
+  },
+  "synthetic_only": true
+}

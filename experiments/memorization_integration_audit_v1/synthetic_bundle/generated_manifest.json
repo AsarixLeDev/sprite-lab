@@ -1,0 +1,10 @@
+{
+  "records": [
+    {
+      "image": "experiments/memorization_integration_audit_v1/synthetic_bundle/generated.ppm",
+      "sample_id": "synthetic-sample-1"
+    }
+  ],
+  "schema_version": "sprite_lab_synthetic_generated_manifest_v1",
+  "synthetic_only": true
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": "sprite_lab_v5_milestone_artifact_hashes_v1",
+  "hash_algorithm": "sha256",
+  "self_excluded": true,
+  "files": {
+    "artifact_index.json": {"bytes": 2097, "sha256": "ee5ac32d1e21f6da0cb65f072bb5a55d165b0dd0d81610c4b8ec896f265ca04e"},
+    "audit_summary.json": {"bytes": 2778, "sha256": "4d71751254d318b342148126904521d20bba14dd918bc5abec4d7ebfd6f020f3"},
+    "command_log.txt": {"bytes": 3039, "sha256": "2e259cbb1e50e4594bf8cf89c91a386becf22b6e3f74a67a7d2752f749af4dc8"},
+    "commit_summary.json": {"bytes": 923, "sha256": "12fe4b6c5fa698c4ba559c55e065a9e41043983b67c6de618016cb3650d8cd3c"},
+    "final_report.json": {"bytes": 2067, "sha256": "9195fd338b9ac8731d39db35f689b4589579b3291c4638bdbabd077dca2f309c"},
+    "final_report.md": {"bytes": 6497, "sha256": "5e66b4257a02a92fb3c4e6451b673f0298304485d72a9b94476fafd61472c7f4"},
+    "git_state_after.txt": {"bytes": 547, "sha256": "4eba255fa9aff040041e295fa04df183224acac6bcbfb46d4bd4b961565b6357"},
+    "git_state_before.txt": {"bytes": 499, "sha256": "573b8891530f5aeb2c6a68fe08a572a2b5b83646cd1f60b99ceafb08f51e1ffd"},
+    "remaining_blockers.json": {"bytes": 2765, "sha256": "3effed46a7f54421db07350d1d2920d6ddb6d56f4aca657d41ec45d933a7cd75"},
+    "test_summary.json": {"bytes": 1644, "sha256": "2dd37f1533544ef15431c9d0ef484028e9cd372a0ddeaccc52686daa02f1c1f3"}
+  }
+}

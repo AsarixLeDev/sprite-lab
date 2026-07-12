@@ -1,0 +1,21 @@
+Phase 4 focused CPU-only tests
+================================
+
+Environment:
+  CUDA_VISIBLE_DEVICES=""
+  PYTHONDONTWRITEBYTECODE=1
+  PYTHONPATH=src
+  unique OS-temporary --basetemp
+
+Command:
+  python -m pytest tests/test_memorization_detector_hardening.py tests/test_memorization_review.py tests/test_memorization_promotion_decision.py -q --basetemp <OS_TEMP>/sprite-lab-memo-audit-<GUID>
+
+Result:
+  ........................................                                 [100%]
+  40 passed in 1.27s
+
+Failed: 0
+Skipped: 0
+Warnings: 0
+
+The tests cover the 16-case detector regression matrix, evidence-strength and gate semantics, unsupported detector policy, append-only legacy review behavior, v2 review replay and identity mismatch handling, all required promotion outcomes, machine-gate precedence, hard exact-RGBA handling, and deterministic eligible output.

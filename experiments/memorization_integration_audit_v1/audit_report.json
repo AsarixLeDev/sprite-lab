@@ -1,0 +1,116 @@
+{
+  "audit_scope": [
+    "src/spritelab/evaluation/memorization.py",
+    "src/spritelab/evaluation/suite.py",
+    "src/spritelab/evaluation/memorization_review.py",
+    "src/spritelab/evaluation/promotion_decision.py",
+    "src/spritelab/evaluation/cli.py"
+  ],
+  "authorization": {
+    "checkpoint_promotion": false,
+    "historical_checkpoint_as_eligible_evidence": false,
+    "production_change": false
+  },
+  "findings": [
+    {
+      "id": "MI-1",
+      "severity": "critical",
+      "summary": "Review-required detector evidence forces a suite machine failure that the decision layer makes irreversible",
+      "evidence": [
+        "suite.py:348 makes memorization_reviews_resolved false when review_required_count > 0",
+        "suite.py:373 exposes manual_review_required while promotion.pass remains false",
+        "promotion_decision.py:306 adds every machine failure as a hard block",
+        "promotion_decision.py:313 chooses blocked before considering cleared reviews"
+      ],
+      "impact": "a real conclusive v2 review cannot clear review-required detector evidence for promotion"
+    },
+    {
+      "id": "MI-2",
+      "severity": "high",
+      "summary": "Detector and decision evidence-class vocabularies disagree",
+      "evidence": [
+        "memorization.py:305 emits exact_rgba_nontrivial",
+        "promotion_decision.py:25 recognizes exact_decoded_rgba",
+        "memorization.py emits exact_rgba_low_evidence_collision while promotion allows blank_collision and near_blank_collision"
+      ],
+      "observed_probe": "detector class exact_rgba_nontrivial produced blocked/not_comparable with candidate pair 0 silently downgrades an exact-RGBA match"
+    },
+    {
+      "id": "MI-3",
+      "severity": "critical",
+      "summary": "Promotion does not authenticate the production detector policy",
+      "evidence": [
+        "detector and suite emit detector_policy_sha256",
+        "promotion validates only a nonempty policy version and optional caller equality",
+        "v2 review required fields omit detector_policy_sha256"
+      ],
+      "observed_probes": [
+        "caller-matched memorization_detector_v999 returned eligible",
+        "all-zero candidate detector_policy_sha256 returned eligible"
+      ]
+    },
+    {
+      "id": "MI-4",
+      "severity": "high",
+      "summary": "candidate_evidence_sha256 in a v2 review hashes only the pair object",
+      "evidence": "promotion_decision.py:140 compares the field to canonical_sha256(pair)",
+      "observed_probe": "a changed top-level candidate document returned eligible while the review hash stayed equal to the pair hash"
+    },
+    {
+      "id": "MI-5",
+      "severity": "high",
+      "summary": "Decision trusts a machine pass without semantic cross-check",
+      "observed_probe": "synthetic report with promotion.pass=true and review_required_count=1 returned eligible",
+      "impact": "internally inconsistent reports can cross the decision boundary if their file hash is correctly bound"
+    },
+    {
+      "id": "MI-6",
+      "severity": "medium",
+      "summary": "Direct training-image verification is optional",
+      "evidence": "promotion_decision.py validates training decoded RGBA only when training_image_path is present"
+    }
+  ],
+  "historical_result": {
+    "classification": "not_comparable",
+    "decision": "blocked",
+    "decision_sha256": "a05efed301338b84f3d4be923718651c3b76af3891a0aa8cc20fd18605e61fdc",
+    "eligible_for_promotion": false
+  },
+  "safety": {
+    "cuda_initialized": false,
+    "generation_runs_started": 0,
+    "historical_inputs_modified": false,
+    "production_files_modified": false,
+    "provider_calls": 0,
+    "test_files_modified": false,
+    "training_runs_started": 0
+  },
+  "schema_version": "sprite_lab_memorization_integration_audit_v1",
+  "source_hashes": {
+    "src/spritelab/evaluation/cli.py": "53a8581025ad5deb4ddb680bc31bd62e1c866791a8afb29655e5488208d60c99",
+    "src/spritelab/evaluation/memorization.py": "c8acf3cc67d35e196561a25ae004141796557ef6bc237ccea4aea3d376d23c2d",
+    "src/spritelab/evaluation/memorization_review.py": "378aca426c7348ef078bf92c9df424c25c9dd8e0e9d144dc0f2dd1533e3b8e54",
+    "src/spritelab/evaluation/promotion_decision.py": "95064cd9b280a84abb80237dff53a806e7babb791548f52faf1d0be983991ca0",
+    "src/spritelab/evaluation/suite.py": "fc57dd28201f38b61c0d670a9548d5aca900d00be6c12dd4f2004b1d9078a38f"
+  },
+  "synthetic_result": {
+    "decision": "eligible",
+    "interpretation": "structural compatibility probe only; not semantically reproducible from suite and not an authorization",
+    "real_checkpoint": false
+  },
+  "tests": {
+    "failed": 0,
+    "passed": 40,
+    "skipped": 0,
+    "warnings": 0
+  },
+  "verdicts": {
+    "combined_integration": "fail_not_certified",
+    "detector_v2_isolated": "pass",
+    "frozen_hashes": "pass",
+    "historical_nonpromotion": "pass",
+    "identity_binding": "fail",
+    "promotion_decision_isolated": "pass",
+    "synthetic_structural_compatibility": "pass_with_critical_qualification"
+  }
+}

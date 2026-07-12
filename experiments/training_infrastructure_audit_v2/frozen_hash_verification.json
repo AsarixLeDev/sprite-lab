@@ -1,0 +1,24 @@
+{
+  "schema_version": "spritelab_training_infrastructure_frozen_hash_verification_v2",
+  "hash_algorithm": "sha256",
+  "audited_files_unchanged": true,
+  "files": [
+    {"path": "src/spritelab/training/generator_challenger.py", "bytes": 149597, "sha256_before": "7af8dbac21081cc447f2caa110682e090cc83697f17286613f440536d5af1439", "sha256_after": "7af8dbac21081cc447f2caa110682e090cc83697f17286613f440536d5af1439", "unchanged": true},
+    {"path": "src/spritelab/training/experiment_system.py", "bytes": 25576, "sha256_before": "7a50412aef4db1a89a26e5e4bf91b67dbf3cb4ef020621d43910e96e313b774c", "sha256_after": "7a50412aef4db1a89a26e5e4bf91b67dbf3cb4ef020621d43910e96e313b774c", "unchanged": true},
+    {"path": "src/spritelab/training/campaign.py", "bytes": 44180, "sha256_before": "ac0159b81980a1dcd24f84544c5931be4d8b89cf97630d677ee7f1da2199d9bc", "sha256_after": "ac0159b81980a1dcd24f84544c5931be4d8b89cf97630d677ee7f1da2199d9bc", "unchanged": true},
+    {"path": "src/spritelab/training/cli/experiment_cmds.py", "bytes": 16699, "sha256_before": "33eac97a9e1835c10ef82ce682c464ae15c172d18c22d64574c31ba0177e6576", "sha256_after": "33eac97a9e1835c10ef82ce682c464ae15c172d18c22d64574c31ba0177e6576", "unchanged": true},
+    {"path": "tests/test_training_architecture_ablation.py", "bytes": 10708, "sha256_before": "a08e969482e38e8995ab9c3bff551ed67b734d53b9a1919b66e5dc57d6e5acb4", "sha256_after": "a08e969482e38e8995ab9c3bff551ed67b734d53b9a1919b66e5dc57d6e5acb4", "unchanged": true},
+    {"path": "tests/test_training_campaign.py", "bytes": 16127, "sha256_before": "644bbe00d5c1ddab816190700cef3581f50a6c1d8c86e19ed645d8cdf15919c4", "sha256_after": "644bbe00d5c1ddab816190700cef3581f50a6c1d8c86e19ed645d8cdf15919c4", "unchanged": true},
+    {"path": "experiments/challenger_full_v4_phase1/train_25k/checkpoint_last_ema.pt", "bytes": 97670471, "sha256_before": "fe6053f38190279d2f7a1b56086711dcd7493af04173b1cc6d52a2e08dfbea10", "sha256_after": "fe6053f38190279d2f7a1b56086711dcd7493af04173b1cc6d52a2e08dfbea10", "unchanged": true, "inspection": "hash only; not loaded; historical and promotion-ineligible"}
+  ],
+  "architecture_hashes": {
+    "absent": "16b9358a2cff5fb2e44eedf14ec58dd4bed286d54da05ad68f52c4e6e8209724",
+    "palette_index": "c42c94c20e0e3afaace9418ee02d54e52c878837712cabab06014fdf175afb86",
+    "repeated_construction_stable": true,
+    "modes_different": true,
+    "loss_only_change_independent": true
+  },
+  "cuda_initialized": false,
+  "training_runs_started": 0,
+  "campaign_subprocess_launches": 0
+}

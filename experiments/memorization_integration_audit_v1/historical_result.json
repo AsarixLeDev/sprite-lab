@@ -1,0 +1,31 @@
+{
+  "decision": {
+    "classification": "not_comparable",
+    "decision": "blocked",
+    "decision_sha256": "a05efed301338b84f3d4be923718651c3b76af3891a0aa8cc20fd18605e61fdc",
+    "eligible_for_promotion": false,
+    "hard_block_reasons": [
+      "existing machine-gate failure"
+    ],
+    "identity_valid": false,
+    "input_bundle_sha256": "38314506737e17e22c2c9150fab9f73d74d208e0806146b9d6f340a98ccbdde2",
+    "legacy_review_event_count": 9,
+    "machine_gates_passed": false,
+    "not_comparable_reasons": [
+      "historical reviews are unbound legacy events without promotion authority",
+      "incomplete full-suite evidence: machine report contains 8 of 54 expected samples"
+    ],
+    "review_set_complete": false
+  },
+  "historical_inputs_modified": false,
+  "historical_review_outcomes": {
+    "latest_same_sprite_or_memorized": 6,
+    "latest_uncertain": 1,
+    "promotion_authority": false,
+    "schema_version": "memorization_review_v1.0"
+  },
+  "output": "experiments/memorization_integration_audit_v1/historical_decision_output/promotion_decision.json",
+  "promotion_authorized": false,
+  "schema_version": "sprite_lab_memorization_historical_result_v1",
+  "verdict": "blocked"
+}

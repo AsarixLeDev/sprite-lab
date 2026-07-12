@@ -1,0 +1,33 @@
+{
+  "schema_version": "sprite_lab_v5_milestone_commit_summary_v1",
+  "base": {
+    "branch": "integration/v5-pretraining",
+    "sha": "19b6adca60a8ff2b6f09aaa25ab5a35901f37869"
+  },
+  "working_branch": "codex/v5-next-milestone",
+  "commits": [
+    {
+      "ordinal": 1,
+      "sha": "9795eb6",
+      "subject": "Fix remaining Labeling-v4 two-pass safety defects"
+    },
+    {
+      "ordinal": 2,
+      "sha": "861b9f1",
+      "subject": "Implement Dataset-v5 named view and freeze tooling"
+    },
+    {
+      "ordinal": 3,
+      "sha": "SELF",
+      "sha_resolution": "git rev-parse HEAD after this self-containing commit",
+      "subject": "Add infrastructure audits and capability snapshot",
+      "contains": [
+        "training infrastructure audit v2",
+        "memorization integration audit v1",
+        "repository capability snapshot v1",
+        "final milestone report v1"
+      ]
+    }
+  ],
+  "pushed": false
+}

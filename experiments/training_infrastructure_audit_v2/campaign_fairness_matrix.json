@@ -1,0 +1,37 @@
+{
+  "schema_version": "spritelab_training_campaign_fairness_matrix_v2",
+  "required_checks": [
+    {"check": "exactly_three_unique_seeds", "result": "PASS"},
+    {"check": "duplicate_seed_rejected", "result": "PASS"},
+    {"check": "missing_seed_rejected", "result": "PASS"},
+    {"check": "fixed_optimizer_steps", "result": "PASS"},
+    {"check": "no_epoch_fallback", "result": "FAIL", "detail": "fixed-step helpers reject zero steps, but arbitrary epoch fields are accepted and not rejected by schema validation"},
+    {"check": "same_batch_and_accumulation", "result": "FAIL_CLOSED_GAP", "detail": "checked only unless the protected path is declared experimental"},
+    {"check": "same_optimizer_and_schedule", "result": "FAIL_CLOSED_GAP", "detail": "checked only unless declared experimental"},
+    {"check": "same_dataset_and_view_hashes", "result": "FAIL_CLOSED_GAP", "detail": "strings are syntax-checked, not rehashed to source bytes, and protected differences can be declared"},
+    {"check": "same_evaluation_benchmark_hash", "result": "FAIL_CLOSED_GAP", "detail": "syntax-only identity"},
+    {"check": "same_evaluation_cadence", "result": "FAIL_CLOSED_GAP", "detail": "protected differences can be declared"},
+    {"check": "same_checkpoint_cadence", "result": "FAIL_CLOSED_GAP", "detail": "protected differences can be declared"},
+    {"check": "same_cfg", "result": "FAIL", "detail": "cfg_value is not required"},
+    {"check": "same_sampling_steps", "result": "FAIL", "detail": "sampling_steps is not required"},
+    {"check": "same_ema_live_policy", "result": "FAIL_CLOSED_GAP", "detail": "some policy values are checked, but protected differences can be declared"},
+    {"check": "only_declared_variables_may_differ", "result": "FAIL", "detail": "declaring a protected fairness field waives it"},
+    {"check": "placeholder_hashes_block_execution", "result": "PASS"},
+    {"check": "foreign_output_root_rejected", "result": "PASS"},
+    {"check": "unsafe_resume_rejected", "result": "PASS"},
+    {"check": "missing_run_artifact_incomplete", "result": "QUALIFIED", "detail": "missing files are detected when roots are inspected, but checks are existence-only and campaign root can be omitted"},
+    {"check": "three_seed_aggregate_deterministic", "result": "QUALIFIED", "detail": "covered cell aggregates deterministically, but an omitted architecture cell can disappear and overall complete can remain true"}
+  ],
+  "critical_identity_findings": [
+    {"finding": "campaign_identity is optional", "severity": "critical"},
+    {"finding": "run identity excludes experiment_command", "severity": "critical"},
+    {"finding": "run identity excludes resolved_config_path and resolved config bytes", "severity": "critical"},
+    {"finding": "arbitrary experiment commands can validate", "severity": "critical"},
+    {"finding": "baseline_launch_authorized=false does not prevent executable=true", "severity": "critical"},
+    {"finding": "identity hashes are syntactic and not rebound to source bytes", "severity": "high"},
+    {"finding": "architecture comparison labels are not bound to physical configs", "severity": "high"},
+    {"finding": "resumability metadata is truthy-only", "severity": "high"},
+    {"finding": "artifact completeness is path-existence-only", "severity": "high"}
+  ],
+  "verdict": "FAIL"
+}

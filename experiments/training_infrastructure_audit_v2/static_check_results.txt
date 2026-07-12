@@ -1,0 +1,9 @@
+Scoped static validation (read-only)
+
+python -m ruff check src/spritelab/training/generator_challenger.py src/spritelab/training/experiment_system.py src/spritelab/training/campaign.py src/spritelab/training/cli/experiment_cmds.py tests/test_training_architecture_ablation.py tests/test_training_campaign.py
+All checks passed!
+
+python -m ruff format --check src/spritelab/training/generator_challenger.py src/spritelab/training/experiment_system.py src/spritelab/training/campaign.py src/spritelab/training/cli/experiment_cmds.py tests/test_training_architecture_ablation.py tests/test_training_campaign.py
+6 files already formatted
+
+Static audit findings are recorded in campaign_fairness_matrix.json and campaign_execution_safety_matrix.json. No source file was modified.
