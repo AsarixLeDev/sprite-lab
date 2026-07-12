@@ -10,6 +10,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     _register_inspect_data(subparsers)
     _register_make_overfit_subset(subparsers)
     _register_dataset_palette_swap_review(subparsers)
+    _register_dataset_role_ramp_transplant_review(subparsers)
+    _register_dataset_role_ramp_transplant_audit(subparsers)
 
 
 def _register_inspect_data(subparsers: argparse._SubParsersAction) -> None:
@@ -133,3 +135,94 @@ def _run_dataset_palette_swap_review(parsed: argparse.Namespace) -> None:
     print(f"Red flags: {len(result.report['red_flags'])}")
     print(f"Markdown report: {result.markdown_path}")
     print(f"Contact sheets: {len(result.contact_sheets)}")
+
+
+def _register_dataset_role_ramp_transplant_review(subparsers: argparse._SubParsersAction) -> None:
+    review = subparsers.add_parser(
+        "dataset-role-ramp-transplant-review",
+        help="Preview role-aligned real-ramp transplant augmentation without training.",
+    )
+    review.add_argument("--dataset", required=True, type=Path, dest="dataset_dir")
+    review.add_argument("--training-manifest", required=True, type=Path)
+    review.add_argument("--out", required=True, type=Path, dest="out_dir")
+    review.add_argument("--max-samples", type=int, default=128)
+    review.add_argument("--seed", type=int, default=20260706)
+    review.add_argument("--role-ramp-transplant-prob", type=float, default=1.0)
+    review.add_argument("--role-ramp-transplant-keep-original-prob", type=float, default=0.0)
+    review.add_argument("--role-ramp-transplant-exclude-families", default="gold,brown")
+    review.add_argument(
+        "--role-ramp-transplant-require-trusted-role-map",
+        action="store_true",
+        default=True,
+        dest="role_ramp_transplant_require_trusted_role_map",
+    )
+    review.add_argument(
+        "--no-role-ramp-transplant-require-trusted-role-map",
+        action="store_false",
+        dest="role_ramp_transplant_require_trusted_role_map",
+    )
+    review.set_defaults(func=_run_dataset_role_ramp_transplant_review)
+
+
+def _run_dataset_role_ramp_transplant_review(parsed: argparse.Namespace) -> None:
+    from spritelab.training.cli._args import _parsed_config_kwargs
+    from spritelab.training.role_ramp_transplant import (
+        RoleRampTransplantReviewConfig,
+        review_role_ramp_transplant,
+    )
+
+    result = review_role_ramp_transplant(RoleRampTransplantReviewConfig(**_parsed_config_kwargs(parsed)))
+    print(f"Previewed samples: {result['sample_count']}")
+    print(f"Applied: {result['applied_count']} (rate {result['applied_rate']:.4f})")
+    print(f"Summary: {parsed.out_dir / 'summary.json'}")
+
+
+def _register_dataset_role_ramp_transplant_audit(subparsers: argparse._SubParsersAction) -> None:
+    audit = subparsers.add_parser(
+        "dataset-role-ramp-transplant-audit",
+        help="Audit real-ramp transplant donor, prompt, pixel, and role consistency without training.",
+    )
+    audit.add_argument("--dataset", required=True, type=Path, dest="dataset_dir")
+    audit.add_argument("--training-manifest", required=True, type=Path)
+    audit.add_argument("--out", required=True, type=Path, dest="out_dir")
+    audit.add_argument("--max-samples", type=int, default=2048)
+    audit.add_argument("--seed", type=int, default=20260706)
+    audit.add_argument("--role-ramp-transplant-prob", type=float, default=0.3)
+    audit.add_argument("--role-ramp-transplant-keep-original-prob", type=float, default=0.5)
+    audit.add_argument("--role-ramp-transplant-exclude-families", default="gold,brown,gray,white,black")
+    audit.add_argument(
+        "--role-ramp-transplant-require-trusted-role-map",
+        action="store_true",
+        default=True,
+        dest="role_ramp_transplant_require_trusted_role_map",
+    )
+    audit.add_argument(
+        "--no-role-ramp-transplant-require-trusted-role-map",
+        action="store_false",
+        dest="role_ramp_transplant_require_trusted_role_map",
+    )
+    audit.add_argument("--role-ramp-transplant-max-resample-attempts", type=int, default=8)
+    audit.add_argument(
+        "--role-ramp-transplant-require-fill-target-match",
+        action="store_true",
+        default=True,
+        dest="role_ramp_transplant_require_fill_target_match",
+    )
+    audit.add_argument(
+        "--no-role-ramp-transplant-require-fill-target-match",
+        action="store_false",
+        dest="role_ramp_transplant_require_fill_target_match",
+    )
+    audit.add_argument("--role-ramp-transplant-min-primary-fill-coverage", type=float, default=0.03)
+    audit.set_defaults(func=_run_dataset_role_ramp_transplant_audit)
+
+
+def _run_dataset_role_ramp_transplant_audit(parsed: argparse.Namespace) -> None:
+    from spritelab.training.cli._args import _parsed_config_kwargs
+    from spritelab.training.role_ramp_transplant import RoleRampTransplantAuditConfig, audit_role_ramp_transplant
+
+    summary = audit_role_ramp_transplant(RoleRampTransplantAuditConfig(**_parsed_config_kwargs(parsed)))
+    print(f"Attempted: {summary['attempted_count']}")
+    print(f"Applied: {summary['applied_count']} (rate {summary['applied_rate']:.4f})")
+    print(f"Failed thresholds: {summary['failed']}")
+    print(f"Summary: {parsed.out_dir / 'summary.json'}")

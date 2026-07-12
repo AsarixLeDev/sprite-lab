@@ -269,6 +269,9 @@ def apply_prediction_to_imported_record(
     candidate_object_names = [str(value) for value in prediction.get("candidate_object_names") or () if str(value)]
     flags = [str(value) for value in label_quality.get("flags") or prediction.get("flags") or () if str(value)]
     bucket = prediction_bucket(prediction)
+    label_confidence_tier = str(
+        prediction.get("label_confidence_tier") or label_quality.get("label_confidence_tier") or ""
+    ).strip()
 
     category = normalize_category(str(safe.get("category", "unknown")))
     object_name = normalize_tag(str(safe.get("object_name", "")))
@@ -302,7 +305,23 @@ def apply_prediction_to_imported_record(
         "safe_prefill": dict(safe),
         "vlm_descriptor": dict(vlm_descriptor),
         "candidate_object_names": candidate_object_names,
+        "fusion_bucket": str(prediction.get("fusion_bucket") or bucket),
+        "label_tier_reason": str(
+            prediction.get("label_tier_reason") or label_quality.get("label_tier_reason") or f"fusion_bucket:{bucket}"
+        ),
+        "label_sources": [
+            str(value)
+            for value in prediction.get("label_sources") or label_quality.get("label_sources") or ()
+            if str(value)
+        ],
+        "label_conflict_codes": [
+            str(value)
+            for value in prediction.get("label_conflict_codes") or label_quality.get("label_conflict_codes") or ()
+            if str(value)
+        ],
     }
+    if label_confidence_tier:
+        label_v2_metadata["label_confidence_tier"] = label_confidence_tier
     if build_id:
         label_v2_metadata["applied_at_build_id"] = str(build_id)
     auto_metadata.update(
@@ -319,6 +338,8 @@ def apply_prediction_to_imported_record(
     )
     if build_id:
         auto_metadata["label_v2_applied_at_build_id"] = str(build_id)
+    if label_confidence_tier:
+        auto_metadata["label_v2_label_confidence_tier"] = label_confidence_tier
     if label_quality:
         auto_metadata["label_v2_label_quality"] = dict(label_quality)
         label_v2_metadata["label_quality"] = dict(label_quality)

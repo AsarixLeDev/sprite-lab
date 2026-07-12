@@ -7,14 +7,21 @@ from pathlib import Path
 
 from spritelab.training.cli._args import (
     _add_export_preset_argument,
+    _add_palette_conditioning_sampling_arguments,
+    _add_palette_conditioning_training_arguments,
     _add_palette_projection_sampling_arguments,
     _add_palette_swap_arguments,
+    _add_role_ramp_transplant_arguments,
     _add_speed_option_arguments,
     _add_v2_phase0_diagnostic_arguments,
     _parse_dropout_rates,
     _parsed_config_kwargs,
 )
 from spritelab.training.conditioning import CONDITIONING_MODES, DEFAULT_CONDITIONING_MODE
+
+
+def _parse_timestep_boundaries(value: str) -> tuple[float, ...]:
+    return tuple(float(part.strip()) for part in str(value).split(",") if part.strip())
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -46,6 +53,8 @@ def _register_generator_challenger(subparsers: argparse._SubParsersAction) -> No
     challenger.add_argument("--palette-loss-weight", type=float, default=0.0)
     challenger.add_argument("--palette-loss-temperature", type=float, default=0.05)
     _add_palette_swap_arguments(challenger)
+    _add_role_ramp_transplant_arguments(challenger)
+    _add_palette_conditioning_training_arguments(challenger)
     challenger.add_argument("--base-channels", type=int, default=64)
     challenger.add_argument("--channel-mults", default="1,2,4")
     challenger.add_argument("--res-blocks-per-level", type=int, default=2)
@@ -63,6 +72,18 @@ def _register_generator_challenger(subparsers: argparse._SubParsersAction) -> No
     challenger.add_argument("--lr-schedule", choices=["none", "cosine"], default="none")
     challenger.add_argument("--lr-warmup-steps", type=int, default=0)
     _add_speed_option_arguments(challenger)
+    challenger.add_argument(
+        "--determinism",
+        choices=["off", "warn", "strict"],
+        default="off",
+        help="CUDA determinism policy; strict fails when the runtime cannot guarantee the qualified scope.",
+    )
+    challenger.add_argument(
+        "--timestep-validation-boundaries",
+        type=_parse_timestep_boundaries,
+        default=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+        help="Six comma-separated boundaries from 0 to 1 for early..late validation buckets.",
+    )
     challenger.add_argument(
         "--film-conditioning",
         action="store_true",
@@ -151,6 +172,11 @@ def _register_sample_generator_challenger(subparsers: argparse._SubParsersAction
         "--prompts", required=True, type=Path, help="JSONL prompt file, one record per line (see docs/v1_default.md)."
     )
     sample_challenger.add_argument(
+        "--allow-legacy-conditioning-v1",
+        action="store_true",
+        help="Explicitly load a schema-v1 structured vocabulary without remapping IDs.",
+    )
+    sample_challenger.add_argument(
         "--out", required=True, type=Path, dest="out_dir", help="Output directory for samples, manifest, and reports."
     )
     sample_challenger.add_argument("--max-samples", type=int, default=64)
@@ -175,6 +201,7 @@ def _register_sample_generator_challenger(subparsers: argparse._SubParsersAction
     )
     _add_palette_projection_sampling_arguments(sample_challenger)
     _add_v2_phase0_diagnostic_arguments(sample_challenger)
+    _add_palette_conditioning_sampling_arguments(sample_challenger)
     # v2 Phase 2 Exp A: sampling-only guidance surgery
     sample_challenger.add_argument(
         "--color-guidance-rgb-only",

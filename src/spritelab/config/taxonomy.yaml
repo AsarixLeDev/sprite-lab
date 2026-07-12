@@ -1,0 +1,11 @@
+schema_version: labeling_v2.1
+categories: [unknown, item_icon, block, plant, ui_icon, entity, character, weapon, tool, armor, material, effect_icon, environment_prop]
+tag_groups:
+  food: [food, consumable, fruit, vegetable, meat, dairy, dessert, drink, beverage, grain, pasta, sushi, prepared_food, ingredient, sweet, savory, tropical, plant_based, animal_product]
+  tool: [tool, utility, measuring_tool, cutting_tool, crafting_tool, navigation, construction, metal, wood, handle]
+  gem_material: [gem, gemstone, mineral, treasure, crafting_material, crystal, polished_gem, raw_gem, faceted, precious_stone]
+  potion_container: [potion, vial, bottle, flask, jar, liquid, container, drink, beverage]
+  weapon: [weapon, melee, ranged, blade, metal, wood, handle]
+  armor: [armor, shield, helmet, clothing, defense, wearable]
+  ui_effect: [ui, icon, effect, status_effect, spell, buff, debuff]
+  environment_tile: [environment, tile, terrain, prop, wall, floor]

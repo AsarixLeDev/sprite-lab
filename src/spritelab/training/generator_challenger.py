@@ -6,6 +6,7 @@ import json
 import math
 import random
 import time
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -20,6 +21,12 @@ except ImportError:  # pragma: no cover - exercised when torch is absent or brok
     torch = None  # type: ignore[assignment]
     nn = None  # type: ignore[assignment]
 
+from spritelab.harvest.label_v4.training_quality import (
+    dataset_uncertainty_report,
+    evaluation_uncertainty_report,
+    training_uncertainty_report,
+    uncertainty_correlation_report,
+)
 from spritelab.training.checkpoint_io import load_checkpoint as _load_checkpoint
 from spritelab.training.checkpoint_io import tokenizer_from_checkpoint as _tokenizer_from_checkpoint
 from spritelab.training.conditioning import (
@@ -52,6 +59,12 @@ from spritelab.training.overfit_subset import (
     read_sprite_id_list,
     select_overfit_subset,
 )
+from spritelab.training.palette_conditioning import (
+    PALETTE_CONDITION_CHANNELS,
+    PALETTE_CONDITION_SLOTS,
+    PaletteConditionLibrary,
+    build_palette_condition_library,
+)
 from spritelab.training.palette_swap import (
     DEFAULT_SWAP_FAMILIES_TEXT,
     PaletteSwapConfig,
@@ -61,14 +74,26 @@ from spritelab.training.progress import StepProgressBar
 from spritelab.training.prompt_records import read_prompt_records
 from spritelab.training.prompt_sensitivity import COLOR_WORDS
 from spritelab.training.rgba import save_rgba_contact_sheet
+from spritelab.training.role_ramp_transplant import RoleRampTransplantConfig
+from spritelab.training.sampler_resume import (
+    StatefulPermutationSampler,
+    UnsupportedExactResumeError,
+    validate_worker_mode,
+)
 from spritelab.training.structured_conditioning import (
     MULTI_HOT_FIELDS,
+    STATUS_FIELDS,
     STRUCTURED_BATCH_KEYS,
     StructuredConditioningVocab,
     build_structured_conditioning_vocab,
     encode_structured_conditioning,
     save_structured_conditioning_vocab,
     structured_vocab_from_checkpoint,
+)
+from spritelab.training.timestep_validation import (
+    DEFAULT_TIMESTEP_BOUNDARIES,
+    TimestepBucketAccumulator,
+    validate_timestep_boundaries,
 )
 from spritelab.training.tokenization import SpriteTextTokenizer
 
@@ -94,14 +119,14 @@ def _ensure_palette_in_01(palette: Any) -> None:
 
 
 STRUCTURED_DROPOUT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("category", ("category_id",)),
-    ("object_id", ("object_id",)),
-    ("base_object_id", ("base_object_id",)),
-    ("colors", ("primary_color_id", "color_multi_hot")),
-    ("materials", ("material_multi_hot",)),
-    ("shapes", ("shape_multi_hot",)),
-    ("function", ("function_multi_hot",)),
-    ("style", ("style_multi_hot",)),
+    ("category", ("category_id", "category_status_id")),
+    ("object_id", ("object_id", "object_status_id")),
+    ("base_object_id", ("base_object_id", "base_object_status_id")),
+    ("colors", ("primary_color_id", "color_multi_hot", "primary_color_status_id", "color_status_id")),
+    ("materials", ("material_multi_hot", "material_status_id")),
+    ("shapes", ("shape_multi_hot", "shape_status_id")),
+    ("function", ("function_multi_hot", "function_status_id")),
+    ("style", ("style_multi_hot", "style_status_id")),
 )
 
 # v2 Phase 0 diagnostics: sampling-time field ablation choices (see docs/v2_phase0_diagnostics.md).
@@ -119,16 +144,21 @@ NULL_FIELD_CHOICES: tuple[str, ...] = (
     "structured",
 )
 _NULL_FIELD_STRUCTURED_KEYS: dict[str, tuple[str, ...]] = {
-    "category": ("category_id",),
-    "object_id": ("object_id",),
-    "base_object": ("base_object_id",),
-    "colors": ("primary_color_id", "color_multi_hot"),
-    "materials": ("material_multi_hot",),
-    "shapes": ("shape_multi_hot",),
-    "function": ("function_multi_hot",),
-    "style": ("style_multi_hot",),
+    "category": ("category_id", "category_status_id"),
+    "object_id": ("object_id", "object_status_id"),
+    "base_object": ("base_object_id", "base_object_status_id"),
+    "colors": ("primary_color_id", "color_multi_hot", "primary_color_status_id", "color_status_id"),
+    "materials": ("material_multi_hot", "material_status_id"),
+    "shapes": ("shape_multi_hot", "shape_status_id"),
+    "function": ("function_multi_hot", "function_status_id"),
+    "style": ("style_multi_hot", "style_status_id"),
 }
-_COLOR_STRUCTURED_KEYS: tuple[str, ...] = ("primary_color_id", "color_multi_hot")
+_COLOR_STRUCTURED_KEYS: tuple[str, ...] = (
+    "primary_color_id",
+    "color_multi_hot",
+    "primary_color_status_id",
+    "color_status_id",
+)
 
 _ModuleBase = nn.Module if nn is not None else object
 
@@ -178,6 +208,14 @@ class ChallengerTrainConfig:
     palette_swap_allow_colorless_caption_if_semantic_color: bool = False
     palette_swap_no_caption_prepend: bool = False
     palette_swap_allow_material_colors: bool = True
+    role_ramp_transplant_prob: float = 0.0
+    role_ramp_transplant_keep_original_prob: float = 0.5
+    role_ramp_transplant_exclude_families: str = "gold,brown"
+    role_ramp_transplant_require_trusted_role_map: bool = True
+    role_ramp_transplant_debug_samples: int = 0
+    role_ramp_transplant_max_resample_attempts: int = 8
+    role_ramp_transplant_require_fill_target_match: bool = True
+    role_ramp_transplant_min_primary_fill_coverage: float = 0.03
     base_channels: int = 64
     channel_mults: str = "1,2,4"
     res_blocks_per_level: int = 2
@@ -217,6 +255,18 @@ class ChallengerTrainConfig:
     palette_presence_loss_weight: float = 0.0
     index_head_warmup_steps: int = 0
     palette_head_use_gt_palette_prob: float = 1.0
+    # v3 Phase 0 explicit canonical palette input (default-off).
+    palette_conditioning: bool = False
+    palette_conditioning_dropout: float = 0.0
+    palette_conditioning_dim: int = 64
+    palette_conditioning_inject: str = "decoder"
+    experiment_manifest: dict[str, Any] | None = None
+    resume_from: Path | None = None
+    unsafe_resume: bool = False
+    determinism: str = "off"
+    gradient_accumulation_steps: int = 1
+    timestep_validation_boundaries: tuple[float, ...] = DEFAULT_TIMESTEP_BOUNDARIES
+    stop_after_step: int | None = None
 
 
 @dataclass(frozen=True)
@@ -256,6 +306,13 @@ class ChallengerSampleConfig:
     color_guidance_start_t: float = 0.0
     color_guidance_ramp_t: float = 0.0
     object_id_scale: float = 1.0
+    # v3 Phase 0. A trained palette-conditioned checkpoint can be sampled with
+    # a real source palette, a retrieved palette, or an explicit null condition.
+    palette_conditioning_source: str = "none"
+    palette_conditioning_dataset: Path | None = None
+    palette_conditioning_training_manifest: Path | None = None
+    palette_conditioning_exclude_exact_prompt_target: bool = False
+    allow_legacy_conditioning_v1: bool = True
 
 
 class RectifiedFlowUNet(_ModuleBase):
@@ -273,6 +330,10 @@ class RectifiedFlowUNet(_ModuleBase):
         structured_vocab_sizes: Mapping[str, int] | None = None,
         film_conditioning: bool = False,
         bottleneck_attention: bool = False,
+        palette_conditioning: bool = False,
+        palette_conditioning_dropout: float = 0.0,
+        palette_conditioning_dim: int = 64,
+        palette_conditioning_inject: str = "decoder",
     ) -> None:
         th, nn_mod = _require_torch()
         del th
@@ -286,6 +347,12 @@ class RectifiedFlowUNet(_ModuleBase):
         self.structured_vocab_sizes = _normalize_structured_vocab_sizes(structured_vocab_sizes)
         self.film_conditioning = bool(film_conditioning)
         self.bottleneck_attention = bool(bottleneck_attention)
+        self.palette_conditioning = bool(palette_conditioning)
+        self.palette_conditioning_dropout = float(palette_conditioning_dropout)
+        self.palette_conditioning_dim = int(palette_conditioning_dim)
+        self.palette_conditioning_inject = str(palette_conditioning_inject).strip().lower()
+        if self.palette_conditioning_inject not in {"decoder", "all", "bottleneck"}:
+            raise ValueError("palette_conditioning_inject must be one of: decoder, all, bottleneck")
 
         channels = [max(8, self.base_channels * value) for value in self.channel_mults]
         emb_dim = max(self.embed_dim, self.base_channels * 4)
@@ -301,6 +368,17 @@ class RectifiedFlowUNet(_ModuleBase):
             nn_mod.SiLU(),
             nn_mod.Linear(emb_dim, emb_dim),
         )
+        if self.palette_conditioning:
+            self.palette_condition_encoder = nn_mod.Sequential(
+                nn_mod.Linear(PALETTE_CONDITION_CHANNELS, self.palette_conditioning_dim),
+                nn_mod.SiLU(),
+                nn_mod.Linear(self.palette_conditioning_dim, self.palette_conditioning_dim),
+                nn_mod.SiLU(),
+            )
+            self.palette_condition_projection = nn_mod.Linear(self.palette_conditioning_dim, emb_dim)
+        else:
+            self.palette_condition_encoder = None
+            self.palette_condition_projection = None
         self.input = nn_mod.Conv2d(4, channels[0], kernel_size=3, padding=1)
         self.downs = nn_mod.ModuleList()
         current = channels[0]
@@ -384,6 +462,10 @@ class RectifiedFlowUNet(_ModuleBase):
             "structured_vocab_sizes": dict(self.structured_vocab_sizes) if self.structured_vocab_sizes else None,
             "film_conditioning": self.film_conditioning,
             "bottleneck_attention": self.bottleneck_attention,
+            "palette_conditioning": self.palette_conditioning,
+            "palette_conditioning_dropout": self.palette_conditioning_dropout,
+            "palette_conditioning_dim": self.palette_conditioning_dim,
+            "palette_conditioning_inject": self.palette_conditioning_inject,
         }
 
     def forward(
@@ -396,6 +478,7 @@ class RectifiedFlowUNet(_ModuleBase):
         structured_conditioning: Mapping[str, Any] | None = None,
         return_aux: bool = False,
         object_id_scale: float = 1.0,
+        palette_condition: Any | None = None,
     ) -> Any:
         th, _nn_mod = _require_torch()
         emb = self._conditioning_embedding(
@@ -406,17 +489,29 @@ class RectifiedFlowUNet(_ModuleBase):
             object_id_scale=object_id_scale,
         )
         h = self.input(x)
+        palette_emb = self._palette_condition_embedding(palette_condition, batch=int(x.shape[0]), device=x.device)
+        down_emb = emb if palette_emb is None or self.palette_conditioning_inject != "all" else emb + palette_emb
+        mid_emb = (
+            emb
+            if palette_emb is None or self.palette_conditioning_inject not in {"all", "bottleneck"}
+            else emb + palette_emb
+        )
+        decoder_emb = (
+            emb
+            if palette_emb is None or self.palette_conditioning_inject not in {"all", "decoder"}
+            else emb + palette_emb
+        )
         skips: list[Any] = []
         for level, down in enumerate(self.downs):
             for block in down["blocks"]:
-                h = block(h, emb)
+                h = block(h, down_emb)
             if level < len(self.downs) - 1:
                 skips.append(h)
                 h = down["down"](h)
         # Bottleneck: save for palette head
         bottleneck_h = h
         for block in self.mid:
-            h = block(h, emb)
+            h = block(h, mid_emb)
         if self.bottleneck_attn is not None:
             h = self.bottleneck_attn(h)
         for up in self.ups:
@@ -426,7 +521,7 @@ class RectifiedFlowUNet(_ModuleBase):
                 h = th.nn.functional.interpolate(h, size=skip.shape[-2:], mode="nearest")
             h = th.cat([h, skip], dim=1)
             for block in up["blocks"]:
-                h = block(h, emb)
+                h = block(h, decoder_emb)
         # h is now the final feature map before output
         output_rgba = self.output(h)
 
@@ -445,6 +540,35 @@ class RectifiedFlowUNet(_ModuleBase):
             "palette_presence_logits": palette_presence,
             "index_logits": index_logits,
         }
+
+    def _palette_condition_embedding(self, palette_condition: Any | None, *, batch: int, device: Any) -> Any | None:
+        """Encode slot features and apply per-example training dropout."""
+        th, _nn_mod = _require_torch()
+        if not self.palette_conditioning or self.palette_condition_encoder is None:
+            return None
+        if palette_condition is None:
+            condition = th.zeros(batch, PALETTE_CONDITION_SLOTS, PALETTE_CONDITION_CHANNELS, device=device)
+        else:
+            condition = palette_condition.to(device=device, dtype=next(self.parameters()).dtype)
+            if (
+                condition.ndim != 3
+                or condition.shape[0] != batch
+                or condition.shape[1:] != (PALETTE_CONDITION_SLOTS, PALETTE_CONDITION_CHANNELS)
+            ):
+                raise ValueError(
+                    "palette_condition must have shape "
+                    f"[B, {PALETTE_CONDITION_SLOTS}, {PALETTE_CONDITION_CHANNELS}], got {tuple(condition.shape)}"
+                )
+        slot = self.palette_condition_encoder(condition)
+        # Coverage is a stable pooling weight; present but tiny entries retain a
+        # small contribution so an accent cannot disappear completely.
+        weights = (condition[..., 4] + condition[..., 3] * 0.01).unsqueeze(-1)
+        pooled = (slot * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1.0e-6)
+        embedding = self.palette_condition_projection(pooled)
+        if self.training and self.palette_conditioning_dropout > 0.0:
+            mask = th.rand(batch, device=device) < min(1.0, max(0.0, self.palette_conditioning_dropout))
+            embedding = embedding.masked_fill(mask[:, None], 0.0)
+        return embedding
 
     def _conditioning_embedding(
         self,
@@ -488,6 +612,7 @@ class RectifiedFlowUNet(_ModuleBase):
         if not self.structured_vocab_sizes:
             self.structured_id_embeddings = nn_mod.ModuleDict()
             self.structured_multi_hot_projections = nn_mod.ModuleDict()
+            self.structured_status_embeddings = nn_mod.ModuleDict()
             return 0
         id_specs = {
             "category_id": "category_vocab_size",
@@ -518,7 +643,13 @@ class RectifiedFlowUNet(_ModuleBase):
                 for field, size_key in multi_specs.items()
             }
         )
-        return self.embed_dim * (len(id_specs) + len(multi_specs))
+        status_size = int(self.structured_vocab_sizes.get("field_status_vocab_size") or 0)
+        self.structured_status_embeddings = nn_mod.ModuleDict(
+            {field: nn_mod.Embedding(status_size, self.embed_dim, padding_idx=0) for field in STATUS_FIELDS}
+            if status_size > 1
+            else {}
+        )
+        return self.embed_dim * (len(id_specs) + len(multi_specs) + len(self.structured_status_embeddings))
 
     def _structured_embedding(
         self,
@@ -550,6 +681,13 @@ class RectifiedFlowUNet(_ModuleBase):
             else:
                 multi_hot = value.to(device=device, dtype=next(projection.parameters()).dtype).reshape(batch, width)
             pieces.append(projection(multi_hot))
+        for field, embedding in self.structured_status_embeddings.items():
+            value = None if structured_conditioning is None else structured_conditioning.get(field)
+            if value is None:
+                ids = th.zeros(batch, dtype=th.long, device=device)
+            else:
+                ids = value.to(device=device, dtype=th.long).reshape(batch)
+            pieces.append(embedding(ids))
         return th.cat(pieces, dim=1)
 
 
@@ -683,11 +821,26 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
     metrics_every = int(config.metrics_every)
     if metrics_every < 1:
         raise ValueError("metrics_every must be >= 1")
+    if not 0.0 <= float(config.palette_conditioning_dropout) <= 1.0:
+        raise ValueError("palette_conditioning_dropout must be in [0, 1]")
+    if int(config.palette_conditioning_dim) < 1:
+        raise ValueError("palette_conditioning_dim must be positive")
+    timestep_boundaries = validate_timestep_boundaries(config.timestep_validation_boundaries)
     started = time.perf_counter()
     _set_seed(config.seed)
     global _palette_scale_needs_normalize
     _palette_scale_needs_normalize = None  # reset per-run palette scale cache
     device = resolve_device(config.device)
+    from spritelab.training.determinism import configure_determinism
+
+    determinism_report = configure_determinism(config.determinism, device=device, torch_module=th)
+    if determinism_report["mode"] != "off" and (config.cudnn_benchmark or config.tf32):
+        raise ValueError("determinism warn/strict is incompatible with cudnn_benchmark or tf32")
+    if int(config.gradient_accumulation_steps) != 1:
+        raise ValueError(
+            "gradient_accumulation_steps other than 1 are not yet supported for exact resume; "
+            "gradient tensors would need checkpointing"
+        )
     out_dir = Path(config.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     conditioning_mode = validate_conditioning_mode(config.conditioning_mode)
@@ -706,17 +859,20 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         train_rows or token_rows or manifest_rows, max_length=config.caption_max_length
     )
     tokenizer.save(out_dir / "vocab.json")
-    structured_vocab = (
-        build_structured_conditioning_vocab(
-            [row for row in token_rows if row.get("split") == effective_split] or train_rows or token_rows
-        )
-        if uses_structured_conditioning(conditioning_mode)
-        else None
-    )
+    preloaded_resume = _load_checkpoint(config.resume_from) if config.resume_from is not None else None
+    structured_vocab = None
+    if uses_structured_conditioning(conditioning_mode):
+        if config.unsafe_resume and isinstance(preloaded_resume, Mapping):
+            structured_vocab = structured_vocab_from_checkpoint(preloaded_resume, allow_schema_v1_adapter=True)
+        if structured_vocab is None:
+            structured_vocab = build_structured_conditioning_vocab(
+                [row for row in token_rows if row.get("split") == effective_split] or train_rows or token_rows
+            )
     if structured_vocab is not None:
         save_structured_conditioning_vocab(structured_vocab, out_dir / "structured_conditioning_vocab.json")
 
     palette_swap = PaletteSwapConfig.from_training_config(config)
+    role_ramp_transplant = RoleRampTransplantConfig.from_training_config(config)
     shared_npz_cache: dict[str, Any] = {}
     train_dataset = SpriteTrainingDataset(
         config.dataset_dir,
@@ -731,6 +887,8 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         structured_vocab=structured_vocab,
         npz_cache=shared_npz_cache,
         palette_swap=palette_swap,
+        role_ramp_transplant=role_ramp_transplant,
+        palette_conditioning=bool(config.palette_conditioning),
     )
     palette_swap_summary = {**palette_swap.report_dict()}
     if palette_swap.active():
@@ -745,6 +903,9 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         )
     else:
         palette_swap_summary.update(estimate_applied([dict(record) for record in train_dataset.records], palette_swap))
+    role_ramp_summary = {**role_ramp_transplant.report_dict()}
+    if train_dataset.role_ramp_library is not None:
+        role_ramp_summary.update(train_dataset.role_ramp_library.report_dict())
     if len(train_dataset) == 0:
         raise ValueError(f"training manifest has no records for split {effective_split!r}")
 
@@ -764,14 +925,22 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
             caption_policy_filter=config.caption_policy_filter,
             structured_vocab=structured_vocab,
             npz_cache=shared_npz_cache,
+            palette_conditioning=bool(config.palette_conditioning),
         )
 
-    loader_generator = th.Generator().manual_seed(config.seed)
+    dataset_label_quality = dataset_uncertainty_report(token_rows)
+    train_label_quality = training_uncertainty_report(train_dataset.records)
+    val_label_quality = evaluation_uncertainty_report(getattr(val_source, "records", []))
+    label_quality_correlations = uncertainty_correlation_report(token_rows)
+
+    sampler_generator = th.Generator().manual_seed(config.seed)
+    loader_generator = th.Generator().manual_seed(config.seed + 1)
+    train_sampler = StatefulPermutationSampler(train_dataset, generator=sampler_generator)
     loader_perf = dataloader_perf_kwargs(device, num_workers=config.num_workers)
     train_loader = th.utils.data.DataLoader(
         train_dataset,
         batch_size=config.batch_size,
-        shuffle=True,
+        sampler=train_sampler,
         generator=loader_generator,
         collate_fn=collate_sprite_batch,
         **loader_perf,
@@ -799,6 +968,10 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "res_blocks_per_level": int(config.res_blocks_per_level),
         "pad_token_id": tokenizer.pad_id,
         "structured_vocab_sizes": None if structured_vocab is None else structured_vocab.sizes(),
+        "palette_conditioning": bool(config.palette_conditioning),
+        "palette_conditioning_dropout": float(config.palette_conditioning_dropout),
+        "palette_conditioning_dim": int(config.palette_conditioning_dim),
+        "palette_conditioning_inject": str(config.palette_conditioning_inject),
     }
     model = RectifiedFlowUNet(
         **model_config,
@@ -846,6 +1019,19 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "palette_loss_weight": float(config.palette_loss_weight),
         "palette_loss_temperature": float(config.palette_loss_temperature),
         "palette_swap": palette_swap_summary,
+        "role_ramp_transplant": role_ramp_summary,
+        "conditioning_schema_version": (
+            "spritelab_conditioning_v1"
+            if structured_vocab is not None and structured_vocab.schema_version.endswith("_v1")
+            else "spritelab_conditioning_v2"
+        ),
+        "determinism": determinism_report,
+        "label_quality": {
+            "dataset": dataset_label_quality,
+            "training": train_label_quality,
+            "evaluation": val_label_quality,
+            "correlation_analysis": label_quality_correlations,
+        },
     }
     (out_dir / "config.json").write_text(json.dumps(config_json, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -861,9 +1047,11 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         palette_loss_weight=config.palette_loss_weight,
         palette_loss_temperature=config.palette_loss_temperature,
         max_batches=config.eval_max_batches,
+        timestep_boundaries=timestep_boundaries,
     )
     metrics_path = out_dir / "train_metrics.jsonl"
-    metrics_path.write_text("", encoding="utf-8")
+    if config.resume_from is None:
+        metrics_path.write_text("", encoding="utf-8")
     preview_batch_cpu = next(iter(eval_train_loader))
     preview_batch = move_batch_to_device(preview_batch_cpu, device)
 
@@ -871,100 +1059,201 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
     last_loss = float(initial_train_losses["loss"])
     last_loss_components: dict[str, float] = {}
     checkpoint_steps = _normalize_checkpoint_steps(config.checkpoint_steps, max_steps=config.max_steps)
+    run_limit = min(config.max_steps, int(config.stop_after_step or config.max_steps))
     checkpoint_step_paths: list[str] = []
     checkpoint_step_ema_paths: list[str] = []
+    resume_mismatches: list[str] = []
+    run_warnings: list[str] = []
+    invalid_batch_count = 0
+    skipped_batch_reasons: dict[str, int] = {}
+    resumed_sampler_state: Mapping[str, Any] | None = None
+    if config.num_workers > 0:
+        message = "num_workers > 0 uses DataLoader prefetch; saved sample cursors are not exact-resume qualified"
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        run_warnings.append(message)
+    if config.resume_from is not None:
+        from spritelab.training.experiment_system import restore_rng_state, validate_resume_compatibility
+
+        resume_checkpoint = preloaded_resume
+        assert isinstance(resume_checkpoint, Mapping)
+        saved_manifest = resume_checkpoint.get("experiment_manifest")
+        if not isinstance(config.experiment_manifest, Mapping) or not isinstance(saved_manifest, Mapping):
+            if not config.unsafe_resume:
+                raise RuntimeError("safe resume requires experiment manifests in both config and checkpoint")
+        else:
+            resume_mismatches = validate_resume_compatibility(
+                config.experiment_manifest, saved_manifest, unsafe=config.unsafe_resume
+            )
+        model.load_state_dict(resume_checkpoint["model_state_dict"])
+        optimizer.load_state_dict(resume_checkpoint["optimizer_state_dict"])
+        if scheduler is not None and resume_checkpoint.get("scheduler_state_dict") is not None:
+            scheduler.load_state_dict(resume_checkpoint["scheduler_state_dict"])
+        if ema_state is not None and isinstance(resume_checkpoint.get("ema_state_dict"), Mapping):
+            ema_state.clear()
+            ema_state.update({key: value.clone() for key, value in resume_checkpoint["ema_state_dict"].items()})
+            ema_fast_cache = _init_ema_fast_state(ema_state, model)
+        step = int(resume_checkpoint.get("global_step", resume_checkpoint.get("step", 0)))
+        resumed_sampler_state = resume_checkpoint.get("sampler_state")
+        if not isinstance(resumed_sampler_state, Mapping):
+            message = "checkpoint has no versioned sampler state; exact mid-epoch resume would restart data order"
+            if not config.unsafe_resume:
+                raise UnsupportedExactResumeError(message + "; pass --unsafe-resume for the legacy path")
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
+            run_warnings.append(message)
+        else:
+            validate_worker_mode(
+                num_workers=config.num_workers,
+                exact_resume=True,
+                unsafe=config.unsafe_resume,
+            )
+            train_sampler.load_state_dict(
+                resumed_sampler_state,
+                batch_size=config.batch_size,
+                loader_generator=loader_generator,
+                num_workers=config.num_workers,
+                unsafe=config.unsafe_resume,
+            )
+            invalid_batch_count = int(resumed_sampler_state.get("invalid_batch_count", 0))
+            skipped_batch_reasons = {
+                str(key): int(value)
+                for key, value in dict(resumed_sampler_state.get("skipped_batch_reasons", {})).items()
+            }
+        if isinstance(resume_checkpoint.get("rng_states"), Mapping):
+            restore_rng_state(resume_checkpoint["rng_states"])
+
+    def current_sampler_state() -> dict[str, Any]:
+        return train_sampler.state_dict(
+            batch_size=config.batch_size,
+            loader_generator=loader_generator,
+            accumulation_position=0,
+            invalid_batch_count=invalid_batch_count,
+            skipped_batch_reasons=skipped_batch_reasons,
+            num_workers=config.num_workers,
+            worker_seed_base=config.seed + 1,
+        )
+
     model.train()
     progress = StepProgressBar(config.max_steps, desc=f"challenger:{out_dir.name}")
     # Keep the metrics file open for the whole run instead of reopening it every
     # step; the line content and order are unchanged, so the file is identical.
     metrics_handle = metrics_path.open("a", encoding="utf-8")
     try:
-        while step < config.max_steps:
-            for batch in train_loader:
-                if step >= config.max_steps:
-                    break
-                batch = move_batch_to_device(batch, device, non_blocking=non_blocking)
-                with amp_autocast(device, config.amp):
-                    losses = rectified_flow_loss(
-                        model,
-                        batch,
-                        conditioning_mode=conditioning_mode,
-                        cfg_dropout=config.cfg_dropout,
-                        structured_field_dropout=config.structured_field_dropout,
-                        structured_field_dropout_rates=config.structured_field_dropout_rates,
-                        pad_token_id=tokenizer.pad_id,
-                        foreground_rgb_loss_weight=config.foreground_rgb_loss_weight,
-                        background_rgb_loss_weight=config.background_rgb_loss_weight,
-                        palette_loss_weight=config.palette_loss_weight,
-                        palette_loss_temperature=config.palette_loss_temperature,
-                        index_head_loss_weight=config.index_head_loss_weight,
-                        palette_head_loss_weight=config.palette_head_loss_weight,
-                        palette_presence_loss_weight=config.palette_presence_loss_weight,
-                        global_step=step,
-                        index_head_warmup_steps=config.index_head_warmup_steps,
-                    )
-                    loss = losses["loss"]
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                clip_gradients(model, config.grad_clip)
-                optimizer.step()
-                if ema_fast_cache is not None:
-                    _update_ema_state_fast(ema_fast_cache, decay=float(config.ema_decay))
-                if scheduler is not None:
-                    scheduler.step()
-                step += 1
-                if step % metrics_every == 0 or step >= config.max_steps:
-                    last_loss = float(loss.detach().cpu())
-                    loss_metrics = _loss_metrics(losses)
-                    last_loss_components = dict(loss_metrics)
-                    progress.update(step, last_loss, lr=float(optimizer.param_groups[0]["lr"]))
-                    _write_jsonl_line(
-                        metrics_handle,
-                        {
-                            "step": step,
-                            **loss_metrics,
-                            "learning_rate": float(optimizer.param_groups[0]["lr"]),
-                            "elapsed_seconds": time.perf_counter() - started,
-                        },
-                    )
-                if config.sample_every > 0 and step % int(config.sample_every) == 0:
-                    _write_challenger_sample_sheet(
-                        model,
-                        preview_batch,
-                        out_dir / f"samples_step_{step:06d}.png",
-                        conditioning_mode=conditioning_mode,
-                        pad_token_id=tokenizer.pad_id,
-                        steps=min(16, max(2, int(config.sample_every))),
-                    )
-                if _should_save_checkpoint_step(step, save_every=config.save_every, checkpoint_steps=checkpoint_steps):
-                    metrics_handle.flush()
-                    step_checkpoint = out_dir / f"checkpoint_step_{step:06d}.pt"
+        train_iterator = iter(train_loader)
+        if isinstance(resumed_sampler_state, Mapping) and int(resumed_sampler_state["sample_cursor"]) < int(
+            resumed_sampler_state["dataset_size"]
+        ):
+            # Iterator construction consumes a DataLoader base seed.  A resumed
+            # mid-epoch iterator is not a new epoch, so restore the persisted
+            # post-construction state to keep loader-generator state exact.
+            loader_generator.set_state(resumed_sampler_state["dataloader_generator_state"])
+        while step < run_limit:
+            try:
+                batch = next(train_iterator)
+            except StopIteration:
+                train_iterator = iter(train_loader)
+                batch = next(train_iterator)
+            if step >= run_limit:
+                break
+            batch = move_batch_to_device(batch, device, non_blocking=non_blocking)
+            with amp_autocast(device, config.amp):
+                losses = rectified_flow_loss(
+                    model,
+                    batch,
+                    conditioning_mode=conditioning_mode,
+                    cfg_dropout=config.cfg_dropout,
+                    structured_field_dropout=config.structured_field_dropout,
+                    structured_field_dropout_rates=config.structured_field_dropout_rates,
+                    pad_token_id=tokenizer.pad_id,
+                    foreground_rgb_loss_weight=config.foreground_rgb_loss_weight,
+                    background_rgb_loss_weight=config.background_rgb_loss_weight,
+                    palette_loss_weight=config.palette_loss_weight,
+                    palette_loss_temperature=config.palette_loss_temperature,
+                    index_head_loss_weight=config.index_head_loss_weight,
+                    palette_head_loss_weight=config.palette_head_loss_weight,
+                    palette_presence_loss_weight=config.palette_presence_loss_weight,
+                    global_step=step,
+                    index_head_warmup_steps=config.index_head_warmup_steps,
+                )
+                loss = losses["loss"]
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            gradient_norm = clip_gradients(model, config.grad_clip)
+            optimizer.step()
+            if ema_fast_cache is not None:
+                _update_ema_state_fast(ema_fast_cache, decay=float(config.ema_decay))
+            if scheduler is not None:
+                scheduler.step()
+            step += 1
+            if step % metrics_every == 0 or step >= run_limit:
+                last_loss = float(loss.detach().cpu())
+                loss_metrics = _loss_metrics(losses)
+                last_loss_components = dict(loss_metrics)
+                progress.update(step, last_loss, lr=float(optimizer.param_groups[0]["lr"]))
+                _write_jsonl_line(
+                    metrics_handle,
+                    {
+                        "step": step,
+                        **loss_metrics,
+                        "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                        "gradient_norm": gradient_norm,
+                        "condition_dropout_fraction": float(losses.get("condition_dropout_fraction", 0.0)),
+                        "timestep_mean": float(losses.get("timestep_mean", 0.0)),
+                        "invalid_batch_count": invalid_batch_count,
+                        "skipped_batch_reasons": skipped_batch_reasons,
+                        "sample_cursor": train_sampler.sample_cursor,
+                        "epoch": train_sampler.epoch,
+                        "gpu_memory_allocated_bytes": int(th.cuda.memory_allocated(device))
+                        if device_type(device) == "cuda"
+                        else 0,
+                        "elapsed_seconds": time.perf_counter() - started,
+                    },
+                )
+            if config.sample_every > 0 and step % int(config.sample_every) == 0:
+                _write_challenger_sample_sheet(
+                    model,
+                    preview_batch,
+                    out_dir / f"samples_step_{step:06d}.png",
+                    conditioning_mode=conditioning_mode,
+                    pad_token_id=tokenizer.pad_id,
+                    steps=min(16, max(2, int(config.sample_every))),
+                )
+            if _should_save_checkpoint_step(step, save_every=config.save_every, checkpoint_steps=checkpoint_steps):
+                metrics_handle.flush()
+                step_checkpoint = out_dir / f"checkpoint_step_{step:06d}.pt"
+                _save_checkpoint(
+                    step_checkpoint,
+                    model=model,
+                    optimizer=optimizer,
+                    tokenizer=tokenizer,
+                    config_json=config_json,
+                    step=step,
+                    ema_decay=float(config.ema_decay),
+                    checkpoint_variant="step",
+                    scheduler=scheduler,
+                    ema_state=ema_state,
+                    metrics_summary=last_loss_components,
+                    sampler_state=current_sampler_state(),
+                )
+                checkpoint_step_paths.append(str(step_checkpoint))
+                if ema_state is not None:
+                    step_ema_checkpoint = out_dir / f"checkpoint_step_{step:06d}_ema.pt"
                     _save_checkpoint(
-                        step_checkpoint,
+                        step_ema_checkpoint,
                         model=model,
                         optimizer=optimizer,
                         tokenizer=tokenizer,
                         config_json=config_json,
                         step=step,
+                        model_state_dict=ema_state,
                         ema_decay=float(config.ema_decay),
-                        checkpoint_variant="step",
+                        checkpoint_variant="step_ema",
+                        ema_weights=True,
+                        scheduler=scheduler,
+                        ema_state=ema_state,
+                        metrics_summary=last_loss_components,
+                        sampler_state=current_sampler_state(),
                     )
-                    checkpoint_step_paths.append(str(step_checkpoint))
-                    if ema_state is not None:
-                        step_ema_checkpoint = out_dir / f"checkpoint_step_{step:06d}_ema.pt"
-                        _save_checkpoint(
-                            step_ema_checkpoint,
-                            model=model,
-                            optimizer=optimizer,
-                            tokenizer=tokenizer,
-                            config_json=config_json,
-                            step=step,
-                            model_state_dict=ema_state,
-                            ema_decay=float(config.ema_decay),
-                            checkpoint_variant="step_ema",
-                            ema_weights=True,
-                        )
-                        checkpoint_step_ema_paths.append(str(step_ema_checkpoint))
+                    checkpoint_step_ema_paths.append(str(step_ema_checkpoint))
     finally:
         metrics_handle.close()
         progress.close(final_loss=last_loss)
@@ -981,6 +1270,7 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         palette_loss_weight=config.palette_loss_weight,
         palette_loss_temperature=config.palette_loss_temperature,
         max_batches=config.eval_max_batches,
+        timestep_boundaries=timestep_boundaries,
     )
     val_losses = (
         _evaluate_challenger_losses(
@@ -995,10 +1285,32 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
             palette_loss_weight=config.palette_loss_weight,
             palette_loss_temperature=config.palette_loss_temperature,
             max_batches=config.eval_max_batches,
+            timestep_boundaries=timestep_boundaries,
         )
         if len(val_source)
         else None
     )
+    ema_val_losses = None
+    if ema_state is not None and len(val_source):
+        live_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+        model.load_state_dict(ema_state)
+        try:
+            ema_val_losses = _evaluate_challenger_losses(
+                model,
+                val_loader,
+                device=device,
+                conditioning_mode=conditioning_mode,
+                pad_token_id=tokenizer.pad_id,
+                seed=config.seed + 2,
+                foreground_rgb_loss_weight=config.foreground_rgb_loss_weight,
+                background_rgb_loss_weight=config.background_rgb_loss_weight,
+                palette_loss_weight=config.palette_loss_weight,
+                palette_loss_temperature=config.palette_loss_temperature,
+                max_batches=config.eval_max_batches,
+                timestep_boundaries=timestep_boundaries,
+            )
+        finally:
+            model.load_state_dict(live_state)
     _save_checkpoint(
         out_dir / "checkpoint_last.pt",
         model=model,
@@ -1008,6 +1320,10 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         step=step,
         ema_decay=float(config.ema_decay),
         checkpoint_variant="last",
+        scheduler=scheduler,
+        ema_state=ema_state,
+        metrics_summary=last_loss_components,
+        sampler_state=current_sampler_state(),
     )
     if ema_state is not None:
         _save_checkpoint(
@@ -1021,6 +1337,10 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
             ema_decay=float(config.ema_decay),
             checkpoint_variant="last_ema",
             ema_weights=True,
+            scheduler=scheduler,
+            ema_state=ema_state,
+            metrics_summary=last_loss_components,
+            sampler_state=current_sampler_state(),
         )
     _save_checkpoint(
         out_dir / "checkpoint_best.pt",
@@ -1031,6 +1351,10 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         step=step,
         ema_decay=float(config.ema_decay),
         checkpoint_variant="best",
+        scheduler=scheduler,
+        ema_state=ema_state,
+        metrics_summary=last_loss_components,
+        sampler_state=current_sampler_state(),
     )
     if ema_state is not None:
         _save_checkpoint(
@@ -1044,6 +1368,10 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
             ema_decay=float(config.ema_decay),
             checkpoint_variant="best_ema",
             ema_weights=True,
+            scheduler=scheduler,
+            ema_state=ema_state,
+            metrics_summary=last_loss_components,
+            sampler_state=current_sampler_state(),
         )
     _write_challenger_sample_sheet(
         model,
@@ -1068,6 +1396,8 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "palette_loss_weight": float(config.palette_loss_weight),
         "palette_loss_temperature": float(config.palette_loss_temperature),
         "palette_swap": palette_swap_summary,
+        "role_ramp_transplant": role_ramp_summary,
+        "palette_conditioning": bool(config.palette_conditioning),
         "seed": int(config.seed),
         "batch_size": int(config.batch_size),
         "max_steps": int(config.max_steps),
@@ -1087,8 +1417,17 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "last_step_loss_components": last_loss_components,
         "val_loss": None if val_losses is None else float(val_losses["loss"]),
         "val_loss_components": None if val_losses is None else val_losses,
+        "ema_val_loss": None if ema_val_losses is None else float(ema_val_losses["loss"]),
+        "ema_val_loss_components": ema_val_losses,
+        "timestep_validation": {
+            "boundaries": list(timestep_boundaries),
+            "non_ema": None if val_losses is None else val_losses.get("timestep_buckets"),
+            "ema": None if ema_val_losses is None else ema_val_losses.get("timestep_buckets"),
+        },
         "loss_decreased": float(final_train_losses["loss"]) < float(initial_train_losses["loss"]),
         "elapsed_seconds": time.perf_counter() - started,
+        "data_throughput_sprites_per_second": (step * int(config.batch_size))
+        / max(1e-9, time.perf_counter() - started),
         "model_config": model_config,
         "structured_vocab_sizes": None if structured_vocab is None else structured_vocab.sizes(),
         "structured_fields_enabled": structured_vocab is not None,
@@ -1099,7 +1438,17 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "checkpoint_steps": list(checkpoint_steps),
         "checkpoint_step_paths": checkpoint_step_paths,
         "checkpoint_step_ema_paths": checkpoint_step_ema_paths,
-        "warnings": [],
+        "warnings": run_warnings + list(determinism_report.get("issues", [])),
+        "determinism": determinism_report,
+        "sampler_state_schema": current_sampler_state()["schema_version"],
+        "resume_from": None if config.resume_from is None else str(config.resume_from),
+        "resume_compatibility_mismatches": resume_mismatches,
+        "label_quality": {
+            "dataset": dataset_label_quality,
+            "training": train_label_quality,
+            "evaluation": val_label_quality,
+            "correlation_analysis": label_quality_correlations,
+        },
     }
     (out_dir / "train_report.json").write_text(
         json.dumps(_jsonable(report), indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -1178,8 +1527,27 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
         )
     ckpt = _load_checkpoint(checkpoint)
     model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(ckpt, device=device)
-    structured_vocab = structured_vocab_from_checkpoint(ckpt)
+    structured_vocab = structured_vocab_from_checkpoint(
+        ckpt, allow_schema_v1_adapter=config.allow_legacy_conditioning_v1
+    )
     prompts = read_prompt_records(config.prompts, max_records=config.max_samples)
+    palette_source_mode = str(config.palette_conditioning_source or "none").strip().lower()
+    if palette_source_mode not in {"none", "source", "retrieved"}:
+        raise ValueError("palette_conditioning_source must be one of: none, source, retrieved")
+    if palette_source_mode != "none" and not model.palette_conditioning:
+        raise ValueError("palette conditioning source was requested for a checkpoint without --palette-conditioning")
+    palette_library: PaletteConditionLibrary | None = None
+    if model.palette_conditioning and palette_source_mode != "none":
+        dataset_dir = config.palette_conditioning_dataset or Path(str(ckpt.get("dataset") or ""))
+        manifest_path = config.palette_conditioning_training_manifest or Path(str(ckpt.get("training_manifest") or ""))
+        if not str(dataset_dir) or not str(manifest_path) or not Path(manifest_path).is_file():
+            raise ValueError(
+                "--palette-conditioning-source source|retrieved requires --palette-conditioning-dataset "
+                "and --palette-conditioning-training-manifest (or those paths embedded in the checkpoint)"
+            )
+        palette_library = build_palette_condition_library(Path(dataset_dir), read_jsonl(Path(manifest_path)))
+        if not palette_library.entries:
+            raise ValueError("palette conditioning library has no usable real palettes")
     manifest_records: list[dict[str, Any]] = []
     base_noise_seed = int(config.noise_seed) if config.noise_seed is not None else int(config.seed) * 100000
     null_fields = _parse_null_fields(config.null_fields)
@@ -1188,7 +1556,15 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
         batch_records = prompts[batch_start : batch_start + max(1, int(config.batch_size))]
         if not batch_records:
             continue
-        noise_seeds = [base_noise_seed + batch_start + index for index in range(len(batch_records))]
+        noise_seeds = [
+            base_noise_seed
+            + int(
+                record.get("benchmark_noise_offset")
+                if record.get("benchmark_noise_offset") is not None
+                else batch_start + index
+            )
+            for index, record in enumerate(batch_records)
+        ]
         caption_tokens = th.as_tensor(
             [tokenizer.encode(str(record["prompt"]), max_length=tokenizer.max_length) for record in batch_records],
             dtype=th.long,
@@ -1219,6 +1595,28 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
                 fields=null_fields,
                 pad_token_id=tokenizer.pad_id,
             )
+        palette_entries = _select_palette_conditions(
+            batch_records,
+            library=palette_library,
+            mode=palette_source_mode,
+            exclude_exact_prompt_target=bool(config.palette_conditioning_exclude_exact_prompt_target),
+        )
+        palette_condition = (
+            None
+            if not model.palette_conditioning
+            else th.as_tensor(
+                np.stack(
+                    [
+                        np.zeros((PALETTE_CONDITION_SLOTS, PALETTE_CONDITION_CHANNELS), dtype=np.float32)
+                        if entry is None
+                        else entry.condition
+                        for entry in palette_entries
+                    ]
+                ),
+                dtype=th.float32,
+                device=device,
+            )
+        )
         initial = th.cat(
             [_sample_initial_noise(1, device=device, seed=noise_seed) for noise_seed in noise_seeds],
             dim=0,
@@ -1241,6 +1639,7 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
                 color_guidance_start_t=config.color_guidance_start_t,
                 color_guidance_ramp_t=config.color_guidance_ramp_t,
                 object_id_scale=config.object_id_scale,
+                palette_condition=palette_condition,
             )
         rgba_np = np.moveaxis(rgba_batch.detach().cpu().numpy().astype(np.float32), 1, -1)
         for item_index, prompt_record in enumerate(batch_records):
@@ -1259,6 +1658,7 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
                 "export_preset": str(config.export_preset or ""),
                 "seed": int(config.seed),
                 "noise_seed": int(noise_seeds[item_index]),
+                "model_output_finite": bool(np.isfinite(rgba_np[item_index]).all()),
                 "conditioning_mode": conditioning_mode,
                 "model_type": "generator_challenger",
                 "architecture": "rectified_flow",
@@ -1275,6 +1675,14 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
                 "color_guidance_start_t": float(config.color_guidance_start_t),
                 "color_guidance_ramp_t": float(config.color_guidance_ramp_t),
                 "object_id_scale": float(config.object_id_scale),
+                "palette_conditioning": bool(model.palette_conditioning),
+                "palette_conditioning_source": palette_source_mode,
+                "palette_conditioning_palette_source_id": None
+                if palette_entries[item_index] is None
+                else palette_entries[item_index].sprite_id,
+                "palette_conditioning_palette_family": None
+                if palette_entries[item_index] is None
+                else palette_entries[item_index].family,
             }
             record = write_generated_sprite_artifacts(
                 sprite,
@@ -1417,6 +1825,7 @@ def rectified_flow_loss(
             semantic_tokens=inputs["semantic_tokens"],
             structured_conditioning=inputs.get("structured_conditioning"),
             return_aux=True,
+            palette_condition=batch.get("palette_condition"),
         )
         pred = aux["velocity"]
     else:
@@ -1426,6 +1835,7 @@ def rectified_flow_loss(
             caption_tokens=inputs["caption_tokens"],
             semantic_tokens=inputs["semantic_tokens"],
             structured_conditioning=inputs.get("structured_conditioning"),
+            palette_condition=batch.get("palette_condition"),
         )
 
     losses = _velocity_loss_components(
@@ -1434,7 +1844,17 @@ def rectified_flow_loss(
         target_rgba=target_rgba,
         foreground_rgb_loss_weight=foreground_rgb_loss_weight,
         background_rgb_loss_weight=background_rgb_loss_weight,
+        sample_weights=batch.get("record_loss_weight"),
     )
+    per_example_velocity_loss = (pred - velocity).square().mean(dim=(1, 2, 3))
+    for lower, upper, label in (
+        (0.0, 0.25, "0_00_0_25"),
+        (0.25, 0.5, "0_25_0_50"),
+        (0.5, 0.75, "0_50_0_75"),
+        (0.75, 1.01, "0_75_1_00"),
+    ):
+        weights = ((t >= lower) & (t < upper)).to(per_example_velocity_loss.dtype)
+        losses[f"loss_timestep_{label}"] = (per_example_velocity_loss * weights).sum() / weights.sum().clamp(min=1.0)
     # Palette soft-min auxiliary loss: skip when weight is zero to avoid the
     # per-step GPU→CPU sync inside palette_soft_min_auxiliary_loss.
     palette_weight = float(palette_loss_weight)
@@ -1445,6 +1865,7 @@ def rectified_flow_loss(
             palette=batch.get("palette"),
             palette_mask=batch.get("palette_mask"),
             temperature=palette_loss_temperature,
+            sample_weights=batch.get("record_loss_weight"),
         )
     else:
         palette_aux = pred.sum() * 0.0
@@ -1474,6 +1895,8 @@ def rectified_flow_loss(
         total = total + float(index_head_loss_weight) * losses["loss_index_head"]
 
     losses["loss"] = total
+    losses["condition_dropout_fraction"] = float(inputs.get("cfg_dropout_fraction", 0.0))
+    losses["timestep_mean"] = float(t.detach().mean().cpu())
     return losses
 
 
@@ -1521,14 +1944,16 @@ def _evaluate_challenger_losses(
     palette_loss_weight: float = 0.0,
     palette_loss_temperature: float = 0.05,
     max_batches: int = 0,
-) -> dict[str, float]:
+    timestep_boundaries: Sequence[float] = DEFAULT_TIMESTEP_BOUNDARIES,
+) -> dict[str, Any]:
     th, _nn_mod = _require_torch()
     generator = th.Generator(device=device)
     generator.manual_seed(int(seed))
     totals: dict[str, float] = {}
-    count = 0
+    count = 0.0
     batches_seen = 0
     batch_cap = int(max_batches)
+    bucket_accumulator = TimestepBucketAccumulator(timestep_boundaries)
     was_training = bool(model.training)
     model.eval()
     with th.no_grad():
@@ -1551,19 +1976,23 @@ def _evaluate_challenger_losses(
                 pad_token_id=pad_token_id,
                 structured_conditioning=_structured_conditioning_from_batch(batch),
             )
-            pred = model(
+            aux = model(
                 xt,
                 t,
                 caption_tokens=inputs["caption_tokens"],
                 semantic_tokens=inputs["semantic_tokens"],
                 structured_conditioning=inputs.get("structured_conditioning"),
+                palette_condition=batch.get("palette_condition"),
+                return_aux=True,
             )
+            pred = aux["velocity"]
             losses = _velocity_loss_components(
                 pred,
                 velocity,
                 target_rgba=target_rgba,
                 foreground_rgb_loss_weight=foreground_rgb_loss_weight,
                 background_rgb_loss_weight=background_rgb_loss_weight,
+                sample_weights=batch.get("record_loss_weight"),
             )
             palette_aux = palette_soft_min_auxiliary_loss(
                 x1_hat=xt + (1.0 - view_t) * pred,
@@ -1571,6 +2000,7 @@ def _evaluate_challenger_losses(
                 palette=batch.get("palette"),
                 palette_mask=batch.get("palette_mask"),
                 temperature=palette_loss_temperature,
+                sample_weights=batch.get("record_loss_weight"),
             )
             palette_weight = float(palette_loss_weight)
             losses["loss_palette_aux"] = palette_aux
@@ -1578,12 +2008,102 @@ def _evaluate_challenger_losses(
                 palette_aux * palette_weight if palette_weight > 0.0 else palette_aux * 0.0
             )
             batch_size = int(target.shape[0])
+            sample_weights = batch.get("record_loss_weight")
+            batch_mass = float(sample_weights.detach().sum().cpu()) if sample_weights is not None else float(batch_size)
             for key, value in losses.items():
-                totals[key] = totals.get(key, 0.0) + float(value.detach().cpu()) * batch_size
-            count += batch_size
+                totals[key] = totals.get(key, 0.0) + float(value.detach().cpu()) * batch_mass
+            count += batch_mass
+            per_sample = _validation_per_sample_losses(
+                pred=pred,
+                velocity=velocity,
+                aux=aux,
+                xt=xt,
+                view_t=view_t,
+                batch=batch,
+                foreground_rgb_loss_weight=foreground_rgb_loss_weight,
+                background_rgb_loss_weight=background_rgb_loss_weight,
+                palette_loss_temperature=palette_loss_temperature,
+            )
+            for row, timestep in zip(per_sample, t.detach().cpu().tolist(), strict=True):
+                bucket_accumulator.add(float(timestep), row)
     if was_training:
         model.train()
-    return {key: value / float(count) for key, value in sorted(totals.items())} if count else {"loss": 0.0}
+    result: dict[str, Any] = {key: value / count for key, value in sorted(totals.items())} if count else {"loss": 0.0}
+    result["timestep_buckets"] = bucket_accumulator.report()
+    return result
+
+
+def _validation_per_sample_losses(
+    *,
+    pred: Any,
+    velocity: Any,
+    aux: Mapping[str, Any],
+    xt: Any,
+    view_t: Any,
+    batch: Mapping[str, Any],
+    foreground_rgb_loss_weight: float,
+    background_rgb_loss_weight: float,
+    palette_loss_temperature: float,
+) -> list[dict[str, float]]:
+    th, _nn_mod = _require_torch()
+    squared = (pred - velocity).square()
+    visible = batch["rgba"][:, 3:4].to(device=pred.device) > 0.5
+    rgb_weight = th.where(
+        visible,
+        th.as_tensor(float(foreground_rgb_loss_weight), device=pred.device, dtype=pred.dtype),
+        th.as_tensor(float(background_rgb_loss_weight), device=pred.device, dtype=pred.dtype),
+    )
+    flow = (squared[:, :3] * rgb_weight).sum(dim=(1, 2, 3)) + squared[:, 3:4].sum(dim=(1, 2, 3))
+    flow = flow / float(squared[0].numel())
+    palette_per_sample = _palette_auxiliary_per_sample(
+        x1_hat=xt + (1.0 - view_t) * pred,
+        target_rgba=batch["rgba"],
+        palette=batch.get("palette"),
+        palette_mask=batch.get("palette_mask"),
+        temperature=palette_loss_temperature,
+    )
+    rows: list[dict[str, float]] = []
+    for index in range(int(pred.shape[0])):
+        sliced = {
+            key: value[index : index + 1] if isinstance(value, th.Tensor) and value.ndim else value
+            for key, value in batch.items()
+        }
+        index_loss = _index_head_loss(aux["index_logits"][index : index + 1], sliced)
+        rows.append(
+            {
+                "loss_velocity": float(flow[index].detach().cpu()),
+                "loss_palette_aux": float(palette_per_sample[index].detach().cpu()),
+                "loss_index_head": float(index_loss.detach().cpu()),
+            }
+        )
+    return rows
+
+
+def _palette_auxiliary_per_sample(
+    *, x1_hat: Any, target_rgba: Any, palette: Any, palette_mask: Any, temperature: float
+) -> Any:
+    th, _nn_mod = _require_torch()
+    batch_size = int(x1_hat.shape[0])
+    result = th.zeros(batch_size, device=x1_hat.device, dtype=x1_hat.dtype)
+    if palette is None or palette_mask is None or batch_size == 0:
+        return result
+    palette_rgb = palette.to(device=x1_hat.device, dtype=x1_hat.dtype)[..., :3]
+    if palette_rgb.numel() and float(palette_rgb.detach().max().cpu()) > 1.0:
+        palette_rgb = palette_rgb / 255.0
+    valid = palette_mask.to(device=x1_hat.device, dtype=th.bool).clone()
+    if valid.shape[1] > 0:
+        valid[:, 0] = False
+    pred_rgb = ((x1_hat[:, :3] + 1.0) * 0.5).clamp(0.0, 1.0).permute(0, 2, 3, 1)
+    distances = ((pred_rgb[:, :, :, None, :] - palette_rgb[:, None, None, :, :]) ** 2).sum(dim=-1)
+    distances = distances.masked_fill(~valid[:, None, None, :], 1.0e6)
+    weights = th.softmax(-distances / max(float(temperature), 1.0e-6), dim=-1)
+    soft_min = (weights * distances).sum(dim=-1)
+    visible = target_rgba[:, 3] > 0.5
+    for index in range(batch_size):
+        mask = visible[index] & valid[index].any()
+        if bool(mask.any()):
+            result[index] = soft_min[index][mask].mean()
+    return result
 
 
 def _velocity_loss_components(
@@ -1593,6 +2113,7 @@ def _velocity_loss_components(
     target_rgba: Any,
     foreground_rgb_loss_weight: float = 1.0,
     background_rgb_loss_weight: float = 1.0,
+    sample_weights: Any | None = None,
 ) -> dict[str, Any]:
     th, _nn_mod = _require_torch()
     squared = (pred - velocity) ** 2
@@ -1605,14 +2126,34 @@ def _velocity_loss_components(
         th.as_tensor(float(background_rgb_loss_weight), dtype=rgb_squared.dtype, device=rgb_squared.device),
     )
     weighted_rgb_squared = rgb_squared * rgb_weight
-    denom = float(squared.numel())
-    loss_rgb = weighted_rgb_squared.sum() / denom
-    loss_alpha = alpha_squared.sum() / denom
+    per_example_denom = float(squared[0].numel())
+    per_example_rgb = weighted_rgb_squared.sum(dim=(1, 2, 3)) / per_example_denom
+    per_example_alpha = alpha_squared.sum(dim=(1, 2, 3)) / per_example_denom
+    loss_rgb = _normalized_weighted_mean(per_example_rgb, sample_weights)
+    loss_alpha = _normalized_weighted_mean(per_example_alpha, sample_weights)
     return {
         "loss_velocity": loss_rgb + loss_alpha,
         "loss_rgb": loss_rgb,
         "loss_alpha": loss_alpha,
     }
+
+
+def _normalized_weighted_mean(values: Any, sample_weights: Any | None) -> Any:
+    """Return ``sum(w*x)/sum(w)`` and preserve the ordinary mean for legacy rows."""
+
+    th, _nn_mod = _require_torch()
+    flattened = values.reshape(-1)
+    if sample_weights is None:
+        return flattened.mean()
+    weights = sample_weights.to(device=flattened.device, dtype=flattened.dtype).reshape(-1)
+    if weights.shape != flattened.shape:
+        raise ValueError(f"sample_weights shape {tuple(weights.shape)} does not match values {tuple(flattened.shape)}")
+    if not bool(th.isfinite(weights).all()) or bool((weights < 0).any()):
+        raise ValueError("sample_weights must be finite and non-negative")
+    denominator = weights.sum()
+    if not bool(denominator > 0):
+        return flattened.sum() * 0.0
+    return (flattened * weights).sum() / denominator
 
 
 # v2 Phase 2: palette/index auxiliary losses ─────────────────────────────────
@@ -1719,6 +2260,7 @@ def palette_soft_min_auxiliary_loss(
     palette: Any,
     palette_mask: Any,
     temperature: float = 0.05,
+    sample_weights: Any | None = None,
 ) -> Any:
     th, _nn_mod = _require_torch()
     zero = x1_hat.sum() * 0.0
@@ -1755,7 +2297,18 @@ def palette_soft_min_auxiliary_loss(
     pixel_mask = visible & valid_per_sample[:, None, None]
     if not bool(pixel_mask.any()):
         return zero
-    return soft_min[pixel_mask].mean()
+    if sample_weights is None:
+        return soft_min[pixel_mask].mean()
+    record_weights = sample_weights.to(device=x1_hat.device, dtype=x1_hat.dtype).reshape(-1)
+    if record_weights.shape[0] != soft_min.shape[0]:
+        raise ValueError("sample_weights batch size does not match palette loss batch")
+    if not bool(th.isfinite(record_weights).all()) or bool((record_weights < 0).any()):
+        raise ValueError("sample_weights must be finite and non-negative")
+    pixel_weights = record_weights[:, None, None].expand_as(soft_min)[pixel_mask]
+    denominator = pixel_weights.sum()
+    if not bool(denominator > 0):
+        return zero
+    return (soft_min[pixel_mask] * pixel_weights).sum() / denominator
 
 
 def integrate_rectified_flow(
@@ -1776,6 +2329,7 @@ def integrate_rectified_flow(
     color_guidance_start_t: float = 0.0,
     color_guidance_ramp_t: float = 0.0,
     object_id_scale: float = 1.0,
+    palette_condition: Any | None = None,
 ) -> Any:
     """Integrate the rectified-flow ODE, optionally with factored (base/color) CFG.
 
@@ -1840,6 +2394,7 @@ def integrate_rectified_flow(
             semantic_tokens=semantic_tokens,
             structured_conditioning=structured_conditioning,
             object_id_scale=obj_scale,
+            palette_condition=palette_condition,
         )
         if factored_cfg:
             v_uncond = model(
@@ -1849,6 +2404,7 @@ def integrate_rectified_flow(
                 semantic_tokens=uncond_semantic,
                 structured_conditioning=uncond_structured,
                 object_id_scale=obj_scale,
+                palette_condition=palette_condition,
             )
             v_no_color = model(
                 x,
@@ -1857,6 +2413,7 @@ def integrate_rectified_flow(
                 semantic_tokens=no_color_semantic,
                 structured_conditioning=no_color_structured,
                 object_id_scale=obj_scale,
+                palette_condition=palette_condition,
             )
             # ── guidance surgery ──
             color_axis = v_cond - v_no_color  # (B, 4, 32, 32)
@@ -1883,6 +2440,7 @@ def integrate_rectified_flow(
                 caption_tokens=uncond_caption,
                 semantic_tokens=uncond_semantic,
                 structured_conditioning=uncond_structured,
+                palette_condition=palette_condition,
             )
             velocity = v_uncond + float(cfg_scale) * (v_cond - v_uncond)
         else:
@@ -2009,7 +2567,14 @@ def load_challenger_from_checkpoint(
         raise ValueError("checkpoint is not a generator_challenger checkpoint")
     tokenizer = _tokenizer_from_checkpoint(ckpt)
     model = RectifiedFlowUNet(**dict(ckpt["model_config"])).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    incompatible = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    optional_head_prefixes = ("palette_head_rgb.", "palette_head_presence.", "index_head.")
+    disallowed_missing = [key for key in incompatible.missing_keys if not key.startswith(optional_head_prefixes)]
+    if disallowed_missing or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "checkpoint model state is incompatible: "
+            f"missing={disallowed_missing}, unexpected={list(incompatible.unexpected_keys)}"
+        )
     model.eval()
     conditioning_mode = validate_conditioning_mode(str(ckpt.get("conditioning_mode") or DEFAULT_CONDITIONING_MODE))
     semantic_max_length = checkpoint_semantic_max_length(ckpt)
@@ -2022,9 +2587,10 @@ def load_challenger_prompt_adapter(
     device: Any,
     steps: int = 30,
     cfg_scale: float = 1.0,
+    allow_legacy_conditioning_v1: bool = True,
 ) -> tuple[ChallengerPromptAdapter, SpriteTextTokenizer, str, int]:
     model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(ckpt, device=device)
-    structured_vocab = structured_vocab_from_checkpoint(ckpt)
+    structured_vocab = structured_vocab_from_checkpoint(ckpt, allow_schema_v1_adapter=allow_legacy_conditioning_v1)
     return (
         ChallengerPromptAdapter(
             model,
@@ -2065,6 +2631,7 @@ def _write_challenger_sample_sheet(
             caption_tokens=inputs["caption_tokens"],
             semantic_tokens=inputs["semantic_tokens"],
             structured_conditioning=inputs.get("structured_conditioning"),
+            palette_condition=batch.get("palette_condition"),
             steps=steps,
             cfg_scale=1.0,
             pad_token_id=pad_token_id,
@@ -2162,8 +2729,16 @@ def _save_checkpoint(
     ema_decay: float = 0.0,
     checkpoint_variant: str = "last",
     ema_weights: bool = False,
+    scheduler: Any | None = None,
+    scaler: Any | None = None,
+    ema_state: Mapping[str, Any] | None = None,
+    metrics_summary: Mapping[str, Any] | None = None,
+    data_position: Mapping[str, Any] | None = None,
+    sampler_state: Mapping[str, Any] | None = None,
 ) -> None:
     th, _nn_mod = _require_torch()
+    from spritelab.training.experiment_system import capture_rng_state
+
     checkpoint = {
         "model_type": "generator_challenger",
         "architecture": "rectified_flow",
@@ -2189,7 +2764,35 @@ def _save_checkpoint(
         "training_manifest": str(config_json.get("training_manifest") or ""),
         "seed": int(config_json.get("seed") or 0),
         "step": int(step),
-        "checkpoint_type": "generator_challenger_rectified_flow_v0",
+        "global_step": int(step),
+        "epoch": int((sampler_state or {}).get("epoch", config_json.get("epoch", 0))),
+        "data_position": dict(
+            data_position
+            or {
+                "batch_index": (sampler_state or {}).get("batch_index"),
+                "sample_cursor": (sampler_state or {}).get("sample_cursor"),
+            }
+        ),
+        "sampler_state": None if sampler_state is None else dict(sampler_state),
+        "ema_state_dict": None if ema_state is None else dict(ema_state),
+        "scheduler_state_dict": None if scheduler is None else scheduler.state_dict(),
+        "scaler_state_dict": None if scaler is None else scaler.state_dict(),
+        "rng_states": capture_rng_state(),
+        "experiment_manifest": config_json.get("experiment_manifest"),
+        "dataset_hashes": {
+            "dataset_manifest_hash": (config_json.get("experiment_manifest") or {}).get("dataset_manifest_hash"),
+            "split_manifest_hash": (config_json.get("experiment_manifest") or {}).get("split_manifest_hash"),
+        },
+        "conditioning_vocabulary": {
+            "text": tokenizer.to_json_dict(),
+            "structured": config_json.get("structured_conditioning_vocab"),
+        },
+        "conditioning_schema_version": config_json.get("conditioning_schema_version")
+        or ((config_json.get("experiment_manifest") or {}).get("conditioning_schema") or {}).get("version"),
+        "code_version": (config_json.get("experiment_manifest") or {}).get("software_version"),
+        "training_metrics_summary": dict(metrics_summary or {}),
+        "checkpoint_lineage": (config_json.get("experiment_manifest") or {}).get("checkpoint_lineage", []),
+        "checkpoint_type": "generator_challenger_rectified_flow_v1",
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     th.save(checkpoint, path)
@@ -2214,6 +2817,7 @@ def _apply_cfg_dropout(inputs: dict[str, Any], *, dropout: float, pad_token_id: 
     if isinstance(structured, Mapping):
         structured = _masked_structured_conditioning(structured, mask)
     result = {"caption_tokens": caption, "semantic_tokens": semantic}
+    result["cfg_dropout_fraction"] = float(mask.float().mean().detach().cpu())
     if structured is not None:
         result["structured_conditioning"] = structured
     return result
@@ -2264,6 +2868,8 @@ def _apply_structured_field_dropout(
         for field in present_fields:
             tensor = dropped[field]
             tensor[mask] = 0
+            if field in MULTI_HOT_FIELDS and tensor.ndim >= 2 and tensor.shape[1] > 0:
+                tensor[mask, 0] = 1
     if not any_masked:
         return inputs
     result = dict(inputs)
@@ -2320,6 +2926,8 @@ def _normalize_structured_vocab_sizes(value: Mapping[str, int] | None) -> dict[s
         "style_vocab_size",
     )
     result = {key: max(1, int(value.get(key) or 0)) for key in keys}
+    if "field_status_vocab_size" in value:
+        result["field_status_vocab_size"] = max(1, int(value.get("field_status_vocab_size") or 0))
     return result
 
 
@@ -2344,16 +2952,47 @@ def _structured_conditioning_for_records(
         result[field] = th.as_tensor([int(row[field]) for row in encoded], dtype=th.long, device=device)
     for field in MULTI_HOT_FIELDS:
         result[field] = th.as_tensor([row[field] for row in encoded], dtype=th.float32, device=device)
+    for field in STATUS_FIELDS:
+        result[field] = th.as_tensor([int(row[field]) for row in encoded], dtype=th.long, device=device)
     return result
+
+
+def _select_palette_conditions(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    library: PaletteConditionLibrary | None,
+    mode: str,
+    exclude_exact_prompt_target: bool,
+) -> list[Any | None]:
+    """Resolve source/retrieved palette rows in prompt order for sampling."""
+    if mode == "none" or library is None:
+        return [None] * len(records)
+    by_sprite = {entry.sprite_id: entry for entry in library.entries if entry.sprite_id}
+    selected: list[Any | None] = []
+    for record in records:
+        if mode == "source":
+            target = str(record.get("sprite_id") or record.get("prompt_id") or "")
+            entry = by_sprite.get(target)
+            if entry is None:
+                entry = library.retrieve(record, exclude_sprite_id=exclude_exact_prompt_target)
+        else:
+            entry = library.retrieve(record, exclude_sprite_id=exclude_exact_prompt_target)
+        selected.append(entry)
+    return selected
 
 
 def _null_structured_conditioning(structured: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(structured, Mapping):
         return None
     th, _nn_mod = _require_torch()
-    return {
+    result = {
         str(key): th.zeros_like(value) if isinstance(value, th.Tensor) else value for key, value in structured.items()
     }
+    for key in MULTI_HOT_FIELDS:
+        value = result.get(key)
+        if isinstance(value, th.Tensor) and value.ndim >= 2 and value.shape[1] > 0:
+            value[:, 0] = 1
+    return result
 
 
 def _masked_structured_conditioning(structured: Mapping[str, Any], mask: Any) -> dict[str, Any]:
@@ -2363,6 +3002,8 @@ def _masked_structured_conditioning(structured: Mapping[str, Any], mask: Any) ->
         if isinstance(value, th.Tensor):
             cloned = value.clone()
             cloned[mask] = 0
+            if str(key) in MULTI_HOT_FIELDS and cloned.ndim >= 2 and cloned.shape[1] > 0:
+                cloned[mask, 0] = 1
             result[str(key)] = cloned
         else:
             result[str(key)] = value

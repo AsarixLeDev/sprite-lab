@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import tarfile
 import zipfile
+from collections.abc import Sequence
+from fnmatch import fnmatchcase
 from pathlib import Path
+from typing import Any
 
 
 def extract_archive(
@@ -12,6 +15,8 @@ def extract_archive(
     output_dir: str | Path,
     *,
     overwrite: bool = False,
+    include_member_globs: Sequence[str] = (),
+    exclude_member_globs: Sequence[str] = (),
 ) -> Path:
     """Extract a .zip (or .tar/.tar.gz) archive path-traversal-safely.
 
@@ -28,7 +33,7 @@ def extract_archive(
 
     suffixes = "".join(archive_path.suffixes).lower()
     if archive_path.suffix.lower() == ".zip":
-        _extract_zip(archive_path, output_dir)
+        _extract_zip(archive_path, output_dir, include_member_globs, exclude_member_globs)
     elif suffixes.endswith((".tar", ".tar.gz", ".tgz")):
         _extract_tar(archive_path, output_dir)
     else:
@@ -45,11 +50,63 @@ def _is_safe_member_name(name: str) -> bool:
     return ".." not in path.parts
 
 
-def _extract_zip(archive_path: Path, output_dir: Path) -> None:
+def normalize_member_name(name: str) -> str:
+    """Return the canonical forward-slash archive member spelling."""
+
+    return str(name).replace("\\", "/")
+
+
+def archive_member_summary(
+    archive_path: str | Path,
+    *,
+    include_member_globs: Sequence[str] = (),
+    exclude_member_globs: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Describe deterministic ZIP member selection before extraction."""
+
+    archive_path = Path(archive_path)
+    if archive_path.suffix.lower() != ".zip":
+        return {}
+    with zipfile.ZipFile(archive_path) as archive:
+        infos = tuple(archive.infolist())
+    safe_files = [info for info in infos if not info.is_dir() and _is_safe_member_name(info.filename)]
+    unsafe = [normalize_member_name(info.filename) for info in infos if not _is_safe_member_name(info.filename)]
+    selected = [
+        info for info in safe_files if _member_selected(info.filename, include_member_globs, exclude_member_globs)
+    ]
+    selected_images = [
+        normalize_member_name(info.filename) for info in selected if info.filename.lower().endswith(".png")
+    ]
+    if (include_member_globs or exclude_member_globs) and not selected_images:
+        raise ValueError("archive member filters selected zero PNG images")
+    return {
+        "total_archive_members": len(infos),
+        "included_members": [normalize_member_name(info.filename) for info in selected],
+        "excluded_members": [normalize_member_name(info.filename) for info in safe_files if info not in selected],
+        "unsupported_members": [
+            normalize_member_name(info.filename) for info in selected if not info.filename.lower().endswith(".png")
+        ],
+        "selected_image_members": selected_images,
+        "unsafe_members": unsafe,
+        "include_member_globs": list(include_member_globs),
+        "exclude_member_globs": list(exclude_member_globs),
+    }
+
+
+def _member_selected(name: str, includes: Sequence[str], excludes: Sequence[str]) -> bool:
+    normalized = normalize_member_name(name)
+    if includes and not any(fnmatchcase(normalized, pattern) for pattern in includes):
+        return False
+    return not any(fnmatchcase(normalized, pattern) for pattern in excludes)
+
+
+def _extract_zip(archive_path: Path, output_dir: Path, includes: Sequence[str], excludes: Sequence[str]) -> None:
     resolved_root = output_dir.resolve()
     with zipfile.ZipFile(archive_path) as archive:
         for info in archive.infolist():
             if not _is_safe_member_name(info.filename):
+                continue
+            if not info.is_dir() and not _member_selected(info.filename, includes, excludes):
                 continue
             target = (output_dir / info.filename.replace("\\", "/")).resolve()
             if resolved_root != target and resolved_root not in target.parents:

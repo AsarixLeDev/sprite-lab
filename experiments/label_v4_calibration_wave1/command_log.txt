@@ -1,0 +1,34 @@
+NO PROVIDER CALLS WERE MADE.
+
+Prefill generation:
+python -m spritelab harvest label-v4-prepare-audit --audit-selection experiments/label_v4_calibration_wave1/audit_manifest.jsonl --output-root experiments/label_v4_calibration_wave1 --inference-policy cached-only --artifact-root experiments/label_v4_real_pilot_15_v1 --artifact-root experiments/label_v4_pilot_replay_v2
+
+Assisted GUI (not launched during implementation):
+python -m spritelab harvest assisted-v4 --records experiments/label_v4_calibration_wave1/audit_prefilled_records.jsonl --corrections experiments/label_v4_calibration_wave1/human_truth.jsonl
+
+Verification commands are appended below as they complete.
+
+Targeted Labeling-v4:
+$v4 = Get-ChildItem tests -Filter 'test_label_v4_*.py' | ForEach-Object { $_.FullName }; python -m pytest $v4 -q
+Result: 128 passed.
+
+All Labeling-v3/v4:
+$tests = Get-ChildItem tests -File | Where-Object { $_.Name -like 'test_label_v3_*.py' -or $_.Name -like 'test_label_v4_*.py' }; python -m pytest ($tests.FullName) -q
+Result: 376 passed.
+
+Full repository:
+python -m pytest -q
+Result: 1685 passed, 1 pre-existing PyTorch warning.
+
+Scoped Ruff:
+python -m ruff check src/spritelab/harvest/label_v4/audit_prefill.py src/spritelab/harvest/label_v4/assisted_v4_gui.py src/spritelab/harvest/label_v4/review.py src/spritelab/harvest/label_v4/calibration_wave.py src/spritelab/harvest/cli/label_v4_cmds.py tests/test_label_v4_audit_prefill_gui.py
+Result: all checks passed.
+
+Whitespace/integrity:
+git diff --check
+Result: passed.
+
+Protected SHA-256 values after implementation:
+audit_manifest.jsonl d1752ce5d9661d1ec7a1825252840392f7b4e47581a6e2ac1a8cbfc5e4d75017
+freeze_manifest.json a65e6153462889934e33cc89e41ca9b78c1b94caaa2c87ad0a6d1b369161f1a7
+human_truth.jsonl e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855

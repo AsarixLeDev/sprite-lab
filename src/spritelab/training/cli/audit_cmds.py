@@ -7,8 +7,10 @@ from pathlib import Path
 
 from spritelab.training.cli._args import (
     _add_export_preset_argument,
+    _add_palette_conditioning_training_arguments,
     _add_palette_projection_sampling_arguments,
     _add_palette_swap_arguments,
+    _add_role_ramp_transplant_arguments,
     _add_speed_option_arguments,
     _parse_dropout_rates,
     _parsed_config_kwargs,
@@ -71,6 +73,8 @@ def _register_audit_challenger_full_v4(subparsers: argparse._SubParsersAction) -
     audit_challenger_full.add_argument("--foreground-rgb-loss-weight", type=float, default=1.0)
     audit_challenger_full.add_argument("--background-rgb-loss-weight", type=float, default=1.0)
     _add_palette_swap_arguments(audit_challenger_full)
+    _add_role_ramp_transplant_arguments(audit_challenger_full)
+    _add_palette_conditioning_training_arguments(audit_challenger_full)
     audit_challenger_full.add_argument("--palette-loss-weight", type=float, default=0.0)
     audit_challenger_full.add_argument("--palette-loss-temperature", type=float, default=0.05)
     audit_challenger_full.add_argument("--sample-steps", type=int, default=30)

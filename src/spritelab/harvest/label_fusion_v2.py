@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
+from spritelab.harvest.config_loader import load_hallucination_denylist_config
 from spritelab.harvest.label_candidates import object_is_generic
 from spritelab.harvest.label_schema import LabelSuggestion, SafeFusedLabel
 from spritelab.harvest.label_taxonomy import (
@@ -29,7 +30,7 @@ class FusionThresholds:
     filename_confidence_threshold: float = 0.65
 
 
-_GENERIC_OBJECTS = {
+_FALLBACK_GENERIC_OBJECTS = {
     "",
     "unknown",
     "unknown_object",
@@ -54,7 +55,7 @@ _GENERIC_OBJECTS = {
     "cell",
 }
 
-_MALFORMED_OBJECTS = {
+_FALLBACK_MALFORMED_OBJECTS = {
     "sho",
     "armour",
     "ambiguou",
@@ -123,7 +124,7 @@ class _CandidateMatch:
     score: float = 1.0
 
 
-_KNOWN_HALLUCINATION_OBJECTS = {
+_FALLBACK_KNOWN_HALLUCINATION_OBJECTS = {
     "gold_bar",
     "gold_coin",
     "coin",
@@ -136,6 +137,32 @@ _KNOWN_HALLUCINATION_OBJECTS = {
     "rolled_parchment",
     "mossy_rock",
 }
+
+
+def _load_denylist() -> tuple[set[str], set[str], set[str]]:
+    fallback = {
+        "vlm_hallucination_objects": sorted(_FALLBACK_KNOWN_HALLUCINATION_OBJECTS),
+        "malformed_objects": sorted(_FALLBACK_MALFORMED_OBJECTS | {"elm"}),
+        "generic_objects": sorted(_FALLBACK_GENERIC_OBJECTS),
+    }
+    config = load_hallucination_denylist_config(fallback)
+    if set(config) != {"schema_version", "vlm_hallucination_objects", "malformed_objects", "generic_objects"}:
+        raise ValueError("invalid label-v2 hallucination_denylist config: unknown or missing top-level keys")
+    parsed: list[set[str]] = []
+    for key in ("vlm_hallucination_objects", "malformed_objects", "generic_objects"):
+        values = config.get(key)
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            raise ValueError(f"invalid label-v2 hallucination_denylist config: '{key}' must be a string list")
+        # These checks intentionally operate on already-normalized suggestion
+        # values. Do not re-canonicalize denylist entries here: e.g. legacy
+        # ``armour`` was historically listed but normalized suggestions become
+        # ``armor`` and must remain valid.
+        parsed.append({str(value).strip() for value in values})
+    return parsed[0], parsed[1], parsed[2]
+
+
+_KNOWN_HALLUCINATION_OBJECTS, _CONFIG_MALFORMED_OBJECTS, _GENERIC_OBJECTS = _load_denylist()
+_MALFORMED_OBJECTS = _CONFIG_MALFORMED_OBJECTS - {"elm"}
 _CURRENCY_METAL_TAGS = {"coin", "currency", "gold", "metal", "treasure", "bar", "ingot"}
 _SAFE_VLM_VISUAL_TAGS = {
     "black",

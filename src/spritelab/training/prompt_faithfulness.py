@@ -22,7 +22,7 @@ from spritelab.training.prompt_sensitivity import COLOR_WORDS, discover_prompt_p
 from spritelab.training.source_match_review import compute_source_match_metrics, load_source_sprite_index
 from spritelab.training.stats import wilson_ci_from_rate
 
-SCHEMA_VERSION = "prompt_faithfulness_v1.0"
+SCHEMA_VERSION = "prompt_faithfulness_v1.1"
 SPRITE_SIZE = 32
 
 
@@ -88,6 +88,8 @@ def run_prompt_faithfulness(config: PromptFaithfulnessConfig) -> dict[str, Any]:
     sample_count = len(samples)
 
     category_rate, category_n = _rate_and_count(samples, "category_consistent")
+    shape_category_rate, shape_category_n = _rate_and_count(samples, "shape_category_consistent")
+    shape_category_matches = sum(1 for sample in samples if sample.get("shape_category_consistent") is True)
     color_rate, color_n = _rate_and_count(samples, "color_consistent")
     shape_bbox_rate, _shape_bbox_n = _rate_and_count(samples, "shape_bbox_consistent")
     repeated_rate, repeated_n = _cluster_member_rate_and_count(silhouette_clusters)
@@ -107,6 +109,14 @@ def run_prompt_faithfulness(config: PromptFaithfulnessConfig) -> dict[str, Any]:
         # Kept as a backwards-compatible alias of the nearest-source metric above.
         "category_consistency_rate": category_rate,
         "category_consistency_ci95": wilson_ci_from_rate(category_rate, category_n),
+        # Separate alpha/silhouette-only retrieval. This deliberately never uses
+        # RGB values, so successful OOD recolors are not penalized as a category
+        # mismatch merely because their nearest RGB source is a different object.
+        "shape_category_consistency_rate": shape_category_rate,
+        "shape_category_consistency_matches": shape_category_matches,
+        "shape_category_consistency_total": shape_category_n,
+        "shape_category_consistency_ci95": wilson_ci_from_rate(shape_category_rate, shape_category_n),
+        "shape_category_feature": "bbox-cropped 16x16 soft alpha mask plus normalized bbox width, height, and area",
         "color_consistency_rate": color_rate,
         "color_consistency_ci95": wilson_ci_from_rate(color_rate, color_n),
         "shape_bbox_consistency_rate": shape_bbox_rate,
@@ -187,6 +197,8 @@ def format_prompt_faithfulness_markdown(report: Mapping[str, Any]) -> str:
         f"{_fmt(nearest.get('median_distance'))} / {_fmt(nearest.get('p10_distance'))}",
         f"- Nearest-source category consistency: {_fmt(report.get('nearest_source_category_consistency_rate', report.get('category_consistency_rate')))}"
         f" {_fmt_ci(report.get('nearest_source_category_consistency_ci95'))}",
+        f"- Shape-only category consistency: {_fmt(report.get('shape_category_consistency_rate'))}"
+        f" {_fmt_ci(report.get('shape_category_consistency_ci95'))}",
         f"- Color consistency heuristic: {_fmt(report.get('color_consistency_rate'))} {_fmt_ci(report.get('color_consistency_ci95'))}",
         f"- Shape/bbox consistency heuristic: {_fmt(report.get('shape_bbox_consistency_rate'))}",
         f"- Repeated silhouette rate: {_fmt(report.get('repeated_silhouette_rate'))} {_fmt_ci(report.get('repeated_silhouette_rate_ci95'))}",
@@ -300,12 +312,17 @@ def _review_sample(
     prompt_object = _prompt_object(record, prompt_record)
     prompt_colors = _prompt_colors(record, prompt_record, prompt)
     nearest = _nearest_source(image, source_candidates)
+    shape_nearest = _nearest_shape_source(image, source_candidates)
     nearest_meta = nearest.get("metadata") if isinstance(nearest.get("metadata"), Mapping) else {}
+    shape_nearest_meta = shape_nearest.get("metadata") if isinstance(shape_nearest.get("metadata"), Mapping) else {}
     generated_colors = _dominant_color_names(image)
     structural = _structural_stats(image)
     expected_categories = source_categories_by_object.get(prompt_object, set()) if prompt_object else set()
     category_consistent = (
         None if not expected_categories else str(nearest_meta.get("category") or "") in expected_categories
+    )
+    shape_category_consistent = (
+        None if not expected_categories else str(shape_nearest_meta.get("category") or "") in expected_categories
     )
     color_consistent = None if not prompt_colors else bool(set(prompt_colors) & set(generated_colors))
     shape_bbox_consistent = _shape_bbox_consistent(prompt_object, nearest.get("metrics", {}))
@@ -324,6 +341,11 @@ def _review_sample(
         "nearest_source_distance": nearest.get("distance"),
         "nearest_source_metrics": nearest.get("metrics", {}),
         "category_consistent": category_consistent,
+        "shape_nearest_source_sprite_id": str(shape_nearest.get("sprite_id") or ""),
+        "shape_nearest_source_object_name": str(shape_nearest_meta.get("object_name") or ""),
+        "shape_nearest_source_category": str(shape_nearest_meta.get("category") or ""),
+        "shape_nearest_source_distance": shape_nearest.get("distance"),
+        "shape_category_consistent": shape_category_consistent,
         "color_consistent": color_consistent,
         "shape_bbox_consistent": shape_bbox_consistent,
         "alpha_silhouette_hash": _alpha_silhouette_hash(image),
@@ -357,6 +379,7 @@ def _source_candidates(
                 "metadata": source.get("metadata", {}),
                 "image": source_image,
                 "feature": _image_prefilter_feature(source_image),
+                "shape_feature": _alpha_silhouette_feature(source_image),
             }
         )
     return candidates
@@ -484,12 +507,62 @@ def _nearest_source(image: Image.Image, source_candidates: Sequence[Mapping[str,
     return best or {"sprite_id": "", "metadata": {}, "metrics": {}, "distance": None}
 
 
+def _nearest_shape_source(image: Image.Image, source_candidates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Return the nearest source using the alpha silhouette feature only."""
+    if not source_candidates:
+        return {"sprite_id": "", "metadata": {}, "distance": None}
+    generated_feature = _alpha_silhouette_feature(image)
+    features = np.stack([np.asarray(candidate["shape_feature"], dtype=np.float32) for candidate in source_candidates])
+    distances = np.mean(np.abs(features - generated_feature[None, :]), axis=1)
+    index = int(np.argmin(distances))
+    source = source_candidates[index]
+    return {
+        "sprite_id": str(source.get("sprite_id") or ""),
+        "metadata": source.get("metadata", {}),
+        "distance": float(distances[index]),
+    }
+
+
 def _image_prefilter_feature(image: Image.Image) -> np.ndarray:
     small = image.convert("RGBA").resize((8, 8), Image.Resampling.BILINEAR)
     arr = np.asarray(small, dtype=np.float32) / 255.0
     alpha_weight = arr[..., 3:4]
     rgb = arr[..., :3] * alpha_weight
     return np.concatenate([rgb, alpha_weight], axis=-1).reshape(-1).astype(np.float32, copy=False)
+
+
+def _alpha_silhouette_feature(image: Image.Image) -> np.ndarray:
+    """Encode shape from alpha only, independently of every RGB channel.
+
+    Foreground is cropped to its alpha bounding box, resized to a soft 16x16
+    mask, then paired with normalized bbox width, height, and occupied area.
+    This preserves silhouette and coarse proportions while remaining invariant
+    to recoloring and transparent RGB garbage.
+    """
+    alpha = np.asarray(image.convert("RGBA"), dtype=np.float32)[..., 3] / 255.0
+    foreground = alpha > 0.5
+    feature_size = 16
+    if not bool(np.any(foreground)):
+        return np.zeros(feature_size * feature_size + 3, dtype=np.float32)
+
+    ys, xs = np.nonzero(foreground)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    cropped = np.where(foreground[y0:y1, x0:x1], alpha[y0:y1, x0:x1], 0.0)
+    resized = np.asarray(
+        Image.fromarray(cropped, mode="F").resize((feature_size, feature_size), Image.Resampling.BILINEAR),
+        dtype=np.float32,
+    ).reshape(-1)
+    height, width = alpha.shape
+    geometry = np.asarray(
+        [
+            float(x1 - x0) / float(width),
+            float(y1 - y0) / float(height),
+            float(np.count_nonzero(foreground)) / float(height * width),
+        ],
+        dtype=np.float32,
+    )
+    return np.concatenate([resized, geometry]).astype(np.float32, copy=False)
 
 
 def _prompt_object(record: Mapping[str, Any], prompt_record: Mapping[str, Any]) -> str:
@@ -809,6 +882,11 @@ def _sample_mapping(sample: Mapping[str, Any]) -> dict[str, Any]:
         "nearest_source_object_name": sample.get("nearest_source_object_name"),
         "nearest_source_category": sample.get("nearest_source_category"),
         "nearest_source_distance": sample.get("nearest_source_distance"),
+        "shape_nearest_source_sprite_id": sample.get("shape_nearest_source_sprite_id"),
+        "shape_nearest_source_object_name": sample.get("shape_nearest_source_object_name"),
+        "shape_nearest_source_category": sample.get("shape_nearest_source_category"),
+        "shape_nearest_source_distance": sample.get("shape_nearest_source_distance"),
+        "shape_category_consistent": sample.get("shape_category_consistent"),
     }
 
 

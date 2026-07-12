@@ -407,6 +407,7 @@ def _write_fake_run_outputs(
     cfg_color_scale: float | None = None,
 ) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "projected").mkdir(exist_ok=True)
     lines = []
     for i in range(sample_count):
         lines.append(
@@ -456,6 +457,9 @@ def _write_fake_run_outputs(
                 "sample_count": sample_count,
                 "category_consistency_rate": 0.8068,
                 "category_consistency_ci95": [0.72, 0.88],
+                "shape_category_consistency_rate": 0.9012,
+                "shape_category_consistency_matches": 87,
+                "shape_category_consistency_total": sample_count,
                 "color_consistency_rate": 0.8438,
                 "color_consistency_ci95": [0.76, 0.91],
                 "repeated_silhouette_rate": 0.0,
@@ -501,6 +505,7 @@ def test_collect_run_metrics_from_synthetic_v1(tmp_path: Path) -> None:
     assert metrics.qa_errors == 0
     assert metrics.median_visible_colors == 12.0
     assert metrics.category_consistency == pytest.approx(0.8068)
+    assert metrics.shape_category_consistency == pytest.approx(0.9012)
 
 
 def test_collect_run_metrics_from_synthetic_v1_1(tmp_path: Path) -> None:
@@ -520,6 +525,22 @@ def test_collect_run_metrics_from_synthetic_v1_1(tmp_path: Path) -> None:
     assert metrics.cfg_color_scale == 3.0
     assert metrics.requested_max_samples == 256
     assert metrics.sample_count_generated == 96
+
+
+def test_collect_run_metrics_accepts_legacy_faithfulness_without_shape_category(tmp_path: Path) -> None:
+    _write_fake_run_outputs(tmp_path, export_preset="v1", factored_cfg=False)
+    faith_path = tmp_path / "prompt_faithfulness_report.json"
+    faith = json.loads(faith_path.read_text(encoding="utf-8"))
+    for key in (
+        "shape_category_consistency_rate",
+        "shape_category_consistency_matches",
+        "shape_category_consistency_total",
+    ):
+        faith.pop(key, None)
+    faith_path.write_text(json.dumps(faith), encoding="utf-8")
+
+    metrics = collect_run_metrics(tmp_path, RunCell(mode="preset_v1_seed1", export_preset="v1", seed=1), 96)
+    assert metrics.shape_category_consistency is None
 
 
 def test_collect_run_metrics_reports_counts(tmp_path: Path) -> None:
@@ -780,6 +801,20 @@ def test_write_summary_markdown_includes_factored_column(tmp_path: Path) -> None
     assert "Faith" in content
     assert "abc123" in content
     assert "20260723" in content
+    assert "Shape Cat" in content
+    assert "NA" in content
+
+
+def test_v2_report_harvests_shape_category_when_present(tmp_path: Path) -> None:
+    summary = _sample_summary()
+    summary["per_run"][0]["shape_category_consistency"] = 0.9012
+    summary["aggregates"]["preset_v1"]["shape_category_consistency_mean"] = 0.9012
+    summary["aggregates"]["preset_v1"]["shape_category_consistency_std"] = 0.0
+    path = tmp_path / "shape.md"
+    write_summary_markdown(summary, path)
+    content = path.read_text(encoding="utf-8")
+    assert "Shape Cat" in content
+    assert "0.9012" in content
 
 
 def test_write_summary_csv_includes_new_columns(tmp_path: Path) -> None:
@@ -1261,12 +1296,12 @@ def test_build_run_plan_includes_guidance_surgery_cells() -> None:
         guidance_surgery_grid=True,
     )
     cells = build_run_plan(config)
-    modes = {c.mode for c in cells}
+    modes = [c.mode for c in cells]
     assert "preset_v1_seed20260723" in modes
     assert "rgb_late_0_5_seed20260723" in modes
     assert "rgb_late_0_5_obj0_5_seed20260723" in modes
-    # 1 preset + 6 guidance modes = 7 cells per seed
-    assert len(cells) == 7
+    assert modes.count("preset_v1_seed20260723") == 1
+    assert len(cells) == 6
 
 
 def test_guidance_cells_have_expected_metadata() -> None:
@@ -1301,3 +1336,104 @@ def test_v2_eval_harvest_handles_missing_guidance_dir(tmp_path: Path) -> None:
     cell_dir = tmp_path / "runs" / "rgb_late_0_5_seed20260723"
     # Don't create the directory
     assert not _cell_outputs_exist(cell_dir)
+
+
+def test_guidance_report_only_uses_direct_mode_seed_directory(tmp_path: Path) -> None:
+    from spritelab.training.v2_phase0_eval import _report_only_cell_dir
+
+    config = V2Phase0EvalConfig(
+        out=tmp_path,
+        checkpoint=Path("c.pt"),
+        prompts=Path("p.jsonl"),
+        dataset=Path("ds"),
+        guidance_surgery_grid=True,
+    )
+    cell = RunCell(mode="rgb_late_0_5_seed20260723", export_preset="v1.1", seed=20260723)
+    assert _report_only_cell_dir(config, tmp_path, tmp_path / "runs", cell) == tmp_path / cell.mode
+
+
+def test_harvestable_run_requires_normal_challenger_structure(tmp_path: Path) -> None:
+    from spritelab.training.v2_phase0_eval import _cell_outputs_exist
+
+    (tmp_path / "generation_report.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "generated_manifest.jsonl").write_text("{}\n", encoding="utf-8")
+    assert not _cell_outputs_exist(tmp_path)
+    (tmp_path / "projected").mkdir()
+    assert _cell_outputs_exist(tmp_path)
+
+
+def test_report_only_requires_allow_partial_for_missing_runs(tmp_path: Path) -> None:
+    from spritelab.training.v2_phase0_eval import run_v2_phase0_eval
+
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text("", encoding="utf-8")
+    config = V2Phase0EvalConfig(
+        out=tmp_path / "out",
+        checkpoint=Path("c.pt"),
+        prompts=prompts,
+        dataset=tmp_path / "dataset",
+        presets=("v1",),
+        seeds=(20260723,),
+        guidance_surgery_grid=True,
+        report_only=True,
+    )
+    with pytest.raises(RuntimeError, match="Missing 6 run"):
+        run_v2_phase0_eval(config)
+
+    partial = V2Phase0EvalConfig(**{**config.__dict__, "allow_partial_report": True})
+    assert run_v2_phase0_eval(partial)["meta"]["report_only"] is True
+
+
+def test_report_only_labels_existing_but_incomplete_directory_invalid(tmp_path: Path) -> None:
+    from spritelab.training.v2_phase0_eval import run_v2_phase0_eval
+
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text("", encoding="utf-8")
+    out = tmp_path / "out"
+    (out / "preset_v1_seed20260723").mkdir(parents=True)
+    config = V2Phase0EvalConfig(
+        out=out,
+        checkpoint=Path("c.pt"),
+        prompts=prompts,
+        dataset=tmp_path / "dataset",
+        presets=("v1",),
+        seeds=(20260723,),
+        guidance_surgery_grid=True,
+        report_only=True,
+    )
+    with pytest.raises(RuntimeError, match="Invalid run directory"):
+        run_v2_phase0_eval(config)
+
+
+def test_guidance_report_only_harvests_synthetic_directories(tmp_path: Path) -> None:
+    from spritelab.training.v2_phase0_eval import GUIDANCE_SURGERY_MODES, run_v2_phase0_eval
+
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text("", encoding="utf-8")
+    out = tmp_path / "out"
+    seed = 20260723
+    for entry in GUIDANCE_SURGERY_MODES:
+        _write_fake_run_outputs(
+            out / f"{entry['mode']}_seed{seed}",
+            export_preset=str(entry["export_preset"]),
+            factored_cfg=bool(entry["factored_cfg"]),
+            cfg_base_scale=entry["cfg_base_scale"],
+            cfg_color_scale=entry["cfg_color_scale"],
+        )
+
+    summary = run_v2_phase0_eval(
+        V2Phase0EvalConfig(
+            out=out,
+            checkpoint=Path("c.pt"),
+            prompts=prompts,
+            dataset=tmp_path / "dataset",
+            presets=("v1",),
+            seeds=(seed,),
+            guidance_surgery_grid=True,
+            report_only=True,
+        )
+    )
+    assert len(summary["per_run"]) == 6
+    assert {row["mode"] for row in summary["per_run"]} == {
+        f"{entry['mode']}_seed{seed}" for entry in GUIDANCE_SURGERY_MODES
+    }

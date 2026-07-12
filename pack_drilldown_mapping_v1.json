@@ -1,0 +1,68 @@
+{
+  "apply_acceptance_count": 0,
+  "apply_applied_auto_count": 0,
+  "candidate_coverage": 0,
+  "examples_that_could_be_auto_trusted": [
+    "farming_tools_calciumtrice_farm_tool_icons_calciumtrice_r000_c000: farm tool icons calciumtrice.png -> backpack [auto_filename_trusted]",
+    "farming_tools_calciumtrice_farm_tool_icons_calciumtrice_r000_c001: farm tool icons calciumtrice.png -> seed_bag [auto_filename_trusted]",
+    "farming_tools_calciumtrice_farm_tool_icons_calciumtrice_r000_c002: farm tool icons calciumtrice.png -> shovel [auto_filename_trusted]",
+    "farming_tools_calciumtrice_farm_tool_icons_calciumtrice_r000_c003: farm tool icons calciumtrice.png -> pickaxe [auto_filename_trusted]",
+    "farming_tools_calciumtrice_farm_tool_icons_calciumtrice_r000_c004: farm tool icons calciumtrice.png -> axe [auto_filename_trusted]",
+    "farming_tools_calciumtrice_farm_tool_icons_calciumtrice_r000_c005: farm tool icons calciumtrice.png -> scythe [auto_filename_trusted]",
+    "farming_tools_calciumtrice_farm_tool_icons_calciumtrice_r001_c002: farm tool icons calciumtrice.png -> shovel [auto_filename_trusted]",
+    "farming_tools_calciumtrice_farm_tool_icons_calciumtrice_r001_c003: farm tool icons calciumtrice.png -> pickaxe [auto_filename_trusted]",
+    "farming_tools_calciumtrice_farm_tool_icons_calciumtrice_r001_c004: farm tool icons calciumtrice.png -> axe [auto_filename_trusted]",
+    "farming_tools_calciumtrice_farm_tool_icons_calciumtrice_r001_c005: farm tool icons calciumtrice.png -> scythe [auto_filename_trusted]"
+  ],
+  "examples_that_should_stay_review": [],
+  "filename_trust_mode": "exact",
+  "needs_review_count": 0,
+  "prediction_file": "harvest_runs\\sota_v2_farming_tools_final2\\label_v2_suggestions_mapping_v1_semantic_v3.jsonl",
+  "prediction_file_is_raw_label_v2": false,
+  "raw_prediction_buckets": {
+    "auto_filename_trusted": 14
+  },
+  "raw_prediction_records": 14,
+  "recommended_fix_class": "semantic_prediction_file_used_as_raw",
+  "recommended_fix_classes": [
+    "semantic_prediction_file_used_as_raw",
+    "stale_accepted_leakage"
+  ],
+  "record_count": 14,
+  "run_dir": "harvest_runs\\sota_v2_farming_tools_final2",
+  "safe_prefill_category_coverage": 14,
+  "safe_prefill_object_coverage": 14,
+  "semantic_v3_base_object_coverage": 1.0,
+  "semantic_v3_records": 14,
+  "semantic_v3_warnings": {
+    "base_object_fallback_full_name": 1
+  },
+  "sheet_coordinate_only_examples": [],
+  "source_author_token_examples": [],
+  "source_profile": {
+    "domain": "tool",
+    "expected_category_bias": [
+      "tool"
+    ],
+    "filename_trust": "exact",
+    "known_path_tokens": [
+      "farming",
+      "calciumtrice",
+      "tools"
+    ],
+    "name": "farming_tools",
+    "notes": "Trusted only with declarative sheet metadata."
+  },
+  "top_categories": {
+    "tool": 14
+  },
+  "top_object_names": {
+    "axe": 3,
+    "backpack": 1,
+    "pickaxe": 3,
+    "scythe": 3,
+    "seed_bag": 1,
+    "shovel": 3
+  },
+  "top_source_author_token_objects": {}
+}

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from spritelab.harvest.label_taxonomy import normalize_category, normalize_object_name, normalize_tag, normalize_tags
 
@@ -65,6 +65,7 @@ class SafeFusedLabel:
     conflict_reasons: tuple[str, ...]
     provenance: dict[str, str | list[str]]
     review_priority: float
+    label_confidence_tier: Literal["T0", "T1", "T2", "T3", "T4"] | str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bucket", str(self.bucket).strip() or "needs_review")
@@ -73,6 +74,30 @@ class SafeFusedLabel:
         object.__setattr__(self, "conflict_reasons", _clean_strings(self.conflict_reasons))
         object.__setattr__(self, "provenance", _clean_provenance(self.provenance))
         object.__setattr__(self, "review_priority", max(0.0, min(1.0, float(self.review_priority))))
+        tier = str(self.label_confidence_tier).strip().upper()
+        object.__setattr__(
+            self,
+            "label_confidence_tier",
+            tier if tier in _LABEL_CONFIDENCE_TIERS else confidence_tier_for_bucket(self.bucket),
+        )
+
+
+_LABEL_CONFIDENCE_TIERS = frozenset({"T0", "T1", "T2", "T3", "T4"})
+
+
+def confidence_tier_for_bucket(bucket: str) -> Literal["T0", "T1", "T2", "T3", "T4"]:
+    """Derive additive label trust tiers from existing fusion buckets."""
+
+    normalized = str(bucket).strip()
+    if normalized == "auto_filename_trusted":
+        return "T0"
+    if normalized == "auto_rpg_496_specialized":
+        return "T1"
+    if normalized in {"auto_prefix_family_trusted", "fused_automatically", "auto_filename_with_vlm_conflict"}:
+        return "T2"
+    if normalized in {"auto_vlm_candidate_ranked", "auto_vlm_when_filename_weak"}:
+        return "T3"
+    return "T4"
 
 
 def label_suggestion_to_json(suggestion: LabelSuggestion | None) -> dict[str, Any] | None:
@@ -139,13 +164,16 @@ def label_suggestion_from_json(data: Mapping[str, Any] | None) -> LabelSuggestio
 
 
 def safe_fused_label_to_json(label: SafeFusedLabel) -> dict[str, Any]:
+    provenance_fields = _label_provenance_fields(label)
     quality = {
         "bucket": label.bucket,
+        "label_confidence_tier": label.label_confidence_tier,
         "needs_review": label.needs_review,
         "flags": list(label.flags),
         "conflict_reasons": list(label.conflict_reasons),
         "provenance": label.provenance,
         "review_priority": label.review_priority,
+        **provenance_fields,
     }
     return {
         "safe_prefill": label_suggestion_to_json(label.safe_prefill),
@@ -153,11 +181,13 @@ def safe_fused_label_to_json(label: SafeFusedLabel) -> dict[str, Any]:
         "vlm_suggestion": label_suggestion_to_json(label.vlm_suggestion),
         "fused_suggestion": label_suggestion_to_json(label.fused_suggestion),
         "bucket": label.bucket,
+        "label_confidence_tier": label.label_confidence_tier,
         "needs_review": label.needs_review,
         "flags": list(label.flags),
         "conflict_reasons": list(label.conflict_reasons),
         "provenance": label.provenance,
         "review_priority": label.review_priority,
+        **provenance_fields,
         "label_quality": quality,
     }
 
@@ -187,6 +217,7 @@ def safe_fused_label_from_json(data: Mapping[str, Any]) -> SafeFusedLabel:
         conflict_reasons=_as_str_tuple(data.get("conflict_reasons", quality.get("conflict_reasons"))),
         provenance=_mapping_dict(data.get("provenance", quality.get("provenance"))),
         review_priority=_clamp_confidence(data.get("review_priority", quality.get("review_priority", 1.0))),
+        label_confidence_tier=str(data.get("label_confidence_tier") or quality.get("label_confidence_tier") or ""),
     )
 
 
@@ -272,3 +303,20 @@ def _clean_provenance(value: Mapping[str, Any]) -> dict[str, str | list[str]]:
         else:
             result[clean_key] = str(raw)
     return result
+
+
+def _label_provenance_fields(label: SafeFusedLabel) -> dict[str, Any]:
+    sources: list[str] = []
+    for value in label.provenance.values():
+        values = [value] if isinstance(value, str) else value
+        for source in values:
+            clean = str(source).strip()
+            if clean and clean not in sources:
+                sources.append(clean)
+    conflict_codes = [flag for flag in label.flags if "conflict" in flag or "hallucination" in flag]
+    return {
+        "label_tier_reason": f"fusion_bucket:{label.bucket}",
+        "fusion_bucket": label.bucket,
+        "label_sources": sources,
+        "label_conflict_codes": conflict_codes,
+    }

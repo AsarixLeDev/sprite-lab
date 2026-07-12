@@ -82,6 +82,14 @@ class FullV4ChallengerAuditConfig:
     palette_swap_allow_colorless_caption_if_semantic_color: bool = False
     palette_swap_no_caption_prepend: bool = False
     palette_swap_allow_material_colors: bool = True
+    role_ramp_transplant_prob: float = 0.0
+    role_ramp_transplant_keep_original_prob: float = 0.5
+    role_ramp_transplant_exclude_families: str = "gold,brown"
+    role_ramp_transplant_require_trusted_role_map: bool = True
+    role_ramp_transplant_debug_samples: int = 0
+    role_ramp_transplant_max_resample_attempts: int = 8
+    role_ramp_transplant_require_fill_target_match: bool = True
+    role_ramp_transplant_min_primary_fill_coverage: float = 0.03
     sample_steps: int = 30
     cfg_scale: float = 2.0
     max_colors: int = 32
@@ -123,6 +131,11 @@ class FullV4ChallengerAuditConfig:
     palette_presence_loss_weight: float = 0.0
     index_head_warmup_steps: int = 0
     palette_head_use_gt_palette_prob: float = 1.0
+    # v3 Phase 0 palette input (default-off)
+    palette_conditioning: bool = False
+    palette_conditioning_dropout: float = 0.0
+    palette_conditioning_dim: int = 64
+    palette_conditioning_inject: str = "decoder"
 
 
 MICRO_OVERFIT_STEPS_PER_SPRITE = 188
@@ -468,6 +481,14 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
             ),
             palette_swap_no_caption_prepend=bool(config.palette_swap_no_caption_prepend),
             palette_swap_allow_material_colors=bool(config.palette_swap_allow_material_colors),
+            role_ramp_transplant_prob=float(config.role_ramp_transplant_prob),
+            role_ramp_transplant_keep_original_prob=float(config.role_ramp_transplant_keep_original_prob),
+            role_ramp_transplant_exclude_families=str(config.role_ramp_transplant_exclude_families),
+            role_ramp_transplant_require_trusted_role_map=bool(config.role_ramp_transplant_require_trusted_role_map),
+            role_ramp_transplant_debug_samples=int(config.role_ramp_transplant_debug_samples),
+            role_ramp_transplant_max_resample_attempts=int(config.role_ramp_transplant_max_resample_attempts),
+            role_ramp_transplant_require_fill_target_match=bool(config.role_ramp_transplant_require_fill_target_match),
+            role_ramp_transplant_min_primary_fill_coverage=float(config.role_ramp_transplant_min_primary_fill_coverage),
             sample_every=0,
             save_every=0,
             checkpoint_steps=checkpoint_steps,
@@ -488,6 +509,10 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
             palette_presence_loss_weight=float(config.palette_presence_loss_weight),
             index_head_warmup_steps=int(config.index_head_warmup_steps),
             palette_head_use_gt_palette_prob=float(config.palette_head_use_gt_palette_prob),
+            palette_conditioning=bool(config.palette_conditioning),
+            palette_conditioning_dropout=float(config.palette_conditioning_dropout),
+            palette_conditioning_dim=int(config.palette_conditioning_dim),
+            palette_conditioning_inject=str(config.palette_conditioning_inject),
         )
     )
     final_sample_checkpoint = train_dir / ("checkpoint_last_ema.pt" if config.sample_ema else "checkpoint_last.pt")
@@ -536,6 +561,9 @@ def run_full_v4_challenger_audit(config: FullV4ChallengerAuditConfig) -> dict[st
             project_palette_target_colors=int(config.project_palette_target_colors),
             project_palette_min_pixel_share=float(config.project_palette_min_pixel_share),
             project_palette_method=str(config.project_palette_method),
+            palette_conditioning_source="source" if config.palette_conditioning else "none",
+            palette_conditioning_dataset=config.dataset,
+            palette_conditioning_training_manifest=config.training_manifest,
         )
     )
     qa = qa_generated_sprites(generated_dir).to_json_dict()
@@ -1010,6 +1038,9 @@ def _run_full_v4_grounded_evaluation(
             project_palette_target_colors=int(config.project_palette_target_colors),
             project_palette_min_pixel_share=float(config.project_palette_min_pixel_share),
             project_palette_method=str(config.project_palette_method),
+            palette_conditioning_source="source" if config.palette_conditioning else "none",
+            palette_conditioning_dataset=config.dataset,
+            palette_conditioning_training_manifest=config.training_manifest,
         )
     )
     qa = qa_generated_sprites(generated_dir).to_json_dict()
@@ -1097,6 +1128,9 @@ def _run_full_v4_ood_evaluation(
             project_palette_target_colors=int(config.project_palette_target_colors),
             project_palette_min_pixel_share=float(config.project_palette_min_pixel_share),
             project_palette_method=str(config.project_palette_method),
+            palette_conditioning_source="retrieved" if config.palette_conditioning else "none",
+            palette_conditioning_dataset=config.dataset,
+            palette_conditioning_training_manifest=config.training_manifest,
         )
     )
     ood_qa = qa_generated_sprites(generated_dir).to_json_dict()
@@ -1792,6 +1826,7 @@ def _full_v4_faithfulness_summary(report: Mapping[str, Any]) -> dict[str, Any]:
             report.get("nearest_source_category_consistency_rate", report.get("category_consistency_rate"))
         ),
         "category_consistency_rate": _optional_float(report.get("category_consistency_rate")),
+        "shape_category_consistency_rate": _optional_float(report.get("shape_category_consistency_rate")),
         "color_consistency_rate": _optional_float(report.get("color_consistency_rate")),
         "shape_bbox_consistency_rate": _optional_float(report.get("shape_bbox_consistency_rate")),
         "repeated_silhouette_rate": _optional_float(report.get("repeated_silhouette_rate")),
@@ -2228,6 +2263,7 @@ def _format_full_v4_markdown(report: Mapping[str, Any]) -> str:
         f"- Source selection: `{json.dumps(_jsonable(faithfulness.get('source_selection', {})), sort_keys=True)}`",
         f"- Mean nearest-source distance: {_fmt(faithfulness.get('mean_nearest_source_distance'))}",
         f"- Nearest-source category consistency: {_fmt(faithfulness.get('nearest_source_category_consistency_rate', faithfulness.get('category_consistency_rate')))}",
+        f"- Shape-only category consistency: {_fmt(faithfulness.get('shape_category_consistency_rate'))}",
         f"- Color consistency heuristic: {_fmt(faithfulness.get('color_consistency_rate'))}",
         f"- Shape/bbox consistency heuristic: {_fmt(faithfulness.get('shape_bbox_consistency_rate'))}",
         f"- Repeated silhouette rate: {_fmt(faithfulness.get('repeated_silhouette_rate'))}",
@@ -2359,6 +2395,7 @@ def _format_full_v4_ood_markdown(
         f"- Too-many-rare-colors rate: {_fmt(review.get('too_many_rare_colors_rate'))}",
         f"- Source selection: `{json.dumps(_jsonable(faithfulness.get('source_selection', {})), sort_keys=True)}`",
         f"- Nearest-source category consistency: {_fmt(faithfulness.get('nearest_source_category_consistency_rate', faithfulness.get('category_consistency_rate')))}",
+        f"- Shape-only category consistency: {_fmt(faithfulness.get('shape_category_consistency_rate'))}",
         f"- Color consistency: {_fmt(faithfulness.get('color_consistency_rate'))}",
         f"- Repeated silhouette rate: {_fmt(faithfulness.get('repeated_silhouette_rate'))}",
         f"- Generic potion collapse rate: {_fmt(faithfulness.get('generic_potion_collapse_rate'))}",

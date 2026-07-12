@@ -1,0 +1,71 @@
+schema_version: spritelab_experiment_config_v1
+name: baseline
+ablation: baseline
+dataset:
+  directory: datasets/sprite_lab_multisource_v4
+  training_manifest: datasets/sprite_lab_multisource_v4/training_manifest.jsonl
+  split_manifest: datasets/sprite_lab_multisource_v4/training_manifest.jsonl
+  split: train
+model:
+  architecture: rectified_flow
+  sprite_size: 32
+  base_channels: 64
+  channel_mults: [1, 2, 4]
+  res_blocks_per_level: 2
+  embed_dim: 64
+  film_conditioning: false
+  bottleneck_attention: false
+conditioning:
+  mode: caption_semantic
+  caption_max_length: 32
+  semantic_max_length: 48
+  cfg_dropout: 0.1
+  field_dropout: {}
+  palette:
+    enabled: false
+    dropout: 0.0
+    strength: 1.0
+loss:
+  strategy: uniform_velocity
+  foreground_rgb_weight: 1.0
+  background_rgb_weight: 1.0
+  palette_aux_weight: 0.0
+  auxiliary_heads: false
+  index_head_weight: 0.0
+  palette_head_weight: 0.0
+  palette_presence_weight: 0.0
+optimizer:
+  name: adamw
+  learning_rate: 0.0002
+  schedule: none
+  warmup_steps: 0
+  gradient_clip: 0.0
+augmentation:
+  palette_swap_probability: 0.0
+  horizontal_flip_probability: 0.0
+seeds:
+  training: 123
+  data_loader: 123
+  evaluation: 124
+  sampling: 123
+runtime:
+  out_dir: experiments/ablations/baseline/seed_123
+  device: cpu
+  precision: fp32
+  batch_size: 32
+  max_steps: 5000
+  num_workers: 0
+  validation_mode: auto
+  sample_every: 250
+  save_every: 1000
+sampling:
+  cfg_scale: 3.0
+  steps: 30
+  max_samples: 64
+ema:
+  decay: 0.999
+  update_every: 1
+timestep_sampling:
+  strategy: uniform
+noise_schedule: rectified_flow_linear_path
+self_conditioning: false

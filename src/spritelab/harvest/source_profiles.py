@@ -6,7 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from spritelab.harvest.label_taxonomy import normalize_tag
+from spritelab.harvest.config_loader import load_source_profiles_config
+from spritelab.harvest.label_taxonomy import CATEGORY_VALUES, normalize_tag
 
 
 @dataclass(frozen=True)
@@ -27,7 +28,7 @@ class SourceProfile:
         return self.filename_trust == "exact"
 
 
-_PROFILES: dict[str, SourceProfile] = {
+_FALLBACK_PROFILES: dict[str, SourceProfile] = {
     "cc0_food": SourceProfile(
         name="cc0_food",
         domain="food",
@@ -110,6 +111,30 @@ _PROFILES: dict[str, SourceProfile] = {
         sheet_specialization="rpg_496",
         fusion_threshold_override=0.65,
     ),
+    "shade_weapons": SourceProfile(
+        name="shade_weapons",
+        domain="weapon",
+        filename_trust="exact",
+        expected_category_bias=("weapon",),
+        known_path_tokens=("shade", "weapons"),
+        notes="Trusted only with declarative sheet metadata.",
+    ),
+    "flare_armor": SourceProfile(
+        name="flare_armor",
+        domain="armor",
+        filename_trust="exact",
+        expected_category_bias=("armor",),
+        known_path_tokens=("flare", "armor"),
+        notes="Trusted only with declarative sheet metadata.",
+    ),
+    "farming_tools": SourceProfile(
+        name="farming_tools",
+        domain="tool",
+        filename_trust="exact",
+        expected_category_bias=("tool",),
+        known_path_tokens=("farming", "calciumtrice", "tools"),
+        notes="Trusted only with declarative sheet metadata.",
+    ),
     "generic_unknown": SourceProfile(
         name="generic_unknown",
         domain="unknown",
@@ -119,6 +144,91 @@ _PROFILES: dict[str, SourceProfile] = {
         notes="No source-specific filename guarantees.",
     ),
 }
+
+
+def hardcoded_source_profiles() -> dict[str, SourceProfile]:
+    """Return the immutable built-in profiles used if config is absent."""
+
+    return dict(_FALLBACK_PROFILES)
+
+
+def _profile_data(profile: SourceProfile) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "domain": profile.domain,
+        "filename_trust": profile.filename_trust,
+        "expected_category_bias": list(profile.expected_category_bias),
+        "known_path_tokens": list(profile.known_path_tokens),
+        "notes": profile.notes,
+    }
+    if profile.sheet_specialization is not None:
+        result["sheet_specialization"] = profile.sheet_specialization
+    if profile.fusion_threshold_override is not None:
+        result["fusion_threshold_override"] = profile.fusion_threshold_override
+    return result
+
+
+def _load_profiles() -> dict[str, SourceProfile]:
+    fallback = {"profiles": {name: _profile_data(profile) for name, profile in _FALLBACK_PROFILES.items()}}
+    config = load_source_profiles_config(fallback)
+    if set(config) != {"schema_version", "profiles"}:
+        raise ValueError("invalid label-v2 source_profiles config: unknown or missing top-level keys")
+    raw_profiles = config.get("profiles")
+    if not isinstance(raw_profiles, Mapping):
+        raise ValueError("invalid label-v2 source_profiles config: 'profiles' must be an object")
+    if set(raw_profiles) != set(_FALLBACK_PROFILES):
+        raise ValueError("invalid label-v2 source_profiles config: profile ids must match built-in profiles")
+
+    profiles: dict[str, SourceProfile] = {}
+    for name, raw in raw_profiles.items():
+        if not isinstance(name, str) or not isinstance(raw, Mapping):
+            raise ValueError("invalid label-v2 source_profiles config: every profile must be an object")
+        allowed_keys = {
+            "domain",
+            "filename_trust",
+            "expected_category_bias",
+            "known_path_tokens",
+            "notes",
+            "sheet_specialization",
+            "fusion_threshold_override",
+        }
+        if set(raw) - allowed_keys:
+            raise ValueError(f"invalid source profile '{name}': unknown keys {sorted(set(raw) - allowed_keys)}")
+        trust = raw.get("filename_trust")
+        bias = raw.get("expected_category_bias")
+        tokens = raw.get("known_path_tokens")
+        if trust not in {"exact", "prefix_family", "none"}:
+            raise ValueError(f"invalid source profile '{name}': filename_trust must be exact, prefix_family, or none")
+        if not isinstance(raw.get("domain"), str) or not isinstance(bias, list) or not isinstance(tokens, list):
+            raise ValueError(
+                f"invalid source profile '{name}': domain, expected_category_bias, and known_path_tokens required"
+            )
+        if not all(isinstance(value, str) for value in [*bias, *tokens]):
+            raise ValueError(f"invalid source profile '{name}': bias and path tokens must be strings")
+        if any(value not in CATEGORY_VALUES for value in bias):
+            raise ValueError(f"invalid source profile '{name}': expected_category_bias contains unknown category")
+        override = raw.get("fusion_threshold_override")
+        if override is not None and (not isinstance(override, (int, float)) or not 0.0 <= float(override) <= 1.0):
+            raise ValueError(f"invalid source profile '{name}': fusion_threshold_override must be 0..1")
+        profiles[name] = SourceProfile(
+            name=name,
+            domain=str(raw["domain"]),
+            filename_trust=trust,
+            expected_category_bias=tuple(bias),
+            known_path_tokens=tuple(tokens),
+            notes=str(raw.get("notes", "")),
+            sheet_specialization=str(raw["sheet_specialization"]) if raw.get("sheet_specialization") else None,
+            fusion_threshold_override=float(override) if override is not None else None,
+        )
+    return profiles
+
+
+_PROFILES = _load_profiles()
+
+
+def loaded_source_profiles() -> dict[str, SourceProfile]:
+    """Return the validated active source-profile configuration."""
+
+    return dict(_PROFILES)
 
 
 def is_exact_filename_trusted(profile: SourceProfile) -> bool:
@@ -141,6 +251,7 @@ def detect_source_profile(record: Mapping[str, Any]) -> SourceProfile:
     source_id = normalize_tag(str(record.get("source_id", "")))
     source_name = normalize_tag(str(record.get("source_name", "")))
     text = f"{source_id}_{source_name}_{haystack}"
+    tokens.update(token for token in text.replace("\\", "_").replace("/", "_").split("_") if token)
 
     if "oga_cc0_food" in text or {"cc0", "food"} <= tokens:
         return _PROFILES["cc0_food"]
@@ -163,6 +274,11 @@ def detect_source_profile(record: Mapping[str, Any]) -> SourceProfile:
             return _PROFILES["cc0_potion"]
     if "mushroom" in tokens or "fungus" in tokens:
         return _PROFILES["mushroom"]
+    for profile in _PROFILES.values():
+        if profile.name == "generic_unknown" or not profile.known_path_tokens:
+            continue
+        if set(profile.known_path_tokens) <= tokens:
+            return profile
     return _PROFILES["generic_unknown"]
 
 

@@ -28,6 +28,14 @@ from typing import Any
 
 import numpy as np
 
+from spritelab.harvest.label_schema import confidence_tier_for_bucket
+from spritelab.harvest.label_v4.training_quality import (
+    dataset_uncertainty_report,
+    evaluation_uncertainty_report,
+    extract_training_quality,
+    training_uncertainty_report,
+    uncertainty_correlation_report,
+)
 from spritelab.harvest.semantic_v3 import (
     _CATEGORY_WORD as CATEGORY_WORD,
 )
@@ -429,8 +437,11 @@ def _build_row(
     attributes = semantic.attributes
     label_v2 = record.get("label_v2") if isinstance(record.get("label_v2"), Mapping) else {}
     bucket = str(label_v2.get("bucket", "")) if isinstance(label_v2, Mapping) else ""
+    tier = str(record.get("label_confidence_tier") or label_v2.get("label_confidence_tier", ""))
+    if not tier and bucket:
+        tier = confidence_tier_for_bucket(bucket)
 
-    return {
+    row = {
         "schema_version": SCHEMA_VERSION,
         "sprite_id": str(record.get("sprite_id", "")),
         "split": split,
@@ -438,6 +449,7 @@ def _build_row(
         "npz_row": int(npz_row) if npz_row is not None else -1,
         "category": str(record.get("category", "")) or semantic.category,
         "object_name": str(record.get("object_name", "")) or semantic.object_name,
+        "label_confidence_tier": tier,
         "base_object": semantic.base_object,
         "caption": variant.caption,
         "caption_type": variant.caption_type,
@@ -466,15 +478,32 @@ def _build_row(
             "dataset_dir": str(dataset_dir).replace("\\", "/"),
             "manifest_file": manifest_file,
             "manifest_row": manifest_row,
+            "source_id": str(record.get("source_id") or record.get("source_dataset") or ""),
+            "source_pack": str(record.get("source_pack") or ""),
+            "artist": str(record.get("artist") or record.get("author") or record.get("sub_artist") or ""),
+            "suitability_status": str(record.get("suitability_status") or ""),
+            "inference_path": str(record.get("inference_path") or ""),
+            "propagation_relation": str(record.get("propagation_relation") or ""),
         },
         "audit": {
             "label_v2_bucket": bucket,
+            "label_confidence_tier": tier,
             "semantic_schema_version": semantic.schema_version,
             "caption_policy": caption_policy,
             "variant_index": variant_index,
             "seed": seed,
         },
     }
+    quality = extract_training_quality(record)
+    if quality is not None:
+        row["label_quality"] = quality
+    semantic_v4 = record.get("semantics") or record.get("semantic_v4")
+    label_v4 = record.get("label_v4")
+    if not isinstance(semantic_v4, Mapping) and isinstance(label_v4, Mapping):
+        semantic_v4 = label_v4.get("semantics")
+    if isinstance(semantic_v4, Mapping):
+        row["conditioning"]["semantic_v4"] = dict(semantic_v4)
+    return row
 
 
 def _dropout_mask(variant: CaptionVariant) -> dict[str, list[str]]:
@@ -588,6 +617,12 @@ def summarize_training_manifest(result: TrainingManifestResult) -> dict[str, Any
             dropout_ops[str(op)] += 1
 
     variant_counts = list(per_sprite.values())
+    label_quality = {
+        "dataset": dataset_uncertainty_report(rows),
+        "training": training_uncertainty_report(row for row in rows if row.get("split") == "train"),
+        "evaluation": evaluation_uncertainty_report(row for row in rows if row.get("split") in {"val", "test"}),
+        "correlation_analysis": uncertainty_correlation_report(rows),
+    }
     return {
         "dataset_dir": str(result.dataset_dir).replace("\\", "/"),
         "caption_policy": result.caption_policy,
@@ -607,6 +642,7 @@ def summarize_training_manifest(result: TrainingManifestResult) -> dict[str, Any
         "top_base_objects": dict(base_objects.most_common(25)),
         "top_colors": dict(colors.most_common(15)),
         "top_materials": dict(materials.most_common(15)),
+        "label_quality": label_quality,
         "warnings": list(result.warnings),
     }
 
@@ -651,6 +687,30 @@ def format_training_manifest_report(summary: Mapping[str, Any]) -> str:
         lines.extend(["", f"## {title}"])
         for name, count in dict(summary.get(key) or {}).items():
             lines.append(f"- {name}: {count}")
+    quality = summary.get("label_quality") if isinstance(summary.get("label_quality"), Mapping) else {}
+    dataset_quality = quality.get("dataset") if isinstance(quality.get("dataset"), Mapping) else {}
+    training_quality = quality.get("training") if isinstance(quality.get("training"), Mapping) else {}
+    contribution = (
+        training_quality.get("training_contribution")
+        if isinstance(training_quality.get("training_contribution"), Mapping)
+        else {}
+    )
+    calibration_counts = (
+        dataset_quality.get("calibration_state_counts")
+        if isinstance(dataset_quality.get("calibration_state_counts"), Mapping)
+        else {}
+    )
+    lines.extend(
+        [
+            "",
+            "## Label quality",
+            f"- Scored records: {int(dataset_quality.get('scored_record_count', 0))}",
+            f"- Uncalibrated records: {int(calibration_counts.get('uncalibrated', 0))}",
+            f"- Effective weighted records: {float(contribution.get('effective_weighted_records', 0.0)):.3f}",
+            f"- Effective sample size: {float(contribution.get('effective_sample_size', 0.0)):.3f}",
+            "- Correlation analysis: descriptive and non-causal; see JSON report for support/nulls.",
+        ]
+    )
     lines.extend(["", "## Warnings"])
     warnings = list(summary.get("warnings") or [])
     if warnings:

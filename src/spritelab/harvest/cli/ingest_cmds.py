@@ -18,6 +18,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     _register_import_zip(subparsers)
     _register_import_dir(subparsers)
     _register_download_zip(subparsers)
+    _register_download_file(subparsers)
     _register_import_diagnostics(subparsers)
 
 
@@ -83,6 +84,18 @@ def _run_download_zip(parsed: argparse.Namespace) -> None:
     _run_import(parsed, kind="url")
 
 
+def _register_download_file(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser("download-file", help="Download and import one direct PNG attachment.")
+    _add_source_args(p)
+    _add_import_args(p)
+    p.add_argument("--url", required=True)
+    p.set_defaults(func=_run_download_file)
+
+
+def _run_download_file(parsed: argparse.Namespace) -> None:
+    _run_import(parsed, kind="file")
+
+
 def _run_import(parsed: argparse.Namespace, *, kind: str) -> None:
     from spritelab.harvest.catalog import (
         append_harvest_event,
@@ -110,11 +123,14 @@ def _run_import(parsed: argparse.Namespace, *, kind: str) -> None:
         canonicalize_palette=parsed.canonicalize_palette,
         slice_sheets=parsed.slice_sheets,
         sheet_config=SheetSliceConfig(tile_width=parsed.tile_size, tile_height=parsed.tile_size),
+        include_member_globs=tuple(parsed.include_member_glob),
+        exclude_member_globs=tuple(parsed.exclude_member_glob),
     )
     harvested = harvest_source_to_imported_sprites(source, options=options, work_dir=run_dir)
     candidates = _unique_candidates(harvested)
 
-    write_sources_jsonl(run_dir, [source])
+    persisted_source = harvested[0].source if harvested else source
+    write_sources_jsonl(run_dir, [persisted_source])
     write_candidates_jsonl(run_dir, candidates)
     write_imported_jsonl(run_dir, harvested)
     write_harvest_reports(run_dir, [source], harvested)

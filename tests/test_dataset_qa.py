@@ -5,7 +5,13 @@ from pathlib import Path
 
 import numpy as np
 
-from spritelab.dataset_maker.qa import build_contact_sheet, qa_dataset, write_reports
+from spritelab.dataset_maker.qa import (
+    _color_tokens_compatible,
+    build_contact_sheet,
+    compare_dataset_manifest_parity,
+    qa_dataset,
+    write_reports,
+)
 
 
 def _bundle_arrays(sprite_ids: list[str]) -> dict[str, np.ndarray]:
@@ -279,3 +285,100 @@ def test_qa_does_not_mutate_dataset(tmp_path: Path) -> None:
     qa_dataset(dataset_dir)
     after = {p.name: p.stat().st_mtime_ns for p in dataset_dir.iterdir()}
     assert before == after
+
+
+def test_label_v2_audits_are_report_only_and_parity_ignores_new_metadata(tmp_path: Path) -> None:
+    dataset_dir = _valid_dataset(tmp_path)
+    result = qa_dataset(dataset_dir)
+    assert result.label_audits["report_only"] is True
+    assert "filename_vlm_category_mismatch" in result.label_audits["evidence_unavailable"]
+
+    train_path = dataset_dir / "manifest_train.jsonl"
+    row = json.loads(train_path.read_text(encoding="utf-8").splitlines()[0])
+    row["label_confidence_tier"] = "T2"  # explicitly ignored by parity
+    changed_dir = tmp_path / "changed"
+    changed_dir.mkdir()
+    for split in ("train", "val", "test"):
+        source = dataset_dir / f"manifest_{split}.jsonl"
+        target = changed_dir / source.name
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    changed_train = [
+        json.loads(line) for line in (changed_dir / "manifest_train.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    changed_train[0]["label_confidence_tier"] = "T2"
+    (changed_dir / "manifest_train.jsonl").write_text(
+        "\n".join(json.dumps(value) for value in changed_train) + "\n", encoding="utf-8"
+    )
+    assert compare_dataset_manifest_parity(dataset_dir, changed_dir)["unexpected_changed_count"] == 0
+
+
+def test_hallucination_audit_suppresses_trusted_same_potion_family(tmp_path: Path) -> None:
+    record = _record(
+        "potion",
+        "train",
+        label_v2={
+            "applied": True,
+            "bucket": "auto_rpg_496_specialized",
+            "flags": ["vlm_conflicts_with_filename"],
+            "safe_prefill": {"object_name": "blue_potion"},
+            "vlm_descriptor": {"object_name": "potion"},
+        },
+    )
+    dataset_dir = _write_dataset(
+        tmp_path, {"train": [record], "val": [_record("v0", "val")], "test": [_record("t0", "test")]}
+    )
+    audits = qa_dataset(dataset_dir).label_audits["entries"]
+    assert any(entry["code"] == "vlm_hallucination_denylist_suppressed" for entry in audits)
+    assert not any(
+        entry["code"] == "vlm_hallucination_denylist_hit" and "potion" in entry["sprite_ids"] for entry in audits
+    )
+
+    weak = _record(
+        "weak_potion",
+        "train",
+        label_v2={
+            "applied": True,
+            "bucket": "auto_vlm_when_filename_weak",
+            "flags": [],
+            "safe_prefill": {"object_name": "blue_potion"},
+            "vlm_descriptor": {"object_name": "potion"},
+        },
+    )
+    weak_dir = _write_dataset(
+        tmp_path / "weak", {"train": [weak], "val": [_record("v1", "val")], "test": [_record("t1", "test")]}
+    )
+    weak_audits = qa_dataset(weak_dir).label_audits["entries"]
+    assert any(
+        entry["code"] == "vlm_hallucination_denylist_hit" and "weak_potion" in entry["sprite_ids"]
+        for entry in weak_audits
+    )
+
+    conflicted = _record(
+        "conflicted_potion",
+        "train",
+        label_v2={
+            "applied": True,
+            "bucket": "auto_rpg_496_specialized",
+            "flags": ["needs_review_candidate_conflict"],
+            "safe_prefill": {"object_name": "blue_potion"},
+            "vlm_descriptor": {"object_name": "potion"},
+        },
+    )
+    conflict_dir = _write_dataset(
+        tmp_path / "conflict", {"train": [conflicted], "val": [_record("v2", "val")], "test": [_record("t2", "test")]}
+    )
+    conflict_audits = qa_dataset(conflict_dir).label_audits["entries"]
+    assert any(
+        entry["code"] == "vlm_hallucination_denylist_hit" and "conflicted_potion" in entry["sprite_ids"]
+        for entry in conflict_audits
+    )
+
+
+def test_color_family_matching_is_conservative_and_canonical() -> None:
+    assert _color_tokens_compatible({"blue"}, ["teal"])
+    assert _color_tokens_compatible({"pink"}, ["magenta"])
+    assert _color_tokens_compatible({"purple"}, ["magenta"])
+    assert _color_tokens_compatible({"gold"}, ["yellow"])
+    assert _color_tokens_compatible({"gray"}, ["black"])
+    assert not _color_tokens_compatible({"pink"}, ["purple"])
+    assert not _color_tokens_compatible({"red"}, ["orange"])

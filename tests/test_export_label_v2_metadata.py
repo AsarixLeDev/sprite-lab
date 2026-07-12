@@ -39,6 +39,7 @@ def test_export_manifest_includes_label_v2_object_and_audit_metadata(tmp_path: P
             "label_v2_applied": True,
             "label_v2_prediction_file": "label_v2_suggestions.jsonl",
             "label_v2_bucket": "auto_rpg_496_specialized",
+            "label_v2_label_confidence_tier": "T1",
             "label_v2_flags": ["auto_rpg_496_specialized"],
             "label_v2_candidate_object_names": ["chestplate", "armor"],
             "label_v2_safe_prefill": {
@@ -67,6 +68,7 @@ def test_export_manifest_includes_label_v2_object_and_audit_metadata(tmp_path: P
     )
     assert manifest["category"] == "armor"
     assert manifest["object_name"] == "chestplate"
+    assert manifest["label_confidence_tier"] == "T1"
     assert manifest["tags"] == ["chestplate", "armor", "metal"]
     assert manifest["short_description"] == "A metal chestplate icon."
     assert manifest["materials"] == ["metal"]
@@ -79,6 +81,7 @@ def test_export_manifest_includes_label_v2_object_and_audit_metadata(tmp_path: P
     assert manifest["label_v2"]["applied"] is True
     assert manifest["label_v2"]["prediction_file"] == "label_v2_suggestions.jsonl"
     assert manifest["label_v2"]["bucket"] == "auto_rpg_496_specialized"
+    assert manifest["label_v2"]["label_confidence_tier"] == "T1"
     assert manifest["label_v2"]["safe_prefill"]["object_name"] == "chestplate"
     assert manifest["label_v2"]["vlm_object_name"] == "armor"
     assert manifest["label_v2"]["vlm_alternative_object_names"] == ["chestplate", "breastplate"]

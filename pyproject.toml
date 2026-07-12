@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.26",
   "Pillow>=10",
+  "PyYAML>=6.0",
 ]
 
 [project.scripts]
@@ -32,6 +33,9 @@ harvest-ui = ["gradio>=4"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+spritelab = ["config/*.yaml", "training/experiment_configs/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -4,13 +4,20 @@ import json
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from spritelab.training.generated_canonicalizer import (
     canonicalize_generated_rgba,
     write_generated_sprite_artifacts,
     write_generation_reports,
 )
-from spritelab.training.prompt_faithfulness import PromptFaithfulnessConfig, run_prompt_faithfulness
+from spritelab.training.prompt_faithfulness import (
+    PromptFaithfulnessConfig,
+    _alpha_silhouette_feature,
+    _image_prefilter_feature,
+    _review_sample,
+    run_prompt_faithfulness,
+)
 
 
 def _rgba(color: tuple[float, float, float]) -> np.ndarray:
@@ -135,6 +142,7 @@ def test_prompt_faithfulness_detects_repeated_silhouettes_color_failure_and_mapp
 _DETERMINISTIC_METRIC_KEYS = (
     "nearest_source_category_consistency_rate",
     "category_consistency_rate",
+    "shape_category_consistency_rate",
     "color_consistency_rate",
     "repeated_silhouette_rate",
     "generic_blob_collapse_rate",
@@ -238,6 +246,9 @@ _PRE_EXISTING_SCALAR_KEYS = (
     "source_selection",
     "nearest_source_category_consistency_rate",
     "category_consistency_rate",
+    "shape_category_consistency_rate",
+    "shape_category_consistency_matches",
+    "shape_category_consistency_total",
     "color_consistency_rate",
     "shape_bbox_consistency_rate",
     "repeated_silhouette_rate",
@@ -250,6 +261,7 @@ _PRE_EXISTING_SCALAR_KEYS = (
 _NEW_CI_KEYS = (
     "nearest_source_category_consistency_ci95",
     "category_consistency_ci95",
+    "shape_category_consistency_ci95",
     "color_consistency_ci95",
     "repeated_silhouette_rate_ci95",
     "nearest_neighbor_duplicate_rate_ci95",
@@ -274,9 +286,16 @@ def test_prompt_faithfulness_json_preserves_old_scalar_fields_and_adds_ci_fields
     assert report["category_consistency_ci95"] == report["nearest_source_category_consistency_ci95"]
     assert report["near_copy_rate"] == report["nearest_neighbor_duplicate_rate"]
     assert report["near_copy_distance_threshold"] is None
+    assert report["shape_category_consistency_matches"] <= report["shape_category_consistency_total"]
+    if report["shape_category_consistency_total"]:
+        assert (
+            report["shape_category_consistency_rate"]
+            == report["shape_category_consistency_matches"] / report["shape_category_consistency_total"]
+        )
 
     for ci_key, rate_key in (
         ("category_consistency_ci95", "category_consistency_rate"),
+        ("shape_category_consistency_ci95", "shape_category_consistency_rate"),
         ("color_consistency_ci95", "color_consistency_rate"),
     ):
         ci = report[ci_key]
@@ -294,3 +313,50 @@ def test_prompt_faithfulness_json_preserves_old_scalar_fields_and_adds_ci_fields
     on_disk = json.loads((tmp_path / "generated" / "ci_fields.json").read_text(encoding="utf-8"))
     for key in (*_PRE_EXISTING_SCALAR_KEYS, *_NEW_CI_KEYS):
         assert key in on_disk
+
+
+def _shape_image(color: tuple[int, int, int], box: tuple[int, int, int, int]) -> Image.Image:
+    arr = np.zeros((32, 32, 4), dtype=np.uint8)
+    y0, y1, x0, x1 = box
+    arr[y0:y1, x0:x1, :3] = color
+    arr[y0:y1, x0:x1, 3] = 255
+    return Image.fromarray(arr, mode="RGBA")
+
+
+def test_alpha_silhouette_feature_ignores_rgb_but_changes_with_shape() -> None:
+    red_square = _shape_image((255, 0, 0), (8, 24, 8, 24))
+    blue_square = _shape_image((0, 0, 255), (8, 24, 8, 24))
+    blue_tall = _shape_image((0, 0, 255), (4, 28, 13, 19))
+
+    assert np.allclose(_alpha_silhouette_feature(red_square), _alpha_silhouette_feature(blue_square))
+    assert not np.allclose(_alpha_silhouette_feature(red_square), _alpha_silhouette_feature(blue_tall))
+
+
+def test_shape_category_retrieval_can_differ_from_rgb_category_retrieval() -> None:
+    generated = _shape_image((0, 0, 255), (8, 24, 8, 24))
+    potion_shape = _shape_image((255, 0, 0), (8, 24, 8, 24))
+    sword_color = _shape_image((0, 0, 255), (4, 28, 13, 19))
+    candidates = []
+    for sprite_id, category, object_name, image in (
+        ("potion", "item_icon", "red_potion", potion_shape),
+        ("sword", "weapon", "blue_sword", sword_color),
+    ):
+        candidates.append(
+            {
+                "sprite_id": sprite_id,
+                "metadata": {"category": category, "object_name": object_name},
+                "image": image,
+                "feature": _image_prefilter_feature(image),
+                "shape_feature": _alpha_silhouette_feature(image),
+            }
+        )
+
+    sample = _review_sample(
+        record={"sample_id": "sample", "prompt_id": "potion", "base_object": "potion"},
+        prompt_record={"prompt_id": "potion", "base_object": "potion"},
+        image=generated,
+        source_candidates=candidates,
+        source_categories_by_object={"potion": {"item_icon"}},
+    )
+    assert sample["category_consistent"] is False
+    assert sample["shape_category_consistent"] is True

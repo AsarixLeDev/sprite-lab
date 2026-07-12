@@ -24,6 +24,7 @@ from spritelab.dataset_maker.model import (
     normalize_sprite_id,
     validate_dataset_maker_item,
 )
+from spritelab.harvest.config_loader import labeling_config_metadata
 
 
 @dataclass(frozen=True)
@@ -303,6 +304,7 @@ def _manifest_records(sprites: Sequence[_PreparedSprite]) -> list[dict[str, Any]
                 "category": item.category,
                 "category_id": sprite.category_id,
                 "object_name": str(safe_prefill.get("object_name", "")),
+                "label_confidence_tier": str(sprite.auto_metadata.get("label_v2_label_confidence_tier", "")),
                 "tags": list(item.tags),
                 "short_description": str(safe_prefill.get("short_description") or item.notes),
                 "materials": [str(value) for value in safe_prefill.get("materials") or ()],
@@ -331,6 +333,13 @@ def _label_v2_manifest_metadata(auto_metadata: Mapping[str, Any]) -> dict[str, A
         "flags": [str(value) for value in auto_metadata.get("label_v2_flags") or ()],
         "candidate_object_names": [str(value) for value in auto_metadata.get("label_v2_candidate_object_names") or ()],
     }
+    label_quality = _mapping(auto_metadata.get("label_v2_label_quality"))
+    tier = str(
+        auto_metadata.get("label_v2_label_confidence_tier", "") or label_quality.get("label_confidence_tier", "")
+    ).strip()
+    if tier:
+        result["label_confidence_tier"] = tier
+    result["fusion_bucket"] = result["bucket"]
     if auto_metadata.get("label_v2_applied_at_build_id"):
         result["applied_at_build_id"] = str(auto_metadata.get("label_v2_applied_at_build_id", ""))
     safe_prefill = _mapping(auto_metadata.get("label_v2_safe_prefill"))
@@ -344,7 +353,6 @@ def _label_v2_manifest_metadata(auto_metadata: Mapping[str, Any]) -> dict[str, A
             str(value) for value in vlm_descriptor.get("alternative_object_names") or ()
         ]
         result["vlm_source_consistency"] = str(vlm_descriptor.get("source_consistency", ""))
-    label_quality = _mapping(auto_metadata.get("label_v2_label_quality"))
     if label_quality:
         result["label_quality"] = label_quality
     conflict_reasons = [str(value) for value in auto_metadata.get("label_v2_conflict_reasons") or ()]
@@ -411,6 +419,7 @@ def _dataset_config(dataset_name: str, max_palette_slots: int) -> dict[str, Any]
         "index_map_shape": [32, 32],
         "created_by": "spritelab.dataset_maker",
         "format_version": "1.0",
+        "labeling_v2_config": labeling_config_metadata(),
     }
 
 

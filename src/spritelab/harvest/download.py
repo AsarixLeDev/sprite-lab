@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 
 
@@ -27,6 +28,7 @@ def download_file(
     *,
     overwrite: bool = False,
     timeout_seconds: float = 60.0,
+    allowed_content_types: Sequence[str] = (),
 ) -> Path:
     """Stream a URL to disk via a ``.part`` file and atomic rename."""
 
@@ -43,6 +45,16 @@ def download_file(
             raise ValueError(
                 f"URL returned HTML instead of a file ({content_type}); "
                 "this is probably a landing page, not a direct download."
+            )
+        if (
+            allowed_content_types
+            and content_type
+            and not any(
+                content_type.lower().split(";", 1)[0].strip() == allowed.lower() for allowed in allowed_content_types
+            )
+        ):
+            raise ValueError(
+                f"URL returned unsupported content type {content_type!r}; expected one of {list(allowed_content_types)!r}"
             )
         total = response.headers.get("Content-Length")
         progress = _make_progress(int(total) if total else None, url)

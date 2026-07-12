@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from spritelab.harvest.config_loader import load_hallucination_denylist_config
 from spritelab.harvest.label_schema import LabelSuggestion
 from spritelab.harvest.label_taxonomy import normalize_object_name, normalize_tag, normalize_tags
 from spritelab.harvest.sheet_specializations import is_rpg_496_profile
@@ -266,7 +267,7 @@ RPG_496_CANDIDATES: dict[str, tuple[str, ...]] = {
     "scroll": ("scroll", "spell_scroll", "magic"),
 }
 
-GENERIC_OBJECT_NAMES = frozenset(
+_FALLBACK_GENERIC_OBJECT_NAMES = frozenset(
     {
         "",
         "gem",
@@ -288,7 +289,31 @@ GENERIC_OBJECT_NAMES = frozenset(
     }
 )
 
-_MALFORMED_CANDIDATES = frozenset({"sho", "armour", "elm", "ambiguou", "ambiguou_object", "ambiguou_shape"})
+_FALLBACK_MALFORMED_CANDIDATES = frozenset({"sho", "armour", "elm", "ambiguou", "ambiguou_object", "ambiguou_shape"})
+
+
+def _config_denylist_values() -> tuple[frozenset[str], frozenset[str]]:
+    fallback = {
+        "vlm_hallucination_objects": [],
+        "malformed_objects": sorted(_FALLBACK_MALFORMED_CANDIDATES),
+        "generic_objects": sorted(_FALLBACK_GENERIC_OBJECT_NAMES),
+    }
+    config = load_hallucination_denylist_config(fallback)
+    if set(config) != {"schema_version", "vlm_hallucination_objects", "malformed_objects", "generic_objects"}:
+        raise ValueError("invalid label-v2 hallucination_denylist config: unknown or missing top-level keys")
+    generic = config.get("generic_objects")
+    malformed = config.get("malformed_objects")
+    if not isinstance(generic, list) or not isinstance(malformed, list):
+        raise ValueError("invalid label-v2 hallucination_denylist config: generic and malformed lists required")
+    if not all(isinstance(value, str) for value in [*generic, *malformed]):
+        raise ValueError("invalid label-v2 hallucination_denylist config: values must be strings")
+    return (
+        frozenset(str(value).strip() for value in generic) & _FALLBACK_GENERIC_OBJECT_NAMES,
+        frozenset(str(value).strip() for value in malformed) & _FALLBACK_MALFORMED_CANDIDATES,
+    )
+
+
+GENERIC_OBJECT_NAMES, _MALFORMED_CANDIDATES = _config_denylist_values()
 _RPG_PREFIX_TOKENS = frozenset({"a", "ac", "c", "e", "i", "p", "s", "w"})
 
 

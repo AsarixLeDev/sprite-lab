@@ -13,6 +13,7 @@ SOURCE_TYPES = (
     "manual_zip",
     "local_directory",
     "direct_zip_url",
+    "direct_file_url",
     "kenney",
     "kenney_manual_zip",
     "opengameart_manual_zip",
@@ -64,7 +65,12 @@ _LICENSE_ALIASES = {
     "publicdomain": "public_domain",
     "pd": "public_domain",
     "cc-by": "cc_by",
+    "cc-by-3.0": "cc_by",
+    "cc-by-4.0": "cc_by",
+    "cc_by_3_0": "cc_by",
+    "cc_by_3.0": "cc_by",
     "cc_by_4.0": "cc_by",
+    "cc_by_4_0": "cc_by",
     "cc-by-sa": "cc_by_sa",
     "oga-by": "oga_by",
     "apache": "apache_2",
@@ -138,12 +144,18 @@ class SourceRecord:
     source_type: str
     source_url: str = ""
     download_url: str = ""
+    download_kind: str = ""
     local_archive_path: str = ""
     local_root_path: str = ""
     author: str = ""
     license: SourceLicense = field(default_factory=lambda: SourceLicense(license="unknown"))
     created_at: str = ""
     sha256: str = ""
+    download_sha256: str = ""
+    download_size_bytes: int = 0
+    downloaded_at_utc: str = ""
+    original_filename: str = ""
+    archive_member_summary: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -152,6 +164,8 @@ class SourceRecord:
         object.__setattr__(self, "source_type", str(self.source_type).strip().lower())
         if not self.created_at:
             object.__setattr__(self, "created_at", utc_timestamp())
+        if self.download_sha256 and not self.sha256:
+            object.__setattr__(self, "sha256", self.download_sha256)  # legacy reader compatibility
 
 
 def utc_timestamp() -> str:

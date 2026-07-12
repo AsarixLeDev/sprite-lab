@@ -14,8 +14,15 @@ try:  # torch is an optional project dependency.
 except ImportError:  # pragma: no cover - exercised when torch is absent or broken.
     torch = None  # type: ignore[assignment]
 
+from spritelab.harvest.label_v4.training_quality import apply_conditioning_policy, quality_tensor_payload
+from spritelab.training.palette_conditioning import build_palette_condition
 from spritelab.training.palette_swap import PaletteSwapConfig, apply_palette_swap
 from spritelab.training.rgba import npz_row_to_rgba
+from spritelab.training.role_ramp_transplant import (
+    RoleRampTransplantConfig,
+    apply_role_ramp_transplant,
+    build_role_ramp_library,
+)
 from spritelab.training.structured_conditioning import (
     STRUCTURED_BATCH_KEYS,
     StructuredConditioningVocab,
@@ -69,6 +76,9 @@ class SpriteTrainingDataset(_DatasetBase):
         cache_samples: bool = True,
         npz_cache: dict[str, dict[str, np.ndarray]] | None = None,
         palette_swap: PaletteSwapConfig | None = None,
+        role_ramp_transplant: RoleRampTransplantConfig | None = None,
+        palette_conditioning: bool = False,
+        palette_conditioning_allow_missing: bool = False,
     ) -> None:
         _require_torch()
         self.dataset_dir = Path(dataset_dir)
@@ -80,6 +90,11 @@ class SpriteTrainingDataset(_DatasetBase):
         self.sprite_ids = None if sprite_ids is None else tuple(str(sprite_id) for sprite_id in sprite_ids)
         self.structured_vocab = structured_vocab
         self.palette_swap = palette_swap if (palette_swap is not None and palette_swap.active()) else None
+        self.role_ramp_transplant = (
+            role_ramp_transplant if (role_ramp_transplant is not None and role_ramp_transplant.active()) else None
+        )
+        self.palette_conditioning = bool(palette_conditioning)
+        self.palette_conditioning_allow_missing = bool(palette_conditioning_allow_missing)
         self.cache_samples = bool(cache_samples) and not (
             self.palette_swap is not None and bool(self.palette_swap.stochastic)
         )
@@ -108,6 +123,17 @@ class SpriteTrainingDataset(_DatasetBase):
         # palette swap disables it so repeated draws can vary.
         self._npz_cache: dict[str, dict[str, np.ndarray]] = npz_cache if npz_cache is not None else {}
         self._sample_cache: dict[int, dict[str, Any]] = {}
+        self.role_ramp_library = (
+            build_role_ramp_library(
+                self.dataset_dir,
+                self.records,
+                require_trusted_role_map=self.role_ramp_transplant.require_trusted_role_map,
+                exclude_families=self.role_ramp_transplant.exclude_families,
+                npz_cache=self._npz_cache,
+            )
+            if self.role_ramp_transplant is not None
+            else None
+        )
 
     def __len__(self) -> int:
         return len(self.records)
@@ -165,12 +191,36 @@ class SpriteTrainingDataset(_DatasetBase):
                 caption = swap.caption
                 active_record = swap.record
 
+        role_ramp_meta: dict[str, Any] | None = None
+        if self.role_ramp_transplant is not None and self.role_ramp_library is not None:
+            transplant = apply_role_ramp_transplant(
+                index_map=index_np,
+                alpha=alpha_np,
+                role_map=role_np,
+                palette_rgb=palette,
+                palette_mask=palette_mask_np,
+                record=active_record,
+                caption=caption,
+                sprite_id=sprite_id,
+                library=self.role_ramp_library,
+                config=self.role_ramp_transplant,
+            )
+            role_ramp_meta = transplant.metadata()
+            if transplant.applied:
+                palette = np.asarray(transplant.palette_rgb, dtype=np.float32)
+                palette_u8 = np.rint(np.clip(palette, 0.0, 1.0) * 255.0).astype(np.uint8)
+                caption = transplant.caption
+                active_record = transplant.record
+
+        active_record, caption = apply_conditioning_policy(active_record, caption)
+
         rgba_np = npz_row_to_rgba(
             index_map=index_np,
             alpha=alpha_np,
             palette=palette,
             palette_mask=palette_mask_np,
         )
+        label_quality = quality_tensor_payload(record)
 
         sample = {
             "rgba": th.as_tensor(rgba_np, dtype=th.float32),
@@ -182,6 +232,17 @@ class SpriteTrainingDataset(_DatasetBase):
             "palette_u8": th.as_tensor(palette_u8, dtype=th.uint8),
             "palette_mask": th.as_tensor(palette_mask_np, dtype=th.bool),
             "category_id": th.as_tensor(category_id, dtype=th.long),
+            "record_loss_weight": th.as_tensor(label_quality["record_loss_weight"], dtype=th.float32),
+            "label_quality_present": th.as_tensor(label_quality["quality_present"], dtype=th.bool),
+            "label_field_uncertainty": th.as_tensor(label_quality["field_uncertainty"], dtype=th.long),
+            "label_field_loss_weight": th.as_tensor(label_quality["field_loss_weight"], dtype=th.float32),
+            "label_field_supervision_mask": th.as_tensor(label_quality["field_supervision_mask"], dtype=th.float32),
+            "label_field_auxiliary_mask": th.as_tensor(label_quality["field_auxiliary_mask"], dtype=th.float32),
+            "label_field_conditioning_mask": th.as_tensor(label_quality["field_conditioning_mask"], dtype=th.float32),
+            "label_field_negative_target_mask": th.as_tensor(
+                label_quality["field_negative_target_mask"], dtype=th.float32
+            ),
+            "label_field_state_ids": th.as_tensor(label_quality["field_state_ids"], dtype=th.long),
             "caption": caption,
             "caption_tokens": th.as_tensor(
                 self.tokenizer.encode(caption, max_length=self.caption_max_length),
@@ -197,8 +258,21 @@ class SpriteTrainingDataset(_DatasetBase):
             "npz_row": npz_row,
             "manifest_record": dict(record),
         }
+        if self.palette_conditioning:
+            sample["palette_condition"] = th.as_tensor(
+                build_palette_condition(
+                    palette_rgb=palette,
+                    palette_mask=palette_mask_np,
+                    index_map=index_np,
+                    role_map=role_np,
+                    allow_missing=self.palette_conditioning_allow_missing,
+                ),
+                dtype=th.float32,
+            )
         if palette_swap_meta is not None:
             sample["palette_swap"] = palette_swap_meta
+        if role_ramp_meta is not None:
+            sample["role_ramp_transplant"] = role_ramp_meta
         if self.structured_vocab is not None:
             structured = encode_structured_conditioning(active_record, self.structured_vocab)
             for key in STRUCTURED_BATCH_KEYS:
@@ -275,10 +349,21 @@ def collate_sprite_batch(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         "category_id",
         "caption_tokens",
         "semantic_tokens",
+        "palette_condition",
+        "record_loss_weight",
+        "label_quality_present",
+        "label_field_uncertainty",
+        "label_field_loss_weight",
+        "label_field_supervision_mask",
+        "label_field_auxiliary_mask",
+        "label_field_conditioning_mask",
+        "label_field_negative_target_mask",
+        "label_field_state_ids",
     )
     batch: dict[str, Any] = {}
     for key in tensor_keys:
-        batch[key] = th.stack([sample[key] for sample in samples])
+        if key in samples[0]:
+            batch[key] = th.stack([sample[key] for sample in samples])
     for key in (*STRUCTURED_BATCH_KEYS, "structured_present"):
         if key in samples[0]:
             batch[key] = th.stack([sample[key] for sample in samples])

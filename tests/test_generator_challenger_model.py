@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch", exc_type=ImportError)
@@ -30,6 +31,15 @@ from spritelab.training.generator_challenger import (
     run_challenger_training,
     run_sample_generator_challenger,
     strip_color_conditioning,
+)
+from spritelab.training.palette_conditioning import (
+    PALETTE_CONDITION_CHANNELS,
+    PALETTE_CONDITION_SLOTS,
+    PaletteConditionEntry,
+    PaletteConditionLibrary,
+    build_palette_condition,
+    prompt_color_family,
+    rgb_to_oklab,
 )
 from spritelab.training.tokenization import SpriteTextTokenizer
 
@@ -154,7 +164,8 @@ def test_structured_field_dropout_only_applies_in_train_mode() -> None:
     dropped = _apply_structured_field_dropout(inputs, dropout=1.0, training=True)
     structured = dropped["structured_conditioning"]
     assert torch.count_nonzero(structured["category_id"]).item() == 0
-    assert torch.count_nonzero(structured["color_multi_hot"]).item() == 0
+    assert torch.all(structured["color_multi_hot"][:, 0] == 1)
+    assert torch.count_nonzero(structured["color_multi_hot"][:, 1:]).item() == 0
 
 
 def test_structured_field_dropout_uses_independent_field_masks() -> None:
@@ -164,7 +175,7 @@ def test_structured_field_dropout_uses_independent_field_masks() -> None:
     structured = dropped["structured_conditioning"]
     category_mask = structured["category_id"].eq(0)
     object_mask = structured["object_id"].eq(0)
-    color_mask = structured["color_multi_hot"].sum(dim=1).eq(0)
+    color_mask = structured["color_multi_hot"][:, 0].eq(1) & structured["color_multi_hot"][:, 1:].sum(dim=1).eq(0)
 
     assert category_mask.any()
     assert object_mask.any()
@@ -1831,6 +1842,140 @@ def test_challenger_sample_config_defaults_preserve_behavior() -> None:
     assert cfg.color_guidance_start_t == 0.0
     assert cfg.color_guidance_ramp_t == 0.0
     assert cfg.object_id_scale == 1.0
+
+
+# ── v3 Phase 0: canonical palette conditioning ─────────────────────────────
+
+
+def _palette_condition_inputs() -> tuple[Any, Any, Any, Any]:
+    palette = np.zeros((16, 3), dtype=np.uint8)
+    palette[0] = (255, 0, 255)  # must remain ignored despite a conspicuous value
+    palette[1] = (220, 40, 30)
+    palette[2] = (40, 100, 220)
+    mask = np.zeros(16, dtype=bool)
+    mask[:3] = True
+    index = np.zeros((32, 32), dtype=np.int64)
+    index[4:20, 4:20] = 1
+    index[20:28, 20:28] = 2
+    roles = np.zeros((32, 32), dtype=np.int64)
+    roles[index == 1] = 4
+    roles[index == 2] = 7
+    return palette, mask, index, roles
+
+
+def test_palette_condition_shape_slot_zero_coverage_and_oklab() -> None:
+    palette, mask, index, roles = _palette_condition_inputs()
+    condition = build_palette_condition(palette_rgb=palette, palette_mask=mask, index_map=index, role_map=roles)
+    assert condition.shape == (PALETTE_CONDITION_SLOTS, PALETTE_CONDITION_CHANNELS)
+    assert condition.dtype == np.float32
+    assert np.all(condition[0] == 0.0)
+    assert condition[1, 3] == 1.0
+    assert condition[1, 4] == pytest.approx(0.25)
+    assert condition[2, 4] == pytest.approx(0.0625)
+    assert 0.0 < condition[1, 0] < 1.0
+    assert condition[1, 1] != pytest.approx(condition[2, 1])
+    white = rgb_to_oklab(np.array([[1.0, 1.0, 1.0]], dtype=np.float32))[0]
+    assert white[0] == pytest.approx(1.0, abs=0.01)
+    assert abs(float(white[1])) < 0.01 and abs(float(white[2])) < 0.01
+
+
+def test_palette_condition_missing_fields_require_explicit_fallback() -> None:
+    with pytest.raises(ValueError, match="palette conditioning requires"):
+        build_palette_condition(palette_rgb=None, palette_mask=None, index_map=None, role_map=None)
+    zero = build_palette_condition(
+        palette_rgb=None, palette_mask=None, index_map=None, role_map=None, allow_missing=True
+    )
+    assert zero.shape == (16, 6)
+    assert not np.any(zero)
+
+
+def test_palette_condition_library_retrieves_requested_family_and_source() -> None:
+    condition = np.zeros((16, 6), dtype=np.float32)
+    library = PaletteConditionLibrary(
+        [
+            PaletteConditionEntry("red_sword", "red", "weapon", condition),
+            PaletteConditionEntry("blue_sword", "blue", "weapon", condition + 1.0),
+        ]
+    )
+    assert prompt_color_family({"prompt": "blue sword"}) == "blue"
+    assert library.retrieve({"prompt": "blue sword", "category": "weapon"}).sprite_id == "blue_sword"
+    from spritelab.training.generator_challenger import _select_palette_conditions
+
+    assert (
+        _select_palette_conditions(
+            [{"sprite_id": "red_sword", "prompt": "red sword"}],
+            library=library,
+            mode="source",
+            exclude_exact_prompt_target=False,
+        )[0].sprite_id
+        == "red_sword"
+    )
+    assert (
+        _select_palette_conditions(
+            [{"prompt": "blue sword", "category": "weapon"}],
+            library=library,
+            mode="retrieved",
+            exclude_exact_prompt_target=False,
+        )[0].sprite_id
+        == "blue_sword"
+    )
+    assert _select_palette_conditions(
+        [{"prompt": "blue sword"}], library=library, mode="none", exclude_exact_prompt_target=False
+    ) == [None]
+
+
+def test_palette_conditioned_model_decoder_injection_and_dropout() -> None:
+    torch.manual_seed(4)
+    model = RectifiedFlowUNet(
+        vocab_size=16,
+        embed_dim=8,
+        base_channels=8,
+        channel_mults=(1, 2),
+        res_blocks_per_level=1,
+        palette_conditioning=True,
+        palette_conditioning_dim=12,
+        palette_conditioning_inject="decoder",
+    ).eval()
+    x, t = torch.randn(2, 4, 32, 32), torch.rand(2)
+    caption = torch.ones(2, 4, dtype=torch.long)
+    condition = torch.zeros(2, 16, 6)
+    condition[:, 1, 0] = 0.6
+    condition[:, 1, 3:5] = torch.tensor([1.0, 0.5])
+    conditioned = model(x, t, caption_tokens=caption, palette_condition=condition)
+    unconditioned = model(x, t, caption_tokens=caption, palette_condition=torch.zeros_like(condition))
+    assert conditioned.shape == unconditioned.shape == (2, 4, 32, 32)
+    assert not torch.allclose(conditioned, unconditioned)
+    model.train()
+    model.palette_conditioning_dropout = 1.0
+    assert torch.count_nonzero(model._palette_condition_embedding(condition, batch=2, device=x.device)).item() == 0
+
+
+def test_palette_condition_disabled_model_ignores_condition() -> None:
+    torch.manual_seed(5)
+    model = RectifiedFlowUNet(
+        vocab_size=16, embed_dim=8, base_channels=8, channel_mults=(1,), res_blocks_per_level=1
+    ).eval()
+    x, t, caption = torch.randn(1, 4, 32, 32), torch.rand(1), torch.ones(1, 4, dtype=torch.long)
+    out_a = model(x, t, caption_tokens=caption)
+    out_b = model(x, t, caption_tokens=caption, palette_condition=torch.rand(1, 16, 6))
+    assert torch.equal(out_a, out_b)
+
+
+def test_palette_conditioning_config_defaults_are_default_off() -> None:
+    config = ChallengerTrainConfig(
+        dataset_dir=Path("ds"), training_manifest=Path("manifest.jsonl"), out_dir=Path("out")
+    )
+    assert config.palette_conditioning is False
+    assert config.palette_conditioning_dropout == 0.0
+    assert config.palette_conditioning_dim == 64
+    assert config.palette_conditioning_inject == "decoder"
+    sample = ChallengerSampleConfig(checkpoint=Path("model.pt"), prompts=Path("prompts.jsonl"), out_dir=Path("out"))
+    assert sample.palette_conditioning_source == "none"
+
+
+def test_palette_conditioned_model_rejects_invalid_injection() -> None:
+    with pytest.raises(ValueError, match="palette_conditioning_inject"):
+        RectifiedFlowUNet(vocab_size=8, palette_conditioning=True, palette_conditioning_inject="invalid")
 
 
 def test_cli_accepts_color_guidance_rgb_only() -> None:

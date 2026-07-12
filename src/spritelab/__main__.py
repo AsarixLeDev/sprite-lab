@@ -10,7 +10,7 @@ Handler = Callable[[list[str]], None]
 
 
 def _usage() -> str:
-    return "Usage: spritelab <curation|training|train|dataset-maker|harvest|ml> ..."
+    return "Usage: spritelab <curation|training|train|dataset-maker|harvest|ml|eval> ..."
 
 
 # ── Handler implementations ───────────────────────────────────────────────────
@@ -32,6 +32,12 @@ def _run_ml(args: list[str]) -> None:
     from spritelab.ml.cli import main as ml_main
 
     ml_main(args)
+
+
+def _run_eval(args: list[str]) -> None:
+    from spritelab.evaluation.cli import main as eval_main
+
+    eval_main(args)
 
 
 def _run_curation(args: list[str]) -> None:
@@ -98,6 +104,7 @@ _COMMANDS: dict[str, Handler] = {
     "training": _run_train,  # alias
     "harvest": _run_harvest,
     "ml": _run_ml,
+    "eval": _run_eval,
     "dataset-maker": _run_dataset_maker,
     "dataset-maker-import-export": _run_dataset_maker_import_export,
     "dataset-maker-prefill": _run_dataset_maker_prefill,

@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
-CATEGORY_VALUES = (
+from spritelab.harvest.config_loader import load_taxonomy_config
+
+_FALLBACK_CATEGORY_VALUES = (
     "unknown",
     "item_icon",
     "block",
@@ -21,8 +23,8 @@ CATEGORY_VALUES = (
     "environment_prop",
 )
 
-FOOD_TAGS = frozenset(
-    {
+_FALLBACK_TAG_GROUPS = {
+    "food": {
         "food",
         "consumable",
         "fruit",
@@ -42,10 +44,8 @@ FOOD_TAGS = frozenset(
         "tropical",
         "plant_based",
         "animal_product",
-    }
-)
-TOOL_TAGS = frozenset(
-    {
+    },
+    "tool": {
         "tool",
         "utility",
         "measuring_tool",
@@ -56,10 +56,8 @@ TOOL_TAGS = frozenset(
         "metal",
         "wood",
         "handle",
-    }
-)
-GEM_MATERIAL_TAGS = frozenset(
-    {
+    },
+    "gem_material": {
         "gem",
         "gemstone",
         "mineral",
@@ -70,15 +68,47 @@ GEM_MATERIAL_TAGS = frozenset(
         "raw_gem",
         "faceted",
         "precious_stone",
-    }
-)
-POTION_CONTAINER_TAGS = frozenset(
-    {"potion", "vial", "bottle", "flask", "jar", "liquid", "container", "drink", "beverage"}
-)
-WEAPON_TAGS = frozenset({"weapon", "melee", "ranged", "blade", "metal", "wood", "handle"})
-ARMOR_TAGS = frozenset({"armor", "shield", "helmet", "clothing", "defense", "wearable"})
-UI_EFFECT_TAGS = frozenset({"ui", "icon", "effect", "status_effect", "spell", "buff", "debuff"})
-ENVIRONMENT_TILE_TAGS = frozenset({"environment", "tile", "terrain", "prop", "wall", "floor"})
+    },
+    "potion_container": {"potion", "vial", "bottle", "flask", "jar", "liquid", "container", "drink", "beverage"},
+    "weapon": {"weapon", "melee", "ranged", "blade", "metal", "wood", "handle"},
+    "armor": {"armor", "shield", "helmet", "clothing", "defense", "wearable"},
+    "ui_effect": {"ui", "icon", "effect", "status_effect", "spell", "buff", "debuff"},
+    "environment_tile": {"environment", "tile", "terrain", "prop", "wall", "floor"},
+}
+
+
+def _load_taxonomy() -> tuple[tuple[str, ...], dict[str, frozenset[str]]]:
+    fallback = {"categories": list(_FALLBACK_CATEGORY_VALUES), "tag_groups": _FALLBACK_TAG_GROUPS}
+    config = load_taxonomy_config(fallback)
+    if set(config) != {"schema_version", "categories", "tag_groups"}:
+        raise ValueError("invalid label-v2 taxonomy config: unknown or missing top-level keys")
+    categories = config.get("categories")
+    groups = config.get("tag_groups")
+    if not isinstance(categories, list) or not all(isinstance(value, str) for value in categories):
+        raise ValueError("invalid label-v2 taxonomy config: 'categories' must be a string list")
+    if tuple(categories) != _FALLBACK_CATEGORY_VALUES:
+        raise ValueError("invalid label-v2 taxonomy config: category values/order must match built-in taxonomy")
+    if not isinstance(groups, dict) or set(groups) != set(_FALLBACK_TAG_GROUPS):
+        raise ValueError("invalid label-v2 taxonomy config: tag group names must match built-in taxonomy")
+    parsed: dict[str, frozenset[str]] = {}
+    for name, values in groups.items():
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            raise ValueError(f"invalid label-v2 taxonomy config: tag group '{name}' must be a string list")
+        if frozenset(values) != frozenset(_FALLBACK_TAG_GROUPS[name]):
+            raise ValueError(f"invalid label-v2 taxonomy config: tag group '{name}' must match built-in values")
+        parsed[name] = frozenset(values)
+    return tuple(categories), parsed
+
+
+CATEGORY_VALUES, _TAG_GROUPS = _load_taxonomy()
+FOOD_TAGS = _TAG_GROUPS["food"]
+TOOL_TAGS = _TAG_GROUPS["tool"]
+GEM_MATERIAL_TAGS = _TAG_GROUPS["gem_material"]
+POTION_CONTAINER_TAGS = _TAG_GROUPS["potion_container"]
+WEAPON_TAGS = _TAG_GROUPS["weapon"]
+ARMOR_TAGS = _TAG_GROUPS["armor"]
+UI_EFFECT_TAGS = _TAG_GROUPS["ui_effect"]
+ENVIRONMENT_TILE_TAGS = _TAG_GROUPS["environment_tile"]
 
 _TOKEN_SEPARATORS_RE = re.compile(r"[\s/\\\-.:;]+")
 _SAFE_TOKEN_RE = re.compile(r"[^a-z0-9_]+")

@@ -30,6 +30,9 @@ from typing import Any
 
 import numpy as np
 
+from spritelab.harvest.config_loader import labeling_config_metadata, load_hallucination_denylist_config
+from spritelab.harvest.label_schema import confidence_tier_for_bucket
+
 SPLIT_NAMES: tuple[str, ...] = ("train", "val", "test")
 
 # Malformed object names that must never reach an exported dataset.
@@ -70,6 +73,7 @@ class DatasetQAResult:
     image_checks: dict[str, Any] = field(default_factory=dict)
     manifest_checks: dict[str, Any] = field(default_factory=dict)
     label_v2_checks: dict[str, Any] = field(default_factory=dict)
+    label_audits: dict[str, Any] = field(default_factory=dict)
     semantic_v3_checks: dict[str, Any] = field(default_factory=dict)
     split_checks: dict[str, Any] = field(default_factory=dict)
     review_queue_overlap: list[str] = field(default_factory=list)
@@ -102,6 +106,8 @@ class DatasetQAResult:
             "image_checks": dict(self.image_checks),
             "manifest_checks": dict(self.manifest_checks),
             "label_v2_checks": dict(self.label_v2_checks),
+            "label_audits": dict(self.label_audits),
+            "labeling_v2_config": labeling_config_metadata(),
             "semantic_v3_checks": dict(self.semantic_v3_checks),
             "split_checks": dict(self.split_checks),
             "review_queue_overlap": list(self.review_queue_overlap),
@@ -153,6 +159,7 @@ def qa_dataset(
     _check_images(result, manifests, npz_by_split, max_palette_slots=max_palette_slots, strict=strict)
     _check_manifests(result, dataset_dir, all_records, config, strict=strict)
     _check_label_v2(result, all_records)
+    _run_label_v2_audits(result, all_records)
     _check_semantic_v3(result, all_records, require_semantic_v3=require_semantic_v3)
     _check_splits(result, manifests, npz_by_split, expected_fractions=expected_fractions)
     _build_counts(result, all_records, vocab)
@@ -161,6 +168,80 @@ def qa_dataset(
 
     result.total_images = sum(int(payload["count"]) for payload in npz_by_split.values() if payload is not None)
     return result
+
+
+def compare_dataset_manifest_parity(before_dir: Path, after_dir: Path) -> dict[str, Any]:
+    """Compare labeling/semantic outputs while ignoring additive v2 metadata.
+
+    This is intentionally read-only and reports every changed sprite row. It
+    is suitable for a pre/post export gate as well as an in-place no-change
+    smoke check.
+    """
+
+    before = _manifest_rows_by_id(Path(before_dir))
+    after = _manifest_rows_by_id(Path(after_dir))
+    changed: list[dict[str, Any]] = []
+    for sprite_id in sorted(set(before) | set(after)):
+        if sprite_id not in before or sprite_id not in after:
+            changed.append(
+                {
+                    "sprite_id": sprite_id,
+                    "reason": "missing_row",
+                    "before_present": sprite_id in before,
+                    "after_present": sprite_id in after,
+                }
+            )
+            continue
+        old = _parity_payload(before[sprite_id])
+        new = _parity_payload(after[sprite_id])
+        if old != new:
+            changed.append({"sprite_id": sprite_id, "reason": "semantic_output_changed", "before": old, "after": new})
+    return {
+        "before_dir": str(before_dir),
+        "after_dir": str(after_dir),
+        "checked_rows": len(set(before) | set(after)),
+        "unexpected_changed_rows": changed,
+        "unexpected_changed_count": len(changed),
+        "ok": not changed,
+    }
+
+
+def _manifest_rows_by_id(dataset_dir: Path) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for split in SPLIT_NAMES:
+        path = dataset_dir / f"manifest_{split}.jsonl"
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict) and str(record.get("sprite_id", "")):
+                rows[str(record["sprite_id"])] = record
+    return rows
+
+
+def _parity_payload(record: Mapping[str, Any]) -> dict[str, Any]:
+    label_v2 = record.get("label_v2") if isinstance(record.get("label_v2"), Mapping) else {}
+    safe = label_v2.get("safe_prefill") if isinstance(label_v2.get("safe_prefill"), Mapping) else {}
+    quality = label_v2.get("label_quality") if isinstance(label_v2.get("label_quality"), Mapping) else {}
+    return {
+        "split": record.get("split"),
+        "category": record.get("category"),
+        "object_name": record.get("object_name"),
+        "tags": record.get("tags"),
+        "materials": record.get("materials"),
+        "dominant_colors": safe.get("dominant_colors", record.get("dominant_colors")),
+        "description": safe.get("short_description", record.get("short_description")),
+        "confidence": safe.get("confidence"),
+        "confidence_reason": safe.get("confidence_reason"),
+        "review_status": {
+            "needs_review": quality.get("needs_review", label_v2.get("needs_review")),
+            "bucket": label_v2.get("bucket"),
+        },
+        "semantic_v3": record.get("semantic_v3"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +596,410 @@ def _check_label_v2(result: DatasetQAResult, records: Sequence[Mapping[str, Any]
         result.add_error(f"label_v2.bucket missing: {sprite_id}")
     for sprite_id in missing_flags:
         result.add_error(f"label_v2.flags missing: {sprite_id}")
+
+
+def _run_label_v2_audits(result: DatasetQAResult, records: Sequence[Mapping[str, Any]]) -> None:
+    """Emit report-only Labeling v2 audit entries; never rewrite or reject rows."""
+
+    fallback = {"vlm_hallucination_objects": [], "malformed_objects": [], "generic_objects": []}
+    denylist = load_hallucination_denylist_config(fallback)
+    hallucinations = {str(value) for value in denylist["vlm_hallucination_objects"]}
+    entries: list[dict[str, Any]] = []
+    unavailable: Counter[str] = Counter()
+
+    filename_vlm_mismatch: list[tuple[str, dict[str, Any]]] = []
+    hallucination_hits: list[tuple[str, dict[str, Any]]] = []
+    hallucination_suppressed: list[tuple[str, dict[str, Any]]] = []
+    color_contradictions: list[tuple[str, dict[str, Any]]] = []
+    role_contradictions: list[tuple[str, dict[str, Any]]] = []
+    shape_contradictions: list[tuple[str, dict[str, Any]]] = []
+    potion_color_only: list[tuple[str, dict[str, Any]]] = []
+    gem_color_only: list[tuple[str, dict[str, Any]]] = []
+    color_expected_missing: list[tuple[str, dict[str, Any]]] = []
+    color_dominates: list[tuple[str, dict[str, Any]]] = []
+    colors = POTION_COLOR_ONLY_NAMES
+    color_words = colors | {
+        "black",
+        "brown",
+        "gray",
+        "grey",
+        "purple",
+        "violet",
+        "pink",
+        "magenta",
+        "cyan",
+        "navy",
+        "teal",
+        "gold",
+        "silver",
+        "lime",
+        "crimson",
+    }
+
+    category_records: dict[str, list[Mapping[str, Any]]] = {}
+    for record in records:
+        sprite_id = str(record.get("sprite_id", ""))
+        category = str(record.get("category", "") or "unknown")
+        category_records.setdefault(category, []).append(record)
+        label_v2 = record.get("label_v2") if isinstance(record.get("label_v2"), Mapping) else {}
+        filename = (
+            label_v2.get("filename_suggestion") if isinstance(label_v2.get("filename_suggestion"), Mapping) else None
+        )
+        vlm = label_v2.get("vlm_descriptor") if isinstance(label_v2.get("vlm_descriptor"), Mapping) else None
+        safe = label_v2.get("safe_prefill") if isinstance(label_v2.get("safe_prefill"), Mapping) else {}
+        tier = _record_label_tier(record, label_v2)
+
+        quality = label_v2.get("label_quality") if isinstance(label_v2.get("label_quality"), Mapping) else {}
+        fusion_flags = {str(value) for value in quality.get("flags") or label_v2.get("flags") or ()}
+        conflict_reasons = [
+            str(value) for value in quality.get("conflict_reasons") or label_v2.get("conflict_reasons") or ()
+        ]
+        if vlm is None:
+            unavailable["filename_vlm_category_mismatch"] += 1
+        elif "vlm_conflicts_with_filename" in fusion_flags:
+            filename_vlm_mismatch.append(
+                (
+                    sprite_id,
+                    {
+                        "tier": tier,
+                        "evidence_source": "fusion_flags",
+                        "fusion_flags": sorted(fusion_flags),
+                        "conflict_reasons": conflict_reasons,
+                    },
+                )
+            )
+        elif filename is not None:
+            try:
+                filename_confidence = float(filename.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                filename_confidence = 0.0
+            filename_category = str(filename.get("category", "unknown"))
+            vlm_category = str(vlm.get("category", vlm.get("possible_category", "unknown")))
+            if (
+                filename_confidence >= 0.85
+                and filename_category != "unknown"
+                and vlm_category != "unknown"
+                and filename_category != vlm_category
+            ):
+                filename_vlm_mismatch.append(
+                    (
+                        sprite_id,
+                        {
+                            "filename_category": filename_category,
+                            "vlm_category": vlm_category,
+                            "filename_confidence": filename_confidence,
+                            "tier": tier,
+                            "evidence_source": "raw_filename_suggestion",
+                        },
+                    )
+                )
+
+        if vlm is None:
+            unavailable["vlm_hallucination_denylist_hit"] += 1
+        else:
+            object_name = str(vlm.get("object_name") or vlm.get("possible_object_name") or "")
+            if object_name in hallucinations:
+                evidence = {
+                    "vlm_object_name": object_name,
+                    "safe_object_name": str(safe.get("object_name") or record.get("object_name") or ""),
+                    "tier": tier,
+                    "fusion_flags": sorted(fusion_flags),
+                }
+                if _trusted_same_object_family(evidence, fusion_flags):
+                    hallucination_suppressed.append((sprite_id, {**evidence, "reason": "trusted_same_object_family"}))
+                else:
+                    hallucination_hits.append((sprite_id, evidence))
+
+        object_name = str(record.get("object_name", ""))
+        tokens = object_name.split("_")
+        is_color_only = object_name in colors
+        if is_color_only and (_is_potion_record(record) or {"potion", "vial", "bottle", "flask", "jar"} & set(tokens)):
+            potion_color_only.append((sprite_id, {"object_name": object_name}))
+        if category == "material" and is_color_only:
+            gem_color_only.append((sprite_id, {"object_name": object_name, "category": category}))
+        if tokens and tokens[0] in color_words and len(tokens) > 1:
+            color_dominates.append(
+                (
+                    sprite_id,
+                    {
+                        "object_name": object_name,
+                        "suggestion": "store color as an attribute when canonical representation exists",
+                    },
+                )
+            )
+
+        dominant_colors = _dominant_colors(record, label_v2, safe, vlm)
+        base = tokens[-1] if tokens else ""
+        if base in _COLOR_EXPECTED_BASE_OBJECTS:
+            if dominant_colors is None:
+                unavailable["color_expected_but_missing"] += 1
+            elif not set(dominant_colors) - {"black", "white", "gray", "grey", "silver", "transparent"}:
+                color_expected_missing.append(
+                    (sprite_id, {"object_name": object_name, "dominant_colors": dominant_colors})
+                )
+
+        named_colors = set(tokens) & color_words
+        if named_colors:
+            if dominant_colors is None:
+                unavailable["vlm_color_contradiction"] += 1
+            elif not _color_tokens_compatible(named_colors, dominant_colors):
+                color_contradictions.append(
+                    (
+                        sprite_id,
+                        {
+                            "label_color_tokens": sorted(named_colors),
+                            "dominant_color_tokens": dominant_colors,
+                            "label_color_families": sorted(_color_families(named_colors)),
+                            "dominant_color_families": sorted(_color_families(dominant_colors)),
+                        },
+                    )
+                )
+
+        visual_facts = record.get("visual_facts") if isinstance(record.get("visual_facts"), Mapping) else None
+        compact_audit_codes = {str(value) for value in quality.get("audit_codes") or ()}
+        if "role_inference_contradiction" in compact_audit_codes:
+            role_contradictions.append(
+                (
+                    sprite_id,
+                    {"evidence_source": "upstream_compact_audit_code", "audit_code": "role_inference_contradiction"},
+                )
+            )
+        if "shape_hint_contradiction" in compact_audit_codes:
+            shape_contradictions.append(
+                (
+                    sprite_id,
+                    {"evidence_source": "upstream_compact_audit_code", "audit_code": "shape_hint_contradiction"},
+                )
+            )
+        if visual_facts is None:
+            if "role_inference_contradiction" not in compact_audit_codes:
+                unavailable["role_inference_contradiction"] += 1
+            if "shape_hint_contradiction" not in compact_audit_codes:
+                unavailable["shape_hint_contradiction"] += 1
+        else:
+            shape_hints = {str(value) for value in visual_facts.get("shape_hints") or ()}
+            if "solid" in set(record.get("tags") or ()) and "small_content" in shape_hints:
+                role_contradictions.append(
+                    (sprite_id, {"tags": list(record.get("tags") or ()), "shape_hints": sorted(shape_hints)})
+                )
+            if "round" in set(tokens) and ({"tall", "wide"} & shape_hints):
+                shape_contradictions.append(
+                    (sprite_id, {"object_name": object_name, "shape_hints": sorted(shape_hints)})
+                )
+
+    _append_audit(entries, "filename_vlm_category_mismatch", filename_vlm_mismatch, severity_by_tier=True)
+    _append_audit(entries, "vlm_hallucination_denylist_hit", hallucination_hits, severity="error")
+    _append_audit(entries, "vlm_hallucination_denylist_suppressed", hallucination_suppressed, severity="info")
+    _append_audit(entries, "vlm_color_contradiction", color_contradictions, severity="warning")
+    _append_audit(entries, "role_inference_contradiction", role_contradictions, severity="warning")
+    _append_audit(entries, "shape_hint_contradiction", shape_contradictions, severity="warning")
+    _append_audit(entries, "potion_is_color_only", potion_color_only, severity="error")
+    _append_audit(entries, "gem_is_color_only", gem_color_only, severity="error")
+    _append_audit(entries, "color_expected_but_missing", color_expected_missing, severity="warning")
+    _append_audit(entries, "color_dominates_object_name", color_dominates, severity="info")
+
+    total = len(records)
+    for category, category_rows in sorted(category_records.items()):
+        count = len(category_rows)
+        if total and count / total < 0.02:
+            _append_audit(
+                entries,
+                "category_underrepresented",
+                [(category, {"category": category, "count": count, "total": total})],
+                severity="warning",
+            )
+        donors = Counter(str(row.get("source_name", "") or "(unknown)") for row in category_rows)
+        if donors:
+            donor, donor_count = donors.most_common(1)[0]
+            if donor_count / count > 0.60:
+                _append_audit(
+                    entries,
+                    "single_donor_dominates_category",
+                    [
+                        (
+                            category,
+                            {"category": category, "source_name": donor, "count": donor_count, "category_count": count},
+                        )
+                    ],
+                    severity="warning",
+                )
+        weak = [
+            row
+            for row in category_rows
+            if _record_label_tier(row, row.get("label_v2") if isinstance(row.get("label_v2"), Mapping) else {})
+            in {"T3", "T4"}
+        ]
+        if count and len(weak) / count > 0.40:
+            _append_audit(
+                entries,
+                "vlm_only_dominates_category",
+                [
+                    (
+                        str(row.get("sprite_id", "")),
+                        {
+                            "category": category,
+                            "tier": _record_label_tier(
+                                row, row.get("label_v2") if isinstance(row.get("label_v2"), Mapping) else {}
+                            ),
+                        },
+                    )
+                    for row in weak
+                ],
+                severity="warning",
+            )
+
+    result.label_audits = {
+        "report_only": True,
+        "entries": entries,
+        "evidence_unavailable": dict(sorted(unavailable.items())),
+        "evidence_coverage": _audit_evidence_coverage(len(records), unavailable),
+    }
+
+
+def _record_label_tier(record: Mapping[str, Any], label_v2: Mapping[str, Any]) -> str:
+    tier = str(record.get("label_confidence_tier") or label_v2.get("label_confidence_tier", "")).strip()
+    if tier:
+        return tier
+    quality = label_v2.get("label_quality") if isinstance(label_v2.get("label_quality"), Mapping) else {}
+    tier = str(quality.get("label_confidence_tier", "")).strip()
+    if tier:
+        return tier
+    bucket = str(label_v2.get("bucket") or quality.get("bucket") or "").strip()
+    return confidence_tier_for_bucket(bucket) if bucket else ""
+
+
+def _dominant_colors(
+    record: Mapping[str, Any], label_v2: Mapping[str, Any], safe: Mapping[str, Any], vlm: Mapping[str, Any] | None
+) -> list[str] | None:
+    for source in (record, safe, vlm or {}):
+        value = source.get("dominant_colors") if isinstance(source, Mapping) else None
+        if isinstance(value, Sequence) and not isinstance(value, str):
+            return [str(color) for color in value]
+    return None
+
+
+def _trusted_same_object_family(evidence: Mapping[str, Any], fusion_flags: set[str]) -> bool:
+    """Suppress a denylist guess only when independent trusted evidence agrees."""
+
+    if str(evidence.get("tier", "")) not in {"T0", "T1"}:
+        return False
+    if "needs_review_candidate_conflict" in fusion_flags:
+        return False
+    return bool(
+        _object_families(str(evidence.get("vlm_object_name", "")))
+        & _object_families(str(evidence.get("safe_object_name", "")))
+    )
+
+
+def _object_families(value: str) -> set[str]:
+    tokens = set(str(value).lower().split("_"))
+    families: set[str] = set()
+    if {"potion", "vial", "bottle", "flask", "jar"} & tokens:
+        families.add("potion_container")
+    if {"coin", "bar", "ingot"} & tokens:
+        families.add("currency_material")
+    return families
+
+
+_COLOR_FAMILY_BY_TOKEN: dict[str, frozenset[str]] = {
+    "blue": frozenset({"blue"}),
+    "light_blue": frozenset({"blue"}),
+    "dark_blue": frozenset({"blue"}),
+    "navy": frozenset({"blue"}),
+    "cyan": frozenset({"blue"}),
+    "teal": frozenset({"blue", "green"}),
+    "pink": frozenset({"pink"}),
+    "magenta": frozenset({"pink", "purple"}),
+    "purple": frozenset({"purple"}),
+    "violet": frozenset({"purple"}),
+    "red": frozenset({"red"}),
+    "dark_red": frozenset({"red"}),
+    "crimson": frozenset({"red"}),
+    "orange": frozenset({"orange"}),
+    "yellow": frozenset({"yellow"}),
+    "gold": frozenset({"yellow"}),
+    "green": frozenset({"green"}),
+    "dark_green": frozenset({"green"}),
+    "lime": frozenset({"green"}),
+    "black": frozenset({"grayscale"}),
+    "white": frozenset({"grayscale"}),
+    "gray": frozenset({"grayscale"}),
+    "grey": frozenset({"grayscale"}),
+    "dark_gray": frozenset({"grayscale"}),
+    "light_gray": frozenset({"grayscale"}),
+    "silver": frozenset({"grayscale"}),
+}
+
+
+def _color_families(tokens: Sequence[str] | set[str]) -> set[str]:
+    families: set[str] = set()
+    for token in tokens:
+        families.update(_COLOR_FAMILY_BY_TOKEN.get(str(token).lower(), ()))
+    return families
+
+
+def _color_tokens_compatible(label_tokens: set[str], observed_tokens: Sequence[str]) -> bool:
+    label_families = _color_families(label_tokens)
+    observed_families = _color_families(observed_tokens)
+    return bool(label_families and observed_families and label_families & observed_families)
+
+
+def _audit_evidence_coverage(total: int, unavailable: Mapping[str, int]) -> dict[str, dict[str, float | int]]:
+    return {
+        code: {
+            "total_records": total,
+            "unavailable_records": int(count),
+            "available_records": max(0, total - int(count)),
+            "coverage": (max(0, total - int(count)) / total) if total else 0.0,
+        }
+        for code, count in sorted(unavailable.items())
+    }
+
+
+def _append_audit(
+    entries: list[dict[str, Any]],
+    code: str,
+    rows: Sequence[tuple[str, Mapping[str, Any]]],
+    *,
+    severity: str = "warning",
+    severity_by_tier: bool = False,
+) -> None:
+    if not rows:
+        return
+    examples = [{"sprite_id": sprite_id, "evidence": dict(evidence)} for sprite_id, evidence in rows]
+    if severity_by_tier:
+        errors = [example for example in examples if example["evidence"].get("tier") in {"T0", "T1"}]
+        warnings = [example for example in examples if example not in errors]
+        if errors:
+            entries.append(
+                {
+                    "code": code,
+                    "severity": "error",
+                    "count": len(errors),
+                    "sprite_ids": [e["sprite_id"] for e in errors],
+                    "examples": errors,
+                }
+            )
+        if warnings:
+            entries.append(
+                {
+                    "code": code,
+                    "severity": "warning",
+                    "count": len(warnings),
+                    "sprite_ids": [e["sprite_id"] for e in warnings],
+                    "examples": warnings,
+                }
+            )
+        return
+    entries.append(
+        {
+            "code": code,
+            "severity": severity,
+            "count": len(examples),
+            "sprite_ids": [e["sprite_id"] for e in examples],
+            "examples": examples,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +1392,19 @@ def _render_markdown(result: DatasetQAResult) -> str:
     lines.append("")
 
     lines.append("## Label-v2 Checks")
+    lines.append("")
+
+    lines.append("## Labeling v2 Audits (report-only)")
+    lines.append("")
+    audits = result.label_audits
+    lines.append(f"- report-only: {audits.get('report_only', True)}")
+    for entry in audits.get("entries", []):
+        lines.append(f"- {entry.get('severity', 'warning')} {entry.get('code', '')}: {entry.get('count', 0)}")
+    unavailable = dict(audits.get("evidence_unavailable", {}) or {})
+    if unavailable:
+        lines.append("- unavailable evidence:")
+        for code, count in unavailable.items():
+            lines.append(f"  - {code}: {count}")
     lines.append("")
     lc = result.label_v2_checks
     lines.append(f"- label-v2 dataset: {lc.get('is_label_v2_dataset')}")

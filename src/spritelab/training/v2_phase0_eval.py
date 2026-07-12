@@ -152,6 +152,7 @@ class RunMetrics:
     # Faithfulness
     category_consistency: float | None = None
     category_ci95: list[float] | None = None
+    shape_category_consistency: float | None = None
     color_consistency: float | None = None
     color_ci95: list[float] | None = None
     repeated_silhouette_rate: float | None = None
@@ -439,7 +440,17 @@ def build_run_plan(config: V2Phase0EvalConfig) -> list[RunCell]:
                     )
                 )
 
-    return cells
+    # A guidance-surgery grid includes the v1 baseline.  It may also be
+    # requested through --presets v1, but a cell is identified by its mode and
+    # seed, so keep exactly one copy.  Preserving first occurrence maintains
+    # the user's explicit preset ordering for non-grid cells.
+    unique_cells: list[RunCell] = []
+    seen_modes: set[str] = set()
+    for cell in cells:
+        if cell.mode not in seen_modes:
+            seen_modes.add(cell.mode)
+            unique_cells.append(cell)
+    return unique_cells
 
 
 # ── Manifest metadata verification ──────────────────────────────────────────
@@ -469,14 +480,21 @@ def _read_manifest_metadata(cell_dir: Path) -> dict[str, Any] | None:
             continue
         if not isinstance(record, dict):
             continue
-        return {
-            "export_preset": record.get("export_preset") or "",
-            "factored_cfg": bool(record.get("factored_cfg")),
-            "cfg_base_scale": record.get("cfg_base_scale"),
-            "cfg_color_scale": record.get("cfg_color_scale"),
-            "null_fields": record.get("null_fields") or [],
-            "sample_count": 1,
-        }
+        metadata_fields = (
+            "export_preset",
+            "seed",
+            "factored_cfg",
+            "cfg_base_scale",
+            "cfg_color_scale",
+            "null_fields",
+            "color_guidance_rgb_only",
+            "color_guidance_start_t",
+            "color_guidance_ramp_t",
+            "object_id_scale",
+        )
+        # Preserve missing keys as missing: old sampler manifests did not have
+        # every setting, and absence is a warning rather than a contradiction.
+        return {key: record[key] for key in metadata_fields if key in record}
     return None
 
 
@@ -500,31 +518,46 @@ def _normalize_null_set(value: Any) -> set[str]:
     return set()
 
 
-def verify_cell_metadata(cell: RunCell, cell_dir: Path) -> None:
+def verify_cell_metadata(cell: RunCell, cell_dir: Path) -> list[str]:
     """Verify sampled outputs match the expected cell configuration.
 
     Raises RuntimeError if the manifest metadata contradicts the cell definition.
+    Missing optional fields from older manifests are returned as warnings.
     """
     meta = _read_manifest_metadata(cell_dir)
     if meta is None:
-        return
+        return [f"metadata unavailable in {cell_dir}; skipping metadata validation"]
+
+    warnings: list[str] = []
+
+    def value_or_warning(key: str) -> Any:
+        if key not in meta:
+            warnings.append(f"metadata field {key!r} is absent in {cell_dir}; validation skipped")
+            return None
+        return meta[key]
 
     expected_ep = cell.export_preset or ""
-    actual_ep = str(meta.get("export_preset") or "")
+    actual_ep_value = value_or_warning("export_preset")
+    actual_ep = str(actual_ep_value or "")
 
     if expected_ep and actual_ep and actual_ep != expected_ep:
         raise RuntimeError(
             f"Manifest export_preset mismatch in {cell_dir}: expected {expected_ep!r}, got {actual_ep!r}"
         )
 
+    expected_seed = int(cell.seed)
+    actual_seed = value_or_warning("seed")
+    if actual_seed is not None and int(actual_seed) != expected_seed:
+        raise RuntimeError(f"Manifest seed mismatch in {cell_dir}: expected {expected_seed}, got {actual_seed}")
+
     expected_fc = bool(cell.factored_cfg)
-    actual_fc = bool(meta.get("factored_cfg"))
-    if expected_fc != actual_fc:
+    actual_fc = value_or_warning("factored_cfg")
+    if actual_fc is not None and expected_fc != bool(actual_fc):
         raise RuntimeError(f"Manifest factored_cfg mismatch in {cell_dir}: expected {expected_fc}, got {actual_fc}")
 
     if expected_fc:
         expected_base = cell.cfg_base_scale
-        actual_base = meta.get("cfg_base_scale")
+        actual_base = value_or_warning("cfg_base_scale")
         if expected_base is not None and actual_base is not None:
             if abs(float(expected_base) - float(actual_base)) > 1e-6:
                 raise RuntimeError(
@@ -532,7 +565,7 @@ def verify_cell_metadata(cell: RunCell, cell_dir: Path) -> None:
                 )
 
         expected_color = cell.cfg_color_scale
-        actual_color = meta.get("cfg_color_scale")
+        actual_color = value_or_warning("cfg_color_scale")
         if expected_color is not None and actual_color is not None:
             if abs(float(expected_color) - float(actual_color)) > 1e-6:
                 raise RuntimeError(
@@ -548,6 +581,24 @@ def verify_cell_metadata(cell: RunCell, cell_dir: Path) -> None:
                 f"Manifest null_fields mismatch in {cell_dir}: "
                 f"expected {sorted(expected_set)}, got {sorted(actual_set)}"
             )
+
+    expected_guidance = {
+        "color_guidance_rgb_only": bool(cell.color_guidance_rgb_only),
+        "color_guidance_start_t": float(cell.color_guidance_start_t),
+        "color_guidance_ramp_t": float(cell.color_guidance_ramp_t),
+        "object_id_scale": float(cell.object_id_scale),
+    }
+    for key, expected in expected_guidance.items():
+        actual = value_or_warning(key)
+        if actual is None:
+            continue
+        if isinstance(expected, bool):
+            if bool(actual) != expected:
+                raise RuntimeError(f"Manifest {key} mismatch in {cell_dir}: expected {expected}, got {actual}")
+        elif abs(float(actual) - expected) > 1e-6:
+            raise RuntimeError(f"Manifest {key} mismatch in {cell_dir}: expected {expected}, got {actual}")
+
+    return warnings
 
 
 def _skip_cell_dir_is_valid(cell: RunCell, cell_dir: Path) -> bool:
@@ -590,12 +641,37 @@ def _skip_cell_dir_is_valid(cell: RunCell, cell_dir: Path) -> bool:
 
 
 def _cell_outputs_exist(cell_dir: Path) -> bool:
-    """Check if a cell directory has the minimum outputs for report harvesting."""
+    """Check whether a normal challenger output directory can be harvested."""
     return (
-        (cell_dir / "generated_manifest.jsonl").is_file()
-        and (cell_dir / "generated_qa_report.json").is_file()
-        and (cell_dir / "prompt_faithfulness_report.json").is_file()
+        (cell_dir / "generation_report.json").is_file()
+        and (cell_dir / "generated_manifest.jsonl").is_file()
+        and any((cell_dir / name).is_dir() for name in ("projected", "hard_rgba", "raw_rgba", "indexed_png"))
     )
+
+
+def _invalid_run_structure(cell_dir: Path) -> list[str]:
+    """Return structural problems for an existing challenger output directory."""
+    problems: list[str] = []
+    for name in ("generation_report.json", "generated_manifest.jsonl"):
+        if not (cell_dir / name).is_file():
+            problems.append(f"missing {name}")
+    if not any((cell_dir / name).is_dir() for name in ("projected", "hard_rgba", "raw_rgba", "indexed_png")):
+        problems.append("missing an image directory (expected projected, hard_rgba, raw_rgba, or indexed_png)")
+    return problems
+
+
+def _report_only_cell_dir(config: V2Phase0EvalConfig, out_dir: Path, runs_dir: Path, cell: RunCell) -> Path:
+    """Resolve the exact existing output directory for report-only harvesting."""
+    if config.guidance_surgery_grid:
+        # Guidance-grid samples are produced directly by sample-generator-challenger.
+        return out_dir / cell.mode
+    return runs_dir / cell.mode
+
+
+def _faithfulness_report_path(run_dir: Path) -> Path:
+    """Prefer the report-only artifact location, retaining legacy root support."""
+    nested = run_dir / "prompt_faithfulness" / "prompt_faithfulness_report.json"
+    return nested if nested.is_file() else run_dir / "prompt_faithfulness_report.json"
 
 
 # ── Collect metrics from run output files ────────────────────────────────────
@@ -641,12 +717,13 @@ def collect_run_metrics(
         metrics.rare_color_warning_rate = warning_counts.get("too_many_rare_colors", 0) / sample_count
         metrics.touches_border_rate = warning_counts.get("touches_border", 0) / sample_count
 
-    faith_path = run_dir / "prompt_faithfulness_report.json"
+    faith_path = _faithfulness_report_path(run_dir)
     faith = _read_json(faith_path)
     if faith:
         metrics.faithfulness_sample_count = int(faith.get("sample_count") or 0)
         metrics.category_consistency = faith.get("category_consistency_rate")
         metrics.category_ci95 = faith.get("category_consistency_ci95")
+        metrics.shape_category_consistency = faith.get("shape_category_consistency_rate")
         metrics.color_consistency = faith.get("color_consistency_rate")
         metrics.color_ci95 = faith.get("color_consistency_ci95")
         metrics.repeated_silhouette_rate = faith.get("repeated_silhouette_rate")
@@ -751,6 +828,18 @@ def _aggregate_cells(name: str, cells: list[RunMetrics]) -> dict[str, Any]:
         ),
         "category_consistency_max": _safe_max(
             [c.category_consistency for c in cells if c.category_consistency is not None]
+        ),
+        "shape_category_consistency_mean": _safe_mean(
+            [c.shape_category_consistency for c in cells if c.shape_category_consistency is not None]
+        ),
+        "shape_category_consistency_std": _safe_stdev(
+            [c.shape_category_consistency for c in cells if c.shape_category_consistency is not None]
+        ),
+        "shape_category_consistency_min": _safe_min(
+            [c.shape_category_consistency for c in cells if c.shape_category_consistency is not None]
+        ),
+        "shape_category_consistency_max": _safe_max(
+            [c.shape_category_consistency for c in cells if c.shape_category_consistency is not None]
         ),
         "color_consistency_mean": _safe_mean([c.color_consistency for c in cells if c.color_consistency is not None]),
         "color_consistency_std": _safe_stdev([c.color_consistency for c in cells if c.color_consistency is not None]),
@@ -932,18 +1021,23 @@ def compute_profile_aggregates(
         if weighting == "family":
             # Family-weighted: average per-family means equally
             cat_vals: list[float] = []
+            shape_cat_vals: list[float] = []
             col_vals: list[float] = []
             blob_vals: list[float] = []
             for r in rows:
                 v = r.get("category_consistency")
                 if v is not None:
                     cat_vals.append(float(v))
+                v = r.get("shape_category_consistency")
+                if v is not None:
+                    shape_cat_vals.append(float(v))
                 v = r.get("color_consistency")
                 if v is not None:
                     col_vals.append(float(v))
                 blob_vals.append(float(r.get("blob_collapse_rate", 0.0)))
             result[mode] = {
                 "category_consistency_mean_weighted": _safe_mean(cat_vals) if cat_vals else None,
+                "shape_category_consistency_mean_weighted": _safe_mean(shape_cat_vals) if shape_cat_vals else None,
                 "color_consistency_mean_weighted": _safe_mean(col_vals) if col_vals else None,
                 "blob_collapse_rate_mean_weighted": _safe_mean(blob_vals) if blob_vals else None,
                 "families_used": list({str(r.get("prompt_family")) for r in rows}),
@@ -955,6 +1049,7 @@ def compute_profile_aggregates(
             if total_n == 0:
                 result[mode] = {
                     "category_consistency_mean_weighted": None,
+                    "shape_category_consistency_mean_weighted": None,
                     "color_consistency_mean_weighted": None,
                     "blob_collapse_rate_mean_weighted": None,
                     "families_used": [],
@@ -962,6 +1057,7 @@ def compute_profile_aggregates(
                 }
                 continue
             w_cat = 0.0
+            w_shape_cat = 0.0
             w_col = 0.0
             w_blob = 0.0
             for r in rows:
@@ -969,12 +1065,16 @@ def compute_profile_aggregates(
                 v = r.get("category_consistency")
                 if v is not None:
                     w_cat += float(v) * n
+                v = r.get("shape_category_consistency")
+                if v is not None:
+                    w_shape_cat += float(v) * n
                 v = r.get("color_consistency")
                 if v is not None:
                     w_col += float(v) * n
                 w_blob += float(r.get("blob_collapse_rate", 0.0)) * n
             result[mode] = {
                 "category_consistency_mean_weighted": w_cat / total_n if total_n else None,
+                "shape_category_consistency_mean_weighted": w_shape_cat / total_n if total_n else None,
                 "color_consistency_mean_weighted": w_col / total_n if total_n else None,
                 "blob_collapse_rate_mean_weighted": w_blob / total_n if total_n else None,
                 "families_used": list({str(r.get("prompt_family")) for r in rows}),
@@ -1139,7 +1239,7 @@ def _compute_breakdowns(
 
     for cell in cells:
         run_dir = cell.out_dir
-        faith_path = run_dir / "prompt_faithfulness_report.json"
+        faith_path = _faithfulness_report_path(run_dir)
         faith = _read_json(faith_path)
         if not faith:
             continue
@@ -1183,6 +1283,7 @@ def _compute_breakdowns(
                 "object_name": prompt_meta["object_name"],
                 "base_object": prompt_meta["base_object"],
                 "category_consistent": faith_sample.get("category_consistent"),
+                "shape_category_consistent": faith_sample.get("shape_category_consistent"),
                 "color_consistent": faith_sample.get("color_consistent"),
                 "generic_blob_like": faith_sample.get("generic_blob_like"),
                 "sample_id": faith_sample.get("sample_id") or manifest_by_pid.get(pid, {}).get("sample_id", ""),
@@ -1261,6 +1362,10 @@ def _build_breakdown_table(
                 [1.0 for s in group_samples if s.get("category_consistent") is True]
                 + [0.0 for s in group_samples if s.get("category_consistent") is False]
             ),
+            "shape_category_consistency": _safe_mean(
+                [1.0 for s in group_samples if s.get("shape_category_consistent") is True]
+                + [0.0 for s in group_samples if s.get("shape_category_consistent") is False]
+            ),
             "color_consistency": _safe_mean(
                 [1.0 for s in group_samples if s.get("color_consistent") is True]
                 + [0.0 for s in group_samples if s.get("color_consistent") is False]
@@ -1271,12 +1376,17 @@ def _build_breakdown_table(
         v1_agg = aggregates.get("preset_v1")
         if v1_agg and mode != "preset_v1":
             v1_cat = v1_agg.get("category_consistency_mean")
+            v1_shape_cat = v1_agg.get("shape_category_consistency_mean")
             v1_col = v1_agg.get("color_consistency_mean")
             v1_blob = v1_agg.get("blob_collapse_rate_mean")
             if row["category_consistency"] is not None and v1_cat is not None:
                 row["delta_category"] = float(row["category_consistency"]) - float(v1_cat)
             else:
                 row["delta_category"] = None
+            if row["shape_category_consistency"] is not None and v1_shape_cat is not None:
+                row["delta_shape_category"] = float(row["shape_category_consistency"]) - float(v1_shape_cat)
+            else:
+                row["delta_shape_category"] = None
             if row["color_consistency"] is not None and v1_col is not None:
                 row["delta_color"] = float(row["color_consistency"]) - float(v1_col)
             else:
@@ -1287,6 +1397,7 @@ def _build_breakdown_table(
                 row["delta_blob"] = None
         else:
             row["delta_category"] = None
+            row["delta_shape_category"] = None
             row["delta_color"] = None
             row["delta_blob"] = None
 
@@ -1307,9 +1418,11 @@ def _write_breakdown_csv(
         group_key,
         "sample_count",
         "category_consistency",
+        "shape_category_consistency",
         "color_consistency",
         "blob_collapse_rate",
         "delta_category",
+        "delta_shape_category",
         "delta_color",
         "delta_blob",
     ]
@@ -1355,6 +1468,7 @@ def write_summary_csv(summary: dict[str, Any], path: Path) -> None:
         "rare_color_warning_rate",
         "touches_border_rate",
         "category_consistency",
+        "shape_category_consistency",
         "color_consistency",
         "repeated_silhouette_rate",
         "blob_collapse_rate",
@@ -1474,12 +1588,29 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                     )
                 lines.append("")
 
+    guidance_decs = summary.get("guidance_surgery_decisions") or {}
+    if guidance_decs:
+        lines.extend(
+            [
+                "### Guidance-Surgery OOD-Core Decisions",
+                "",
+                "| Mode | Label | Summary |",
+                "|---|---|---|",
+            ]
+        )
+        for mode, gdec in sorted(guidance_decs.items()):
+            lines.append(
+                f"| `{_md_escape(str(mode))}` | `{_md_escape(str(gdec.get('label', '')))}` | "
+                f"{_md_escape(str(gdec.get('explanation', '')))} |"
+            )
+        lines.append("")
+
     lines.extend(
         [
             "## Per-Run Results",
             "",
-            "| Mode | Seed | Preset | Factored | Null Fields | Gen | Review | Faith | QA Err | Colors | Rare % | Touch % | Category | Color | Repeated % | Blob % | Potion % | NearCopy % | p10 |",
-            "|---|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Mode | Seed | Preset | Factored | Null Fields | Gen | Review | Faith | QA Err | Colors | Rare % | Touch % | Category | Shape Cat | Color | Repeated % | Blob % | Potion % | NearCopy % | p10 |",
+            "|---|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for run in per_run:
@@ -1505,6 +1636,7 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                     _fmt(_pct(run.get("rare_color_warning_rate"))),
                     _fmt(_pct(run.get("touches_border_rate"))),
                     _fmt(run.get("category_consistency")),
+                    _fmt_shape_category(run.get("shape_category_consistency")),
                     _fmt(run.get("color_consistency")),
                     _fmt(_pct(run.get("repeated_silhouette_rate"))),
                     _fmt(_pct(run.get("blob_collapse_rate"))),
@@ -1521,8 +1653,8 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
             "",
             "## Aggregate Results",
             "",
-            "| Mode | Runs | Colors (mean +/- std) | Category (mean +/- std) | Color (mean +/- std) | Repeated % | Blob % | Potion % | NearCopy % | QA Err Total |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Mode | Runs | Colors (mean +/- std) | Category (mean +/- std) | Shape Cat (mean +/- std) | Color (mean +/- std) | Repeated % | Blob % | Potion % | NearCopy % | QA Err Total |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for mode_name, agg in sorted(aggregates.items()):
@@ -1534,6 +1666,11 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                     str(agg.get("run_count", "")),
                     _fmt_mean_std(agg.get("median_visible_colors_mean"), agg.get("median_visible_colors_std")),
                     _fmt_mean_std(agg.get("category_consistency_mean"), agg.get("category_consistency_std")),
+                    "NA"
+                    if agg.get("shape_category_consistency_mean") is None
+                    else _fmt_mean_std(
+                        agg.get("shape_category_consistency_mean"), agg.get("shape_category_consistency_std")
+                    ),
                     _fmt_mean_std(agg.get("color_consistency_mean"), agg.get("color_consistency_std")),
                     _fmt_mean_std(
                         _pct(agg.get("repeated_silhouette_rate_mean")), _pct(agg.get("repeated_silhouette_rate_std"))
@@ -1561,9 +1698,12 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                     "## Breakdown by Prompt Family",
                     "",
                     "| Family | "
-                    + " | ".join(f"`{m}` Cat | `{m}` Color | `{m}` Blob | D Cat | D Color |" for m in mode_order)
+                    + " | ".join(
+                        f"`{m}` Cat | `{m}` Shape Cat | `{m}` Color | `{m}` Blob | D Cat | D Shape Cat | D Color |"
+                        for m in mode_order
+                    )
                     + " |",
-                    "|---:|" + "---:|".join([""] * (len(mode_order) * 6)) + " |",
+                    "|---:|" + "---:|".join([""] * (len(mode_order) * 7)) + " |",
                 ]
             )
             # Group rows by family
@@ -1579,16 +1719,20 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                         family_cols.extend(
                             [
                                 _fmt(mode_row.get("category_consistency")),
+                                _fmt_shape_category(mode_row.get("shape_category_consistency")),
                                 _fmt(mode_row.get("color_consistency")),
                                 _fmt(_pct(mode_row.get("blob_collapse_rate"))),
                                 _fmt(mode_row.get("delta_category"))
                                 if mode_row.get("delta_category") is not None
                                 else "",
+                                _fmt(mode_row.get("delta_shape_category"))
+                                if mode_row.get("delta_shape_category") is not None
+                                else "",
                                 _fmt(mode_row.get("delta_color")) if mode_row.get("delta_color") is not None else "",
                             ]
                         )
                     else:
-                        family_cols.extend(["", "", "", "", ""])
+                        family_cols.extend(["", "", "", "", "", "", ""])
                 lines.append(" | ".join(family_cols) + " |")
 
     # Profile aggregate tables
@@ -1600,12 +1744,25 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                     "",
                     f"### Profile Aggregate (`{profile_name}`, weighting=`{summary.get('profile_weighting', 'family')}`)",
                     "",
-                    "| Mode | Families | Profiled Samples | Category (weighted) | Color (weighted) | Blob (weighted) |",
-                    "|---|---:|---:|---:|---:|---:|",
+                    "| Mode | Families | Profiled Samples | Category (weighted) | Δ Category vs v1 | Shape Cat (weighted) | Δ Shape Cat vs v1 | Color (weighted) | Δ Color vs v1 | Blob (weighted) | Δ Blob vs v1 |",
+                    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
                 ]
             )
+            baseline = pa.get("preset_v1") or {}
             for mode, agg in sorted(pa.items()):
                 fams = ", ".join(str(f) for f in agg.get("families_used", []))
+
+                def _profile_delta(
+                    key: str,
+                    current: dict[str, Any] = agg,
+                    reference: dict[str, Any] = baseline,
+                ) -> float | None:
+                    value = current.get(key)
+                    base = reference.get(key)
+                    if isinstance(value, (int, float)) and isinstance(base, (int, float)):
+                        return float(value) - float(base)
+                    return None
+
                 lines.append(
                     "| "
                     + " | ".join(
@@ -1614,8 +1771,13 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                             _md_escape(fams),
                             str(agg.get("sample_count_profiled", "")),
                             _fmt(agg.get("category_consistency_mean_weighted")),
+                            _fmt(_profile_delta("category_consistency_mean_weighted")),
+                            _fmt_shape_category(agg.get("shape_category_consistency_mean_weighted")),
+                            _fmt_shape_category(_profile_delta("shape_category_consistency_mean_weighted")),
                             _fmt(agg.get("color_consistency_mean_weighted")),
+                            _fmt(_profile_delta("color_consistency_mean_weighted")),
                             _fmt(agg.get("blob_collapse_rate_mean_weighted")),
+                            _fmt(_profile_delta("blob_collapse_rate_mean_weighted")),
                         ]
                     )
                     + " |"
@@ -1627,8 +1789,8 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                 "",
                 "## Deltas vs `v1` Baseline",
                 "",
-                "| Mode | Color Delta | Category Delta | Rare Delta | Blob Delta | NearCopy Delta |",
-                "|---|---:|---:|---:|---:|---:|",
+                "| Mode | Color Delta | Category Delta | Shape Cat Delta | Rare Delta | Blob Delta | NearCopy Delta |",
+                "|---|---:|---:|---:|---:|---:|---:|",
             ]
         )
         for mode_name, delta in sorted(deltas.items()):
@@ -1639,6 +1801,7 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
                         f"`{_md_escape(str(mode_name))}`",
                         _fmt(delta.get("color_consistency_mean_delta")),
                         _fmt(delta.get("category_consistency_mean_delta")),
+                        _fmt(delta.get("shape_category_consistency_mean_delta")),
                         _fmt(delta.get("rare_color_warning_rate_mean_delta")),
                         _fmt(delta.get("blob_collapse_rate_mean_delta")),
                         _fmt(delta.get("near_copy_rate_mean_delta")),
@@ -1688,6 +1851,11 @@ def _fmt_mean_std(mean_val: Any, std_val: Any) -> str:
     return s
 
 
+def _fmt_shape_category(value: Any) -> str:
+    """Render absent shape-only metrics explicitly for legacy reports."""
+    return "NA" if value is None else _fmt(value)
+
+
 def _compute_deltas(aggregates: dict[str, Any]) -> dict[str, Any]:
     v1_agg = aggregates.get("preset_v1")
     if v1_agg is None:
@@ -1700,6 +1868,7 @@ def _compute_deltas(aggregates: dict[str, Any]) -> dict[str, Any]:
         for key in (
             "color_consistency_mean",
             "category_consistency_mean",
+            "shape_category_consistency_mean",
             "rare_color_warning_rate_mean",
             "blob_collapse_rate_mean",
             "near_copy_rate_mean",
@@ -1814,21 +1983,64 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
     # Report-only mode: harvest existing outputs
     if config.report_only:
         missing: list[str] = []
+        invalid: list[str] = []
+        from spritelab.training.generated_qa import qa_generated_sprites
+        from spritelab.training.generated_review import GeneratedReviewConfig, review_generated_sprites
+        from spritelab.training.prompt_faithfulness import PromptFaithfulnessConfig, run_prompt_faithfulness
+
         for cell in cells:
-            cell_dir = runs_dir / cell.mode
+            cell_dir = _report_only_cell_dir(config, out_dir, runs_dir, cell)
+            if not cell_dir.exists():
+                missing.append(cell.mode)
+                continue
             if _cell_outputs_exist(cell_dir):
-                if not _skip_cell_dir_is_valid(cell, cell_dir):
-                    raise RuntimeError(
-                        f"Existing outputs in {cell_dir} do not match cell configuration "
-                        f"(export_preset={cell.export_preset}, null_fields={cell.null_fields}). "
-                        f"Remove or re-sample the directory, or adjust your cell parameters."
+                for warning in verify_cell_metadata(cell, cell_dir):
+                    print(f"  Warning: {warning}")
+
+                qa_path = cell_dir / "generated_qa_report.json"
+                if not qa_path.is_file():
+                    print(f"  Running QA: {cell.mode}")
+                    qa_generated_sprites(cell_dir)
+
+                review_path = cell_dir / "review" / "generated_review_report.json"
+                if not review_path.is_file():
+                    print(f"  Running review: {cell.mode}")
+                    review_generated_sprites(
+                        GeneratedReviewConfig(
+                            generated_dir=cell_dir,
+                            out_dir=cell_dir / "review",
+                            group_by="none",
+                            max_samples_per_sheet=64,
+                        )
+                    )
+
+                faith_report = _read_json(_faithfulness_report_path(cell_dir))
+                if not faith_report or "shape_category_consistency_rate" not in faith_report:
+                    faith_dir = cell_dir / "prompt_faithfulness"
+                    print(f"  Running prompt faithfulness/backfill: {cell.mode}")
+                    run_prompt_faithfulness(
+                        PromptFaithfulnessConfig(
+                            generated=cell_dir,
+                            prompts=prompts_path,
+                            dataset=config.dataset,
+                            out=faith_dir / "prompt_faithfulness_report.md",
+                            out_json=faith_dir / "prompt_faithfulness_report.json",
+                            max_sources=config.faithfulness_max_sources,
+                            source_selection="auto",
+                        )
                     )
                 metrics = collect_run_metrics(cell_dir, cell, config.max_samples)
                 all_metrics.append(metrics)
                 print(f"  Harvested: {cell.mode}")
             else:
-                missing.append(cell.mode)
+                invalid.append(f"{cell.mode} ({'; '.join(_invalid_run_structure(cell_dir))})")
 
+        if invalid:
+            msg = f"Invalid run directory for {len(invalid)} run(s): {invalid}"
+            if config.allow_partial_report:
+                print(f"Warning: {msg}. Proceeding with partial report.")
+            else:
+                raise RuntimeError(msg)
         if missing:
             msg = f"Missing {len(missing)} run(s): {missing}"
             if config.allow_partial_report:
@@ -1949,6 +2161,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
     # Profile-specific aggregates (ood_core / ood_plus_grid)
     profile_aggregates: dict[str, Any] = {}
     profile_decisions: dict[str, Any] = {}
+    guidance_surgery_decisions: dict[str, Any] = {}
     if config.eval_profile != "all" and breakdowns:
         pa = compute_profile_aggregates(breakdowns, config.eval_profile, config.profile_weighting, aggregates)
         if pa:
@@ -1956,6 +2169,12 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
             v1_prof = pa.get("preset_v1")
             v11_prof = pa.get("preset_v1_1")
             profile_decisions[config.eval_profile] = decide_ood_core(v1_prof, v11_prof, v1_agg)
+            if config.guidance_surgery_grid:
+                guidance_surgery_decisions = {
+                    mode: decide_ood_core(v1_prof, profile, v1_agg)
+                    for mode, profile in pa.items()
+                    if mode != "preset_v1"
+                }
 
     decision = decide_v1_1(v1_agg, v11_agg)
 
@@ -1980,6 +2199,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
             "touches_border_rate": m.touches_border_rate,
             "category_consistency": m.category_consistency,
             "category_ci95": m.category_ci95,
+            "shape_category_consistency": m.shape_category_consistency,
             "color_consistency": m.color_consistency,
             "color_ci95": m.color_ci95,
             "repeated_silhouette_rate": m.repeated_silhouette_rate,
@@ -2034,6 +2254,7 @@ def run_v2_phase0_eval(config: V2Phase0EvalConfig) -> dict[str, Any]:
         "breakdowns": {k: v for k, v in breakdowns.items() if v} if breakdowns else {},
         "profile_aggregates": profile_aggregates,
         "profile_decisions": profile_decisions,
+        "guidance_surgery_decisions": guidance_surgery_decisions,
         "eval_profile": config.eval_profile,
         "profile_weighting": config.profile_weighting,
     }

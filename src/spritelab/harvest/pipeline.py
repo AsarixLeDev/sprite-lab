@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from spritelab.dataset_maker.exporter import (
     DatasetMakerExportConfig,
@@ -14,12 +15,13 @@ from spritelab.dataset_maker.exporter import (
 )
 from spritelab.dataset_maker.importer import ImportedSprite, ImportOptions, import_png_as_dataset_item
 from spritelab.dataset_maker.model import DatasetMakerItem, normalize_sprite_id
-from spritelab.harvest.archive import extract_archive
+from spritelab.harvest.archive import archive_member_summary, extract_archive
 from spritelab.harvest.autolabel import merge_auto_labels, suggest_metadata_from_path
-from spritelab.harvest.download import download_file
+from spritelab.harvest.download import compute_sha256, download_file
 from spritelab.harvest.extract import HarvestCandidate, discover_png_candidates, filter_candidate_basic
+from spritelab.harvest.sheet_mappings import metadata_for_sheet_cell
 from spritelab.harvest.sheets import SheetSliceConfig, center_pad_to_32, looks_like_sprite_sheet, slice_sheet_to_pngs
-from spritelab.harvest.sources import SourceRecord, is_license_allowed_for_training
+from spritelab.harvest.sources import SourceRecord, is_license_allowed_for_training, utc_timestamp
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,8 @@ class HarvestImportOptions:
     recursive: bool = True
     slice_sheets: bool = True
     sheet_config: SheetSliceConfig = field(default_factory=SheetSliceConfig)
+    include_member_globs: tuple[str, ...] = ()
+    exclude_member_globs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -54,7 +58,7 @@ def harvest_source_to_imported_sprites(
     """Resolve a source to PNGs, slice/pad as configured, and import each one."""
 
     work_dir = Path(work_dir)
-    root = _resolve_source_root(source, work_dir)
+    root, source = _resolve_source_root(source, work_dir, options=options)
     candidates = [
         filter_candidate_basic(candidate)
         for candidate in discover_png_candidates(root, source, recursive=options.recursive)
@@ -76,6 +80,12 @@ def harvest_source_to_imported_sprites(
             tile_dir = sliced_dir / candidate.candidate_id
             tiles = slice_sheet_to_pngs(candidate.extracted_path, tile_dir, options.sheet_config)
             for tile in tiles:
+                if (
+                    options.allow_center_pad_to_32
+                    and options.sheet_config.tile_width <= 32
+                    and options.sheet_config.tile_height <= 32
+                ):
+                    tile = center_pad_to_32(tile, padded_dir / f"{tile.stem}.png")
                 final_pngs.append((candidate, tile, []))
         elif options.allow_center_pad_to_32 and candidate.width <= 32 and candidate.height <= 32:
             padded = center_pad_to_32(
@@ -101,6 +111,9 @@ def harvest_source_to_imported_sprites(
     for candidate, png_path, extra_errors in final_pngs:
         imported = import_png_as_dataset_item(png_path, options=import_options)
         suggestion = suggest_metadata_from_path(candidate.relative_path, source.source_name)
+        mapping = metadata_for_sheet_cell(source.source_id, candidate.relative_path, png_path)
+        if mapping.get("mapping_excluded") == "true":
+            extra_errors = [*extra_errors, "excluded by declarative sheet mapping"]
         item = _apply_source_metadata(imported.item, source, candidate, used_ids)
         item = merge_auto_labels(item, [suggestion])
         errors = tuple(imported.errors) + tuple(extra_errors)
@@ -111,7 +124,11 @@ def harvest_source_to_imported_sprites(
                 source=source,
                 candidate=candidate,
                 imported=replace(imported, item=item, errors=errors),
-                auto_metadata={"rule_suggestion": suggestion.__dict__ | {"tags": list(suggestion.tags)}},
+                auto_metadata={
+                    "rule_suggestion": suggestion.__dict__ | {"tags": list(suggestion.tags)},
+                    "import_options": {"allow_nearest_resize": options.allow_nearest_resize},
+                    **({"sheet_mapping": mapping} if mapping else {}),
+                },
                 final_item=item,
             )
         )
@@ -231,23 +248,86 @@ def export_harvested_dataset(
     )
 
 
-def _resolve_source_root(source: SourceRecord, work_dir: Path) -> Path:
+def _resolve_source_root(
+    source: SourceRecord, work_dir: Path, *, options: HarvestImportOptions
+) -> tuple[Path, SourceRecord]:
     if source.local_root_path:
-        return Path(source.local_root_path)
+        return Path(source.local_root_path), source
     if source.local_archive_path:
         extracted = work_dir / "extracted" / source.source_id
         if not (extracted.exists() and any(extracted.iterdir())):
-            extract_archive(source.local_archive_path, extracted, overwrite=True)
-        return extracted
+            summary = archive_member_summary(
+                source.local_archive_path,
+                include_member_globs=options.include_member_globs,
+                exclude_member_globs=options.exclude_member_globs,
+            )
+            extract_archive(
+                source.local_archive_path,
+                extracted,
+                overwrite=True,
+                include_member_globs=options.include_member_globs,
+                exclude_member_globs=options.exclude_member_globs,
+            )
+        else:
+            summary = archive_member_summary(
+                source.local_archive_path,
+                include_member_globs=options.include_member_globs,
+                exclude_member_globs=options.exclude_member_globs,
+            )
+        return extracted, replace(
+            source,
+            download_sha256=compute_sha256(source.local_archive_path),
+            download_size_bytes=Path(source.local_archive_path).stat().st_size,
+            original_filename=Path(source.local_archive_path).name,
+            archive_member_summary=summary,
+        )
     if source.download_url:
         downloads = work_dir / "downloads"
-        archive_path = downloads / f"{source.source_id}.zip"
+        is_direct_file = source.download_kind == "file"
+        suffix = ".png" if is_direct_file else ".zip"
+        original_filename = Path(unquote(urlparse(source.download_url).path)).name or f"{source.source_id}{suffix}"
+        archive_path = downloads / original_filename
         if not archive_path.exists():
-            download_file(source.download_url, archive_path)
+            download_file(
+                source.download_url, archive_path, allowed_content_types=("image/png",) if is_direct_file else ()
+            )
+        downloaded = replace(
+            source,
+            download_sha256=compute_sha256(archive_path),
+            download_size_bytes=archive_path.stat().st_size,
+            downloaded_at_utc=utc_timestamp(),
+            original_filename=original_filename,
+        )
+        if is_direct_file:
+            from PIL import Image
+
+            try:
+                with Image.open(archive_path) as image:
+                    if image.format != "PNG":
+                        raise ValueError(f"downloaded attachment is {image.format}, expected PNG")
+            except OSError as exc:
+                raise ValueError("downloaded attachment is not a decodable PNG") from exc
+            extracted = work_dir / "extracted" / source.source_id
+            extracted.mkdir(parents=True, exist_ok=True)
+            target = extracted / archive_path.name
+            if not target.exists():
+                target.write_bytes(archive_path.read_bytes())
+            return extracted, downloaded
         extracted = work_dir / "extracted" / source.source_id
+        summary = archive_member_summary(
+            archive_path,
+            include_member_globs=options.include_member_globs,
+            exclude_member_globs=options.exclude_member_globs,
+        )
         if not (extracted.exists() and any(extracted.iterdir())):
-            extract_archive(archive_path, extracted, overwrite=True)
-        return extracted
+            extract_archive(
+                archive_path,
+                extracted,
+                overwrite=True,
+                include_member_globs=options.include_member_globs,
+                exclude_member_globs=options.exclude_member_globs,
+            )
+        return extracted, replace(downloaded, archive_member_summary=summary)
     raise ValueError(f"{source.source_id}: source has no local_root_path, local_archive_path, or download_url.")
 
 

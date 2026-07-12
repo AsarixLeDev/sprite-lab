@@ -177,6 +177,53 @@ def _add_palette_swap_arguments(parser: argparse.ArgumentParser) -> None:
     _add_palette_swap_conservative_arguments(parser)
 
 
+def _add_role_ramp_transplant_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add default-off Phase 3 real-ramp transplant training controls."""
+    parser.add_argument("--role-ramp-transplant-prob", type=float, default=0.0)
+    parser.add_argument("--role-ramp-transplant-keep-original-prob", type=float, default=0.5)
+    parser.add_argument("--role-ramp-transplant-exclude-families", default="gold,brown")
+    parser.add_argument(
+        "--role-ramp-transplant-require-trusted-role-map",
+        action="store_true",
+        default=True,
+        dest="role_ramp_transplant_require_trusted_role_map",
+    )
+    parser.add_argument(
+        "--no-role-ramp-transplant-require-trusted-role-map",
+        action="store_false",
+        dest="role_ramp_transplant_require_trusted_role_map",
+    )
+    parser.add_argument("--role-ramp-transplant-debug-samples", type=int, default=0)
+    parser.add_argument("--role-ramp-transplant-max-resample-attempts", type=int, default=8)
+    parser.add_argument(
+        "--role-ramp-transplant-require-fill-target-match",
+        action="store_true",
+        default=True,
+        dest="role_ramp_transplant_require_fill_target_match",
+    )
+    parser.add_argument(
+        "--no-role-ramp-transplant-require-fill-target-match",
+        action="store_false",
+        dest="role_ramp_transplant_require_fill_target_match",
+    )
+    parser.add_argument("--role-ramp-transplant-min-primary-fill-coverage", type=float, default=0.03)
+
+
+def _add_palette_conditioning_training_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add default-off v3 canonical palette conditioning controls."""
+    parser.add_argument("--palette-conditioning", action="store_true", default=False)
+    parser.add_argument("--palette-conditioning-dropout", type=float, default=0.0)
+    parser.add_argument("--palette-conditioning-dim", type=int, default=64)
+    parser.add_argument("--palette-conditioning-inject", choices=["decoder", "all", "bottleneck"], default="decoder")
+
+
+def _add_palette_conditioning_sampling_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--palette-conditioning-source", choices=["none", "source", "retrieved"], default="none")
+    parser.add_argument("--palette-conditioning-dataset", type=Path)
+    parser.add_argument("--palette-conditioning-training-manifest", type=Path)
+    parser.add_argument("--palette-conditioning-exclude-exact-prompt-target", action="store_true", default=False)
+
+
 def _bool_str(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 

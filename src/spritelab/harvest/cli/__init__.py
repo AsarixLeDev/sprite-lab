@@ -24,16 +24,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         golden_cmds,
         ingest_cmds,
         label_v2_cmds,
+        label_v3_cmds,
+        label_v4_cmds,
         prefill_cmds,
         semantic_cmds,
+        suitability_cmds,
     )
 
     ingest_cmds.register(subparsers)
     prefill_cmds.register(subparsers)
     label_v2_cmds.register(subparsers)
+    label_v3_cmds.register(subparsers)
+    label_v4_cmds.register(subparsers)
     semantic_cmds.register(subparsers)
     golden_cmds.register(subparsers)
     dataset_cmds.register(subparsers)
+    suitability_cmds.register(subparsers)
 
     parsed = parser.parse_args(raw_argv)
     logging.basicConfig(

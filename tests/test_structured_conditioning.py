@@ -62,7 +62,8 @@ def test_structured_vocab_construction_and_missing_fields() -> None:
     missing = encode_structured_conditioning({}, vocab)
     assert missing["category_id"] == 0
     assert missing["object_id"] == 0
-    assert sum(missing["color_multi_hot"]) == 0.0
+    assert missing["color_multi_hot"][0] == 1.0
+    assert sum(missing["color_multi_hot"]) == 1.0
 
 
 def test_ood_compositional_prompt_builder_writes_default_96_rows(tmp_path: Path) -> None:

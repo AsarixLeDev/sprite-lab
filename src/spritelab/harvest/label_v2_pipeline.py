@@ -292,6 +292,30 @@ def build_label_v2_record(
         if candidate_object_names
         else filename_result.suggestion
     )
+    sheet_mapping = dict((record.get("auto_metadata") or {}).get("sheet_mapping") or {})
+    if filename_result.profile.name in {"shade_weapons", "flare_armor", "farming_tools"} and not sheet_mapping:
+        filename_suggestion = replace(
+            filename_suggestion,
+            confidence=min(filename_suggestion.confidence, 0.25),
+            confidence_reason="source profile requires declarative sheet mapping",
+            evidence=(*filename_suggestion.evidence, "sheet_mapping:missing"),
+        )
+    if sheet_mapping and sheet_mapping.get("mapping_excluded") != "true":
+        mapped_object = str(sheet_mapping.get("object_name", ""))
+        mapped_category = str(sheet_mapping.get("category", ""))
+        mapped_material = str(sheet_mapping.get("material", ""))
+        if mapped_object or mapped_category:
+            filename_suggestion = replace(
+                filename_suggestion,
+                object_name=mapped_object or filename_suggestion.object_name,
+                category=mapped_category or filename_suggestion.category,
+                materials=tuple(value for value in (*filename_suggestion.materials, mapped_material) if value),
+                tags=tuple(value for value in (*filename_suggestion.tags, mapped_material) if value),
+                confidence=max(filename_suggestion.confidence, 0.96),
+                confidence_reason="validated declarative sheet mapping",
+                evidence=(*filename_suggestion.evidence, f"sheet_mapping:{sheet_mapping.get('mapping_name', '')}"),
+                source="sheet_mapping",
+            )
     if specialization.object_name or specialization.category:
         filename_suggestion = replace(
             filename_suggestion,
@@ -344,6 +368,8 @@ def build_label_v2_record(
         "conflict_reasons": list(fused.conflict_reasons),
         "provenance": fused.provenance,
         "review_priority": fused.review_priority,
+        "sheet_mapping": sheet_mapping,
+        "audit_codes": _compact_visual_audit_codes(fused.safe_prefill, visual_facts),
     }
     output = {
         "sprite_id": str(record.get("sprite_id", "")),
@@ -674,6 +700,22 @@ def _object_from_mapping(value: Any) -> str:
     if not isinstance(value, Mapping):
         return ""
     return str(value.get("object_name") or value.get("possible_object_name") or "")
+
+
+def _compact_visual_audit_codes(suggestion: LabelSuggestion, visual_facts: Any) -> list[str]:
+    """Persist only upstream contradiction codes, never a second visual-facts payload."""
+
+    if visual_facts is None:
+        return []
+    tags = set(suggestion.tags)
+    tokens = set(suggestion.object_name.split("_"))
+    shape_hints = set(visual_facts.shape_hints)
+    codes: list[str] = []
+    if "solid" in tags and "small_content" in shape_hints:
+        codes.append("role_inference_contradiction")
+    if "round" in tokens and {"tall", "wide"} & shape_hints:
+        codes.append("shape_hint_contradiction")
+    return codes
 
 
 def _specialized_tags(existing: Sequence[str], object_name: str, category: str) -> tuple[str, ...]:

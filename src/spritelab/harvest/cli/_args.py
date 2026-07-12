@@ -43,6 +43,18 @@ def _add_import_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--slice-sheets", action="store_true", default=True)
     parser.add_argument("--no-slice-sheets", action="store_false", dest="slice_sheets")
     parser.add_argument("--tile-size", type=int, default=32)
+    parser.add_argument(
+        "--include-member-glob",
+        action="append",
+        default=[],
+        help="Case-sensitive ZIP member glob to include (repeatable).",
+    )
+    parser.add_argument(
+        "--exclude-member-glob",
+        action="append",
+        default=[],
+        help="Case-sensitive ZIP member glob to exclude (repeatable).",
+    )
 
 
 def _add_qwen_prefill_args(parser: argparse.ArgumentParser) -> None:
@@ -149,13 +161,17 @@ def _add_label_v2_args(parser: argparse.ArgumentParser, *, include_vlm_args: boo
 
 
 def _build_source(parsed: argparse.Namespace, *, kind: str) -> SourceRecord:
-    source_type = parsed.source_type or {"zip": "manual_zip", "dir": "local_directory", "url": "direct_zip_url"}[kind]
+    source_type = (
+        parsed.source_type
+        or {"zip": "manual_zip", "dir": "local_directory", "url": "direct_zip_url", "file": "direct_file_url"}[kind]
+    )
     return SourceRecord(
         source_id=parsed.source_id,
         source_name=parsed.source_name,
         source_type=source_type,
         source_url=parsed.source_url,
-        download_url=parsed.url if kind == "url" else "",
+        download_url=parsed.url if kind in {"url", "file"} else "",
+        download_kind="file" if kind == "file" else "zip" if kind == "url" else "",
         local_archive_path=str(parsed.zip_path) if kind == "zip" else "",
         local_root_path=str(parsed.dir_path) if kind == "dir" else "",
         author=parsed.author,
@@ -192,11 +208,12 @@ def _rehydrate_run(run_dir: Path):
         candidate = candidates_by_id.get(record["candidate_id"])
         if source is None or candidate is None:
             continue
+        auto_metadata = dict(record.get("auto_metadata", {}))
+        import_options_data = dict(auto_metadata.get("import_options") or {})
         imported = import_png_as_dataset_item(
             record["final_png_path"],
-            options=ImportOptions(),
+            options=ImportOptions(allow_nearest_resize=bool(import_options_data.get("allow_nearest_resize", False))),
         )
-        auto_metadata = dict(record.get("auto_metadata", {}))
         item = DatasetMakerItem(
             sprite_id=record["sprite_id"],
             source_path=Path(record["final_png_path"]),

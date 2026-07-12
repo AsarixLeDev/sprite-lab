@@ -24,6 +24,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         challenger_cmds,
         data_cmds,
         eval_cmds,
+        experiment_cmds,
         gallery_cmds,
         monitor_cmds,
         review_cmds,
@@ -31,6 +32,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     data_cmds.register(subparsers)
     challenger_cmds.register(subparsers)
+    experiment_cmds.register(subparsers)
     review_cmds.register(subparsers)
     audit_cmds.register(subparsers)
     gallery_cmds.register(subparsers)

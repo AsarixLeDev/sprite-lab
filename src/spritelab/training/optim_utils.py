@@ -105,11 +105,16 @@ def apply_backend_speed_flags(*, cudnn_benchmark: bool = False, tf32: bool = Fal
         torch.backends.cudnn.allow_tf32 = True
 
 
-def clip_gradients(model: Any, max_norm: float) -> None:
+def clip_gradients(model: Any, max_norm: float) -> float:
     """Clip gradient norm in place; a no-op when ``max_norm`` is 0 or negative."""
 
-    if torch is not None and max_norm and float(max_norm) > 0.0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), float(max_norm))
+    if torch is None:
+        return 0.0
+    parameters = [parameter for parameter in model.parameters() if parameter.grad is not None]
+    if not parameters:
+        return 0.0
+    limit = float(max_norm) if max_norm and float(max_norm) > 0.0 else float("inf")
+    return float(torch.nn.utils.clip_grad_norm_(parameters, limit).detach().cpu())
 
 
 def dataloader_perf_kwargs(device: Any, *, num_workers: int, pin_memory: bool | None = None) -> dict[str, Any]:
