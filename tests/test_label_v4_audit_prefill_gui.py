@@ -114,7 +114,8 @@ def test_resume_skips_only_completed_records(tmp_path: Path) -> None:
     records = _rows(tmp_path / "out" / "audit_prefilled_records.jsonl")
     truth = tmp_path / "truth.jsonl"
     mark_unsuitable_image(truth, records[0], metadata={"record_completed": True})
-    assert review_resume_index(records, truth) == 1
+    # Legacy generic completion metadata is not a valid two-pass quality decision.
+    assert review_resume_index(records, truth) == 0
 
 
 def test_pixel_viewer_uses_nearest_neighbor_checkerboard_zoom_and_native_dimensions(tmp_path: Path) -> None:
@@ -138,7 +139,7 @@ def test_blind_mode_hides_proposal_risk_and_evidence_until_first_critical_judgme
     record["proposal_visible_before_judgment"] = False
     truth = tmp_path / "truth.jsonl"
     hidden = gui_field_view(record, "canonical_object", truth)
-    assert hidden["blind_locked"] is True and hidden["evidence_summary"] == []
-    accept_proposal(truth, record, "canonical_object")
-    revealed = gui_field_view(record, "canonical_object", truth)
-    assert revealed["blind_locked"] is False
+    # Missing predictions never enter blind semantic review; there is no proposal to hide/reveal.
+    assert hidden["blind_locked"] is False
+    with pytest.raises(ValueError, match="forbidden for value_state=missing_prediction"):
+        accept_proposal(truth, record, "canonical_object")

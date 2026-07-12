@@ -79,6 +79,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     assisted = subparsers.add_parser("assisted-v4", help="Launch the compact append-only Labeling-v4 review GUI.")
     assisted.add_argument("--records", type=Path, required=True)
     assisted.add_argument("--corrections", type=Path, required=True)
+    assisted.add_argument(
+        "--mode",
+        choices=("quality-only", "semantic-assisted", "manual-truth-diagnostic"),
+        default="quality-only",
+    )
     assisted.add_argument("--host", default="127.0.0.1")
     assisted.add_argument("--port", type=int, default=7862)
     assisted.add_argument("--share", action="store_true", default=False)
@@ -94,7 +99,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "label-v4-prepare-audit",
         help="Prepare schema-checked, provider-safe Labeling-v4 calibration review records.",
     )
-    prepare.add_argument("--audit-selection", type=Path, required=True)
+    prepare_input = prepare.add_mutually_exclusive_group(required=True)
+    prepare_input.add_argument("--audit-selection", type=Path)
+    prepare_input.add_argument("--inference-queue", type=Path)
     prepare.add_argument("--output-root", type=Path, required=True)
     prepare.add_argument(
         "--inference-policy",
@@ -115,6 +122,23 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     prepare.add_argument("--text-model", default="")
     prepare.add_argument("--timeout-seconds", type=float, default=90.0)
     prepare.set_defaults(func=_run_prepare_audit)
+
+    freeze_queue = subparsers.add_parser(
+        "label-v4-freeze-inference-queue",
+        help="Freeze a deterministic quality-eligible Labeling-v4 inference queue.",
+    )
+    freeze_queue.add_argument("--audit-selection", type=Path, required=True)
+    freeze_queue.add_argument("--prefilled-records", type=Path, required=True)
+    freeze_queue.add_argument("--human-truth", type=Path, required=True)
+    freeze_queue.add_argument("--output-root", type=Path, required=True)
+    freeze_queue.add_argument(
+        "--include-quality-state",
+        action="append",
+        choices=("quality_suitable", "quality_uncertain_usable"),
+        default=None,
+    )
+    freeze_queue.add_argument("--allow-partial", action="store_true", default=False)
+    freeze_queue.set_defaults(func=_run_freeze_inference_queue)
 
     shard = subparsers.add_parser("label-v4-shard", help="Run one deterministic, resumable Labeling-v4 shard.")
     shard.add_argument("--input", type=Path, required=True)
@@ -307,6 +331,7 @@ def _run_assisted(parsed: argparse.Namespace) -> None:
     launch_assisted_v4(
         parsed.records,
         parsed.corrections,
+        mode=parsed.mode,
         host=parsed.host,
         port=parsed.port,
         share=parsed.share,
@@ -348,13 +373,27 @@ def _run_prepare_audit(parsed: argparse.Namespace) -> None:
         Path("experiments/label_v4_pilot_replay_v2"),
     ]
     result = prepare_audit(
-        parsed.audit_selection,
+        parsed.audit_selection or parsed.inference_queue,
         parsed.output_root,
         inference_policy=parsed.inference_policy,
         allow_provider_calls=bool(parsed.allow_provider_calls),
         artifact_roots=roots,
         vlm_provider=vlm,
         text_provider=text,
+    )
+    _print_json(result)
+
+
+def _run_freeze_inference_queue(parsed: argparse.Namespace) -> None:
+    from spritelab.harvest.label_v4.two_pass import freeze_inference_queue
+
+    result = freeze_inference_queue(
+        parsed.audit_selection,
+        parsed.prefilled_records,
+        parsed.human_truth,
+        parsed.output_root,
+        inclusion_policy=parsed.include_quality_state or ("quality_suitable", "quality_uncertain_usable"),
+        allow_partial=bool(parsed.allow_partial),
     )
     _print_json(result)
 

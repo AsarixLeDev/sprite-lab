@@ -8,7 +8,7 @@
     "records_total": 100,
     "records_with_compatible_cached_rich_vlm_predictions": 2,
     "records_with_complete_deterministic_critical_semantics": 0,
-    "records_with_genuine_model_abstentions": 1,
+    "records_with_genuine_model_abstentions": 2,
     "records_with_quality_quarantine": 60
   },
   "diagnostics": {
@@ -31,9 +31,12 @@
   "input_schema": "label_v4_audit_selection_v1",
   "input_sha256": "d1752ce5d9661d1ec7a1825252840392f7b4e47581a6e2ac1a8cbfc5e4d75017",
   "output_schema": "label_v4_prefilled_audit_record_v1",
-  "output_sha256": "09b5cd6ad5a8982ca7261cf703d933cd7ada3433ce19ac984b10e56a07ae749b",
+  "output_sha256": "d841df2110c270dc0cd4eb8804f1b02e4293475e219f8f8383ebe7b0d4871593",
   "provider_calls_allowed": false,
   "provider_calls_made": 0,
   "records": 100,
-  "schema_version": "label_v4_audit_prefill_manifest_v1"
+  "schema_version": "label_v4_audit_prefill_manifest_v1",
+  "semantic_excluded_quality": 0,
+  "semantic_pending_inference": 98,
+  "semantic_ready_records": 2
 }

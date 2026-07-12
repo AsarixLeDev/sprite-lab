@@ -16,7 +16,18 @@ import numpy as np
 from PIL import Image
 
 from spritelab.evaluation.conditional import FIELDS, score_conditions
-from spritelab.evaluation.memorization import TrainingImage, load_training_images, retrieve_neighbors, suspicious_kind
+from spritelab.evaluation.memorization import (
+    COMPARISON_METHOD,
+    COMPARISON_PARAMETERS,
+    COMPARISON_PARAMETERS_SHA256,
+    DETECTOR_POLICY_SHA256,
+    DETECTOR_POLICY_VERSION,
+    TrainingImage,
+    detector_policy_record,
+    load_training_images,
+    retrieve_neighbors,
+    suspicious_kind,
+)
 from spritelab.evaluation.metrics import batch_metrics, duplicate_groups, score_image
 from spritelab.harvest.label_v4.training_quality import (
     evaluation_uncertainty_report,
@@ -82,6 +93,7 @@ def score_suite(
             conditional = (
                 score_conditions(record, arr, metrics["pixel_art"].get("palette_adherence")) if arr is not None else {}
             )
+            nearest = neighbors[0] if neighbors else None
             item = {
                 "sample_id": str(record.get("sample_id") or image_path.stem),
                 "prompt_id": str(record.get("prompt_id") or ""),
@@ -95,7 +107,18 @@ def score_suite(
                 "metrics": metrics,
                 "conditional": conditional,
                 "training_neighbors": neighbors,
-                "suspicious_memorization": suspicious_kind(neighbors[0] if neighbors else None),
+                "detector_policy_version": DETECTOR_POLICY_VERSION,
+                "comparison_method": COMPARISON_METHOD,
+                "comparison_parameters": COMPARISON_PARAMETERS,
+                "comparison_parameters_sha256": COMPARISON_PARAMETERS_SHA256,
+                "detector_policy_sha256": DETECTOR_POLICY_SHA256,
+                "memorization_evidence_class": nearest.get("evidence_class") if nearest else "no_material_match",
+                "evidence_strength": nearest.get("evidence_strength") if nearest else "none",
+                "requires_human_review": bool(nearest and nearest.get("requires_human_review")),
+                "machine_hard_block_candidate": bool(nearest and nearest.get("machine_hard_block_candidate")),
+                "warning_only": bool(nearest and nearest.get("warning_only")),
+                "low_evidence_reason": nearest.get("low_evidence_reason") if nearest else None,
+                "suspicious_memorization": suspicious_kind(nearest),
                 "label_quality": record.get("label_quality"),
                 "split": str(record.get("split") or ""),
                 "source_id": str(record.get("source_id") or ""),
@@ -107,7 +130,9 @@ def score_suite(
                 "unseen_pack": bool(record.get("unseen_pack")),
             }
             item["conditional_adherence"] = _conditional_adherence(conditional)
-            item["memorization_indicator"] = bool(item["suspicious_memorization"])
+            # Legacy field: now means machine-hard evidence only.  Candidate,
+            # review, and warning states remain separate in the fields above.
+            item["memorization_indicator"] = bool(item["machine_hard_block_candidate"])
             item["generation_failed"] = not bool(metrics["hard_validity"].get("pass"))
             items.append(item)
             if arr is not None:
@@ -131,6 +156,12 @@ def score_suite(
     }
     report = {
         "schema_version": "generation_benchmark_v1.0",
+        "detector_policy_version": DETECTOR_POLICY_VERSION,
+        "comparison_method": COMPARISON_METHOD,
+        "comparison_parameters": COMPARISON_PARAMETERS,
+        "comparison_parameters_sha256": COMPARISON_PARAMETERS_SHA256,
+        "detector_policy_sha256": DETECTOR_POLICY_SHA256,
+        "detector_policy": detector_policy_record(),
         "generated": str(generated),
         "training_manifests": [str(path) for path in training_manifests or []],
         "thresholds": {
@@ -139,6 +170,7 @@ def score_suite(
             "near_train_pixel_distance": 0.025,
             "suspicious_geometry_iou": 0.98,
             "palette_adherence_rgb_tolerance": "12/255",
+            "memorization_detector": COMPARISON_PARAMETERS["thresholds"],
         },
         "summary": summary,
         "label_quality": label_quality,
@@ -221,6 +253,9 @@ def _summarize(items: list[dict[str, Any]], batch: dict[str, Any]) -> dict[str, 
     malformed = sum(not bool(item["metrics"]["hard_validity"].get("pass")) for item in items)
     pixels = [item["metrics"]["pixel_art"] for item in items if item["metrics"]["pixel_art"]]
     suspicious = [item for item in items if item.get("suspicious_memorization")]
+    hard_evidence = [item for item in items if item.get("machine_hard_block_candidate")]
+    review_required = [item for item in items if item.get("requires_human_review")]
+    low_evidence = [item for item in items if item.get("warning_only")]
     conditional_counts = {
         field: Counter(item.get("conditional", {}).get(field, "unscorable") for item in items) for field in FIELDS
     }
@@ -249,9 +284,24 @@ def _summarize(items: list[dict[str, Any]], batch: dict[str, Any]) -> dict[str, 
             "translated_alpha": duplicate_groups(items, "normalized_alpha_sha256"),
         },
         "memorization": {
+            "detector_policy_version": DETECTOR_POLICY_VERSION,
+            "comparison_method": COMPARISON_METHOD,
+            "comparison_parameters": COMPARISON_PARAMETERS,
+            "comparison_parameters_sha256": COMPARISON_PARAMETERS_SHA256,
+            "detector_policy_sha256": DETECTOR_POLICY_SHA256,
+            "hard_evidence_count": len(hard_evidence),
+            "review_required_count": len(review_required),
+            "low_evidence_collision_count": len(low_evidence),
+            "warning_count": len(low_evidence),
+            "unresolved_candidate_count": len(hard_evidence) + len(review_required),
+            "evidence_class_counts": dict(Counter(item.get("memorization_evidence_class") for item in items)),
+            # Legacy compatibility: suspicious includes every retained hard,
+            # review, or warning candidate.  Gates do not use it as proof.
             "suspicious_count": len(suspicious),
             "suspicious_rate": len(suspicious) / max(1, len(items)),
-            "exact_rgba_count": sum(item.get("suspicious_memorization") == "exact_rgba" for item in items),
+            # Legacy compatibility: exact_rgba_count is restricted to
+            # nontrivial exact RGBA machine-hard evidence.
+            "exact_rgba_count": len(hard_evidence),
             "examples": [
                 {
                     "sample_id": item["sample_id"],
@@ -286,10 +336,20 @@ def evaluate_gates(
     pixel = summary["pixel_art"]
     diversity = summary["diversity"]
     memo = summary["memorization"]
+    detector_policy_supported = memo.get("detector_policy_version") == DETECTOR_POLICY_VERSION
+    hard_evidence_count = int(memo.get("hard_evidence_count", 0))
+    review_required_count = int(memo.get("review_required_count", 0))
+    unresolved_count = int(memo.get("unresolved_candidate_count", hard_evidence_count + review_required_count))
+    unresolved_rate = unresolved_count / max(1, int(summary.get("sample_count", 0)))
     checks = {
+        "detector_policy_supported": detector_policy_supported,
         "malformed": int(hard["malformed_count"]) <= gates["max_malformed"],
-        "exact_train_duplicates": int(memo["exact_rgba_count"]) <= gates["max_exact_train_duplicates"],
-        "near_train_duplicates": float(memo["suspicious_rate"]) <= gates["max_near_train_duplicate_rate"],
+        "memorization_hard_evidence": hard_evidence_count == 0,
+        "memorization_reviews_resolved": review_required_count == 0,
+        "exact_train_duplicates": hard_evidence_count <= gates["max_exact_train_duplicates"],
+        # Legacy gate name, now derived only from unresolved hard/review
+        # candidates.  Warning-only collisions cannot fail this check.
+        "near_train_duplicates": unresolved_rate <= gates["max_near_train_duplicate_rate"],
         "alpha_quality": float(pixel["semi_transparent_ratio_mean"] or 0.0) <= gates["max_semi_transparent_ratio"],
         "palette": float(pixel["palette_size_mean"] or 0.0) <= gates["max_palette_size_mean"],
         "exact_duplicates": float(diversity.get("exact_duplicate_rate") or 0.0) <= gates["max_exact_duplicate_rate"],
@@ -302,10 +362,19 @@ def evaluate_gates(
         checks["conditional_not_worse"] = candidate_rate + gates["max_conditional_regression"] >= baseline_rate
     return {
         "policy_version": "generation_benchmark_v1.0",
+        "detector_policy_version": str(memo.get("detector_policy_version") or "unsupported_or_missing"),
+        "comparison_method": memo.get("comparison_method"),
+        "comparison_parameters": memo.get("comparison_parameters"),
+        "comparison_parameters_sha256": memo.get("comparison_parameters_sha256"),
+        "detector_policy_sha256": memo.get("detector_policy_sha256"),
         "thresholds": dict(gates),
         "checks": checks,
         "pass": all(checks.values()),
-        "manual_review_required": False,
+        "manual_review_required": review_required_count > 0,
+        "hard_evidence_count": hard_evidence_count,
+        "review_required_count": review_required_count,
+        "low_evidence_collision_count": int(memo.get("low_evidence_collision_count", 0)),
+        "unresolved_candidate_count": unresolved_count,
     }
 
 
@@ -332,7 +401,7 @@ def compare_reports(baseline: Path, candidate: Path, out: Path, *, architecture_
             }
         )
     gates = evaluate_gates(cand_report["summary"], DEFAULT_GATES, base_report["summary"])
-    gates["manual_review_required"] = architecture_change
+    gates["manual_review_required"] = bool(gates["manual_review_required"] or architecture_change)
     report = {
         "schema_version": "generation_benchmark_compare_v1.0",
         "paired_count": len(keys),
@@ -496,6 +565,9 @@ def _markdown(report: Mapping[str, Any]) -> str:
             f"- Malformed: {summary['hard_validity']['malformed_count']}",
             f"- Exact duplicate rate: {summary['diversity'].get('exact_duplicate_rate')}",
             f"- Suspicious training neighbors: {summary['memorization']['suspicious_count']}",
+            f"- Hard memorization evidence: {summary['memorization']['hard_evidence_count']}",
+            f"- Review-required candidates: {summary['memorization']['review_required_count']}",
+            f"- Low-evidence collision warnings: {summary['memorization']['low_evidence_collision_count']}",
             f"- Promotion pass: {report['promotion']['pass']}",
             "",
             "Raw per-image metrics remain in `per_image_metrics.jsonl`.",

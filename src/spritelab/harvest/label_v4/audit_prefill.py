@@ -16,6 +16,19 @@ PREFILLED_AUDIT_SCHEMA = "label_v4_prefilled_audit_record_v1"
 HUMAN_TRUTH_SCHEMA = "label_v4_human_truth_v1"
 LEGACY_SELECTION_SCHEMAS = frozenset({"label_v4_calibration_wave1_v1", AUDIT_SELECTION_SCHEMA})
 INFERENCE_POLICIES = frozenset({"deterministic-only", "cached-only", "semantic-minimal"})
+QUEUE_IDENTITY_FIELDS = (
+    "queue_id",
+    "audit_order",
+    "prefill_record_hash",
+    "audit_id",
+    "sprite_id",
+    "exported_rgba_hash",
+    "normalized_alpha_hash",
+    "alpha_mask_hash",
+    "downloaded_file_hash",
+    "quality_state",
+    "quality_event",
+)
 VALUE_STATES = frozenset(
     {
         "known",
@@ -121,16 +134,46 @@ def prepare_audit(
         raise ValueError("semantic-minimal provider calls require explicitly configured VLM and text providers")
     source = Path(selection_path).resolve()
     before = _sha256_file(source)
-    rows = _read_jsonl(source)
+    output = Path(output_root).resolve()
+    if output.exists():
+        raise FileExistsError(f"semantic preparation output already exists: {output}")
+    queue_verification: dict[str, Any] | None = None
+    if source.name == "inference_queue.jsonl":
+        from spritelab.harvest.label_v4.two_pass import verify_frozen_inference_queue
+
+        queue_verification = verify_frozen_inference_queue(source)
+        rows = list(queue_verification["rows"])
+    else:
+        rows = _read_jsonl(source)
     if not rows:
         raise AuditSchemaError("audit selection is empty")
-    if any(detect_audit_schema(row) != AUDIT_SELECTION_SCHEMA for row in rows):
-        raise AuditSchemaError(f"prepare input must use {AUDIT_SELECTION_SCHEMA}")
+    input_schema = detect_audit_schema(rows[0])
+    queue_schema = "label_v4_inference_queue_v1"
+    is_queue = str(rows[0].get("schema_version")) == queue_schema
+    if is_queue and queue_verification is None:
+        from spritelab.harvest.label_v4.two_pass import verify_frozen_inference_queue
+
+        queue_verification = verify_frozen_inference_queue(source)
+        rows = list(queue_verification["rows"])
+    if input_schema != AUDIT_SELECTION_SCHEMA and not is_queue:
+        raise AuditSchemaError(f"prepare input must use {AUDIT_SELECTION_SCHEMA} or {queue_schema}")
+    if any(str(row.get("schema_version")) not in LEGACY_SELECTION_SCHEMAS | {queue_schema} for row in rows):
+        raise AuditSchemaError("prepare input contains mixed or incompatible schemas")
 
     roots = tuple(Path(root).resolve() for root in artifact_roots)
-    cached = _compatible_rich_records(rows, roots) if inference_policy != "deterministic-only" else {}
+    excluded_quality = [
+        {**copy.deepcopy(row), "semantic_preparation_reason": f"ineligible_quality:{row.get('quality_state')}"}
+        for row in rows
+        if is_queue and str(row.get("quality_state")) not in {"quality_suitable", "quality_uncertain_usable"}
+    ]
+    eligible_rows = (
+        [row for row in rows if row not in excluded_quality]
+        if not is_queue
+        else [row for row in rows if str(row.get("quality_state")) in {"quality_suitable", "quality_uncertain_usable"}]
+    )
+    cached = _compatible_rich_records(eligible_rows, roots) if inference_policy != "deterministic-only" else {}
     prepared: list[dict[str, Any]] = []
-    for index, selection in enumerate(rows):
+    for index, selection in enumerate(eligible_rows):
         stage_a = label_record_v4(selection, config=LabelV4PipelineConfig(mode="A", use_cache=False))
         candidate = cached.get(str(selection.get("sprite_id", "")))
         if candidate is not None and candidate.get("image_hash") == stage_a.get("image_hash"):
@@ -149,19 +192,46 @@ def prepare_audit(
             prediction_origin = "deterministic_stage_a"
         prepared.append(_prefill_record(selection, prediction, stage_a, index=index, origin=prediction_origin))
 
-    require_prefilled_records(prepared)
-    output = Path(output_root).resolve()
-    output.mkdir(parents=True, exist_ok=True)
+    if prepared:
+        require_prefilled_records(prepared)
+    elif not excluded_quality:
+        raise AuditSchemaError("assisted-v4 input has no records")
+    output.mkdir(parents=True)
     records_path = output / "audit_prefilled_records.jsonl"
     _write_jsonl(records_path, prepared)
+    from spritelab.harvest.label_v4.two_pass import semantic_readiness
+
+    semantic_ready = [row for row in prepared if semantic_readiness(row)[0]]
+    semantic_failed = [
+        row
+        for row in prepared
+        if not semantic_readiness(row)[0]
+        and any((field or {}).get("value_state") == "provider_failed" for field in row.get("fields", {}).values())
+    ]
+    failed_ids = {str(row.get("sprite_id")) for row in semantic_failed}
+    semantic_pending = [
+        row for row in prepared if not semantic_readiness(row)[0] and str(row.get("sprite_id")) not in failed_ids
+    ]
+    semantic_excluded = excluded_quality
+    partition_integrity = _assert_partition_integrity(
+        rows, semantic_ready, semantic_pending, semantic_failed, semantic_excluded
+    )
+    _write_jsonl(output / "semantic_ready_records.jsonl", semantic_ready)
+    _write_jsonl(output / "semantic_pending_inference.jsonl", semantic_pending)
+    _write_jsonl(output / "semantic_failed_records.jsonl", semantic_failed)
+    _write_jsonl(output / "semantic_excluded_quality.jsonl", semantic_excluded)
     coverage = summarize_prefill_coverage(prepared)
     manifest = {
         "schema_version": "label_v4_audit_prefill_manifest_v1",
-        "input_schema": AUDIT_SELECTION_SCHEMA,
+        "input_schema": input_schema if input_schema != "unknown" else str(rows[0].get("schema_version")),
         "output_schema": PREFILLED_AUDIT_SCHEMA,
         "input_path": str(source),
         "input_sha256": before,
         "records": len(prepared),
+        "semantic_ready_records": len(semantic_ready),
+        "semantic_pending_inference": len(semantic_pending),
+        "semantic_failed_records": len(semantic_failed),
+        "semantic_excluded_quality": len(semantic_excluded),
         "inference_policy": inference_policy,
         "provider_calls_allowed": bool(allow_provider_calls),
         "provider_calls_made": sum(int(row.get("provider_calls_made", 0)) for row in prepared),
@@ -170,6 +240,9 @@ def prepare_audit(
         "diagnostics": _diagnostics(prepared),
         "output_sha256": _sha256_file(records_path),
         "frozen_input_unchanged": before == _sha256_file(source),
+        "queue_id": queue_verification["queue_id"] if queue_verification else None,
+        "queue_file_sha256": queue_verification["queue_sha256"] if queue_verification else None,
+        "partition_integrity": partition_integrity,
     }
     _write_json(output / "audit_prefill_manifest.json", manifest)
     (output / "audit_prefill_report.md").write_text(_report_markdown(manifest), encoding="utf-8", newline="\n")
@@ -297,6 +370,8 @@ def _prefill_record(
         if origin == "semantic_minimal_provider"
         else 0,
         "prediction_origin": origin,
+        "quality_risk_penalty": selection.get("quality_risk_penalty", 0.0),
+        **{name: copy.deepcopy(selection.get(name)) for name in QUEUE_IDENTITY_FIELDS},
         "stage_a_critical_semantics_complete": stage_a_complete,
         "fields": fields,
         "field_proposals": field_proposals,
@@ -342,7 +417,14 @@ def _value_state(
 ) -> tuple[str, str]:
     if value not in (None, "", [], {}):
         return "known", "normalized_available_evidence"
-    failed = any(item.get("failure_diagnostics") for item in prediction.get("stage_ledger") or ())
+    outcomes = {
+        str(item.get("stage")): str(item.get("stage_status")) for item in prediction.get("stage_outcomes") or ()
+    }
+    failed = any(
+        item.get("failure_diagnostics")
+        and outcomes.get(str(item.get("stage"))) not in {"success_after_json_repair", "deterministic_fallback"}
+        for item in prediction.get("stage_ledger") or ()
+    )
     if failed:
         return "provider_failed", "required_provider_stage_failed"
     if missing and name in (
@@ -364,7 +446,6 @@ def _value_state(
     ):
         return "model_abstained", "model_stage_completed_without_promoted_value"
     if name in {
-        "explicit_material",
         "filename_color_hints",
         "secondary_colors",
         "outline_colors",
@@ -373,6 +454,8 @@ def _value_state(
         "parts",
     }:
         return "not_applicable", "no_supported_value_for_optional_field"
+    if name == "explicit_material":
+        return "unsupported", "material_applicability_not_established"
     return "unsupported", "available_pipeline_stages_do_not_produce_field"
 
 
@@ -505,6 +588,58 @@ def _diagnostics(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             "diagnosis": "schema_mismatch_missing_prefill_and_missing_model_stage",
         }
     return result
+
+
+def _id_set_hash(values: set[str]) -> str:
+    return hashlib.sha256(
+        json.dumps(sorted(values), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _assert_partition_integrity(
+    cohort: Sequence[Mapping[str, Any]],
+    ready: Sequence[Mapping[str, Any]],
+    pending: Sequence[Mapping[str, Any]],
+    failed: Sequence[Mapping[str, Any]],
+    excluded: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Fail closed unless all preparation partitions are disjoint and exhaustive."""
+
+    cohort_ids = [str(row.get("sprite_id") or "") for row in cohort]
+    if not all(cohort_ids) or len(set(cohort_ids)) != len(cohort_ids):
+        raise AuditSchemaError("semantic preparation cohort has missing or duplicate sprite IDs")
+    source = {str(row["sprite_id"]): row for row in cohort}
+    partitions = {"ready": ready, "pending": pending, "failed": failed, "excluded": excluded}
+    sets: dict[str, set[str]] = {}
+    for name, rows in partitions.items():
+        ids = [str(row.get("sprite_id") or "") for row in rows]
+        if not all(ids) or len(set(ids)) != len(ids):
+            raise AuditSchemaError(f"semantic {name} partition has missing or duplicate sprite IDs")
+        sets[name] = set(ids)
+        for row in rows:
+            original = source.get(str(row["sprite_id"]))
+            if original is None:
+                raise AuditSchemaError(f"semantic {name} partition contains a foreign record")
+            for field in QUEUE_IDENTITY_FIELDS:
+                if field in original and row.get(field) != original.get(field):
+                    raise AuditSchemaError(f"semantic {name} partition lost identity field {field}")
+    names = tuple(sets)
+    for index, left in enumerate(names):
+        for right in names[index + 1 :]:
+            overlap = sets[left] & sets[right]
+            if overlap:
+                raise AuditSchemaError(f"semantic partitions {left}/{right} overlap: {sorted(overlap)}")
+    union = set().union(*sets.values())
+    if union != set(cohort_ids):
+        raise AuditSchemaError("semantic preparation partitions do not exhaust the validated cohort")
+    return {
+        "cohort_count": len(cohort_ids),
+        "cohort_ids_sha256": _id_set_hash(set(cohort_ids)),
+        "partition_counts": {name: len(values) for name, values in sets.items()},
+        "partition_id_set_sha256": {name: _id_set_hash(values) for name, values in sets.items()},
+        "disjoint": True,
+        "exhaustive": True,
+    }
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

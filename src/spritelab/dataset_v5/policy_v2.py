@@ -34,8 +34,13 @@ from spritelab.dataset_v5.builder import (
     source_file_sha256,
 )
 
-POLICY_BUILDER_VERSION = "dataset_v5_policy_v2.1"
+POLICY_BUILDER_VERSION = "dataset_v5_policy_v2.2"
+CURRENT_POLICY_SCHEMA_VERSION = "dataset_v5_policy_v2.current.v1"
+LEGACY_POLICY_SCHEMA_VERSION = "dataset_v5_policy_v2.legacy.v1"
 POLICY_NAMES = ("strict_hard_cap", "soft_balanced", "core_plus_weighted_sampling")
+QUALITY_TIERS = frozenset(("strict", "standard", "unreviewed"))
+SAFE_QUALITY_MULTIPLIERS = {"strict": 1.0, "standard": 0.8, "unreviewed": 0.0}
+LEGACY_QUALITY_MULTIPLIERS = {"strict": 1.0, "standard": 0.8, "unreviewed": 0.2}
 
 
 @dataclass(frozen=True)
@@ -50,16 +55,41 @@ class WeightingPolicy:
     source_family_exponent: float = 0.25
     canonical_object_exponent: float = 0.25
     geometry_family_exponent: float = 1.0
-    quality_tier_multipliers: dict[str, float] = field(
-        # Keep an explicitly bounded contribution from weak/unreviewed rows;
-        # zero-weight elimination requires an explicit non-default policy.
-        default_factory=lambda: {"strict": 1.0, "standard": 0.8, "unreviewed": 0.2}
-    )
+    quality_multipliers: dict[str, float] = field(default_factory=lambda: dict(SAFE_QUALITY_MULTIPLIERS))
+    quality_multipliers_explicit: bool = False
+    diagnostic_only_allow_positive_unreviewed: bool = False
     per_epoch_quota: int | None = None
+
+    def __post_init__(self) -> None:
+        tiers = set(self.quality_multipliers)
+        missing = sorted(QUALITY_TIERS - tiers)
+        unknown = sorted(tiers - QUALITY_TIERS)
+        if missing:
+            raise ValueError(f"missing required quality multiplier tiers: {missing}")
+        if unknown:
+            raise ValueError(f"unknown quality multiplier tiers: {unknown}")
+        for tier, value in self.quality_multipliers.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"quality multiplier for {tier!r} must be finite")
+            if value < 0:
+                raise ValueError(f"quality multiplier for {tier!r} must be nonnegative")
+        if self.quality_multipliers["unreviewed"] > 0 and not self.diagnostic_only_allow_positive_unreviewed:
+            raise ValueError("unreviewed > 0 requires diagnostic_only_allow_positive_unreviewed=true")
+
+    def resolved(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def resolved_policy_hash(self) -> str:
+        return _hash_json(self.resolved())
+
+    @property
+    def promotion_forbidden(self) -> bool:
+        return self.diagnostic_only_allow_positive_unreviewed
 
 
 @dataclass(frozen=True)
 class PolicyV2Config:
+    policy_schema_version: str = CURRENT_POLICY_SCHEMA_VERSION
     dataset_name: str = "sprite_lab_multisource_v5_policy_v2_preview"
     policy_name: str = "core_plus_weighted_sampling"
     seed: int = 20260711
@@ -75,11 +105,35 @@ class PolicyV2Config:
     strict_membership_artist_cap: float = 0.15
     evaluation_max_records: int = 160
     weighting: WeightingPolicy = field(default_factory=WeightingPolicy)
+    production_policy: bool = False
+
+    def __post_init__(self) -> None:
+        if self.policy_schema_version not in {CURRENT_POLICY_SCHEMA_VERSION, LEGACY_POLICY_SCHEMA_VERSION}:
+            raise ValueError(f"unsupported policy_schema_version {self.policy_schema_version!r}")
+        if self.production_policy and self.weighting.diagnostic_only_allow_positive_unreviewed:
+            raise ValueError("production-policy configs cannot use the diagnostic unreviewed-weight override")
 
     @classmethod
-    def from_json(cls, path: str | Path) -> PolicyV2Config:
+    def from_json(cls, path: str | Path, *, legacy: bool = False) -> PolicyV2Config:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        weighting = WeightingPolicy(**raw.pop("weighting", {}))
+        weighting_raw = raw.pop("weighting", {})
+        if "quality_tier_multipliers" in weighting_raw:
+            raise ValueError("quality_tier_multipliers is obsolete; use quality_multipliers")
+        explicit = "quality_multipliers" in weighting_raw
+        if legacy:
+            declared = raw.get("policy_schema_version")
+            if declared not in (None, LEGACY_POLICY_SCHEMA_VERSION):
+                raise ValueError("explicit legacy loading requires the legacy policy schema")
+            raw["policy_schema_version"] = LEGACY_POLICY_SCHEMA_VERSION
+            weighting_raw.setdefault("quality_multipliers", dict(LEGACY_QUALITY_MULTIPLIERS))
+            weighting_raw.setdefault("diagnostic_only_allow_positive_unreviewed", True)
+        else:
+            if not explicit:
+                raise ValueError("current policy requires explicit weighting.quality_multipliers")
+            if raw.get("policy_schema_version") != CURRENT_POLICY_SCHEMA_VERSION:
+                raise ValueError(f"current policy requires policy_schema_version={CURRENT_POLICY_SCHEMA_VERSION!r}")
+        weighting_raw["quality_multipliers_explicit"] = explicit
+        weighting = WeightingPolicy(**weighting_raw)
         for key in ("source_ood_packs", "held_out_artists", "open_set_objects"):
             if key in raw:
                 raw[key] = tuple(raw[key])
@@ -87,6 +141,24 @@ class PolicyV2Config:
 
     def canonical(self) -> dict[str, Any]:
         return asdict(self)
+
+    def validate_for_build(self) -> None:
+        if (
+            self.policy_schema_version == CURRENT_POLICY_SCHEMA_VERSION
+            and not self.weighting.quality_multipliers_explicit
+        ):
+            raise ValueError("current production/candidate policy must explicitly resolve quality_multipliers")
+
+    def resolved_policy(self) -> dict[str, Any]:
+        return {
+            "policy_schema_version": self.policy_schema_version,
+            "policy_name": self.policy_name,
+            "production_policy": self.production_policy,
+            "weighting": self.weighting.resolved(),
+        }
+
+    def resolved_policy_hash(self) -> str:
+        return _hash_json(self.resolved_policy())
 
 
 def _normal_path(value: Any) -> str:
@@ -310,9 +382,8 @@ def compute_sampling_weights(
     positive = [value for value in raw.values() if value > 0]
     scale = len(positive) / sum(positive) if positive else 1.0
     weights = {
-        sprite_id: min(policy.maximum_weight, max(policy.minimum_weight, value * scale))
+        sprite_id: min(policy.maximum_weight, max(policy.minimum_weight, value * scale)) if value > 0 else 0.0
         for sprite_id, value in raw.items()
-        if value > 0
     }
     # Rake pack and artist marginals to the configured soft ceiling. This keeps
     # intersecting factors (for example, a rare pack from a common artist) from
@@ -348,7 +419,7 @@ def compute_sampling_weights(
         if not changed:
             break
     weights = {
-        sprite_id: round(min(policy.maximum_weight, max(policy.minimum_weight, value)), 12)
+        sprite_id: round(min(policy.maximum_weight, max(policy.minimum_weight, value)), 12) if value > 0 else 0.0
         for sprite_id, value in weights.items()
     }
     effective_total = sum(weights.values())
@@ -398,7 +469,7 @@ def _label_quality_sampling_multiplier(row: dict[str, Any], policy: WeightingPol
     quality = row.get("label_quality") if isinstance(row.get("label_quality"), dict) else {}
     score = quality.get("record_uncertainty_1_20")
     if score is None:
-        return max(0.0, float(policy.quality_tier_multipliers.get(fallback_tier, 1.0)))
+        return float(policy.quality_multipliers[fallback_tier])
     value = max(1, min(20, int(score)))
     if value <= 4:
         multiplier = 1.0
@@ -684,6 +755,7 @@ def build_policy_preview(
 ) -> dict[str, Any]:
     """Build a non-production policy preview without changing any frozen input."""
 
+    config.validate_for_build()
     if config.policy_name not in POLICY_NAMES:
         raise ValueError(f"unknown policy {config.policy_name!r}; expected one of {POLICY_NAMES}")
     output = Path(output_dir).resolve()
@@ -693,6 +765,8 @@ def build_policy_preview(
     v4 = Path(v4_dir).resolve()
     harvest = Path(harvest_root).resolve()
     config_hash = _hash_json(config.canonical())
+    resolved_policy = config.resolved_policy()
+    resolved_policy_hash = config.resolved_policy_hash()
     discovered = _discover(v4, harvest, tuple(Path(path).resolve() for path in explicit_manifests))
     records, exclusions = _load_v4(v4, harvest, config_hash)
     records.extend(_load_explicit(explicit_manifests, config_hash, exclusions))
@@ -757,6 +831,8 @@ def build_policy_preview(
     weight_report["effective_train_epoch_mass"] = round(
         sum(weights[row["sprite_id"]] for row in membership if assignments[row["sprite_id"]] == "train"), 9
     )
+    weight_report["resolved_policy"] = resolved_policy
+    weight_report["resolved_policy_hash"] = resolved_policy_hash
 
     evaluation_candidates = [
         row for row in supervised_core if core_assignments.get(row["sprite_id"]) in {"validation", "test"}
@@ -784,6 +860,7 @@ def build_policy_preview(
             geometry_family_id=families[row["sprite_id"]],
             sampling_weight=weights[row["sprite_id"]],
             sampling_weight_schema="sampling_weights_v2.1",
+            resolved_policy_hash=resolved_policy_hash,
         )
         dataset_rows.append(public)
     _write_jsonl(output / "dataset_manifest.jsonl", sorted(dataset_rows, key=lambda row: row["sprite_id"]))
@@ -807,6 +884,8 @@ def build_policy_preview(
                 "validation": config.validation_fraction,
                 "test": config.test_fraction,
             },
+            "resolved_policy": resolved_policy,
+            "resolved_policy_hash": resolved_policy_hash,
         },
     )
     _write_variant(output, "supervised_core", supervised_core, core_assignments)
@@ -829,6 +908,7 @@ def build_policy_preview(
     for row in training_rows:
         row["sampling_weight"] = weights[row["sprite_id"]]
         row["sampling_weight_schema"] = "sampling_weights_v2.1"
+        row["resolved_policy_hash"] = resolved_policy_hash
     _write_jsonl(output / "training_manifest.jsonl", training_rows)
 
     leakage = _leakage_report(assignments, relations, config, membership)
@@ -839,6 +919,8 @@ def build_policy_preview(
         "builder_version": POLICY_BUILDER_VERSION,
         "policy_name": config.policy_name,
         "config_hash": config_hash,
+        "resolved_policy": resolved_policy,
+        "resolved_policy_hash": resolved_policy_hash,
         "input_records": len(records),
         "deduplicated_records": len(deduplicated),
         "total_membership": len(membership),
@@ -873,6 +955,8 @@ def build_policy_preview(
             "promotion_forbidden": True,
             "builder_version": POLICY_BUILDER_VERSION,
             "config_hash": config_hash,
+            "resolved_policy": resolved_policy,
+            "resolved_policy_hash": resolved_policy_hash,
             "artifact_hashes": hashes,
         },
     )
@@ -919,7 +1003,7 @@ def verify_policy_preview(output_dir: str | Path) -> dict[str, Any]:
     for row in rows:
         weight = float(row.get("sampling_weight", 0.0))
         policy = summary["effective_sampling"]["policy"]
-        if not policy["minimum_weight"] <= weight <= policy["maximum_weight"]:
+        if weight != 0.0 and not policy["minimum_weight"] <= weight <= policy["maximum_weight"]:
             errors.append(f"out-of-bounds sampling weight for {row['sprite_id']}")
         if row.get("label_provenance", {}).get("adapter") == "label_v3" and not row.get("label_provenance", {}).get(
             "record", {}

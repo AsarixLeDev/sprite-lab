@@ -24,20 +24,35 @@ from typing import Any
 
 REVIEW_EVENT_SCHEMA_VERSION = "label_v4_human_truth_v1"
 
-ACCEPT_PROPOSAL = "accept_proposal"
+
+class ReviewEventSchemaError(ValueError):
+    """Raised when a review event does not use the canonical event schema."""
+
+
+ACCEPT_PROPOSAL = "accept_proposed_value"
+ACCEPT_MODEL_ABSTENTION = "accept_model_abstention"
 SELECT_ALTERNATIVE = "select_alternative"
 EDIT = "edit"
-ABSTAIN = "abstain"
+ABSTAIN = "mark_human_abstention"
 MARK_UNSUPPORTED = "mark_unsupported"
 MARK_WRONG_TAXONOMY = "mark_wrong_taxonomy"
 MARK_UNSUITABLE_IMAGE = "mark_unsuitable_image"
 MARK_SUITABLE_IMAGE = "mark_suitable_image"
 MARK_UNCERTAIN_QUALITY = "mark_uncertain_quality"
 MARK_NOT_APPLICABLE = "mark_not_applicable"
+QUALITY_SUITABLE = "quality_suitable"
+QUALITY_UNCERTAIN_USABLE = "quality_uncertain_usable"
+QUALITY_UNSUITABLE = "quality_unsuitable"
+QUALITY_UNCERTAIN_NOT_USABLE = "quality_uncertain_not_usable"
+
+QUALITY_ACTIONS = frozenset(
+    {QUALITY_SUITABLE, QUALITY_UNCERTAIN_USABLE, QUALITY_UNSUITABLE, QUALITY_UNCERTAIN_NOT_USABLE}
+)
 
 REVIEW_ACTIONS = frozenset(
     {
         ACCEPT_PROPOSAL,
+        ACCEPT_MODEL_ABSTENTION,
         SELECT_ALTERNATIVE,
         EDIT,
         ABSTAIN,
@@ -47,11 +62,13 @@ REVIEW_ACTIONS = frozenset(
         MARK_SUITABLE_IMAGE,
         MARK_UNCERTAIN_QUALITY,
         MARK_NOT_APPLICABLE,
+        *QUALITY_ACTIONS,
     }
 )
 
 _ACTION_STATES = {
     ACCEPT_PROPOSAL: "accepted",
+    ACCEPT_MODEL_ABSTENTION: "accepted_abstention",
     SELECT_ALTERNATIVE: "accepted",
     EDIT: "accepted",
     ABSTAIN: "abstained",
@@ -61,11 +78,16 @@ _ACTION_STATES = {
     MARK_SUITABLE_IMAGE: "suitable_image",
     MARK_UNCERTAIN_QUALITY: "uncertain_quality",
     MARK_NOT_APPLICABLE: "not_applicable",
+    QUALITY_SUITABLE: "quality_suitable",
+    QUALITY_UNCERTAIN_USABLE: "quality_uncertain_usable",
+    QUALITY_UNSUITABLE: "quality_unsuitable",
+    QUALITY_UNCERTAIN_NOT_USABLE: "quality_uncertain_not_usable",
 }
 
-_RECORD_ACTIONS = frozenset({MARK_UNSUITABLE_IMAGE, MARK_SUITABLE_IMAGE, MARK_UNCERTAIN_QUALITY})
+_RECORD_ACTIONS = frozenset({MARK_UNSUITABLE_IMAGE, MARK_SUITABLE_IMAGE, MARK_UNCERTAIN_QUALITY, *QUALITY_ACTIONS})
 _HUMAN_OUTCOMES = {
     ACCEPT_PROPOSAL: "correct",
+    ACCEPT_MODEL_ABSTENTION: "model_abstention_accepted",
     SELECT_ALTERNATIVE: "incorrect",
     EDIT: "incorrect",
     ABSTAIN: "human_abstained",
@@ -75,7 +97,15 @@ _HUMAN_OUTCOMES = {
     MARK_SUITABLE_IMAGE: "not_applicable",
     MARK_UNCERTAIN_QUALITY: "not_scorable_due_to_image",
     MARK_NOT_APPLICABLE: "not_applicable",
+    QUALITY_SUITABLE: "quality_suitable",
+    QUALITY_UNCERTAIN_USABLE: "quality_uncertain_usable",
+    QUALITY_UNSUITABLE: "quality_unsuitable",
+    QUALITY_UNCERTAIN_NOT_USABLE: "quality_uncertain_not_usable",
 }
+
+_UNSAFE_SEMANTIC_STATES = frozenset(
+    {"missing_prediction", "provider_failed", "not_scorable", "not_scorable_due_to_image"}
+)
 
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
@@ -154,6 +184,10 @@ class ReviewEvent:
     review_duration_seconds: float | None = None
 
     def __post_init__(self) -> None:
+        if self.schema_version != REVIEW_EVENT_SCHEMA_VERSION:
+            raise ReviewEventSchemaError(
+                f"unsupported review-event schema {self.schema_version!r}; expected {REVIEW_EVENT_SCHEMA_VERSION!r}"
+            )
         if self.action not in REVIEW_ACTIONS:
             raise ValueError(f"unsupported review action: {self.action}")
         if self.action not in _RECORD_ACTIONS and not str(self.field_name).strip():
@@ -231,8 +265,13 @@ class ReviewEvent:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ReviewEvent:
+        schema_version = str(value.get("schema_version", REVIEW_EVENT_SCHEMA_VERSION))
+        if schema_version != REVIEW_EVENT_SCHEMA_VERSION:
+            raise ReviewEventSchemaError(
+                f"unsupported review-event schema {schema_version!r}; expected {REVIEW_EVENT_SCHEMA_VERSION!r}"
+            )
         return cls(
-            schema_version=str(value.get("schema_version", REVIEW_EVENT_SCHEMA_VERSION)),
+            schema_version=schema_version,
             event_id=str(value.get("event_id", "")),
             sprite_id=str(value.get("sprite_id", "")),
             action=str(value.get("action", "")),
@@ -340,9 +379,9 @@ def load_review_events(path: str | Path, *, strict: bool = True) -> tuple[Review
             continue
         try:
             events.append(ReviewEvent.from_dict(json.loads(line)))
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
             if strict:
-                raise ValueError(f"invalid review event at {target}:{line_number}") from None
+                raise ValueError(f"invalid review event at {target}:{line_number}: {exc}") from None
     return tuple(events)
 
 
@@ -488,8 +527,22 @@ def create_review_event(
     view = compact_review_presenter(record)
     field_view = view["fields"].get(field_name, {})
     proposed = copy.deepcopy(field_view.get("proposed_value"))
+    source_field = record.get("fields", {}).get(field_name, {}) if isinstance(record.get("fields"), Mapping) else {}
+    value_state = str(source_field.get("value_state", "known" if proposed is not None else "unsupported"))
+    semantic_action = action not in _RECORD_ACTIONS
+    if semantic_action and value_state in _UNSAFE_SEMANTIC_STATES:
+        raise ValueError(f"{field_name}: semantic action {action} forbidden for value_state={value_state}")
+    if action in {ACCEPT_PROPOSAL, ACCEPT_MODEL_ABSTENTION}:
+        # Local import avoids a module cycle while keeping every acceptance path on
+        # the same strict state validator used by readiness and completion.
+        from spritelab.harvest.label_v4.two_pass import validate_semantic_field
+
+        validation = validate_semantic_field(record, field_name)
+        expected = "known" if action == ACCEPT_PROPOSAL else "model_abstained"
+        if not validation.valid or validation.value_state != expected:
+            raise ValueError(f"{field_name}: {action} requires valid {expected}: {validation.reason}")
     if reviewed_value is _MISSING:
-        reviewed_value = proposed if action == ACCEPT_PROPOSAL else None
+        reviewed_value = proposed if action in {ACCEPT_PROPOSAL, ACCEPT_MODEL_ABSTENTION} else None
     alternatives = tuple(copy.deepcopy(field_view.get("alternatives") or ()))
     if action == SELECT_ALTERNATIVE and reviewed_value not in alternatives:
         raise ValueError(f"selected value is not a visible alternative for {field_name}")
@@ -543,6 +596,10 @@ def accept_proposal(path: str | Path, record: Mapping[str, Any], field_name: str
     return record_review_action(path, record, ACCEPT_PROPOSAL, field_name, **kwargs)
 
 
+def accept_model_abstention(path: str | Path, record: Mapping[str, Any], field_name: str, **kwargs: Any) -> ReviewEvent:
+    return record_review_action(path, record, ACCEPT_MODEL_ABSTENTION, field_name, **kwargs)
+
+
 def select_alternative(
     path: str | Path, record: Mapping[str, Any], field_name: str, value: Any, **kwargs: Any
 ) -> ReviewEvent:
@@ -579,3 +636,9 @@ def mark_uncertain_quality(path: str | Path, record: Mapping[str, Any], **kwargs
 
 def mark_not_applicable(path: str | Path, record: Mapping[str, Any], field_name: str, **kwargs: Any) -> ReviewEvent:
     return record_review_action(path, record, MARK_NOT_APPLICABLE, field_name, reviewed_value=None, **kwargs)
+
+
+def record_quality_decision(path: str | Path, record: Mapping[str, Any], outcome: str, **kwargs: Any) -> ReviewEvent:
+    if outcome not in QUALITY_ACTIONS:
+        raise ValueError(f"invalid quality outcome: {outcome}")
+    return record_review_action(path, record, outcome, reviewed_value=outcome, **kwargs)

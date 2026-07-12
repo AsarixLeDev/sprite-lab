@@ -8,7 +8,9 @@ import random
 import time
 import warnings
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import asdict, dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +100,44 @@ from spritelab.training.timestep_validation import (
 from spritelab.training.tokenization import SpriteTextTokenizer
 
 SPRITE_SIZE = 32
+AUXILIARY_HEAD_PREFIXES = ("palette_head_rgb.", "palette_head_presence.", "index_head.")
+FORWARD_OUTPUT_SCHEMA_VERSION = "spritelab_generator_forward_v2"
+
+
+class AuxiliaryHeadsMode(str, Enum):
+    """Physical palette/index head construction; independent of loss weights."""
+
+    ABSENT = "absent"
+    PALETTE_INDEX = "palette_index"
+
+
+def normalize_auxiliary_heads_mode(value: AuxiliaryHeadsMode | str | None) -> tuple[AuxiliaryHeadsMode, bool]:
+    """Return physical mode and whether the historical adapter selected it.
+
+    Historical configs omitted this field.  They always constructed the heads,
+    including when every auxiliary loss weight was zero, so omission maps to a
+    marked legacy palette/index architecture and never to a headless model.
+    """
+    if value is None:
+        return AuxiliaryHeadsMode.PALETTE_INDEX, True
+    if isinstance(value, AuxiliaryHeadsMode):
+        return value, False
+    try:
+        return AuxiliaryHeadsMode(str(value)), False
+    except ValueError as exc:
+        raise ValueError("auxiliary_heads_mode must be 'absent' or 'palette_index'") from exc
+
+
+def resolve_auxiliary_heads_mode(
+    value: AuxiliaryHeadsMode | str | None, experiment_manifest: Mapping[str, Any] | None
+) -> tuple[AuxiliaryHeadsMode, bool]:
+    """Resolve a direct option or the same explicit option bound in a manifest."""
+    if value is None and isinstance(experiment_manifest, Mapping):
+        architecture = experiment_manifest.get("model_architecture")
+        if isinstance(architecture, Mapping) and architecture.get("identity_kind") == "explicit":
+            value = architecture.get("auxiliary_heads_mode")
+    return normalize_auxiliary_heads_mode(value)
+
 
 # Palette range cache: hoists per-step GPU→CPU sync out of the hot loop.
 # Training palettes are consistently either 0-1 or 0-255 for the entire
@@ -255,6 +295,7 @@ class ChallengerTrainConfig:
     palette_presence_loss_weight: float = 0.0
     index_head_warmup_steps: int = 0
     palette_head_use_gt_palette_prob: float = 1.0
+    auxiliary_heads_mode: AuxiliaryHeadsMode | str | None = None
     # v3 Phase 0 explicit canonical palette input (default-off).
     palette_conditioning: bool = False
     palette_conditioning_dropout: float = 0.0
@@ -263,6 +304,7 @@ class ChallengerTrainConfig:
     experiment_manifest: dict[str, Any] | None = None
     resume_from: Path | None = None
     unsafe_resume: bool = False
+    unsafe_resume_reason: str | None = None
     determinism: str = "off"
     gradient_accumulation_steps: int = 1
     timestep_validation_boundaries: tuple[float, ...] = DEFAULT_TIMESTEP_BOUNDARIES
@@ -334,6 +376,7 @@ class RectifiedFlowUNet(_ModuleBase):
         palette_conditioning_dropout: float = 0.0,
         palette_conditioning_dim: int = 64,
         palette_conditioning_inject: str = "decoder",
+        auxiliary_heads_mode: AuxiliaryHeadsMode | str | None = None,
     ) -> None:
         th, nn_mod = _require_torch()
         del th
@@ -351,6 +394,9 @@ class RectifiedFlowUNet(_ModuleBase):
         self.palette_conditioning_dropout = float(palette_conditioning_dropout)
         self.palette_conditioning_dim = int(palette_conditioning_dim)
         self.palette_conditioning_inject = str(palette_conditioning_inject).strip().lower()
+        self.auxiliary_heads_mode, self.legacy_auxiliary_heads_adapter = normalize_auxiliary_heads_mode(
+            auxiliary_heads_mode
+        )
         if self.palette_conditioning_inject not in {"decoder", "all", "bottleneck"}:
             raise ValueError("palette_conditioning_inject must be one of: decoder, all, bottleneck")
 
@@ -435,21 +481,23 @@ class RectifiedFlowUNet(_ModuleBase):
         )
         self._time_embedding_dim = emb_dim
 
-        # v2 Phase 2: palette/index auxiliary heads (always present, losses default-off)
-        K = 16
-        bottleneck_channels = channels[-1]
-        self._bottleneck_pool = nn_mod.AdaptiveAvgPool2d(1)
-        self.palette_head_rgb = nn_mod.Sequential(
-            nn_mod.Linear(bottleneck_channels, 128),
-            nn_mod.SiLU(),
-            nn_mod.Linear(128, K * 3),
-        )
-        self.palette_head_presence = nn_mod.Sequential(
-            nn_mod.Linear(bottleneck_channels, 128),
-            nn_mod.SiLU(),
-            nn_mod.Linear(128, K),
-        )
-        self.index_head = nn_mod.Conv2d(current, K, kernel_size=1)
+        # Physical construction is selected only by auxiliary_heads_mode.
+        # No placeholder modules or attributes are registered in absent mode.
+        if self.auxiliary_heads_mode is AuxiliaryHeadsMode.PALETTE_INDEX:
+            K = 16
+            bottleneck_channels = channels[-1]
+            self._bottleneck_pool = nn_mod.AdaptiveAvgPool2d(1)
+            self.palette_head_rgb = nn_mod.Sequential(
+                nn_mod.Linear(bottleneck_channels, 128),
+                nn_mod.SiLU(),
+                nn_mod.Linear(128, K * 3),
+            )
+            self.palette_head_presence = nn_mod.Sequential(
+                nn_mod.Linear(bottleneck_channels, 128),
+                nn_mod.SiLU(),
+                nn_mod.Linear(128, K),
+            )
+            self.index_head = nn_mod.Conv2d(current, K, kernel_size=1)
 
     def config(self) -> dict[str, Any]:
         return {
@@ -466,6 +514,7 @@ class RectifiedFlowUNet(_ModuleBase):
             "palette_conditioning_dropout": self.palette_conditioning_dropout,
             "palette_conditioning_dim": self.palette_conditioning_dim,
             "palette_conditioning_inject": self.palette_conditioning_inject,
+            "auxiliary_heads_mode": self.auxiliary_heads_mode.value,
         }
 
     def forward(
@@ -528,18 +577,23 @@ class RectifiedFlowUNet(_ModuleBase):
         if not return_aux:
             return output_rgba
 
-        # v2 Phase 2 auxiliary outputs
-        b_feat = self._bottleneck_pool(bottleneck_h).flatten(1)  # (B, C_bottleneck)
-        palette_rgb = self.palette_head_rgb(b_feat).view(-1, 16, 3)  # (B, 16, 3)
-        palette_presence = self.palette_head_presence(b_feat)  # (B, 16) logits
-        index_logits = self.index_head(h)  # (B, 16, H, W)
-
-        return {
+        result = {
+            "schema_version": FORWARD_OUTPUT_SCHEMA_VERSION,
             "velocity": output_rgba,
-            "palette_rgb": palette_rgb,
-            "palette_presence_logits": palette_presence,
-            "index_logits": index_logits,
+            "auxiliary_heads_mode": self.auxiliary_heads_mode.value,
+            "auxiliary_heads_available": self.auxiliary_heads_mode is AuxiliaryHeadsMode.PALETTE_INDEX,
+            "palette_rgb": None,
+            "palette_presence_logits": None,
+            "index_logits": None,
         }
+        if self.auxiliary_heads_mode is AuxiliaryHeadsMode.ABSENT:
+            return result
+
+        b_feat = self._bottleneck_pool(bottleneck_h).flatten(1)
+        result["palette_rgb"] = self.palette_head_rgb(b_feat).view(-1, 16, 3)
+        result["palette_presence_logits"] = self.palette_head_presence(b_feat)
+        result["index_logits"] = self.index_head(h)
+        return result
 
     def _palette_condition_embedding(self, palette_condition: Any | None, *, batch: int, device: Any) -> Any | None:
         """Encode slot features and apply per-example training dropout."""
@@ -816,6 +870,20 @@ class ChallengerPromptAdapter:
 
 def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
     th, _nn_mod = _require_torch()
+    auxiliary_mode, legacy_auxiliary_adapter = resolve_auxiliary_heads_mode(
+        config.auxiliary_heads_mode, config.experiment_manifest
+    )
+    auxiliary_weights = {
+        "index_head_loss_weight": float(config.index_head_loss_weight),
+        "palette_head_loss_weight": float(config.palette_head_loss_weight),
+        "palette_presence_loss_weight": float(config.palette_presence_loss_weight),
+    }
+    nonzero_auxiliary_weights = [name for name, value in auxiliary_weights.items() if value != 0.0]
+    if auxiliary_mode is AuxiliaryHeadsMode.ABSENT and nonzero_auxiliary_weights:
+        raise ValueError(
+            "auxiliary_heads_mode='absent' is incompatible with nonzero auxiliary losses: "
+            + ", ".join(nonzero_auxiliary_weights)
+        )
     if str(config.architecture).lower() != "rectified_flow":
         raise ValueError("only --architecture rectified_flow is supported")
     metrics_every = int(config.metrics_every)
@@ -977,11 +1045,38 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         **model_config,
         film_conditioning=config.film_conditioning,
         bottleneck_attention=config.bottleneck_attention,
+        auxiliary_heads_mode=None if legacy_auxiliary_adapter else auxiliary_mode,
     ).to(device)
+    model_config = model.config()
     optimizer = build_adamw(model.parameters(), lr=float(config.learning_rate), fused=config.fused_adamw)
     ema_enabled = float(config.ema_decay) > 0.0
     ema_state = _init_ema_state(model) if ema_enabled else None
     ema_fast_cache = _init_ema_fast_state(ema_state, model) if ema_enabled else None
+    from spritelab.training.experiment_system import RESUME_HARD_FIELDS, measured_architecture_identity, stable_hash
+
+    effective_experiment_manifest = (
+        None if config.experiment_manifest is None else deepcopy(dict(config.experiment_manifest))
+    )
+    if effective_experiment_manifest is not None and isinstance(
+        effective_experiment_manifest.get("model_architecture"), Mapping
+    ):
+        measured_identity = measured_architecture_identity(model)
+        effective_experiment_manifest["model_architecture"] = measured_identity
+        effective_experiment_manifest["model_architecture_hash"] = measured_identity["hash"]
+        effective_experiment_manifest["auxiliary_heads_mode"] = auxiliary_mode.value
+        effective_experiment_manifest["legacy_architecture"] = legacy_auxiliary_adapter
+        effective_experiment_manifest["fair_architecture_comparison_eligible"] = not legacy_auxiliary_adapter
+        effective_experiment_manifest["checkpoint_promotion_eligible"] = not legacy_auxiliary_adapter
+        effective_experiment_manifest["experiment_configuration_hash"] = stable_hash(
+            {
+                field: effective_experiment_manifest.get(field)
+                for field in RESUME_HARD_FIELDS
+                if field != "experiment_configuration_hash"
+            }
+        )
+        effective_experiment_manifest["experiment_hash"] = stable_hash(
+            {key: value for key, value in effective_experiment_manifest.items() if key != "experiment_hash"}
+        )
     apply_backend_speed_flags(cudnn_benchmark=config.cudnn_benchmark, tf32=config.tf32)
     scheduler = build_lr_scheduler(
         optimizer,
@@ -990,12 +1085,17 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         warmup_steps=config.lr_warmup_steps,
     )
     non_blocking = device_type(device) == "cuda"
+    unsafe_resume_record: dict[str, Any] = {}
     config_json = {
         **{key: _jsonable(value) for key, value in asdict(config).items()},
         "architecture": "rectified_flow",
         "model_type": "generator_challenger",
         "conditioning_mode": conditioning_mode,
         "model_config": model_config,
+        "auxiliary_heads_mode": auxiliary_mode.value,
+        "legacy_auxiliary_heads_adapter": legacy_auxiliary_adapter,
+        "experiment_manifest": effective_experiment_manifest,
+        "unsafe_resume_record": unsafe_resume_record,
         "train_records": len(train_dataset),
         "val_records": len(val_source),
         "validation_mode": validation_mode,
@@ -1077,12 +1177,29 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         resume_checkpoint = preloaded_resume
         assert isinstance(resume_checkpoint, Mapping)
         saved_manifest = resume_checkpoint.get("experiment_manifest")
-        if not isinstance(config.experiment_manifest, Mapping) or not isinstance(saved_manifest, Mapping):
+        if not isinstance(effective_experiment_manifest, Mapping) or not isinstance(saved_manifest, Mapping):
             if not config.unsafe_resume:
                 raise RuntimeError("safe resume requires experiment manifests in both config and checkpoint")
+            if not str(config.unsafe_resume_reason or "").strip():
+                raise RuntimeError("unsafe resume requires an explicit recorded unsafe reason")
+            resume_mismatches = ["experiment_manifest"]
+            unsafe_resume_record.update(
+                {
+                    "unsafe_resume": True,
+                    "unsafe_reason": str(config.unsafe_resume_reason),
+                    "mismatches": list(resume_mismatches),
+                    "exact_replay_claimed": False,
+                    "fair_architecture_comparison_eligible": False,
+                    "checkpoint_promotion_eligible": False,
+                }
+            )
         else:
             resume_mismatches = validate_resume_compatibility(
-                config.experiment_manifest, saved_manifest, unsafe=config.unsafe_resume
+                effective_experiment_manifest,
+                saved_manifest,
+                unsafe=config.unsafe_resume,
+                unsafe_reason=config.unsafe_resume_reason,
+                unsafe_record=unsafe_resume_record if config.unsafe_resume else None,
             )
         model.load_state_dict(resume_checkpoint["model_state_dict"])
         optimizer.load_state_dict(resume_checkpoint["optimizer_state_dict"])
@@ -1443,6 +1560,11 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "sampler_state_schema": current_sampler_state()["schema_version"],
         "resume_from": None if config.resume_from is None else str(config.resume_from),
         "resume_compatibility_mismatches": resume_mismatches,
+        "unsafe_resume_record": unsafe_resume_record,
+        "auxiliary_heads_mode": auxiliary_mode.value,
+        "legacy_auxiliary_heads_adapter": legacy_auxiliary_adapter,
+        "fair_architecture_comparison_eligible": not legacy_auxiliary_adapter and not bool(unsafe_resume_record),
+        "checkpoint_promotion_eligible": not legacy_auxiliary_adapter and not bool(unsafe_resume_record),
         "label_quality": {
             "dataset": dataset_label_quality,
             "training": train_label_quality,
@@ -1526,7 +1648,9 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
             "or train the Phase 1 challenger first."
         )
     ckpt = _load_checkpoint(checkpoint)
-    model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(ckpt, device=device)
+    model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(
+        ckpt, device=device, legacy_evaluation_import=True
+    )
     structured_vocab = structured_vocab_from_checkpoint(
         ckpt, allow_schema_v1_adapter=config.allow_legacy_conditioning_v1
     )
@@ -1790,6 +1914,13 @@ def rectified_flow_loss(
     index_head_warmup_steps: int = 0,
 ) -> Any:
     th, _nn_mod = _require_torch()
+    auxiliary_weights = (
+        float(index_head_loss_weight),
+        float(palette_head_loss_weight),
+        float(palette_presence_loss_weight),
+    )
+    if model.auxiliary_heads_mode is AuxiliaryHeadsMode.ABSENT and any(weight != 0.0 for weight in auxiliary_weights):
+        raise ValueError("nonzero auxiliary loss requires auxiliary_heads_mode='palette_index'")
     target_rgba = batch["rgba"]
     target = target_rgba * 2.0 - 1.0
     x0 = th.randn_like(target)
@@ -1877,8 +2008,15 @@ def rectified_flow_loss(
     losses["loss_palette_presence"] = zero
     losses["loss_index_head"] = zero
     losses["index_head_active"] = False
+    losses["auxiliary_heads_mode"] = model.auxiliary_heads_mode.value
+    losses["auxiliary_heads_available"] = model.auxiliary_heads_mode is AuxiliaryHeadsMode.PALETTE_INDEX
+    losses["auxiliary_loss_enabled"] = aux_active
 
     if aux_active:
+        if not aux["auxiliary_heads_available"] or any(
+            aux[key] is None for key in ("palette_rgb", "palette_presence_logits", "index_logits")
+        ):
+            raise RuntimeError("auxiliary output contract is unavailable for an enabled auxiliary loss")
         head_losses = _palette_head_loss(aux["palette_rgb"], aux["palette_presence_logits"], batch)
         losses["loss_palette_head"] = head_losses["loss_palette_head"]
         losses["loss_palette_presence"] = head_losses["loss_palette_presence"]
@@ -2068,7 +2206,12 @@ def _validation_per_sample_losses(
             key: value[index : index + 1] if isinstance(value, th.Tensor) and value.ndim else value
             for key, value in batch.items()
         }
-        index_loss = _index_head_loss(aux["index_logits"][index : index + 1], sliced)
+        index_logits = aux.get("index_logits")
+        index_loss = (
+            pred[index : index + 1].sum() * 0.0
+            if index_logits is None
+            else _index_head_loss(index_logits[index : index + 1], sliced)
+        )
         rows.append(
             {
                 "loss_velocity": float(flow[index].detach().cpu()),
@@ -2561,20 +2704,68 @@ def apply_conditioning_field_ablations(
 
 
 def load_challenger_from_checkpoint(
-    ckpt: dict[str, Any], *, device: Any
+    ckpt: dict[str, Any],
+    *,
+    device: Any,
+    auxiliary_heads_mode: AuxiliaryHeadsMode | str | None = None,
+    legacy_evaluation_import: bool = False,
 ) -> tuple[RectifiedFlowUNet, SpriteTextTokenizer, str, int]:
     if str(ckpt.get("model_type") or "") != "generator_challenger":
         raise ValueError("checkpoint is not a generator_challenger checkpoint")
     tokenizer = _tokenizer_from_checkpoint(ckpt)
-    model = RectifiedFlowUNet(**dict(ckpt["model_config"])).to(device)
-    incompatible = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    optional_head_prefixes = ("palette_head_rgb.", "palette_head_presence.", "index_head.")
-    disallowed_missing = [key for key in incompatible.missing_keys if not key.startswith(optional_head_prefixes)]
-    if disallowed_missing or incompatible.unexpected_keys:
+    checkpoint_config = dict(ckpt["model_config"])
+    checkpoint_mode, checkpoint_legacy = normalize_auxiliary_heads_mode(checkpoint_config.get("auxiliary_heads_mode"))
+    requested_mode = (
+        checkpoint_mode if auxiliary_heads_mode is None else normalize_auxiliary_heads_mode(auxiliary_heads_mode)[0]
+    )
+    if requested_mode is not checkpoint_mode:
         raise RuntimeError(
-            "checkpoint model state is incompatible: "
-            f"missing={disallowed_missing}, unexpected={list(incompatible.unexpected_keys)}"
+            "checkpoint architecture is incompatible: "
+            f"checkpoint_auxiliary_heads_mode={checkpoint_mode.value!r}, "
+            f"requested_auxiliary_heads_mode={requested_mode.value!r}; safe resume/import is blocked"
         )
+    manifest = ckpt.get("experiment_manifest")
+    if isinstance(manifest, Mapping):
+        claimed_mode = manifest.get("auxiliary_heads_mode")
+        if claimed_mode is not None and str(claimed_mode) != checkpoint_mode.value:
+            raise RuntimeError(
+                "checkpoint architecture identity is inconsistent: "
+                f"manifest={claimed_mode!r}, model_config={checkpoint_mode.value!r}"
+            )
+    checkpoint_config["auxiliary_heads_mode"] = None if checkpoint_legacy else checkpoint_mode
+    model = RectifiedFlowUNet(**checkpoint_config).to(device)
+    expected_keys = set(model.state_dict())
+    supplied_keys = set(ckpt["model_state_dict"])
+    missing = sorted(expected_keys - supplied_keys)
+    unexpected = sorted(supplied_keys - expected_keys)
+
+    def key_class(key: str) -> str:
+        return "auxiliary" if key.startswith(AUXILIARY_HEAD_PREFIXES) else "base_model"
+
+    legacy_missing_auxiliary = (
+        checkpoint_legacy and bool(missing) and not unexpected and all(key_class(key) == "auxiliary" for key in missing)
+    )
+    if missing or unexpected:
+        if legacy_evaluation_import and legacy_missing_auxiliary:
+            # Preserve every historical tensor and initialize only the heads
+            # absent from that old format, then finish with a strict load.  The
+            # resulting model is explicitly evaluation-only and non-promotable.
+            merged_state = model.state_dict()
+            merged_state.update(ckpt["model_state_dict"])
+            model.load_state_dict(merged_state, strict=True)
+            model.checkpoint_import_mode = "legacy_missing_auxiliary_evaluation_only"
+            model.safe_resume_eligible = False
+            model.fair_architecture_comparison_eligible = False
+            model.checkpoint_promotion_eligible = False
+        else:
+            raise RuntimeError(
+                "checkpoint model state is incompatible: "
+                f"missing={missing}, unexpected={unexpected}, "
+                f"missing_key_classes={sorted({key_class(key) for key in missing})}, "
+                f"unexpected_key_classes={sorted({key_class(key) for key in unexpected})}"
+            )
+    else:
+        model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model.eval()
     conditioning_mode = validate_conditioning_mode(str(ckpt.get("conditioning_mode") or DEFAULT_CONDITIONING_MODE))
     semantic_max_length = checkpoint_semantic_max_length(ckpt)
@@ -2589,7 +2780,9 @@ def load_challenger_prompt_adapter(
     cfg_scale: float = 1.0,
     allow_legacy_conditioning_v1: bool = True,
 ) -> tuple[ChallengerPromptAdapter, SpriteTextTokenizer, str, int]:
-    model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(ckpt, device=device)
+    model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(
+        ckpt, device=device, legacy_evaluation_import=True
+    )
     structured_vocab = structured_vocab_from_checkpoint(ckpt, allow_schema_v1_adapter=allow_legacy_conditioning_v1)
     return (
         ChallengerPromptAdapter(
@@ -2745,6 +2938,8 @@ def _save_checkpoint(
         "model_state_dict": model.state_dict() if model_state_dict is None else dict(model_state_dict),
         "optimizer_state_dict": optimizer.state_dict(),
         "model_config": model.config(),
+        "auxiliary_heads_mode": model.auxiliary_heads_mode.value,
+        "legacy_auxiliary_heads_adapter": bool(model.legacy_auxiliary_heads_adapter),
         "vocab": tokenizer.to_json_dict(),
         "train_config": config_json,
         "structured_conditioning_vocab": config_json.get("structured_conditioning_vocab"),

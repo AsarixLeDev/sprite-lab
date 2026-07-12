@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,204 @@ REVIEW_CHOICES = (
     "uncertain",
 )
 SCHEMA_VERSION = "memorization_review_v1.0"
+BOUND_REVIEW_SCHEMA_VERSION = "sprite_lab_memorization_review_event_v2"
+BOUND_REVIEW_OUTCOMES = frozenset(
+    {
+        "same_sprite_or_memorized",
+        "uncertain",
+        "different_sprite",
+        "common_generic_shape",
+        "likely_false_positive",
+    }
+)
+BOUND_REVIEW_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "event_id",
+        "pair_id",
+        "revision",
+        "previous_event_sha256",
+        "reviewer_id",
+        "created_at_utc",
+        "review_outcome",
+        "human_note",
+        "checkpoint_path",
+        "checkpoint_sha256",
+        "benchmark_manifest_path",
+        "benchmark_manifest_sha256",
+        "generated_report_path",
+        "generated_report_sha256",
+        "generated_sample_id",
+        "prompt_id",
+        "seed",
+        "generated_png_sha256",
+        "generated_decoded_rgba_sha256",
+        "training_dataset_identity",
+        "training_manifest_path",
+        "training_manifest_sha256",
+        "training_source_sprite_id",
+        "training_row_or_index",
+        "training_decoded_rgba_sha256",
+        "detector_policy_version",
+        "comparison_method",
+        "comparison_parameters_sha256",
+        "candidate_evidence_sha256",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ReviewReplay:
+    """Fail-closed replay result for an append-only review-event log."""
+
+    current: dict[str, dict[str, Any]]
+    legacy_events: tuple[dict[str, Any], ...]
+    invalid_reasons: tuple[str, ...]
+    seen_pair_ids: frozenset[str]
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Serialize canonical JSON as UTF-8, sorted compact keys, and preserved Unicode.
+
+    This representation deliberately has no insignificant whitespace. Event hashes
+    use this serialization after removing only the top-level ``event_sha256`` key.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def canonical_sha256(value: Any) -> str:
+    """Return the lowercase SHA-256 of canonical JSON."""
+    return sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def review_event_sha256(event: Mapping[str, Any]) -> str:
+    """Hash a bound review event, excluding only its computed hash field."""
+    payload = dict(event)
+    payload.pop("event_sha256", None)
+    return canonical_sha256(payload)
+
+
+def _valid_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _validate_bound_event(event: Mapping[str, Any], line_number: int) -> list[str]:
+    reasons: list[str] = []
+    missing = sorted(BOUND_REVIEW_REQUIRED_FIELDS - event.keys())
+    if missing:
+        reasons.append(f"line {line_number}: missing required fields: {', '.join(missing)}")
+    if event.get("schema_version") != BOUND_REVIEW_SCHEMA_VERSION:
+        reasons.append(f"line {line_number}: wrong review schema")
+    if not isinstance(event.get("event_id"), str) or not event.get("event_id"):
+        reasons.append(f"line {line_number}: invalid event_id")
+    if not isinstance(event.get("pair_id"), str) or not event.get("pair_id"):
+        reasons.append(f"line {line_number}: invalid pair_id")
+    revision = event.get("revision")
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        reasons.append(f"line {line_number}: revision must be a positive integer")
+    if event.get("review_outcome") not in BOUND_REVIEW_OUTCOMES:
+        reasons.append(f"line {line_number}: unknown review_outcome")
+    if not isinstance(event.get("human_note"), str):
+        reasons.append(f"line {line_number}: human_note must be a string")
+    if not isinstance(event.get("reviewer_id"), str) or not event.get("reviewer_id"):
+        reasons.append(f"line {line_number}: invalid reviewer_id")
+    try:
+        timestamp = datetime.fromisoformat(str(event.get("created_at_utc", "")).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None or timestamp.utcoffset() != timezone.utc.utcoffset(timestamp):
+            raise ValueError
+    except ValueError:
+        reasons.append(f"line {line_number}: created_at_utc must be an aware UTC timestamp")
+    for field in sorted(
+        name for name in BOUND_REVIEW_REQUIRED_FIELDS if name.endswith("_sha256") and name != "previous_event_sha256"
+    ):
+        if not _valid_sha256(event.get(field)):
+            reasons.append(f"line {line_number}: invalid {field}")
+    previous = event.get("previous_event_sha256")
+    if previous is not None and not _valid_sha256(previous):
+        reasons.append(f"line {line_number}: invalid previous_event_sha256")
+    if "event_sha256" in event and event.get("event_sha256") != review_event_sha256(event):
+        reasons.append(f"line {line_number}: invalid event_sha256")
+    return reasons
+
+
+def replay_review_events(results_path: Path) -> ReviewReplay:
+    """Replay v2 chains without allowing malformed, legacy, or competing rows to win.
+
+    Historical v1 rows are returned for display with ``promotion_authority=false``
+    and ``identity_status=unbound_legacy``. They are never current decisions.
+    """
+    if not results_path.is_file():
+        return ReviewReplay({}, (), ("review event log is missing",), frozenset())
+    try:
+        lines = results_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        return ReviewReplay({}, (), (f"review event log cannot be read: {error}",), frozenset())
+    events_by_pair: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    legacy: list[dict[str, Any]] = []
+    invalid: list[str] = []
+    seen_event_ids: set[str] = set()
+    seen_pairs: set[str] = set()
+    for line_number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            invalid.append(f"line {line_number}: malformed JSON: {error.msg}")
+            continue
+        if not isinstance(raw, dict):
+            invalid.append(f"line {line_number}: review event must be an object")
+            continue
+        pair_id = raw.get("pair_id")
+        if isinstance(pair_id, str) and pair_id:
+            seen_pairs.add(pair_id)
+        if raw.get("schema_version") == SCHEMA_VERSION:
+            legacy.append({**raw, "promotion_authority": False, "identity_status": "unbound_legacy"})
+            continue
+        row_reasons = _validate_bound_event(raw, line_number)
+        event_id = raw.get("event_id")
+        if isinstance(event_id, str) and event_id in seen_event_ids:
+            row_reasons.append(f"line {line_number}: duplicate event_id")
+        if isinstance(event_id, str):
+            seen_event_ids.add(event_id)
+        if row_reasons:
+            invalid.extend(row_reasons)
+            continue
+        events_by_pair.setdefault(str(pair_id), []).append((line_number, dict(raw)))
+
+    current: dict[str, dict[str, Any]] = {}
+    for pair_id, numbered_events in sorted(events_by_pair.items()):
+        by_revision: dict[int, list[tuple[int, dict[str, Any]]]] = {}
+        for item in numbered_events:
+            by_revision.setdefault(int(item[1]["revision"]), []).append(item)
+        pair_reasons: list[str] = []
+        for revision, competing in sorted(by_revision.items()):
+            if len(competing) > 1:
+                pair_reasons.append(f"pair {pair_id}: competing events for revision {revision}")
+        revisions = sorted(by_revision)
+        if revisions and revisions != list(range(1, revisions[-1] + 1)):
+            pair_reasons.append(f"pair {pair_id}: revision gap")
+        preceding_hash: str | None = None
+        if not pair_reasons:
+            for revision in revisions:
+                event = by_revision[revision][0][1]
+                previous = event.get("previous_event_sha256")
+                if revision == 1:
+                    if previous is not None:
+                        pair_reasons.append(f"pair {pair_id}: revision 1 must use null genesis hash")
+                        break
+                elif previous != preceding_hash:
+                    pair_reasons.append(f"pair {pair_id}: invalid previous-event hash at revision {revision}")
+                    break
+                preceding_hash = review_event_sha256(event)
+        if pair_reasons:
+            invalid.extend(pair_reasons)
+            continue
+        if revisions:
+            event = dict(by_revision[revisions[-1]][0][1])
+            event["event_sha256"] = review_event_sha256(event)
+            current[pair_id] = event
+    return ReviewReplay(current, tuple(legacy), tuple(invalid), frozenset(seen_pairs))
 
 
 @dataclass(frozen=True)

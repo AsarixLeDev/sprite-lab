@@ -82,6 +82,23 @@ def _parser() -> argparse.ArgumentParser:
         help="Append-only review output directory.",
     )
     review.set_defaults(func=_review_memorization)
+
+    decision = sub.add_parser(
+        "promotion-decision",
+        help="Make a read-only fail-closed promotion decision from bound evidence and reviews.",
+    )
+    decision.add_argument("--checkpoint", required=True, type=Path)
+    decision.add_argument("--benchmark-manifest", required=True, type=Path)
+    decision.add_argument("--machine-report", required=True, type=Path)
+    decision.add_argument("--generated-report", required=True, type=Path)
+    decision.add_argument("--generated-manifest", required=True, type=Path)
+    decision.add_argument("--training-dataset-identity", required=True)
+    decision.add_argument("--training-manifest", required=True, type=Path)
+    decision.add_argument("--candidate-evidence", required=True, type=Path)
+    decision.add_argument("--review-events", required=True, type=Path)
+    decision.add_argument("--detector-policy-version")
+    decision.add_argument("--out", required=True, type=Path)
+    decision.set_defaults(func=_promotion_decision)
     return parser
 
 
@@ -216,6 +233,34 @@ def _review_memorization(parsed: argparse.Namespace) -> None:
     pairs = load_review_pairs(parsed.report)
     print(f"Loaded {len(pairs)} exact-alpha benchmark pairs; output: {parsed.out}")
     launch_gui(pairs, parsed.out)
+
+
+def _promotion_decision(parsed: argparse.Namespace) -> None:
+    from spritelab.evaluation.promotion_decision import decide_promotion, write_decision_artifacts
+
+    if parsed.out.exists():
+        raise SystemExit(f"refusing to overwrite existing output directory: {parsed.out}")
+    decision = decide_promotion(
+        checkpoint=parsed.checkpoint,
+        benchmark_manifest=parsed.benchmark_manifest,
+        machine_report=parsed.machine_report,
+        generated_report=parsed.generated_report,
+        generated_manifest=parsed.generated_manifest,
+        training_dataset_identity=parsed.training_dataset_identity,
+        training_manifest=parsed.training_manifest,
+        candidate_evidence=parsed.candidate_evidence,
+        review_event_log=parsed.review_events,
+        detector_policy_version=parsed.detector_policy_version,
+    )
+    json_path, _ = write_decision_artifacts(parsed.out, decision)
+    print(
+        f"Promotion decision={decision['decision']}; eligible={decision['eligible_for_promotion']}; "
+        f"artifact={json_path}"
+    )
+    if decision["classification"] == "not_comparable":
+        raise SystemExit(2)
+    if not decision["eligible_for_promotion"]:
+        raise SystemExit(1)
 
 
 def main(argv: list[str] | None = None) -> None:

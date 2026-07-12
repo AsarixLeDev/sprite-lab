@@ -10,7 +10,7 @@ Inference policy: `cached-only`. Provider calls allowed: `false`. Provider calls
 - Records with complete deterministic critical semantics: 0
 - Records with compatible cached rich-VLM predictions: 2
 - Records requiring missing B/C inference: 98
-- Records with genuine model abstentions: 1
+- Records with genuine model abstentions: 2
 - Records with quality quarantine: 60
 
 ## Reported mineral record

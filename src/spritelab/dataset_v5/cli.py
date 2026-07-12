@@ -32,6 +32,11 @@ def main(argv: list[str] | None = None) -> int:
     policy_build.add_argument("--harvest-root", required=True)
     policy_build.add_argument("--output", required=True)
     policy_build.add_argument("--explicit-manifest", action="append", default=[])
+    policy_build.add_argument(
+        "--legacy-policy-config",
+        action="store_true",
+        help="explicitly resolve a legacy policy config using documented historical defaults",
+    )
     policy_verify = sub.add_parser("verify-policy-preview")
     policy_verify.add_argument("--dataset", required=True)
     compare = sub.add_parser("compare-policy-previews")
@@ -52,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
             v4_dir=args.v4,
             harvest_root=args.harvest_root,
             output_dir=args.output,
-            config=PolicyV2Config.from_json(args.config),
+            config=PolicyV2Config.from_json(args.config, legacy=args.legacy_policy_config),
             explicit_manifests=tuple(args.explicit_manifest),
         )
     elif args.command == "verify-policy-preview":

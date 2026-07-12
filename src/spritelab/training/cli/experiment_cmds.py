@@ -46,6 +46,35 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     qualify.add_argument("--steps", type=int, default=4)
     qualify.add_argument("--out", type=Path)
     qualify.set_defaults(func=_qualify_determinism)
+    _register_campaign_commands(subparsers)
+
+
+def _register_campaign_commands(subparsers: argparse._SubParsersAction) -> None:
+    plan = subparsers.add_parser("campaign-plan", help="Plan a versioned fixed-step three-seed campaign.")
+    plan.add_argument("--config", required=True, type=Path, help="Campaign specification JSON.")
+    plan.add_argument("--out", required=True, type=Path, help="New campaign manifest path.")
+    plan.add_argument("--plan-only", action="store_true", default=True, help="Plan only (the safe default).")
+    plan.set_defaults(func=_campaign_plan)
+
+    validate = subparsers.add_parser("campaign-validate", help="Validate identities and fixed-step fairness.")
+    validate.add_argument("--campaign", required=True, type=Path)
+    validate.add_argument("--out", type=Path, help="Optional new validation report path.")
+    validate.add_argument("--validate-only", action="store_true", default=True, help="Validate only; launch nothing.")
+    validate.set_defaults(func=_campaign_validate)
+
+    run = subparsers.add_parser("campaign-run", help="Execute an already-ready campaign after explicit gates.")
+    run.add_argument("--campaign", required=True, type=Path)
+    run.add_argument("--execute", action="store_true", help="Required explicit execution mode.")
+    run.add_argument("--confirm-execute", action="store_true", help="Required non-interactive launch confirmation.")
+    run.add_argument("--resume", action="store_true", help="Resume identity-verified partial runs.")
+    run.add_argument("--unsafe-resume", action="store_true", help="Rejected for fair-comparison campaigns.")
+    run.set_defaults(func=_campaign_run)
+
+    status = subparsers.add_parser("campaign-status", help="Audit run roots and artifact completeness without launch.")
+    status.add_argument("--campaign", required=True, type=Path)
+    status.add_argument("--campaign-artifact-root", type=Path)
+    status.add_argument("--out", type=Path, help="Optional new status report path.")
+    status.set_defaults(func=_campaign_status)
 
 
 def _create(parsed: argparse.Namespace) -> None:
@@ -237,6 +266,65 @@ def _qualify_determinism(parsed: argparse.Namespace) -> None:
             raise FileExistsError(f"refusing to overwrite qualification report: {parsed.out}")
         parsed.out.write_text(payload, encoding="utf-8")
     print(payload, end="")
+
+
+def _campaign_plan(parsed: argparse.Namespace) -> None:
+    from spritelab.training.campaign import plan_campaign, write_json_exclusive
+
+    spec = json.loads(parsed.config.read_text(encoding="utf-8"))
+    manifest = plan_campaign(spec)
+    write_json_exclusive(parsed.out, manifest)
+    print(
+        json.dumps(
+            {
+                "campaign_id": manifest["campaign_id"],
+                "plan_status": manifest["plan_status"],
+                "executable": manifest["executable"],
+                "manifest": str(parsed.out),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _campaign_validate(parsed: argparse.Namespace) -> None:
+    from spritelab.training.campaign import load_campaign, validate_campaign, write_json_exclusive
+
+    report = validate_campaign(load_campaign(parsed.campaign))
+    if parsed.out is not None:
+        write_json_exclusive(parsed.out, report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def _campaign_run(parsed: argparse.Namespace) -> None:
+    from spritelab.training.campaign import execute_campaign, load_campaign
+
+    report = execute_campaign(
+        load_campaign(parsed.campaign),
+        execute=bool(parsed.execute),
+        confirm_execute=bool(parsed.confirm_execute),
+        resume=bool(parsed.resume),
+        unsafe_resume=bool(parsed.unsafe_resume),
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def _campaign_status(parsed: argparse.Namespace) -> None:
+    from spritelab.training.campaign import (
+        audit_artifact_completeness,
+        audit_resume,
+        load_campaign,
+        write_json_exclusive,
+    )
+
+    campaign = load_campaign(parsed.campaign)
+    report = {
+        "resume": audit_resume(campaign),
+        "artifacts": audit_artifact_completeness(campaign, campaign_artifact_root=parsed.campaign_artifact_root),
+    }
+    if parsed.out is not None:
+        write_json_exclusive(parsed.out, report)
+    print(json.dumps(report, indent=2, sort_keys=True))
 
 
 def _resolve(config_path: Path, value: str | Path) -> Path:

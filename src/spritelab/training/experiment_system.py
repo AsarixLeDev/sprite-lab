@@ -21,7 +21,9 @@ try:
 except ImportError:  # pragma: no cover
     torch = None  # type: ignore[assignment]
 
-EXPERIMENT_MANIFEST_VERSION = "spritelab_experiment_v1"
+EXPERIMENT_MANIFEST_VERSION = "spritelab_experiment_v2"
+ARCHITECTURE_SCHEMA_VERSION = "spritelab_generator_architecture_v2"
+FORWARD_OUTPUT_SCHEMA_VERSION = "spritelab_generator_forward_v2"
 CONDITIONING_SCHEMA_VERSION_V1 = "spritelab_conditioning_v1"
 CONDITIONING_SCHEMA_VERSION = "spritelab_conditioning_v2"
 EVALUATION_SUITE_VERSION = "spritelab_eval_v1"
@@ -31,7 +33,44 @@ RESUME_HARD_FIELDS = (
     "split_manifest_hash",
     "model_architecture_hash",
     "conditioning_schema_hash",
+    "optimizer_identity_hash",
+    "schedule_identity_hash",
+    "global_batch_size",
+    "effective_batch_size",
+    "gradient_accumulation_steps",
+    "precision_policy",
+    "ema_identity_hash",
+    "loss_configuration_hash",
+    "auxiliary_heads_mode",
+    "seed_identity_hash",
+    "sampler_policy_hash",
+    "determinism_policy_hash",
+    "evaluation_cadence",
+    "checkpoint_cadence",
+    "max_optimizer_steps",
+    "experiment_configuration_hash",
+    "lineage_parent_identity",
 )
+
+# Resume classifications are deliberately explicit.  Hard fields affect exact
+# replay or fair architectural comparison; warnings affect interpretation but
+# not optimizer continuation; runtime information is descriptive and may vary
+# safely between machines or output locations.
+RESUME_FIELD_CLASSIFICATION = {
+    "resume_hard": RESUME_HARD_FIELDS,
+    "resume_warning": (
+        "software_version",
+        "augmentation_configuration",
+        "timestep_validation_boundaries",
+    ),
+    "runtime_informational": (
+        "name",
+        "ablation",
+        "dataset_manifest",
+        "split_manifest",
+        "hardware_summary",
+    ),
+}
 
 
 class IncompatibleResumeError(RuntimeError):
@@ -91,17 +130,120 @@ def conditioning_schema(*, mode: str, tokenizer: Mapping[str, Any], structured_v
 
 
 def architecture_identity(
-    model_config: Mapping[str, Any], *, auxiliary_heads_instantiated: bool = True
+    model_config: Mapping[str, Any],
+    *,
+    auxiliary_heads_instantiated: bool | None = None,
+    parameter_names: Sequence[str] | None = None,
+    state_dict_keys: Sequence[str] | None = None,
+    parameter_count: int | None = None,
 ) -> dict[str, Any]:
+    """Build the immutable physical model identity.
+
+    A missing ``auxiliary_heads_mode`` is the documented legacy adapter: it
+    preserves the historical, physically enabled palette/index heads and marks
+    the identity as legacy.  Loss weights never select physical construction.
+    """
+    raw_config = dict(model_config)
+    explicit_mode = raw_config.get("auxiliary_heads_mode")
+    legacy = explicit_mode is None
+    mode = "palette_index" if legacy else str(explicit_mode)
+    if mode not in {"absent", "palette_index"}:
+        raise ValueError("auxiliary_heads_mode must be 'absent' or 'palette_index'")
+    instantiated = mode == "palette_index"
+    if auxiliary_heads_instantiated is not None and bool(auxiliary_heads_instantiated) != instantiated:
+        raise ValueError("auxiliary head instantiation disagrees with auxiliary_heads_mode")
+    normalized_config = dict(raw_config)
+    normalized_config["auxiliary_heads_mode"] = mode
+    names = None if parameter_names is None else list(parameter_names)
+    keys = None if state_dict_keys is None else list(state_dict_keys)
     identity = {
+        "schema_version": ARCHITECTURE_SCHEMA_VERSION,
         "model_type": "generator_challenger",
-        "architecture": "rectified_flow",
-        "sprite_size": 32,
-        "model_config": dict(model_config),
-        "auxiliary_heads_instantiated": bool(auxiliary_heads_instantiated),
+        "base_model_family": str(raw_config.get("architecture", "rectified_flow")),
+        "sprite_size": int(raw_config.get("sprite_size", 32)),
+        "model_config": normalized_config,
+        "channel_widths_depth": {
+            "base_channels": raw_config.get("base_channels"),
+            "channel_mults": raw_config.get("channel_mults"),
+            "res_blocks_per_level": raw_config.get("res_blocks_per_level"),
+        },
+        "conditioning_dimensions": {
+            "vocab_size": raw_config.get("vocab_size"),
+            "embed_dim": raw_config.get("embed_dim"),
+            "palette_conditioning_dim": raw_config.get("palette_conditioning_dim"),
+        },
+        "text_pooling_configuration": "masked_mean_v1",
+        "structured_conditioning_schema": raw_config.get("structured_vocab_sizes"),
+        "auxiliary_heads_mode": mode,
+        "auxiliary_heads_instantiated": instantiated,
+        "auxiliary_head_configuration": {"palette_slots": 16, "index_classes": 16} if instantiated else None,
+        "identity_kind": "legacy_adapter" if legacy else "explicit",
+        "promotion_eligible": not legacy,
+        "parameter_count": None if parameter_count is None else int(parameter_count),
+        "ordered_parameter_name_hash": None if names is None else stable_hash(names),
+        "state_dict_key_hash": None if keys is None else stable_hash(keys),
+        "forward_output_schema_version": FORWARD_OUTPUT_SCHEMA_VERSION,
     }
     identity["hash"] = stable_hash(identity)
     return identity
+
+
+def measured_architecture_identity(model: Any) -> dict[str, Any]:
+    """Measure names, keys and parameter ownership from a constructed model."""
+    names = [name for name, _parameter in model.named_parameters()]
+    keys = list(model.state_dict())
+    config = model.config()
+    if bool(getattr(model, "legacy_auxiliary_heads_adapter", False)):
+        config.pop("auxiliary_heads_mode", None)
+    return architecture_identity(
+        config,
+        parameter_names=names,
+        state_dict_keys=keys,
+        parameter_count=sum(int(parameter.numel()) for parameter in model.parameters()),
+    )
+
+
+def _measure_configured_architecture(
+    model_config: Mapping[str, Any], *, tokenizer: Mapping[str, Any], structured_vocab: Any
+) -> dict[str, Any]:
+    """Construct the declared architecture on CPU without perturbing RNG state."""
+    if torch is None:
+        return architecture_identity(model_config)
+    from spritelab.training.generator_challenger import RectifiedFlowUNet
+    from spritelab.training.structured_conditioning import StructuredConditioningVocab
+
+    token_to_id = tokenizer.get("token_to_id", {})
+    if not isinstance(token_to_id, Mapping) or not token_to_id:
+        raise ValueError("tokenizer must contain a nonempty token_to_id mapping")
+    structured_sizes = None
+    if isinstance(structured_vocab, Mapping):
+        structured_sizes = StructuredConditioningVocab.from_json_dict(structured_vocab).sizes()
+    palette = model_config.get("palette_conditioning", False)
+    if isinstance(palette, Mapping):
+        palette_enabled = bool(palette.get("enabled", False))
+        palette_dropout = float(palette.get("dropout", 0.0))
+    else:
+        palette_enabled = bool(palette)
+        palette_dropout = float(model_config.get("palette_conditioning_dropout", 0.0))
+    kwargs = {
+        "vocab_size": len(token_to_id),
+        "embed_dim": int(model_config.get("embed_dim", 64)),
+        "base_channels": int(model_config.get("base_channels", 64)),
+        "channel_mults": tuple(int(value) for value in model_config.get("channel_mults", (1, 2, 4))),
+        "res_blocks_per_level": int(model_config.get("res_blocks_per_level", 2)),
+        "pad_token_id": int(token_to_id.get("<pad>", 0)),
+        "structured_vocab_sizes": structured_sizes,
+        "film_conditioning": bool(model_config.get("film_conditioning", False)),
+        "bottleneck_attention": bool(model_config.get("bottleneck_attention", False)),
+        "palette_conditioning": palette_enabled,
+        "palette_conditioning_dropout": palette_dropout,
+        "palette_conditioning_dim": int(model_config.get("palette_conditioning_dim", 64)),
+        "palette_conditioning_inject": str(model_config.get("palette_conditioning_inject", "decoder")),
+        "auxiliary_heads_mode": model_config.get("auxiliary_heads_mode"),
+    }
+    with torch.random.fork_rng(devices=[]):
+        model = RectifiedFlowUNet(**kwargs)
+    return measured_architecture_identity(model)
 
 
 def software_version(repo: str | Path | None = None) -> dict[str, Any]:
@@ -153,7 +295,12 @@ def build_experiment_manifest(
     checkpoint_lineage: Sequence[str] = (),
 ) -> dict[str, Any]:
     model_config = dict(config.get("model", {}))
-    architecture = architecture_identity(model_config)
+    # Config-only manifests retain null measured fields.  Production training
+    # replaces this identity with measured_architecture_identity(model) before
+    # checkpointing, so checkpoint identities always bind physical tensors.
+    architecture = _measure_configured_architecture(
+        model_config, tokenizer=tokenizer, structured_vocab=structured_vocab
+    )
     conditioning = conditioning_schema(
         mode=str(config.get("conditioning", {}).get("mode", "caption_semantic")),
         tokenizer=tokenizer,
@@ -161,6 +308,34 @@ def build_experiment_manifest(
     )
     dataset_path = Path(dataset_manifest)
     split_path = Path(split_manifest or dataset_manifest)
+    optimizer = deepcopy(config.get("optimizer", {}))
+    loss = deepcopy(config.get("loss", {}))
+    runtime = deepcopy(config.get("runtime", {}))
+    ema = deepcopy(config.get("ema", {}))
+    seeds = deepcopy(config.get("seeds", {}))
+    sampling_policy = deepcopy(config.get("sampler", config.get("sampling_policy", {})))
+    gradient_accumulation = int(runtime.get("gradient_accumulation_steps", 1))
+    global_batch = int(runtime.get("batch_size", 0))
+    effective_batch = int(runtime.get("effective_batch_size", global_batch * gradient_accumulation))
+    lineage = list(checkpoint_lineage)
+    hard_config = {
+        "model": architecture,
+        "conditioning_hash": conditioning["hash"],
+        "loss": loss,
+        "optimizer": optimizer,
+        "batch_size": global_batch,
+        "effective_batch_size": effective_batch,
+        "gradient_accumulation_steps": gradient_accumulation,
+        "precision": runtime.get("precision", "fp32"),
+        "ema": ema,
+        "seeds": seeds,
+        "sampler": sampling_policy,
+        "determinism": runtime.get("determinism", "off"),
+        "evaluation_cadence": runtime.get("sample_every", 0),
+        "checkpoint_cadence": runtime.get("save_every", 0),
+        "max_optimizer_steps": runtime.get("max_steps"),
+        "lineage_parent_identity": lineage[-1] if lineage else None,
+    }
     manifest = {
         "manifest_version": EXPERIMENT_MANIFEST_VERSION,
         "name": str(config.get("name", "unnamed")),
@@ -173,36 +348,87 @@ def build_experiment_manifest(
         "model_architecture_hash": architecture["hash"],
         "conditioning_schema": conditioning,
         "conditioning_schema_hash": conditioning["hash"],
-        "loss_configuration": deepcopy(config.get("loss", {})),
-        "optimizer_configuration": deepcopy(config.get("optimizer", {})),
+        "loss_configuration": loss,
+        "loss_configuration_hash": stable_hash(loss),
+        "optimizer_configuration": optimizer,
+        "optimizer_identity_hash": stable_hash(optimizer),
+        "schedule_identity_hash": stable_hash(
+            {"schedule": optimizer.get("schedule", "none"), "warmup_steps": optimizer.get("warmup_steps", 0)}
+        ),
         "augmentation_configuration": deepcopy(config.get("augmentation", {})),
-        "random_seeds": deepcopy(config.get("seeds", {})),
+        "random_seeds": seeds,
+        "seed_identity_hash": stable_hash(seeds),
         "software_version": software_version(repo),
-        "precision_mode": str(config.get("runtime", {}).get("precision", "fp32")),
+        "precision_mode": str(runtime.get("precision", "fp32")),
+        "precision_policy": str(runtime.get("precision", "fp32")),
         "hardware_summary": hardware_summary(),
         "evaluation_suite_version": EVALUATION_SUITE_VERSION,
-        "checkpoint_lineage": list(checkpoint_lineage),
+        "checkpoint_lineage": lineage,
+        "lineage_parent_identity": lineage[-1] if lineage else None,
         "sampling": deepcopy(config.get("sampling", {})),
-        "ema": deepcopy(config.get("ema", {})),
+        "ema": ema,
+        "ema_identity_hash": stable_hash({"enabled": float(ema.get("decay", 0.0)) > 0.0, **ema}),
         "timestep_sampling": deepcopy(config.get("timestep_sampling", {"strategy": "uniform"})),
-        "determinism_mode": str(config.get("runtime", {}).get("determinism", "off")),
+        "determinism_mode": str(runtime.get("determinism", "off")),
+        "determinism_policy_hash": stable_hash(runtime.get("determinism", "off")),
+        "sampler_policy_hash": stable_hash(sampling_policy),
+        "global_batch_size": global_batch,
+        "effective_batch_size": effective_batch,
+        "gradient_accumulation_steps": gradient_accumulation,
+        "evaluation_cadence": runtime.get("sample_every", 0),
+        "checkpoint_cadence": runtime.get("save_every", 0),
+        "max_optimizer_steps": runtime.get("max_steps"),
+        "auxiliary_heads_mode": architecture["auxiliary_heads_mode"],
+        "legacy_architecture": architecture["identity_kind"] == "legacy_adapter",
+        "fair_architecture_comparison_eligible": bool(architecture["promotion_eligible"]),
+        "checkpoint_promotion_eligible": bool(architecture["promotion_eligible"]),
+        "resume_field_classification": RESUME_FIELD_CLASSIFICATION,
         "timestep_validation_boundaries": deepcopy(
             config.get("runtime", {}).get("timestep_validation_boundaries", [0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
         ),
     }
+    manifest["experiment_configuration_hash"] = stable_hash(hard_config)
     manifest["experiment_hash"] = stable_hash(manifest)
     return manifest
 
 
 def validate_resume_compatibility(
-    current: Mapping[str, Any], saved: Mapping[str, Any], *, unsafe: bool = False
+    current: Mapping[str, Any],
+    saved: Mapping[str, Any],
+    *,
+    unsafe: bool = False,
+    unsafe_reason: str | None = None,
+    unsafe_record: dict[str, Any] | None = None,
 ) -> list[str]:
+    for label, manifest in (("current", current), ("checkpoint", saved)):
+        architecture = manifest.get("model_architecture")
+        if isinstance(architecture, Mapping):
+            claimed = architecture.get("hash")
+            content = dict(architecture)
+            content.pop("hash", None)
+            if claimed != stable_hash(content) or manifest.get("model_architecture_hash") != claimed:
+                raise IncompatibleResumeError(
+                    f"{label} has tampered model_architecture_hash or architecture identity content"
+                )
     mismatches = [field for field in RESUME_HARD_FIELDS if current.get(field) != saved.get(field)]
     if mismatches and not unsafe:
         detail = ", ".join(
             f"{field}: current={current.get(field)!r}, checkpoint={saved.get(field)!r}" for field in mismatches
         )
         raise IncompatibleResumeError(f"incompatible resume ({detail}); pass --unsafe-resume to override explicitly")
+    if mismatches and unsafe_record is not None:
+        if not str(unsafe_reason or "").strip():
+            raise IncompatibleResumeError("unsafe resume requires an explicit recorded unsafe reason")
+        unsafe_record.update(
+            {
+                "unsafe_resume": True,
+                "unsafe_reason": str(unsafe_reason),
+                "mismatches": list(mismatches),
+                "exact_replay_claimed": False,
+                "fair_architecture_comparison_eligible": False,
+                "checkpoint_promotion_eligible": False,
+            }
+        )
     return mismatches
 
 
@@ -288,6 +514,23 @@ def validate_ablation_config(config: Mapping[str, Any]) -> None:
         raise ValueError("alternative noise schedules are not supported cleanly by the current sampler")
     if str(config.get("timestep_sampling", {}).get("strategy", "uniform")) != "uniform":
         raise ValueError("only uniform timestep sampling is currently implemented")
+    model = config.get("model", {})
+    mode = model.get("auxiliary_heads_mode") if isinstance(model, Mapping) else None
+    if mode is not None and str(mode) not in {"absent", "palette_index"}:
+        raise ValueError("model.auxiliary_heads_mode must be 'absent' or 'palette_index'")
+    loss = config.get("loss", {})
+    auxiliary_weights = (
+        "index_head_weight",
+        "palette_head_weight",
+        "palette_presence_weight",
+    )
+    if mode == "absent" and isinstance(loss, Mapping):
+        nonzero = [field for field in auxiliary_weights if float(loss.get(field, 0.0)) != 0.0]
+        if nonzero:
+            raise ValueError(
+                "model.auxiliary_heads_mode='absent' is incompatible with nonzero auxiliary loss fields: "
+                + ", ".join(nonzero)
+            )
 
 
 def ablation_registry() -> dict[str, dict[str, Any]]:

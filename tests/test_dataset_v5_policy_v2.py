@@ -8,6 +8,8 @@ import pytest
 
 from spritelab.dataset_v5.builder import alpha_mask_sha256, canonical_rgba_sha256, validate_no_leakage
 from spritelab.dataset_v5.policy_v2 import (
+    CURRENT_POLICY_SCHEMA_VERSION,
+    LEGACY_POLICY_SCHEMA_VERSION,
     PolicyV2Config,
     WeightingPolicy,
     _hard_cap_subset,
@@ -84,6 +86,120 @@ def _distinct_records(count: int) -> list[dict]:
             )
         )
     return rows
+
+
+def _write_policy_config(path: Path, multipliers: dict[str, float] | None, **weighting_overrides: object) -> Path:
+    weighting: dict[str, object] = dict(weighting_overrides)
+    if multipliers is not None:
+        weighting["quality_multipliers"] = multipliers
+    path.write_text(
+        json.dumps({"policy_schema_version": CURRENT_POLICY_SCHEMA_VERSION, "weighting": weighting}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_current_config_with_explicit_quality_multipliers_is_valid(tmp_path: Path):
+    config = PolicyV2Config.from_json(
+        _write_policy_config(tmp_path / "policy.json", {"strict": 1.0, "standard": 0.8, "unreviewed": 0.0})
+    )
+    assert config.weighting.quality_multipliers == {"strict": 1.0, "standard": 0.8, "unreviewed": 0.0}
+    assert config.weighting.quality_multipliers_explicit is True
+
+
+def test_current_config_missing_quality_multipliers_fails(tmp_path: Path):
+    with pytest.raises(ValueError, match="requires explicit"):
+        PolicyV2Config.from_json(_write_policy_config(tmp_path / "policy.json", None))
+
+
+def test_legacy_config_missing_field_loads_only_through_explicit_legacy_path(tmp_path: Path):
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({"weighting": {}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="requires explicit"):
+        PolicyV2Config.from_json(path)
+    config = PolicyV2Config.from_json(path, legacy=True)
+    assert config.policy_schema_version == LEGACY_POLICY_SCHEMA_VERSION
+    assert config.weighting.quality_multipliers == {"strict": 1.0, "standard": 0.8, "unreviewed": 0.2}
+    assert config.weighting.quality_multipliers_explicit is False
+
+
+def test_positive_unreviewed_multiplier_requires_diagnostic_override():
+    with pytest.raises(ValueError, match="requires diagnostic"):
+        WeightingPolicy(quality_multipliers={"strict": 1.0, "standard": 0.8, "unreviewed": 0.2})
+    policy = WeightingPolicy(
+        quality_multipliers={"strict": 1.0, "standard": 0.8, "unreviewed": 0.2},
+        diagnostic_only_allow_positive_unreviewed=True,
+    )
+    assert policy.promotion_forbidden is True
+    with pytest.raises(ValueError, match="production-policy"):
+        PolicyV2Config(weighting=policy, production_policy=True)
+
+
+@pytest.mark.parametrize(
+    ("multipliers", "message"),
+    [
+        ({"strict": -1.0, "standard": 0.8, "unreviewed": 0.0}, "nonnegative"),
+        ({"strict": float("nan"), "standard": 0.8, "unreviewed": 0.0}, "finite"),
+        ({"strict": 1.0, "standard": 0.8}, "missing required"),
+        ({"strict": 1.0, "standard": 0.8, "unreviewed": 0.0, "gold": 1.0}, "unknown"),
+    ],
+)
+def test_invalid_quality_multipliers_fail(multipliers: dict[str, float], message: str):
+    with pytest.raises(ValueError, match=message):
+        WeightingPolicy(quality_multipliers=multipliers)
+
+
+def test_changed_multiplier_changes_resolved_policy_hash():
+    base = PolicyV2Config(
+        weighting=WeightingPolicy(
+            quality_multipliers={"strict": 1.0, "standard": 0.8, "unreviewed": 0.0},
+            quality_multipliers_explicit=True,
+        )
+    )
+    changed = PolicyV2Config(
+        weighting=WeightingPolicy(
+            quality_multipliers={"strict": 1.0, "standard": 0.7, "unreviewed": 0.0},
+            quality_multipliers_explicit=True,
+        )
+    )
+    assert base.resolved_policy_hash() != changed.resolved_policy_hash()
+
+
+def test_all_strict_cohort_retains_identical_record_weights():
+    records = _distinct_records(12)
+    families = {row["sprite_id"]: row["sprite_id"] for row in records}
+    current, _ = compute_sampling_weights(records, families, WeightingPolicy())
+    historical_default, _ = compute_sampling_weights(
+        records,
+        families,
+        WeightingPolicy(
+            quality_multipliers={"strict": 1.0, "standard": 0.8, "unreviewed": 0.2},
+            diagnostic_only_allow_positive_unreviewed=True,
+        ),
+    )
+    assert current == historical_default
+
+
+def test_mixed_quality_synthetic_cohort_applies_exact_multipliers():
+    strict = _record("strict")
+    standard = _record("standard", strict=False)
+    unreviewed = _record("unreviewed", strict=False)
+    unreviewed["is_supervised"] = False
+    records = [strict, standard, unreviewed]
+    families = {row["sprite_id"]: row["sprite_id"] for row in records}
+    weights, _ = compute_sampling_weights(
+        records,
+        families,
+        WeightingPolicy(
+            pack_exponent=0,
+            artist_exponent=0,
+            source_family_exponent=0,
+            canonical_object_exponent=0,
+            geometry_family_exponent=0,
+        ),
+    )
+    assert weights["standard"] / weights["strict"] == pytest.approx(0.8)
+    assert weights["unreviewed"] == 0.0
 
 
 def test_soft_pack_cap_downweights_without_deleting_membership():

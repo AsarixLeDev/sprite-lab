@@ -1,34 +1,31 @@
 NO PROVIDER CALLS WERE MADE.
+NO FINAL INFERENCE QUEUE WAS CREATED: human_truth.jsonl contains no quality decisions.
 
-Prefill generation:
+A. Provider-free quality preparation:
 python -m spritelab harvest label-v4-prepare-audit --audit-selection experiments/label_v4_calibration_wave1/audit_manifest.jsonl --output-root experiments/label_v4_calibration_wave1 --inference-policy cached-only --artifact-root experiments/label_v4_real_pilot_15_v1 --artifact-root experiments/label_v4_pilot_replay_v2
+Result: 100 prepared; 2 semantic-ready; 98 semantic-pending; 0 provider calls.
 
-Assisted GUI (not launched during implementation):
-python -m spritelab harvest assisted-v4 --records experiments/label_v4_calibration_wave1/audit_prefilled_records.jsonl --corrections experiments/label_v4_calibration_wave1/human_truth.jsonl
+B. Quality-only GUI (supported, not launched during implementation):
+python -m spritelab harvest assisted-v4 --mode quality-only --records experiments/label_v4_calibration_wave1/audit_prefilled_records.jsonl --corrections experiments/label_v4_calibration_wave1/human_truth.jsonl
 
-Verification commands are appended below as they complete.
+C. Freeze quality-eligible inference queue (supported, intentionally not run against current empty truth):
+python -m spritelab harvest label-v4-freeze-inference-queue --audit-selection experiments/label_v4_calibration_wave1/audit_manifest.jsonl --prefilled-records experiments/label_v4_calibration_wave1/audit_prefilled_records.jsonl --human-truth experiments/label_v4_calibration_wave1/human_truth.jsonl --output-root experiments/label_v4_calibration_wave1/inference_queue_v1
 
-Targeted Labeling-v4:
-$v4 = Get-ChildItem tests -Filter 'test_label_v4_*.py' | ForEach-Object { $_.FullName }; python -m pytest $v4 -q
-Result: 128 passed.
+D. Provider-free semantic preparation after queue freeze:
+python -m spritelab harvest label-v4-prepare-audit --inference-queue experiments/label_v4_calibration_wave1/inference_queue_v1/inference_queue.jsonl --output-root experiments/label_v4_calibration_wave1/semantic_prefill_v1 --inference-policy cached-only --artifact-root experiments/label_v4_real_pilot_15_v1 --artifact-root experiments/label_v4_pilot_replay_v2
 
-All Labeling-v3/v4:
-$tests = Get-ChildItem tests -File | Where-Object { $_.Name -like 'test_label_v3_*.py' -or $_.Name -like 'test_label_v4_*.py' }; python -m pytest ($tests.FullName) -q
-Result: 376 passed.
+E. Semantic-assisted GUI after semantic preparation:
+python -m spritelab harvest assisted-v4 --mode semantic-assisted --records experiments/label_v4_calibration_wave1/semantic_prefill_v1/semantic_ready_records.jsonl --corrections experiments/label_v4_calibration_wave1/human_truth.jsonl
 
-Full repository:
-python -m pytest -q
-Result: 1685 passed, 1 pre-existing PyTorch warning.
+Verification:
+targeted Labeling-v4: 142 passed
+all Labeling-v3/v4: 390 passed
+full repository: 1699 passed, 1 pre-existing PyTorch warning
+scoped Ruff: passed
+scoped Ruff format: passed
+git diff --check: passed
 
-Scoped Ruff:
-python -m ruff check src/spritelab/harvest/label_v4/audit_prefill.py src/spritelab/harvest/label_v4/assisted_v4_gui.py src/spritelab/harvest/label_v4/review.py src/spritelab/harvest/label_v4/calibration_wave.py src/spritelab/harvest/cli/label_v4_cmds.py tests/test_label_v4_audit_prefill_gui.py
-Result: all checks passed.
-
-Whitespace/integrity:
-git diff --check
-Result: passed.
-
-Protected SHA-256 values after implementation:
+Protected hashes:
 audit_manifest.jsonl d1752ce5d9661d1ec7a1825252840392f7b4e47581a6e2ac1a8cbfc5e4d75017
 freeze_manifest.json a65e6153462889934e33cc89e41ca9b78c1b94caaa2c87ad0a6d1b369161f1a7
 human_truth.jsonl e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
