@@ -1,0 +1,44 @@
+{
+  "final": {
+    "completed": 100,
+    "next_index": null,
+    "remaining": 0,
+    "review_complete": true,
+    "total": 100
+  },
+  "gui_final": {
+    "completed": 100,
+    "next_index": null,
+    "remaining": 0,
+    "review_complete": true,
+    "total": 100
+  },
+  "no_wrap_to_zero": true,
+  "schema_version": "label_v4_resume_matrix_v2",
+  "snapshots": [
+    {
+      "after_records": 1,
+      "completed": 1,
+      "next_index": 1,
+      "remaining": 99,
+      "review_complete": false,
+      "total": 100
+    },
+    {
+      "after_records": 99,
+      "completed": 99,
+      "next_index": 99,
+      "remaining": 1,
+      "review_complete": false,
+      "total": 100
+    },
+    {
+      "after_records": 100,
+      "completed": 100,
+      "next_index": null,
+      "remaining": 0,
+      "review_complete": true,
+      "total": 100
+    }
+  ]
+}

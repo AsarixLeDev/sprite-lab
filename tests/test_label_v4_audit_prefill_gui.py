@@ -126,7 +126,8 @@ def test_pixel_viewer_uses_nearest_neighbor_checkerboard_zoom_and_native_dimensi
     rendered = pixel_preview_html(path, DEFAULT_ZOOM)
     assert "image-rendering:pixelated" in rendered
     assert "linear-gradient" in rendered
-    assert "native 32\u00d732" in rendered
+    assert "Decoded exported canvas" in rendered
+    assert "32\u00d732" in rendered
     assert "zoom 12\u00d7" in rendered
     assert 'width="384"' in rendered and 'height="384"' in rendered
 

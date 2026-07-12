@@ -1,0 +1,176 @@
+{
+  "excluded": 20,
+  "final_queue": true,
+  "gui_resume_after_100": {
+    "completed": 100,
+    "next_index": null,
+    "remaining": 0,
+    "review_complete": true,
+    "total": 100
+  },
+  "included": 80,
+  "passed": true,
+  "provider_calls": 0,
+  "quality_event_count": 100,
+  "quality_records": 100,
+  "quality_state_counts": {
+    "quality_suitable": 70,
+    "quality_uncertain_not_usable": 10,
+    "quality_uncertain_usable": 10,
+    "quality_unsuitable": 10
+  },
+  "queue_id": "73524fa72aa44d297e164c0100c69d67a12a40fdd90f4e5acf2438ec26014e11",
+  "repeated_freezes_byte_identical": true,
+  "resume_after_100": {
+    "completed": 100,
+    "next_index": null,
+    "remaining": 0,
+    "review_complete": true,
+    "total": 100
+  },
+  "schema_version": "label_v4_two_pass_synthetic_rehearsal_v2",
+  "semantic_complete": 8,
+  "semantic_incomplete": 2,
+  "semantic_scenarios": [
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "known_values",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "genuine_abstention",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "repaired_abstention",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": false,
+      "readiness_reasons": [
+        "missing_required_model_stage",
+        "canonical_object:missing_prediction"
+      ],
+      "ready": false,
+      "reasons": [
+        "missing_required_model_stage",
+        "canonical_object:missing_prediction",
+        "unreviewed:canonical_object",
+        "unreviewed:category",
+        "unreviewed:domain",
+        "unreviewed:role"
+      ],
+      "scenario": "missing_prediction",
+      "terminal_fields": []
+    },
+    {
+      "complete": false,
+      "readiness_reasons": [
+        "canonical_object:provider_failed"
+      ],
+      "ready": false,
+      "reasons": [
+        "canonical_object:provider_failed",
+        "unreviewed:canonical_object",
+        "unreviewed:category",
+        "unreviewed:domain",
+        "unreviewed:role"
+      ],
+      "scenario": "provider_failure",
+      "terminal_fields": []
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "material_required",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "explicit_material",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "rejected_abstention_correction",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "human_abstention",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "unsupported",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "not_applicable",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    }
+  ],
+  "unreviewed": 0
+}

@@ -1,0 +1,108 @@
+{
+  "cases": [
+    {
+      "case": "missing_schema_quality",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "missing_schema_semantic",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "wrong_schema_quality",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "wrong_schema_semantic",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "identity_free_semantic",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "empty_proposal_hash",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "wrong_audit_record",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "wrong_sprite_id",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "wrong_field_identity",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "wrong_exported_rgba_hash",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "different_actual_audit_selection",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "different_actual_prefilled_records",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "different_actual_human_truth",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "missing_queue_source",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "source_path_hash_mismatch",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "queue_id_mismatch",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "resume_after_final_record",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "rejected_abstention_then_correction",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "human_abstention_denominator_exclusion",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    },
+    {
+      "case": "unsupported_denominator_exclusion",
+      "expected": "fail_closed_or_safe_terminal",
+      "passed": true
+    }
+  ],
+  "evidence": "tests/test_label_v4_two_pass_workflow.py; 64 focused tests passed",
+  "failed": 0,
+  "passed": 20,
+  "schema_version": "label_v4_adversarial_state_matrix_v2"
+}

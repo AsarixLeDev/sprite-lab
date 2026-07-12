@@ -1,0 +1,56 @@
+{
+  "all_unchanged": true,
+  "protected_artifacts": [
+    {
+      "after_sha256": "496b059d6b79420931469d76650850966d4e35dbb0dbac181f7f656f83d5a9d7",
+      "before_sha256": "496b059d6b79420931469d76650850966d4e35dbb0dbac181f7f656f83d5a9d7",
+      "head_sha256": null,
+      "path": "experiments/label_v4_calibration_wave1/audit_manifest.json",
+      "tracked_at_head": false,
+      "unchanged": true
+    },
+    {
+      "after_sha256": "d1752ce5d9661d1ec7a1825252840392f7b4e47581a6e2ac1a8cbfc5e4d75017",
+      "before_sha256": "d1752ce5d9661d1ec7a1825252840392f7b4e47581a6e2ac1a8cbfc5e4d75017",
+      "head_sha256": null,
+      "path": "experiments/label_v4_calibration_wave1/audit_manifest.jsonl",
+      "tracked_at_head": false,
+      "unchanged": true
+    },
+    {
+      "after_sha256": "2b48fa30dc3272f810dc430cd069951735935800d27e4e1fbfbb0dc033deec41",
+      "before_sha256": "2b48fa30dc3272f810dc430cd069951735935800d27e4e1fbfbb0dc033deec41",
+      "head_sha256": "2b48fa30dc3272f810dc430cd069951735935800d27e4e1fbfbb0dc033deec41",
+      "path": "experiments/label_v4_calibration_wave1/audit_prefill_manifest.json",
+      "tracked_at_head": true,
+      "unchanged": true
+    },
+    {
+      "after_sha256": "d841df2110c270dc0cd4eb8804f1b02e4293475e219f8f8383ebe7b0d4871593",
+      "before_sha256": "d841df2110c270dc0cd4eb8804f1b02e4293475e219f8f8383ebe7b0d4871593",
+      "head_sha256": "d841df2110c270dc0cd4eb8804f1b02e4293475e219f8f8383ebe7b0d4871593",
+      "path": "experiments/label_v4_calibration_wave1/audit_prefilled_records.jsonl",
+      "tracked_at_head": true,
+      "unchanged": true
+    },
+    {
+      "after_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "before_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "head_sha256": null,
+      "path": "experiments/label_v4_calibration_wave1/human_truth.jsonl",
+      "tracked_at_head": false,
+      "unchanged": true
+    },
+    {
+      "after_sha256": "a65e6153462889934e33cc89e41ca9b78c1b94caaa2c87ad0a6d1b369161f1a7",
+      "before_sha256": "a65e6153462889934e33cc89e41ca9b78c1b94caaa2c87ad0a6d1b369161f1a7",
+      "head_sha256": null,
+      "path": "experiments/label_v4_calibration_wave1/freeze_manifest.json",
+      "tracked_at_head": false,
+      "unchanged": true
+    }
+  ],
+  "real_human_truth_written": false,
+  "real_inference_queue_created": false,
+  "schema_version": "label_v4_frozen_hash_verification_v2"
+}

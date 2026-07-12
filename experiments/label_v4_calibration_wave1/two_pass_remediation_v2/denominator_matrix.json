@@ -1,0 +1,233 @@
+{
+  "abstention_corrections": [
+    {
+      "field": "canonical_object",
+      "outcome": "incorrect",
+      "reason": "model_abstention_rejected_with_human_correction",
+      "sprite_id": "synthetic-semantic-rejected_abstention_correction"
+    }
+  ],
+  "abstention_judgments": [
+    {
+      "field": "canonical_object",
+      "outcome": "model_abstention_accepted",
+      "sprite_id": "synthetic-semantic-genuine_abstention"
+    },
+    {
+      "field": "canonical_object",
+      "outcome": "model_abstention_accepted",
+      "sprite_id": "synthetic-semantic-repaired_abstention"
+    }
+  ],
+  "excluded": [
+    {
+      "field": "canonical_object",
+      "outcome": "incorrect",
+      "reason": "model_abstention_rejected_with_human_correction",
+      "sprite_id": "synthetic-semantic-rejected_abstention_correction"
+    },
+    {
+      "field": "canonical_object",
+      "outcome": "human_abstained",
+      "reason": "non_value_outcome:human_abstained",
+      "sprite_id": "synthetic-semantic-human_abstention"
+    },
+    {
+      "field": "canonical_object",
+      "outcome": "unsupported",
+      "reason": "non_value_outcome:unsupported",
+      "sprite_id": "synthetic-semantic-unsupported"
+    },
+    {
+      "field": "canonical_object",
+      "outcome": "not_applicable",
+      "reason": "non_value_outcome:not_applicable",
+      "sprite_id": "synthetic-semantic-not_applicable"
+    }
+  ],
+  "excluded_field_judgments": 4,
+  "human_abstention_judgments": 1,
+  "missing_prediction_records": 1,
+  "model_abstention_appropriateness_judgments": 2,
+  "model_abstention_rejected_with_correction_judgments": 1,
+  "non_value_outcome_counts": {
+    "human_abstained": 1,
+    "missing_prediction": 0,
+    "model_abstention_accepted": 0,
+    "not_applicable": 1,
+    "not_scorable": 0,
+    "provider_failed": 0,
+    "unsupported": 1
+  },
+  "not_applicable_judgments": 1,
+  "provider_failure_records": 1,
+  "quality_reviewed_records": 10,
+  "scorable": [
+    {
+      "field": "canonical_object",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-known_values"
+    },
+    {
+      "field": "category",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-known_values"
+    },
+    {
+      "field": "domain",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-known_values"
+    },
+    {
+      "field": "role",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-known_values"
+    },
+    {
+      "field": "category",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-genuine_abstention"
+    },
+    {
+      "field": "domain",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-genuine_abstention"
+    },
+    {
+      "field": "role",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-genuine_abstention"
+    },
+    {
+      "field": "category",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-repaired_abstention"
+    },
+    {
+      "field": "domain",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-repaired_abstention"
+    },
+    {
+      "field": "role",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-repaired_abstention"
+    },
+    {
+      "field": "canonical_object",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-material_required"
+    },
+    {
+      "field": "category",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-material_required"
+    },
+    {
+      "field": "domain",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-material_required"
+    },
+    {
+      "field": "role",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-material_required"
+    },
+    {
+      "field": "explicit_material",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-material_required"
+    },
+    {
+      "field": "category",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-rejected_abstention_correction"
+    },
+    {
+      "field": "domain",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-rejected_abstention_correction"
+    },
+    {
+      "field": "role",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-rejected_abstention_correction"
+    },
+    {
+      "field": "category",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-human_abstention"
+    },
+    {
+      "field": "domain",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-human_abstention"
+    },
+    {
+      "field": "role",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-human_abstention"
+    },
+    {
+      "field": "category",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-unsupported"
+    },
+    {
+      "field": "domain",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-unsupported"
+    },
+    {
+      "field": "role",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-unsupported"
+    },
+    {
+      "field": "category",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-not_applicable"
+    },
+    {
+      "field": "domain",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-not_applicable"
+    },
+    {
+      "field": "role",
+      "outcome": "correct",
+      "reason": null,
+      "sprite_id": "synthetic-semantic-not_applicable"
+    }
+  ],
+  "scorable_field_judgments": 27,
+  "semantic_complete_records": 8,
+  "semantic_ready_records": 8,
+  "unsupported_judgments": 1
+}

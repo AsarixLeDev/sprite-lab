@@ -102,6 +102,21 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     prepare_input = prepare.add_mutually_exclusive_group(required=True)
     prepare_input.add_argument("--audit-selection", type=Path)
     prepare_input.add_argument("--inference-queue", type=Path)
+    prepare.add_argument(
+        "--bound-audit-selection",
+        type=Path,
+        help="Actual audit-selection source bound by --inference-queue (required for queue verification).",
+    )
+    prepare.add_argument(
+        "--bound-prefilled-records",
+        type=Path,
+        help="Actual prefilled-record source bound by --inference-queue (required for queue verification).",
+    )
+    prepare.add_argument(
+        "--bound-human-truth",
+        type=Path,
+        help="Actual human-truth source bound by --inference-queue (required for queue verification).",
+    )
     prepare.add_argument("--output-root", type=Path, required=True)
     prepare.add_argument(
         "--inference-policy",
@@ -380,6 +395,9 @@ def _run_prepare_audit(parsed: argparse.Namespace) -> None:
         artifact_roots=roots,
         vlm_provider=vlm,
         text_provider=text,
+        bound_audit_selection=parsed.bound_audit_selection,
+        bound_prefilled_records=parsed.bound_prefilled_records,
+        bound_human_truth=parsed.bound_human_truth,
     )
     _print_json(result)
 

@@ -1,0 +1,759 @@
+{
+  "categories_exhaustive": true,
+  "primary_categories": [
+    "schema_incompatible",
+    "identity_mismatch",
+    "proposal_hash_mismatch",
+    "malformed",
+    "valid_quality",
+    "valid_semantic",
+    "ignored_non_authoritative"
+  ],
+  "quality_rehearsal": {
+    "categories": {
+      "identity_mismatch": [],
+      "ignored_non_authoritative": [],
+      "malformed": [],
+      "proposal_hash_mismatch": [],
+      "schema_incompatible": [],
+      "valid_quality": [
+        {
+          "action": "quality_suitable",
+          "event_id": "d3b957b99b324a68a117f443cde44335",
+          "line": 1,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-000"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "ef5b9eaccb6a40a58cecb9150a600200",
+          "line": 2,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-001"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "9ce48416aa9b413dba0365fe0fc9d924",
+          "line": 3,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-002"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "33dc05daab8f4cbb80b43ee0a8f4f187",
+          "line": 4,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-003"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "78dc50d0c16c44af981636b65cd696ac",
+          "line": 5,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-004"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "d3d4b775e7ea4773ad66844508e2b12b",
+          "line": 6,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-005"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "defa06a94bdb417ab09b7de5a01d1fd9",
+          "line": 7,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-006"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "010952e9bb214abca38e1ff38a87dc72",
+          "line": 8,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-007"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "73dcd1772dc14514814a2b877017e875",
+          "line": 9,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-008"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "ad6ebbd2b3254b81a4923b62352654a1",
+          "line": 10,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-009"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "e90d512f6f524dd488c3f9c1e9f08c41",
+          "line": 11,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-010"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "fc3c6fa7f159411190cc4dcdca2fd014",
+          "line": 12,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-011"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "8d04b30048bc4d8983e5c54595381bd6",
+          "line": 13,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-012"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "392b176217a8425fa04ceac9a31197fd",
+          "line": 14,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-013"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "a81575173c8f4d1781e2e1c89181e13a",
+          "line": 15,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-014"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "a12b1bd8dc984430915105406cc3fd69",
+          "line": 16,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-015"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "4f4f14c4ce6740898073afcfd0bf9dfc",
+          "line": 17,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-016"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "3c53be6a7c8f4635ab8428a59fd81be2",
+          "line": 18,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-017"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "b02bb12a5dca44d1b0a015cdc0fb022d",
+          "line": 19,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-018"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "42b9b5cbdc57491c8798cb0fe70827ae",
+          "line": 20,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-019"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "c0950e75a56e42e887d7088f6c223af3",
+          "line": 21,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-020"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "f04cd3dbfae44976808b0b43a208f316",
+          "line": 22,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-021"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "aee2b44aa6af47129ff3b54aaa25e197",
+          "line": 23,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-022"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "0965eb51ff264ec2961982a5f92a2e61",
+          "line": 24,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-023"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "2867ac482511483a936711053159cb24",
+          "line": 25,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-024"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "dd77ea58f7ed401c82b5a7087b03c5f2",
+          "line": 26,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-025"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "a887ae65c7e842d5a958175374b91245",
+          "line": 27,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-026"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "456fc2b93aca4e06a8846d62f366c084",
+          "line": 28,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-027"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "f8f3957d9d254fc7b063318dc000cf0f",
+          "line": 29,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-028"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "a3b71c07004547ae971a69177c625598",
+          "line": 30,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-029"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "95ceb80dfc2d44feb778db3db29a204d",
+          "line": 31,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-030"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "2d916b9ed4054d86a3b2caf110d59ab2",
+          "line": 32,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-031"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "70cbc0446d3c404ab18fb00552b30d14",
+          "line": 33,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-032"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "a127d6cd69e449cda056792226d561e9",
+          "line": 34,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-033"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "cc2773f5b03c4f318bf57485e1855784",
+          "line": 35,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-034"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "b75cfbfc33e748d8acb3a604f8cd8fd3",
+          "line": 36,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-035"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "8959e5c84bfd4e34b566fad7021f457f",
+          "line": 37,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-036"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "c0e6d8e5f3644ee2a11a8ea1a9ad8d79",
+          "line": 38,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-037"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "c600a86043a840c69e2164bf762ffab7",
+          "line": 39,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-038"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "138fff276283411a89b6bd6b8c97e259",
+          "line": 40,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-039"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "4e16c67f8b3842cdae010857c76833ad",
+          "line": 41,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-040"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "994747889b96412b8f74d1084220bfb3",
+          "line": 42,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-041"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "040e315e934e4fca833781ff63c85fb1",
+          "line": 43,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-042"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "5b0ae578b7eb413bb26b89b77e77f271",
+          "line": 44,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-043"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "0b4a51306d414fc082bb6ffbd3b0b39c",
+          "line": 45,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-044"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "918d2b3401524fccb90b2d6bda7cdf5d",
+          "line": 46,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-045"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "d088ce745d5a4f36b360a4bc7c7904b4",
+          "line": 47,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-046"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "aee0ce8cd1584be69692e2660bd85a49",
+          "line": 48,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-047"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "7b8f1b6a55594fda9edc03775423ebfc",
+          "line": 49,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-048"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "2f2843cbbf8c453abd19addec2ce9b7c",
+          "line": 50,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-049"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "dddd22b782bd42eea63392d72d41469e",
+          "line": 51,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-050"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "df5b0cf944774ca191ee87ca19fd7515",
+          "line": 52,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-051"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "9d73737bbea448398a456dae13c178d0",
+          "line": 53,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-052"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "22c63f39886f42b2aded81d413e964b0",
+          "line": 54,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-053"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "6c8c1b805fb448f892d1548193850b6a",
+          "line": 55,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-054"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "29df54e7ee9747e09a34e4dc698a4dee",
+          "line": 56,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-055"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "da8f2f83d95d472eb2a67ff3eec33cd3",
+          "line": 57,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-056"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "3a9c9fcb43314e72a743a43e598b10fd",
+          "line": 58,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-057"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "726c1f8ca22b4efaa2c2a415cdbb4f1c",
+          "line": 59,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-058"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "4c45a96652c74957a0d0fa27959aa9ab",
+          "line": 60,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-059"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "a6bcb7ef8ee94978a39dcb624d89e40a",
+          "line": 61,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-060"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "b98658dda378428695d253b9f8c382fd",
+          "line": 62,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-061"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "8661ac4812f846c381b322df0b3df2d1",
+          "line": 63,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-062"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "b9f492b19780414f98b2ecb14fb34bc1",
+          "line": 64,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-063"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "78e9d5b4c7ad435e8b45f91813518557",
+          "line": 65,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-064"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "12989561ee1b4aca9e38fb3dbc5a4f79",
+          "line": 66,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-065"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "e8dd372383704f25b1d6303c4ce52ca7",
+          "line": 67,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-066"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "353467d101a740f58ec2e5c6dcb87602",
+          "line": 68,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-067"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "b205d9a3e4604b1c816a83444a0dbf4e",
+          "line": 69,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-068"
+        },
+        {
+          "action": "quality_suitable",
+          "event_id": "c29d3fc90ff64e348672a0276763bb4c",
+          "line": 70,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-069"
+        },
+        {
+          "action": "quality_uncertain_usable",
+          "event_id": "5cadc4375bf74d1793e5c95639f53e5c",
+          "line": 71,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-070"
+        },
+        {
+          "action": "quality_uncertain_usable",
+          "event_id": "a70fb2c95cff490f81d3496fe7ad1d3e",
+          "line": 72,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-071"
+        },
+        {
+          "action": "quality_uncertain_usable",
+          "event_id": "8f3076af33de4ca7a4e4337cf178ad60",
+          "line": 73,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-072"
+        },
+        {
+          "action": "quality_uncertain_usable",
+          "event_id": "02c2d1dbfa35400c95a32fa845ea4a74",
+          "line": 74,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-073"
+        },
+        {
+          "action": "quality_uncertain_usable",
+          "event_id": "3f207bf6a36349049343fd15081af07a",
+          "line": 75,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-074"
+        },
+        {
+          "action": "quality_uncertain_usable",
+          "event_id": "a1074991ba244baa8b2b9c59a1112919",
+          "line": 76,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-075"
+        },
+        {
+          "action": "quality_uncertain_usable",
+          "event_id": "7c26f5cba6a647ad9030e323b93ad59a",
+          "line": 77,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-076"
+        },
+        {
+          "action": "quality_uncertain_usable",
+          "event_id": "8291acf3a0524b0d986c396255dcd7ca",
+          "line": 78,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-077"
+        },
+        {
+          "action": "quality_uncertain_usable",
+          "event_id": "83eab51861b644bc86aa62db8129ed34",
+          "line": 79,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-078"
+        },
+        {
+          "action": "quality_uncertain_usable",
+          "event_id": "b9d544c245664f40a5d79fe0f7e53fe3",
+          "line": 80,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-079"
+        },
+        {
+          "action": "quality_unsuitable",
+          "event_id": "cf71f627a87d4f42804d55088181c2cc",
+          "line": 81,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-080"
+        },
+        {
+          "action": "quality_unsuitable",
+          "event_id": "366190c96ef84cb68a391323bdf34afc",
+          "line": 82,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-081"
+        },
+        {
+          "action": "quality_unsuitable",
+          "event_id": "d86dc5fc18864b9282d125c23d1db9a2",
+          "line": 83,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-082"
+        },
+        {
+          "action": "quality_unsuitable",
+          "event_id": "ea64a362b1f84b8080a357cf76f92b38",
+          "line": 84,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-083"
+        },
+        {
+          "action": "quality_unsuitable",
+          "event_id": "c93d675b244842fe907f6e335b7c3d2e",
+          "line": 85,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-084"
+        },
+        {
+          "action": "quality_unsuitable",
+          "event_id": "3de2e5b59dae4d7b9e6c63145cb1d4ef",
+          "line": 86,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-085"
+        },
+        {
+          "action": "quality_unsuitable",
+          "event_id": "735cde13550d4d0db4f1ac85c50364bd",
+          "line": 87,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-086"
+        },
+        {
+          "action": "quality_unsuitable",
+          "event_id": "19bbc7468eee4e368bce49e01739421b",
+          "line": 88,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-087"
+        },
+        {
+          "action": "quality_unsuitable",
+          "event_id": "421802dff9fb401a81ef1b28ff19525c",
+          "line": 89,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-088"
+        },
+        {
+          "action": "quality_unsuitable",
+          "event_id": "c0e3e509302d4fdca8fb985fecae5365",
+          "line": 90,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-089"
+        },
+        {
+          "action": "quality_uncertain_not_usable",
+          "event_id": "73effbbe4b0b44a79796012473d213fa",
+          "line": 91,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-090"
+        },
+        {
+          "action": "quality_uncertain_not_usable",
+          "event_id": "f6b54925a901497881c479aebbf91dca",
+          "line": 92,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-091"
+        },
+        {
+          "action": "quality_uncertain_not_usable",
+          "event_id": "4cdc92dd8cdb454c8fc1306ea16a2759",
+          "line": 93,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-092"
+        },
+        {
+          "action": "quality_uncertain_not_usable",
+          "event_id": "961222a0bb53444da66127af55758529",
+          "line": 94,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-093"
+        },
+        {
+          "action": "quality_uncertain_not_usable",
+          "event_id": "8427c643bf6d45a98fd778dc70ed45da",
+          "line": 95,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-094"
+        },
+        {
+          "action": "quality_uncertain_not_usable",
+          "event_id": "05ff60f0da8947a7ae5df0439d73d260",
+          "line": 96,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-095"
+        },
+        {
+          "action": "quality_uncertain_not_usable",
+          "event_id": "a69331a3fc64418f9555838fc32b536b",
+          "line": 97,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-096"
+        },
+        {
+          "action": "quality_uncertain_not_usable",
+          "event_id": "b7bd6edae6c2436ca1cce7c87d34da98",
+          "line": 98,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-097"
+        },
+        {
+          "action": "quality_uncertain_not_usable",
+          "event_id": "1baf047c665448e7a181e8d2f7231746",
+          "line": 99,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-098"
+        },
+        {
+          "action": "quality_uncertain_not_usable",
+          "event_id": "b8ea465e54b142acb558e20ca8cbf948",
+          "line": 100,
+          "reason": "authoritative_quality_event",
+          "sprite_id": "synthetic-quality-099"
+        }
+      ],
+      "valid_semantic": []
+    },
+    "categories_exhaustive": true,
+    "category_counts": {
+      "identity_mismatch": 0,
+      "ignored_non_authoritative": 0,
+      "malformed": 0,
+      "proposal_hash_mismatch": 0,
+      "schema_incompatible": 0,
+      "valid_quality": 100,
+      "valid_semantic": 0
+    },
+    "correction_plan": [
+      "Append a superseding valid quality event for incompatible or changed quality decisions.",
+      "Append explicit terminal semantic judgments; never delete unsafe historical events.",
+      "Exclude unsafe null acceptances and premature completion flags from denominators."
+    ],
+    "diagnostic_counts": {
+      "premature_completion": 0,
+      "unsafe_null_acceptance": 0
+    },
+    "diagnostics": {
+      "premature_completion": [],
+      "unsafe_null_acceptance": []
+    },
+    "events_total": 100,
+    "incomplete": [],
+    "incomplete_count": 0,
+    "legacy_category_counts": {
+      "premature_completion": 0,
+      "unsafe_null_acceptance": 0,
+      "valid_quality_event": 100,
+      "valid_semantic_event": 0
+    },
+    "schema_version": "label_v4_existing_event_audit_v2"
+  },
+  "resolver_agreement": true,
+  "schema_version": "label_v4_event_audit_matrix_v2"
+}

@@ -1,0 +1,33 @@
+{
+  "all_passed": true,
+  "cases": [
+    {
+      "case": "actual_sources",
+      "expected": "pass",
+      "observed": "pass",
+      "passed": true
+    },
+    {
+      "case": "missing_source_inputs",
+      "expected": "fail",
+      "observed": "ValueError: frozen inference queue verification requires actual source inputs: audit_selection, prefilled_records, human_truth",
+      "passed": true
+    },
+    {
+      "case": "self_consistent_copied_source_path",
+      "expected": "fail source path mismatch",
+      "observed": "ValueError: inference queue source path mismatch: audit_selection",
+      "passed": true
+    },
+    {
+      "case": "source_bound_queue_ids_repeat",
+      "expected": "equal",
+      "observed": [
+        "73524fa72aa44d297e164c0100c69d67a12a40fdd90f4e5acf2438ec26014e11",
+        "73524fa72aa44d297e164c0100c69d67a12a40fdd90f4e5acf2438ec26014e11"
+      ],
+      "passed": true
+    }
+  ],
+  "schema_version": "label_v4_queue_binding_matrix_v2"
+}

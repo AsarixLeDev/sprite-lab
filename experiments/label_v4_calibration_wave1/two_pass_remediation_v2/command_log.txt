@@ -1,0 +1,8 @@
+prepare_audit(..., inference_policy='deterministic-only', allow_provider_calls=False)
+freeze_inference_queue(... queue-a); freeze_inference_queue(... queue-b)
+prepare_audit(KEY, cached-only, local artifacts, provider calls disabled)
+python -m pytest tests/test_label_v4_two_pass_workflow.py tests/test_label_v4_audit_prefill_gui.py -q
+python -m pytest tests -q -k label_v3 or label_v4
+python -m ruff check src/spritelab/harvest/label_v4/two_pass.py src/spritelab/harvest/label_v4/review.py src/spritelab/harvest/label_v4/audit_prefill.py src/spritelab/harvest/label_v4/assisted_v4_gui.py src/spritelab/harvest/cli/label_v4_cmds.py tests/test_label_v4_two_pass_workflow.py tests/test_label_v4_audit_prefill_gui.py
+python -m ruff format --check src/spritelab/harvest/label_v4/two_pass.py src/spritelab/harvest/label_v4/review.py src/spritelab/harvest/label_v4/audit_prefill.py src/spritelab/harvest/label_v4/assisted_v4_gui.py src/spritelab/harvest/cli/label_v4_cmds.py tests/test_label_v4_two_pass_workflow.py tests/test_label_v4_audit_prefill_gui.py
+git diff --check

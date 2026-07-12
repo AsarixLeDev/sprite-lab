@@ -1,0 +1,144 @@
+{
+  "scenarios": [
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "known_values",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "genuine_abstention",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "repaired_abstention",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": false,
+      "readiness_reasons": [
+        "missing_required_model_stage",
+        "canonical_object:missing_prediction"
+      ],
+      "ready": false,
+      "reasons": [
+        "missing_required_model_stage",
+        "canonical_object:missing_prediction",
+        "unreviewed:canonical_object",
+        "unreviewed:category",
+        "unreviewed:domain",
+        "unreviewed:role"
+      ],
+      "scenario": "missing_prediction",
+      "terminal_fields": []
+    },
+    {
+      "complete": false,
+      "readiness_reasons": [
+        "canonical_object:provider_failed"
+      ],
+      "ready": false,
+      "reasons": [
+        "canonical_object:provider_failed",
+        "unreviewed:canonical_object",
+        "unreviewed:category",
+        "unreviewed:domain",
+        "unreviewed:role"
+      ],
+      "scenario": "provider_failure",
+      "terminal_fields": []
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "material_required",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "explicit_material",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "rejected_abstention_correction",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "human_abstention",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "unsupported",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    },
+    {
+      "complete": true,
+      "readiness_reasons": [],
+      "ready": true,
+      "reasons": [],
+      "scenario": "not_applicable",
+      "terminal_fields": [
+        "canonical_object",
+        "category",
+        "domain",
+        "role"
+      ]
+    }
+  ],
+  "schema_version": "label_v4_semantic_completion_matrix_v2"
+}

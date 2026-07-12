@@ -1,0 +1,22 @@
+{
+  "authorization": "fresh independent Labeling-v4 audit still required",
+  "defects_remediated": [
+    "L4-1",
+    "L4-2",
+    "L4-3",
+    "L4-4",
+    "L4-5",
+    "L4-6",
+    "L4-7",
+    "L4-8",
+    "L4-9"
+  ],
+  "focused_tests": 64,
+  "frozen_hashes_unchanged": true,
+  "independent_certification_claimed": false,
+  "label_v3_v4_tests": 432,
+  "provider_calls": 0,
+  "result": "PASS_LOCAL_REMEDIATION",
+  "schema_version": "label_v4_two_pass_remediation_report_v2",
+  "synthetic_rehearsal_passed": true
+}

@@ -36,7 +36,7 @@ from spritelab.harvest.label_v4.two_pass import (
     QualityResolution,
     calibration_denominator_report,
     has_real_semantic_proposal,
-    quality_resume_index,
+    quality_resume_state,
     require_semantic_ready_records,
     resolve_quality_decisions,
     semantic_completion,
@@ -101,22 +101,35 @@ def load_assisted_records(
     return rows
 
 
-def review_resume_index(
+def review_resume_state(
     records: list[dict[str, Any]], corrections_path: str | Path, *, mode: str = "quality_only"
-) -> int:
+) -> dict[str, Any]:
     events = load_review_events(corrections_path, strict=False)
     normalized = normalize_review_mode(mode)
     if normalized == "quality_only":
-        return quality_resume_index(records, events)
+        return quality_resume_state(records, events)
     quality = resolve_quality_decisions(records, events)
+    remaining_indices: list[int] = []
     for index, record in enumerate(records):
         sprite_id = str(record.get("sprite_id", ""))
         decision = quality[sprite_id]
         if decision.effective_state == "quality_unreviewed" and record.get("quality_state") in QUALITY_ELIGIBLE:
             decision = QualityResolution(sprite_id, str(record["quality_state"]), None, 0, 0)
         if not semantic_completion(record, events, decision)["complete"]:
-            return index
-    return 0
+            remaining_indices.append(index)
+    return {
+        "next_index": remaining_indices[0] if remaining_indices else None,
+        "review_complete": not remaining_indices,
+        "remaining": len(remaining_indices),
+        "completed": len(records) - len(remaining_indices),
+        "total": len(records),
+    }
+
+
+def review_resume_index(
+    records: list[dict[str, Any]], corrections_path: str | Path, *, mode: str = "quality_only"
+) -> int | None:
+    return review_resume_state(records, corrections_path, mode=mode)["next_index"]
 
 
 def require_quality_eligible_for_semantic(records: list[dict[str, Any]], events: Any) -> None:
@@ -149,7 +162,8 @@ def pixel_preview_html(image_path: str | Path, zoom: int = DEFAULT_ZOOM, *, incl
     cells = [
         f'<figure><div style="{CHECKERBOARD_CSS}display:inline-block">'
         f'<img alt="full sprite canvas" src="{full_uri}" width="{display_width}" height="{display_height}" '
-        f'style="{style}"></div><figcaption>Full canvas — native {width}\u00d7{height}, zoom {zoom}\u00d7</figcaption></figure>'
+        f'style="{style}"></div><figcaption>Decoded exported canvas — {width}\u00d7{height}, '
+        f"zoom {zoom}\u00d7</figcaption></figure>"
     ]
     if crop is not None:
         crop_width, crop_height = crop.size
@@ -169,12 +183,17 @@ def pixel_preview_html(image_path: str | Path, zoom: int = DEFAULT_ZOOM, *, incl
 def quality_record_summary(record: dict[str, Any]) -> str:
     source = record.get("source_metadata", {})
     suitability = record.get("source_suitability", {})
+    source_native = record.get("native_dimensions") or {}
+    decoded_exported = record.get("decoded_exported_dimensions") or {}
     return (
         f"**Source suitability:** `{suitability.get('status', 'unknown')}`  \n"
         f"**Reason codes:** `{json.dumps(suitability.get('reason_codes', []))}`  \n"
         f"**Source:** `{source.get('source_id')}`  \n"
         f"**Pack:** `{source.get('pack_name') or source.get('pack_id')}`  \n"
-        f"**Sheet/image:** `{source.get('source_sheet') or source.get('source_image')}`"
+        f"**Sheet/image:** `{source.get('source_sheet') or source.get('source_image')}`  \n"
+        f"**Source-native size:** `{source_native.get('width')}x{source_native.get('height')}`  \n"
+        f"**Decoded export size:** `{decoded_exported.get('width')}x{decoded_exported.get('height')}`  \n"
+        f"**Resize policy:** `{record.get('resize_policy') or 'unspecified'}`"
     )
 
 
@@ -261,14 +280,22 @@ def _launch_quality_gui(
     gr: Any,
     records: list[dict[str, Any]],
     corrections: Path,
-    resume: int,
+    resume: int | None,
     opened_at: dict[int, tuple[float, str]],
     contract: dict[str, Any],
     host: str,
     port: int,
     share: bool,
 ) -> Any:
-    def render(index: int, zoom: int = DEFAULT_ZOOM) -> tuple[Any, ...]:
+    def render(index: int | None, zoom: int = DEFAULT_ZOOM) -> tuple[Any, ...]:
+        if index is None:
+            return (
+                None,
+                "",
+                "",
+                "**Review complete.** All quality records have terminal decisions.",
+                "review_complete",
+            )
         index = max(0, min(len(records) - 1, int(index)))
         record = records[index]
         opened_at.setdefault(index, (time.monotonic(), _utc_now()))
@@ -283,7 +310,9 @@ def _launch_quality_gui(
             resolved.effective_state,
         )
 
-    def decide(index: int, outcome: str, zoom: int) -> tuple[Any, ...]:
+    def decide(index: int | None, outcome: str, zoom: int) -> tuple[Any, ...]:
+        if index is None:
+            raise ValueError("quality review is already complete")
         record = records[int(index)]
         event = record_quality_decision(
             corrections,
@@ -297,13 +326,19 @@ def _launch_quality_gui(
                 "review_mode": "quality_only",
             },
         )
-        return f"Appended immutable {event.human_outcome}; advanced.", *render(int(index) + 1, zoom)
+        next_index = review_resume_index(records, corrections, mode="quality_only")
+        return f"Appended immutable {event.human_outcome}; advanced.", *render(next_index, zoom)
+
+    def navigate(index: int | None, delta: int, zoom: int) -> tuple[Any, ...]:
+        if index is None:
+            return render(len(records) - 1 if delta < 0 else None, zoom)
+        return render(int(index) + delta, zoom)
 
     with gr.Blocks(
         title="Sprite Lab Labeling v4 Quality Review",
         css=".sprite-pixel-viewer img{image-rendering:pixelated!important}",
     ) as demo:
-        index_state = gr.State(0)
+        index_state = gr.State(resume)
         gr.Markdown(f"# {contract['banner']}")
         with gr.Row():
             previous = gr.Button("Previous")
@@ -322,8 +357,8 @@ def _launch_quality_gui(
         outputs = [index_state, sprite_id, preview, metadata, state]
         demo.load(lambda: render(resume), outputs=outputs)
         zoom.change(render, inputs=[index_state, zoom], outputs=outputs)
-        previous.click(lambda i, z: render(int(i) - 1, z), inputs=[index_state, zoom], outputs=outputs)
-        next_.click(lambda i, z: render(int(i) + 1, z), inputs=[index_state, zoom], outputs=outputs)
+        previous.click(lambda i, z: navigate(i, -1, z), inputs=[index_state, zoom], outputs=outputs)
+        next_.click(lambda i, z: navigate(i, 1, z), inputs=[index_state, zoom], outputs=outputs)
         for button, outcome in (
             (suitable, "quality_suitable"),
             (uncertain_usable, "quality_uncertain_usable"),
@@ -340,7 +375,7 @@ def _launch_semantic_gui(
     gr: Any,
     records: list[dict[str, Any]],
     corrections: Path,
-    resume: int,
+    resume: int | None,
     opened_at: dict[int, tuple[float, str]],
     contract: dict[str, Any],
     mode: str,
@@ -350,7 +385,23 @@ def _launch_semantic_gui(
 ) -> Any:
     semantic_buttons_enabled = all(semantic_readiness(record)[0] for record in records)
 
-    def render(index: int, field_name: str, zoom: int = DEFAULT_ZOOM) -> tuple[Any, ...]:
+    def render(index: int | None, field_name: str, zoom: int = DEFAULT_ZOOM) -> tuple[Any, ...]:
+        if index is None:
+            return (
+                None,
+                "",
+                "",
+                "**Review complete.** All semantic records have terminal judgments.",
+                "REVIEW COMPLETE",
+                gr.update(choices=list(PREFILL_FIELDS), value=None, interactive=False),
+                "",
+                "",
+                gr.update(choices=[], value=None, interactive=False),
+                "",
+                "",
+                "review_complete",
+                {"review_complete": True, "remaining": 0},
+            )
         index = max(0, min(len(records) - 1, int(index)))
         record = records[index]
         field_name = field_name if field_name in PREFILL_FIELDS else "canonical_object"
@@ -383,7 +434,16 @@ def _launch_semantic_gui(
             {**panel["details"], "readiness_reasons": reasons},
         )
 
-    def act(index: int, field_name: str, action: str, alternative: str, edited: str, zoom: int) -> tuple[Any, ...]:
+    def act(
+        index: int | None,
+        field_name: str,
+        action: str,
+        alternative: str,
+        edited: str,
+        zoom: int,
+    ) -> tuple[Any, ...]:
+        if index is None:
+            raise ValueError("semantic review is already complete")
         record = records[int(index)]
         ready, reasons = semantic_readiness(record)
         if not ready:
@@ -423,10 +483,12 @@ def _launch_semantic_gui(
         events = load_review_events(corrections, strict=False)
         quality = _quality_for_record(record, records, events)
         complete = semantic_completion(record, events, quality)["complete"]
-        next_index = int(index) + 1 if complete else int(index)
+        next_index = review_resume_index(records, corrections, mode=mode) if complete else int(index)
         return f"Appended {event.human_outcome}; semantic_complete={complete}.", *render(next_index, field_name, zoom)
 
-    def accept_all(index: int, field_name: str, zoom: int) -> tuple[Any, ...]:
+    def accept_all(index: int | None, field_name: str, zoom: int) -> tuple[Any, ...]:
+        if index is None:
+            raise ValueError("semantic review is already complete")
         record = records[int(index)]
         required = list(validate_accept_all(record))
         events = load_review_events(corrections, strict=False)
@@ -441,15 +503,19 @@ def _launch_semantic_gui(
         completion = semantic_completion(record, load_review_events(corrections, strict=False), quality)
         if not completion["complete"]:
             raise RuntimeError("accept all invariant failed: " + ", ".join(completion["reasons"]))
-        return f"Accepted {len(required)} critical fields; semantic complete.", *render(
-            int(index) + 1, field_name, zoom
-        )
+        next_index = review_resume_index(records, corrections, mode=mode)
+        return f"Accepted {len(required)} critical fields; semantic complete.", *render(next_index, field_name, zoom)
+
+    def navigate(index: int | None, delta: int, field_name: str, zoom: int) -> tuple[Any, ...]:
+        if index is None:
+            return render(len(records) - 1 if delta < 0 else None, field_name, zoom)
+        return render(int(index) + delta, field_name, zoom)
 
     with gr.Blocks(
         title="Sprite Lab Labeling v4 Semantic Review",
         css=".sprite-pixel-viewer img{image-rendering:pixelated!important}",
     ) as demo:
-        index_state = gr.State(0)
+        index_state = gr.State(resume)
         gr.Markdown(f"# {contract['banner']}")
         if mode == "manual_truth_diagnostic":
             gr.Markdown("**Diagnostics are excluded from assisted-model accuracy denominators.**")
@@ -499,8 +565,8 @@ def _launch_semantic_gui(
         demo.load(lambda: render(resume, "canonical_object"), outputs=outputs)
         field.change(render, inputs=[index_state, field, zoom], outputs=outputs)
         zoom.change(render, inputs=[index_state, field, zoom], outputs=outputs)
-        previous.click(lambda i, f, z: render(int(i) - 1, f, z), inputs=[index_state, field, zoom], outputs=outputs)
-        next_.click(lambda i, f, z: render(int(i) + 1, f, z), inputs=[index_state, field, zoom], outputs=outputs)
+        previous.click(lambda i, f, z: navigate(i, -1, f, z), inputs=[index_state, field, zoom], outputs=outputs)
+        next_.click(lambda i, f, z: navigate(i, 1, f, z), inputs=[index_state, field, zoom], outputs=outputs)
         for button, action in (
             (accept, "accept"),
             (accept_abstention, "model_abstention"),

@@ -265,7 +265,11 @@ class ReviewEvent:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ReviewEvent:
-        schema_version = str(value.get("schema_version", REVIEW_EVENT_SCHEMA_VERSION))
+        if "schema_version" not in value or not str(value.get("schema_version") or "").strip():
+            raise ReviewEventSchemaError(
+                f"missing review-event schema_version; expected {REVIEW_EVENT_SCHEMA_VERSION!r}"
+            )
+        schema_version = str(value["schema_version"])
         if schema_version != REVIEW_EVENT_SCHEMA_VERSION:
             raise ReviewEventSchemaError(
                 f"unsupported review-event schema {schema_version!r}; expected {REVIEW_EVENT_SCHEMA_VERSION!r}"
@@ -550,8 +554,17 @@ def create_review_event(
     vlm_proposal = record.get("vlm_proposal")
     if not proposal_version and isinstance(vlm_proposal, Mapping):
         proposal_version = str(vlm_proposal.get("schema_version", ""))
+    sprite_id = str(record.get("sprite_id", "")).strip()
+    audit_record_id = str(record.get("audit_id", "")).strip()
+    event_metadata = copy.deepcopy(dict(metadata or {}))
+    if audit_record_id:
+        event_metadata.setdefault("audit_id", audit_record_id)
+        event_metadata.setdefault("audit_record_id", audit_record_id)
+    event_metadata.setdefault("sprite_id", sprite_id)
+    event_metadata.setdefault("field_name", str(field_name).strip())
+    event_metadata.setdefault("proposal_hash", view["raw_proposal_hash"])
     return ReviewEvent(
-        sprite_id=str(record.get("sprite_id", "")),
+        sprite_id=sprite_id,
         action=action,
         field_name=field_name,
         proposed_value=proposed,
@@ -569,9 +582,9 @@ def create_review_event(
         taxonomy_hash=str(record.get("taxonomy_hash", "")),
         risk_model_version=str(record.get("risk_model_version", "")),
         reviewer_id=reviewer_id,
-        session_id=session_id,
+        session_id=str(session_id or audit_record_id),
         notes=notes,
-        metadata=metadata or {},
+        metadata=event_metadata,
     )
 
 

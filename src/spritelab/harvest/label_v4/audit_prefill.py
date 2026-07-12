@@ -123,6 +123,9 @@ def prepare_audit(
     artifact_roots: Sequence[str | Path] = (),
     vlm_provider: Any | None = None,
     text_provider: Any | None = None,
+    bound_audit_selection: str | Path | None = None,
+    bound_prefilled_records: str | Path | None = None,
+    bound_human_truth: str | Path | None = None,
 ) -> dict[str, Any]:
     """Prepare immutable-review projections; never constructs a provider implicitly."""
 
@@ -141,7 +144,12 @@ def prepare_audit(
     if source.name == "inference_queue.jsonl":
         from spritelab.harvest.label_v4.two_pass import verify_frozen_inference_queue
 
-        queue_verification = verify_frozen_inference_queue(source)
+        queue_verification = verify_frozen_inference_queue(
+            source,
+            audit_selection=bound_audit_selection,
+            prefilled_records=bound_prefilled_records,
+            human_truth=bound_human_truth,
+        )
         rows = list(queue_verification["rows"])
     else:
         rows = _read_jsonl(source)
@@ -153,7 +161,12 @@ def prepare_audit(
     if is_queue and queue_verification is None:
         from spritelab.harvest.label_v4.two_pass import verify_frozen_inference_queue
 
-        queue_verification = verify_frozen_inference_queue(source)
+        queue_verification = verify_frozen_inference_queue(
+            source,
+            audit_selection=bound_audit_selection,
+            prefilled_records=bound_prefilled_records,
+            human_truth=bound_human_truth,
+        )
         rows = list(queue_verification["rows"])
     if input_schema != AUDIT_SELECTION_SCHEMA and not is_queue:
         raise AuditSchemaError(f"prepare input must use {AUDIT_SELECTION_SCHEMA} or {queue_schema}")
@@ -242,6 +255,9 @@ def prepare_audit(
         "frozen_input_unchanged": before == _sha256_file(source),
         "queue_id": queue_verification["queue_id"] if queue_verification else None,
         "queue_file_sha256": queue_verification["queue_sha256"] if queue_verification else None,
+        "queue_source_bindings_verified": bool(
+            queue_verification and queue_verification.get("source_bindings_verified") is True
+        ),
         "partition_integrity": partition_integrity,
     }
     _write_json(output / "audit_prefill_manifest.json", manifest)
@@ -325,7 +341,7 @@ def _prefill_record(
         }
         for name, field in fields.items()
     }
-    return {
+    record = {
         "schema_version": PREFILLED_AUDIT_SCHEMA,
         "sprite_id": str(selection.get("sprite_id", "")),
         "audit_id": str(selection.get("audit_id", "")),
@@ -337,6 +353,12 @@ def _prefill_record(
                 "height": prediction.get("deterministic_evidence", {}).get("pixels", {}).get("height"),
             }
         ),
+        "native_dimensions_meaning": "source_native_pre_transform",
+        "decoded_exported_dimensions": {
+            "width": prediction.get("deterministic_evidence", {}).get("pixels", {}).get("width"),
+            "height": prediction.get("deterministic_evidence", {}).get("pixels", {}).get("height"),
+        },
+        "resize_policy": str(selection.get("resize_policy") or ""),
         "source_metadata": {
             key: copy.deepcopy(selection.get(key))
             for key in (
@@ -387,6 +409,49 @@ def _prefill_record(
         "record_summary": {name: copy.deepcopy(fields[name]["value"]) for name in CRITICAL_FIELDS},
         "model_provenance": copy.deepcopy(dict(prediction)),
     }
+    bind_model_stage_proof(record)
+    return record
+
+
+def bind_model_stage_proof(record: dict[str, Any]) -> None:
+    """Bind successful model-stage evidence to this exact review projection."""
+
+    provenance = record.get("model_provenance")
+    if not isinstance(provenance, dict):
+        return
+    outcomes = {
+        str(item.get("stage")): item for item in provenance.get("stage_outcomes") or () if isinstance(item, Mapping)
+    }
+    ledger = {
+        str(item.get("stage")): item for item in provenance.get("stage_ledger") or () if isinstance(item, Mapping)
+    }
+    stage_artifacts: dict[str, dict[str, str]] = {}
+    for stage in ("B_blind_vlm_proposal", "C_text_reconciliation"):
+        artifact = ledger.get(stage)
+        outcome = outcomes.get(stage)
+        if artifact is None or outcome is None:
+            continue
+        stage_artifacts[stage] = {
+            "artifact_sha256": _canonical_hash(artifact),
+            "stage_status": str(outcome.get("stage_status") or ""),
+            "proposal_input_hash": str(provenance.get("image_hash") or ""),
+        }
+    provenance["review_record_binding"] = {
+        "audit_record_id": str(record.get("audit_id") or ""),
+        "sprite_id": str(record.get("sprite_id") or ""),
+        "exported_rgba_hash": str(record.get("exported_rgba_hash") or ""),
+        "proposal_hash": _canonical_hash(record.get("field_proposals") or {}),
+        "proposal_input_hash": str(provenance.get("image_hash") or ""),
+        "queue_id": str(record.get("queue_id") or ""),
+        "prefill_record_hash": str(record.get("prefill_record_hash") or ""),
+        "stage_artifacts": stage_artifacts,
+    }
+
+
+def _canonical_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode()
+    ).hexdigest()
 
 
 def _semantic_value(semantics: Mapping[str, Any], prediction: Mapping[str, Any], name: str) -> Any:

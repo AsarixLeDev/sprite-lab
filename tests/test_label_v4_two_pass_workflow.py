@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -12,13 +13,20 @@ from spritelab.harvest.label_v4.assisted_v4_gui import (
     load_assisted_records,
     require_quality_eligible_for_semantic,
     review_resume_index,
+    review_resume_state,
 )
-from spritelab.harvest.label_v4.audit_prefill import prepare_audit
+from spritelab.harvest.label_v4.audit_prefill import bind_model_stage_proof, prepare_audit
+from spritelab.harvest.label_v4.pixel_evidence import exact_rgba_content_hash
 from spritelab.harvest.label_v4.review import (
     ReviewEvent,
+    ReviewEventSchemaError,
+    abstain_field,
     accept_model_abstention,
     accept_proposal,
+    edit_field,
     load_review_events,
+    mark_not_applicable,
+    mark_unsupported,
     record_quality_decision,
 )
 from spritelab.harvest.label_v4.two_pass import (
@@ -26,11 +34,13 @@ from spritelab.harvest.label_v4.two_pass import (
     audit_existing_events,
     calibration_denominator_report,
     freeze_inference_queue,
+    quality_resume_state,
     resolve_quality_decisions,
     semantic_completion,
     semantic_readiness,
     validate_accept_all,
     validate_semantic_field,
+    verify_frozen_inference_queue,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,10 +61,21 @@ def _stable(value: object) -> str:
     ).hexdigest()
 
 
-def _rehash_queue(root: Path) -> None:
+def _rehash_queue(root: Path, selection: Path, prefilled: Path, truth: Path) -> None:
     queue_path = root / "inference_queue.jsonl"
     rows = _rows(queue_path)
-    queue_id = _stable([{key: value for key, value in row.items() if key != "queue_id"} for row in rows])
+    base_rows = [{key: value for key, value in row.items() if key != "queue_id"} for row in rows]
+    queue_id = _stable(
+        {
+            "identity_version": "label_v4_source_bound_queue_id_v2",
+            "source_sha256": {
+                "audit_selection": hashlib.sha256(selection.read_bytes()).hexdigest(),
+                "prefilled_records": hashlib.sha256(prefilled.read_bytes()).hexdigest(),
+                "human_truth": hashlib.sha256(truth.read_bytes()).hexdigest(),
+            },
+            "records": base_rows,
+        }
+    )
     for row in rows:
         row["queue_id"] = queue_id
     queue_path.write_text(
@@ -81,6 +102,27 @@ def _rehash_queue(root: Path) -> None:
     freeze_path.write_text(json.dumps(freeze, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _rehash_freeze(root: Path) -> None:
+    freeze_path = root / "freeze_manifest.json"
+    freeze = json.loads(freeze_path.read_text(encoding="utf-8"))
+    freeze["files"] = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.iterdir())
+        if path.is_file() and path.name != "freeze_manifest.json"
+    }
+    freeze_path.write_text(json.dumps(freeze, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _rewrite_source_binding(root: Path, name: str, source: Path) -> None:
+    manifest_path = root / "inference_queue_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest["source_bindings"][name] = {"path": str(source.resolve()), "sha256": digest}
+    manifest[f"{name}_sha256"] = digest
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _rehash_freeze(root)
+
+
 def _selection(tmp_path: Path, ids: tuple[str, ...]) -> Path:
     index = {row["sprite_id"]: row for row in _rows(AUDIT)}
     path = tmp_path / "selection.jsonl"
@@ -98,6 +140,24 @@ def _prepared(tmp_path: Path, ids: tuple[str, ...], *, cached: bool = False) -> 
         artifact_roots=[PILOT, REPLAY] if cached else [],
     )
     return selection, _rows(output / "audit_prefilled_records.jsonl")
+
+
+def _prepare_bound_queue(
+    queue: Path,
+    output: Path,
+    selection: Path,
+    prefilled: Path,
+    truth: Path,
+    **kwargs: object,
+) -> dict:
+    return prepare_audit(
+        queue,
+        output,
+        bound_audit_selection=selection,
+        bound_prefilled_records=prefilled,
+        bound_human_truth=truth,
+        **kwargs,
+    )
 
 
 def _quality(path: Path, record: dict, outcome: str) -> None:
@@ -119,7 +179,7 @@ def _material_not_required(record: dict) -> None:
 
 
 def _valid_abstention(record: dict, field_name: str = "canonical_object", *, repaired: bool = False) -> None:
-    image_hash = "a" * 64
+    image_hash = exact_rgba_content_hash(record["image_path"])
     status = "success_after_json_repair" if repaired else "success"
     record["model_provenance"]["image_hash"] = image_hash
     record["model_provenance"]["stage_outcomes"] = [
@@ -147,6 +207,7 @@ def _valid_abstention(record: dict, field_name: str = "canonical_object", *, rep
     }
     record["fields"][field_name].update(update)
     record["field_proposals"][field_name].update(update)
+    bind_model_stage_proof(record)
 
 
 def test_quality_only_contract_has_no_semantic_controls() -> None:
@@ -271,7 +332,7 @@ def test_denominator_excludes_missing_null_incomplete_and_quality_ineligible(tmp
     report = calibration_denominator_report(records, [unsafe])
     assert report["missing_prediction_records"] == 1
     assert report["scorable_field_judgments"] == 0
-    assert report["excluded_field_judgments"] == 1
+    assert report["excluded_field_judgments"] == 0
 
 
 def test_blind_semantic_mode_requires_real_proposal(tmp_path: Path) -> None:
@@ -297,7 +358,8 @@ def test_event_audit_preserves_append_history_and_reports_incomplete(tmp_path: P
     _quality(truth, records[0], "quality_unsuitable")
     before = truth.read_bytes()
     report = audit_existing_events(tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth)
-    assert report["category_counts"]["valid_quality_event"] == 2
+    assert report["category_counts"]["valid_quality"] == 2
+    assert report["categories_exhaustive"] is True
     assert report["incomplete_count"] == 0
     assert truth.read_bytes() == before
 
@@ -328,7 +390,7 @@ def test_wrong_schema_quality_event_fails_closed_and_does_not_resume(tmp_path: P
     assert load_review_events(truth, strict=False) == ()
     report = audit_existing_events(tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth)
     assert report["category_counts"]["schema_incompatible"] == 1
-    assert report["category_counts"]["valid_quality_event"] == 0
+    assert report["category_counts"]["valid_quality"] == 0
     assert report["incomplete_count"] == 1
     assert review_resume_index(records, truth, mode="quality-only") == 0
     bad = copy.deepcopy(valid)
@@ -359,7 +421,7 @@ def test_wrong_schema_semantic_event_never_completes_a_field(tmp_path: Path) -> 
     truth.write_text(json.dumps(raw) + "\n", encoding="utf-8")
     report = audit_existing_events(tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth)
     assert report["category_counts"]["schema_incompatible"] == 1
-    assert report["category_counts"]["valid_semantic_event"] == 0
+    assert report["category_counts"]["valid_semantic"] == 0
 
 
 def test_partial_and_complete_queue_manifests_have_explicit_finality(tmp_path: Path) -> None:
@@ -449,13 +511,21 @@ def test_queue_with_omitted_finality_or_unreviewed_row_is_rejected(tmp_path: Pat
         prepare_audit(queue / "inference_queue.jsonl", tmp_path / "no-finality", inference_policy="cached-only")
 
     queue2 = tmp_path / "queue2"
-    freeze_inference_queue(selection, tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth, queue2)
+    prefilled = tmp_path / "prepared" / "audit_prefilled_records.jsonl"
+    freeze_inference_queue(selection, prefilled, truth, queue2)
     row = _rows(queue2 / "inference_queue.jsonl")[0]
     row["quality_state"] = "quality_unreviewed"
     (queue2 / "inference_queue.jsonl").write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
-    _rehash_queue(queue2)
-    with pytest.raises(ValueError, match="unknown or unreviewed quality state"):
-        prepare_audit(queue2 / "inference_queue.jsonl", tmp_path / "unreviewed", inference_policy="cached-only")
+    _rehash_queue(queue2, selection, prefilled, truth)
+    with pytest.raises(ValueError, match="bound source projection"):
+        _prepare_bound_queue(
+            queue2 / "inference_queue.jsonl",
+            tmp_path / "unreviewed",
+            selection,
+            prefilled,
+            truth,
+            inference_policy="cached-only",
+        )
 
 
 def test_queue_identity_and_partition_integrity_survive_semantic_prefill(
@@ -468,11 +538,15 @@ def test_queue_identity_and_partition_integrity_survive_semantic_prefill(
     truth = tmp_path / "truth.jsonl"
     _quality(truth, records[0], "quality_suitable")
     queue = tmp_path / "queue"
-    freeze_inference_queue(selection, tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth, queue)
+    prefilled = tmp_path / "prepared" / "audit_prefilled_records.jsonl"
+    freeze_inference_queue(selection, prefilled, truth, queue)
     source_row = _rows(queue / "inference_queue.jsonl")[0]
-    manifest = prepare_audit(
+    manifest = _prepare_bound_queue(
         queue / "inference_queue.jsonl",
         tmp_path / "semantic",
+        selection,
+        prefilled,
+        truth,
         inference_policy="cached-only",
         artifact_roots=[PILOT, REPLAY],
     )
@@ -503,23 +577,28 @@ def test_queue_identity_and_partition_integrity_survive_semantic_prefill(
     assert manifest["queue_file_sha256"] == hashlib.sha256((queue / "inference_queue.jsonl").read_bytes()).hexdigest()
 
 
-def test_quality_unsuitable_queue_row_is_excluded_and_never_ready(tmp_path: Path) -> None:
+def test_tampered_quality_state_is_rejected_against_bound_sources(tmp_path: Path) -> None:
     selection, records = _prepared(tmp_path, (KEY,), cached=True)
     truth = tmp_path / "truth.jsonl"
     _quality(truth, records[0], "quality_suitable")
     queue = tmp_path / "queue"
-    freeze_inference_queue(selection, tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth, queue)
+    prefilled = tmp_path / "prepared" / "audit_prefilled_records.jsonl"
+    freeze_inference_queue(selection, prefilled, truth, queue)
     row = _rows(queue / "inference_queue.jsonl")[0]
     row["quality_state"] = "quality_unsuitable"
     row["quality_event"]["action"] = "quality_unsuitable"
     row["quality_event"]["human_outcome"] = "quality_unsuitable"
     (queue / "inference_queue.jsonl").write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
-    _rehash_queue(queue)
-    manifest = prepare_audit(queue / "inference_queue.jsonl", tmp_path / "semantic", inference_policy="cached-only")
-    assert _rows(tmp_path / "semantic" / "semantic_ready_records.jsonl") == []
-    excluded = _rows(tmp_path / "semantic" / "semantic_excluded_quality.jsonl")
-    assert len(excluded) == 1 and excluded[0]["quality_state"] == "quality_unsuitable"
-    assert manifest["partition_integrity"]["partition_counts"]["excluded"] == 1
+    _rehash_queue(queue, selection, prefilled, truth)
+    with pytest.raises(ValueError, match="bound source projection"):
+        _prepare_bound_queue(
+            queue / "inference_queue.jsonl",
+            tmp_path / "semantic",
+            selection,
+            prefilled,
+            truth,
+            inference_policy="cached-only",
+        )
 
 
 @pytest.mark.parametrize(
@@ -587,3 +666,329 @@ def test_missing_material_is_unresolved_not_automatically_not_applicable(tmp_pat
     assert "explicit_material:material_applicability_not_established" in reasons
     quality = QualityResolution(KEY, "quality_suitable", None, 1, 0)
     assert semantic_completion(record, [], quality)["complete"] is False
+
+
+def test_missing_schema_quality_event_is_incompatible_and_never_advances_resume(tmp_path: Path) -> None:
+    _selection_path, records = _prepared(tmp_path, (MINERAL,))
+    truth = tmp_path / "truth.jsonl"
+    _quality(truth, records[0], "quality_suitable")
+    raw = json.loads(truth.read_text(encoding="utf-8"))
+    del raw["schema_version"]
+    truth.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+
+    with pytest.raises(ReviewEventSchemaError, match="missing review-event schema_version"):
+        ReviewEvent.from_dict(raw)
+    with pytest.raises(ValueError, match="missing review-event schema_version"):
+        load_review_events(truth)
+    assert load_review_events(truth, strict=False) == ()
+    assert quality_resume_state(records, [])["next_index"] == 0
+    report = audit_existing_events(tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth)
+    assert report["category_counts"]["schema_incompatible"] == 1
+    assert report["category_counts"]["valid_quality"] == 0
+
+
+def test_missing_schema_semantic_event_is_incompatible_and_never_terminal(tmp_path: Path) -> None:
+    _selection_path, records = _prepared(tmp_path, (KEY,), cached=True)
+    record = records[0]
+    _material_not_required(record)
+    truth = tmp_path / "truth.jsonl"
+    accept_proposal(truth, record, "canonical_object")
+    raw = json.loads(truth.read_text(encoding="utf-8"))
+    del raw["schema_version"]
+    truth.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+
+    assert load_review_events(truth, strict=False) == ()
+    quality = QualityResolution(KEY, "quality_suitable", None, 1, 0)
+    completion = semantic_completion(record, [], quality)
+    assert completion["terminal_fields"] == []
+    assert completion["complete"] is False
+    report = audit_existing_events(tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth)
+    assert report["category_counts"]["schema_incompatible"] == 1
+    assert report["category_counts"]["valid_semantic"] == 0
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_category"),
+    [
+        ("identity_free", "identity_mismatch"),
+        ("empty_proposal_hash", "proposal_hash_mismatch"),
+        ("wrong_audit_record", "identity_mismatch"),
+        ("wrong_sprite_id", "identity_mismatch"),
+        ("wrong_field_identity", "identity_mismatch"),
+    ],
+)
+def test_semantic_event_identity_bindings_are_exact_and_invalid_events_never_count(
+    tmp_path: Path, case: str, expected_category: str
+) -> None:
+    _selection_path, records = _prepared(tmp_path, (KEY,), cached=True)
+    record = records[0]
+    _material_not_required(record)
+    truth = tmp_path / "truth.jsonl"
+    for name in ("canonical_object", "category", "domain", "role"):
+        accept_proposal(truth, record, name)
+    raw_events = _rows(truth)
+    forged = raw_events[0]
+    if case == "identity_free":
+        forged["session_id"] = ""
+        forged["metadata"] = {}
+    elif case == "empty_proposal_hash":
+        forged["proposal_hash"] = ""
+    elif case == "wrong_audit_record":
+        forged["session_id"] = "wrong-audit"
+        forged["metadata"]["audit_id"] = "wrong-audit"
+        forged["metadata"]["audit_record_id"] = "wrong-audit"
+    elif case == "wrong_sprite_id":
+        forged["sprite_id"] = "foreign-sprite"
+    else:
+        forged["field_name"] = "foreign_field"
+    truth.write_text("".join(json.dumps(item) + "\n" for item in raw_events), encoding="utf-8")
+
+    events = load_review_events(truth)
+    quality = QualityResolution(KEY, "quality_suitable", None, 1, 0)
+    completion = semantic_completion(record, events, quality)
+    assert completion["complete"] is False
+    assert "canonical_object" not in completion["terminal_fields"]
+    denominator = calibration_denominator_report([record], events)
+    assert denominator["scorable_field_judgments"] == 0
+    assert all(item["field"] != "canonical_object" for item in denominator["excluded"])
+    report = audit_existing_events(tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth)
+    assert report["category_counts"][expected_category] == 1
+    assert report["category_counts"]["valid_semantic"] == 3
+    assert report["categories_exhaustive"] is True
+
+
+def test_event_audit_uses_exhaustive_primary_categories(tmp_path: Path) -> None:
+    _selection_path, records = _prepared(tmp_path, (MINERAL,))
+    valid_path = tmp_path / "valid.jsonl"
+    _quality(valid_path, records[0], "quality_suitable")
+    valid = json.loads(valid_path.read_text(encoding="utf-8"))
+    ignored = ReviewEvent(
+        sprite_id=MINERAL,
+        action="mark_suitable_image",
+        proposal_hash=valid["proposal_hash"],
+        session_id=records[0]["audit_id"],
+        metadata={"audit_id": records[0]["audit_id"]},
+    ).to_dict()
+    truth = tmp_path / "audit-matrix.jsonl"
+    truth.write_text("{malformed\n" + json.dumps(valid) + "\n" + json.dumps(ignored) + "\n", encoding="utf-8")
+    report = audit_existing_events(tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth)
+    assert set(report["category_counts"]) == {
+        "schema_incompatible",
+        "identity_mismatch",
+        "proposal_hash_mismatch",
+        "malformed",
+        "valid_quality",
+        "valid_semantic",
+        "ignored_non_authoritative",
+    }
+    assert report["category_counts"]["malformed"] == 1
+    assert report["category_counts"]["valid_quality"] == 1
+    assert report["category_counts"]["ignored_non_authoritative"] == 1
+    assert report["categories_exhaustive"] is True
+
+
+def test_quality_proposal_hash_mismatch_is_invalid_in_audit_and_resolver(tmp_path: Path) -> None:
+    _selection_path, records = _prepared(tmp_path, (MINERAL,))
+    truth = tmp_path / "truth.jsonl"
+    _quality(truth, records[0], "quality_suitable")
+    raw = json.loads(truth.read_text(encoding="utf-8"))
+    raw["proposal_hash"] = "f" * 64
+    truth.write_text(json.dumps(raw) + "\n", encoding="utf-8")
+    events = load_review_events(truth)
+    resolution = resolve_quality_decisions(records, events)[MINERAL]
+    assert resolution.effective_state == "quality_unreviewed"
+    assert resolution.valid_event_count == 0
+    report = audit_existing_events(tmp_path / "prepared" / "audit_prefilled_records.jsonl", truth)
+    assert report["category_counts"]["proposal_hash_mismatch"] == 1
+    assert report["category_counts"]["valid_quality"] == 0
+
+
+def test_queue_verification_requires_and_reprojects_actual_bound_sources(tmp_path: Path) -> None:
+    selection, records = _prepared(tmp_path, (MINERAL, KEY))
+    prefilled = tmp_path / "prepared" / "audit_prefilled_records.jsonl"
+    truth = tmp_path / "truth.jsonl"
+    _quality(truth, records[0], "quality_suitable")
+    _quality(truth, records[1], "quality_unsuitable")
+    queue = tmp_path / "queue"
+    freeze_inference_queue(selection, prefilled, truth, queue)
+    verified = verify_frozen_inference_queue(
+        queue / "inference_queue.jsonl",
+        audit_selection=selection,
+        prefilled_records=prefilled,
+        human_truth=truth,
+    )
+    assert verified["source_bindings_verified"] is True
+    with pytest.raises(ValueError, match="requires actual source inputs"):
+        verify_frozen_inference_queue(queue / "inference_queue.jsonl")
+
+    copied_queue = tmp_path / "copied-queue"
+    copied_selection = tmp_path / "copied-selection.jsonl"
+    copied_prefilled = tmp_path / "copied-prefilled.jsonl"
+    copied_truth = tmp_path / "copied-truth.jsonl"
+    shutil.copytree(queue, copied_queue)
+    shutil.copy2(selection, copied_selection)
+    shutil.copy2(prefilled, copied_prefilled)
+    shutil.copy2(truth, copied_truth)
+    with pytest.raises(ValueError, match="source path mismatch"):
+        verify_frozen_inference_queue(
+            copied_queue / "inference_queue.jsonl",
+            audit_selection=copied_selection,
+            prefilled_records=copied_prefilled,
+            human_truth=copied_truth,
+        )
+
+
+@pytest.mark.parametrize("source_name", ["audit_selection", "prefilled_records", "human_truth"])
+def test_regenerated_local_source_manifest_cannot_rebind_queue(tmp_path: Path, source_name: str) -> None:
+    selection, records = _prepared(tmp_path, (MINERAL, KEY))
+    prefilled = tmp_path / "prepared" / "audit_prefilled_records.jsonl"
+    truth = tmp_path / "truth.jsonl"
+    _quality(truth, records[0], "quality_suitable")
+    _quality(truth, records[1], "quality_unsuitable")
+    queue = tmp_path / "queue"
+    freeze_inference_queue(selection, prefilled, truth, queue)
+    forged_queue = tmp_path / f"forged-{source_name}"
+    shutil.copytree(queue, forged_queue)
+    sources = {
+        "audit_selection": selection,
+        "prefilled_records": prefilled,
+        "human_truth": truth,
+    }
+    changed = tmp_path / f"changed-{source_name}.jsonl"
+    changed.write_bytes(sources[source_name].read_bytes())
+    if source_name == "human_truth":
+        changed.write_text(changed.read_text(encoding="utf-8") + " \n", encoding="utf-8")
+    else:
+        rows = _rows(changed)
+        rows[0]["adversarial_change"] = source_name
+        changed.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    _rewrite_source_binding(forged_queue, source_name, changed)
+    sources[source_name] = changed
+    with pytest.raises(ValueError, match=r"bound source projection|exactly match|incompatible schema"):
+        verify_frozen_inference_queue(
+            forged_queue / "inference_queue.jsonl",
+            audit_selection=sources["audit_selection"],
+            prefilled_records=sources["prefilled_records"],
+            human_truth=sources["human_truth"],
+        )
+
+
+def test_queue_id_mismatch_is_rejected_even_when_local_manifest_is_rehashed(tmp_path: Path) -> None:
+    selection, records = _prepared(tmp_path, (KEY,), cached=True)
+    prefilled = tmp_path / "prepared" / "audit_prefilled_records.jsonl"
+    truth = tmp_path / "truth.jsonl"
+    _quality(truth, records[0], "quality_suitable")
+    queue = tmp_path / "queue"
+    freeze_inference_queue(selection, prefilled, truth, queue)
+    manifest_path = queue / "inference_queue_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["queue_id"] = "f" * 64
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    freeze_path = queue / "freeze_manifest.json"
+    freeze = json.loads(freeze_path.read_text(encoding="utf-8"))
+    freeze["queue_id"] = "f" * 64
+    freeze_path.write_text(json.dumps(freeze, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _rehash_freeze(queue)
+    with pytest.raises(ValueError, match="bound source projection"):
+        verify_frozen_inference_queue(
+            queue / "inference_queue.jsonl",
+            audit_selection=selection,
+            prefilled_records=prefilled,
+            human_truth=truth,
+        )
+
+
+def test_resume_after_final_record_has_explicit_completed_state(tmp_path: Path) -> None:
+    _selection_path, records = _prepared(tmp_path, (MINERAL, KEY))
+    truth = tmp_path / "truth.jsonl"
+    for record in records:
+        _quality(truth, record, "quality_suitable")
+    events = load_review_events(truth)
+    expected = {"next_index": None, "review_complete": True, "remaining": 0, "completed": 2, "total": 2}
+    assert quality_resume_state(records, events) == expected
+    assert review_resume_state(records, truth, mode="quality-only") == expected
+    assert review_resume_index(records, truth, mode="quality-only") is None
+
+
+def test_semantic_resume_after_final_record_is_explicitly_complete(tmp_path: Path) -> None:
+    _selection_path, records = _prepared(tmp_path, (KEY,), cached=True)
+    record = records[0]
+    _material_not_required(record)
+    truth = tmp_path / "truth.jsonl"
+    _quality(truth, record, "quality_suitable")
+    for name in validate_accept_all(record):
+        accept_proposal(truth, record, name)
+    state = review_resume_state(records, truth, mode="semantic-assisted")
+    assert state == {"next_index": None, "review_complete": True, "remaining": 0, "completed": 1, "total": 1}
+    assert review_resume_index(records, truth, mode="semantic-assisted") is None
+
+
+def test_rejected_model_abstention_correction_supersedes_without_acceptance(tmp_path: Path) -> None:
+    _selection_path, records = _prepared(tmp_path, (KEY,), cached=True)
+    record = records[0]
+    _material_not_required(record)
+    _valid_abstention(record)
+    truth = tmp_path / "truth.jsonl"
+    _quality(truth, record, "quality_suitable")
+    correction = edit_field(truth, record, "canonical_object", "corrected-key")
+    for name in ("category", "domain", "role"):
+        accept_proposal(truth, record, name)
+    events = load_review_events(truth)
+    quality = resolve_quality_decisions([record], events)[KEY]
+    completion = semantic_completion(record, events, quality)
+    assert correction.human_outcome == "incorrect"
+    assert completion["complete"] is True
+    assert not any(reason.startswith("unjudged_model_abstention") for reason in completion["reasons"])
+    assert len(events) == 5
+    report = calibration_denominator_report([record], events)
+    assert report["model_abstention_appropriateness_judgments"] == 0
+    assert report["model_abstention_rejected_with_correction_judgments"] == 1
+    assert all(item["field"] != "canonical_object" for item in report["scorable"])
+
+
+@pytest.mark.parametrize(
+    ("outcome", "counter"),
+    [
+        ("human_abstained", "human_abstention_judgments"),
+        ("unsupported", "unsupported_judgments"),
+        ("not_applicable", "not_applicable_judgments"),
+    ],
+)
+def test_terminal_non_value_outcomes_never_enter_semantic_value_denominator(
+    tmp_path: Path, outcome: str, counter: str
+) -> None:
+    _selection_path, records = _prepared(tmp_path, (KEY,), cached=True)
+    record = records[0]
+    _material_not_required(record)
+    truth = tmp_path / "truth.jsonl"
+    _quality(truth, record, "quality_suitable")
+    if outcome == "human_abstained":
+        abstain_field(truth, record, "canonical_object")
+    elif outcome == "unsupported":
+        mark_unsupported(truth, record, "canonical_object")
+    else:
+        mark_not_applicable(truth, record, "canonical_object")
+    for name in ("category", "domain", "role"):
+        accept_proposal(truth, record, name)
+    events = load_review_events(truth)
+    quality = resolve_quality_decisions([record], events)[KEY]
+    assert semantic_completion(record, events, quality)["complete"] is True
+    report = calibration_denominator_report([record], events)
+    assert report["scorable_field_judgments"] == 3
+    assert report[counter] == 1
+    assert report["non_value_outcome_counts"][outcome] == 1
+    assert all(item["field"] != "canonical_object" for item in report["scorable"])
+
+
+def test_internally_rebound_wrong_exported_rgba_hash_fails_abstention_proof(tmp_path: Path) -> None:
+    _selection_path, records = _prepared(tmp_path, (KEY,), cached=True)
+    record = records[0]
+    _material_not_required(record)
+    _valid_abstention(record)
+    assert semantic_readiness(record)[0] is True
+    forged = copy.deepcopy(record)
+    forged["exported_rgba_hash"] = "f" * 64
+    bind_model_stage_proof(forged)
+    ready, reasons = semantic_readiness(forged)
+    assert ready is False
+    assert any("exported_rgba_hash_does_not_match_image" in reason for reason in reasons)

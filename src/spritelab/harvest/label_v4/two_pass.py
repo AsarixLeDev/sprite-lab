@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import struct
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from spritelab.harvest.label_v4.audit_prefill import (
     AUDIT_SELECTION_SCHEMA,
@@ -35,6 +38,18 @@ SEMANTIC_TERMINAL_OUTCOMES = frozenset(
         "human_abstained",
         "not_applicable",
         "model_abstention_accepted",
+    }
+)
+SEMANTIC_VALUE_OUTCOMES = frozenset({"correct", "correct_but_normalization_changed", "incorrect"})
+SEMANTIC_NON_VALUE_OUTCOMES = frozenset(
+    {
+        "model_abstention_accepted",
+        "human_abstained",
+        "unsupported",
+        "not_applicable",
+        "not_scorable",
+        "missing_prediction",
+        "provider_failed",
     }
 )
 REQUIRED_CRITICAL_FIELDS = ("canonical_object", "category", "domain", "role")
@@ -82,6 +97,56 @@ def _compatible_event(event: ReviewEvent) -> bool:
     return event.schema_version == REVIEW_EVENT_SCHEMA_VERSION
 
 
+def _common_event_authority(
+    record: Mapping[str, Any] | None,
+    event: ReviewEvent,
+    *,
+    semantic: bool,
+) -> tuple[str | None, str]:
+    """Return an invalid audit category/reason, or ``(None, "authoritative")``.
+
+    This is the shared identity boundary used by replay resolvers and the
+    existing-event audit.  Bindings are deliberately exact and non-optional.
+    """
+
+    if not _compatible_event(event):
+        return "schema_incompatible", "unsupported_review_event_schema"
+    if record is None:
+        return "identity_mismatch", "sprite_not_in_review_manifest"
+    sprite_id = str(record.get("sprite_id") or "")
+    if not sprite_id or event.sprite_id != sprite_id:
+        return "identity_mismatch", "sprite_id_mismatch"
+    audit_record_id = str(record.get("audit_id") or "")
+    metadata_audit_id = str(event.metadata.get("audit_record_id") or event.metadata.get("audit_id") or "")
+    if not audit_record_id:
+        return "identity_mismatch", "review_record_missing_audit_identity"
+    if not event.session_id or event.session_id != audit_record_id:
+        return "identity_mismatch", "session_identity_mismatch"
+    if not metadata_audit_id or metadata_audit_id != audit_record_id:
+        return "identity_mismatch", "audit_record_identity_mismatch"
+    if semantic:
+        fields = record.get("fields") if isinstance(record.get("fields"), Mapping) else {}
+        if not fields and isinstance(record.get("field_proposals"), Mapping):
+            fields = record["field_proposals"]
+        if not event.field_name or event.field_name not in fields:
+            return "identity_mismatch", "semantic_field_identity_mismatch"
+    elif event.field_name:
+        return "identity_mismatch", "quality_event_has_field_identity"
+    expected_hash = immutable_proposal_digest(record)
+    if not event.proposal_hash or event.proposal_hash != expected_hash:
+        return "proposal_hash_mismatch", "missing_or_changed_proposal_hash"
+    return None, "authoritative"
+
+
+def _quality_event_authority(record: Mapping[str, Any] | None, event: ReviewEvent) -> tuple[str, str]:
+    category, reason = _common_event_authority(record, event, semantic=False)
+    if category:
+        return category, reason
+    if event.action not in QUALITY_ACTIONS or event.human_outcome != event.action:
+        return "ignored_non_authoritative", "invalid_quality_action_or_outcome"
+    return "valid_quality", "authoritative_quality_event"
+
+
 def resolve_quality_decisions(
     records: Sequence[Mapping[str, Any]], events: Sequence[ReviewEvent]
 ) -> dict[str, QualityResolution]:
@@ -92,13 +157,8 @@ def resolve_quality_decisions(
     ignored = Counter()
     for event in events:
         record = by_id.get(event.sprite_id)
-        if not _compatible_event(event) or record is None or event.action not in QUALITY_ACTIONS or event.field_name:
-            ignored[event.sprite_id] += 1
-            continue
-        audit_id = str(record.get("audit_id", ""))
-        event_audit_id = str(event.metadata.get("audit_id") or event.session_id or "")
-        expected_hash = immutable_proposal_digest(record)
-        if event_audit_id != audit_id or (event.proposal_hash and event.proposal_hash != expected_hash):
+        category, _reason = _quality_event_authority(record, event)
+        if category != "valid_quality":
             ignored[event.sprite_id] += 1
             continue
         valid[event.sprite_id].append(event)
@@ -114,12 +174,22 @@ def resolve_quality_decisions(
     }
 
 
-def quality_resume_index(records: Sequence[Mapping[str, Any]], events: Sequence[ReviewEvent]) -> int:
+def quality_resume_state(records: Sequence[Mapping[str, Any]], events: Sequence[ReviewEvent]) -> dict[str, Any]:
     resolved = resolve_quality_decisions(records, events)
-    return next(
-        (index for index, record in enumerate(records) if not resolved[str(record.get("sprite_id", ""))].complete),
-        0,
-    )
+    remaining_indices = [
+        index for index, record in enumerate(records) if not resolved[str(record.get("sprite_id", ""))].complete
+    ]
+    return {
+        "next_index": remaining_indices[0] if remaining_indices else None,
+        "review_complete": not remaining_indices,
+        "remaining": len(remaining_indices),
+        "completed": len(records) - len(remaining_indices),
+        "total": len(records),
+    }
+
+
+def quality_resume_index(records: Sequence[Mapping[str, Any]], events: Sequence[ReviewEvent]) -> int | None:
+    return quality_resume_state(records, events)["next_index"]
 
 
 def _actual_value(value: Any) -> bool:
@@ -136,9 +206,57 @@ def _validated_model_stages(record: Mapping[str, Any]) -> tuple[bool, str]:
     provenance = record.get("model_provenance")
     if not isinstance(provenance, Mapping):
         return False, "missing_model_provenance"
+    audit_record_id = str(record.get("audit_id") or "")
+    sprite_id = str(record.get("sprite_id") or "")
+    exported_rgba_hash = str(record.get("exported_rgba_hash") or "")
+    if not audit_record_id or not sprite_id:
+        return False, "missing_canonical_record_identity"
+    if len(exported_rgba_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in exported_rgba_hash.lower()
+    ):
+        return False, "missing_exported_rgba_identity"
     input_hash = str(provenance.get("image_hash") or "")
     if not input_hash:
         return False, "missing_model_input_binding"
+    if str(provenance.get("sprite_id") or "") != sprite_id:
+        return False, "model_provenance_sprite_identity_mismatch"
+    image_path = Path(str(record.get("image_path") or ""))
+    if not image_path.is_file():
+        return False, "missing_bound_review_image"
+    try:
+        with Image.open(image_path) as source:
+            rgba = source.convert("RGBA")
+            exported_payload = (
+                b"spritelab-exported-rgba-v1\0" + struct.pack(">II", rgba.width, rgba.height) + rgba.tobytes()
+            )
+    except (OSError, ValueError):
+        return False, "unreadable_bound_review_image"
+    if hashlib.sha256(exported_payload).hexdigest() != exported_rgba_hash:
+        return False, "exported_rgba_hash_does_not_match_image"
+    from spritelab.harvest.label_v4.pixel_evidence import exact_rgba_content_hash
+
+    if exact_rgba_content_hash(image_path) != input_hash:
+        return False, "model_input_hash_does_not_match_image"
+    binding = provenance.get("review_record_binding")
+    if not isinstance(binding, Mapping):
+        return False, "missing_review_record_binding"
+    expected_binding = {
+        "audit_record_id": audit_record_id,
+        "sprite_id": sprite_id,
+        "exported_rgba_hash": exported_rgba_hash,
+        "proposal_hash": immutable_proposal_digest(record),
+        "proposal_input_hash": input_hash,
+    }
+    for name, expected in expected_binding.items():
+        if not expected or str(binding.get(name) or "") != expected:
+            return False, f"review_record_binding_mismatch:{name}"
+    for optional_identity in ("queue_id", "prefill_record_hash"):
+        record_value = str(record.get(optional_identity) or "")
+        if record_value and str(binding.get(optional_identity) or "") != record_value:
+            return False, f"review_record_binding_mismatch:{optional_identity}"
+    stage_proofs = binding.get("stage_artifacts")
+    if not isinstance(stage_proofs, Mapping):
+        return False, "missing_stage_artifact_identities"
     outcomes = {
         str(item.get("stage")): item for item in provenance.get("stage_outcomes") or () if isinstance(item, Mapping)
     }
@@ -152,6 +270,15 @@ def _validated_model_stages(record: Mapping[str, Any]) -> tuple[bool, str]:
             return False, f"{stage}:not_successfully_terminal"
         if not artifact:
             return False, f"{stage}:missing_stage_artifact"
+        proof = stage_proofs.get(stage)
+        if not isinstance(proof, Mapping):
+            return False, f"{stage}:missing_stage_identity"
+        if str(proof.get("artifact_sha256") or "") != _stable_hash(artifact):
+            return False, f"{stage}:stage_artifact_identity_mismatch"
+        if str(proof.get("stage_status") or "") != str(outcome.get("stage_status") or ""):
+            return False, f"{stage}:stage_status_binding_mismatch"
+        if str(proof.get("proposal_input_hash") or "") != input_hash:
+            return False, f"{stage}:proposal_input_identity_mismatch"
         if stage == "B_blind_vlm_proposal":
             if str(artifact.get("image_hash") or "") != input_hash:
                 return False, f"{stage}:artifact_input_binding_mismatch"
@@ -207,6 +334,42 @@ def validate_semantic_field(record: Mapping[str, Any], field_name: str) -> Seman
     if state in {"not_applicable", "unsupported"}:
         return SemanticFieldValidation(field_name, state, False, f"unscorable_{state}")
     return SemanticFieldValidation(field_name, state, False, state or "missing_prediction")
+
+
+def _semantic_event_authority(record: Mapping[str, Any] | None, event: ReviewEvent) -> tuple[str, str]:
+    category, reason = _common_event_authority(record, event, semantic=True)
+    if category:
+        return category, reason
+    assert record is not None  # narrowed by the common authority check
+    if event.action in QUALITY_ACTIONS or event.human_outcome not in SEMANTIC_TERMINAL_OUTCOMES:
+        return "ignored_non_authoritative", "nonterminal_or_quality_semantic_event"
+    allowed_actions = {
+        "correct": {"accept_proposed_value"},
+        "correct_but_normalization_changed": {
+            "accept_proposed_value",
+            "select_alternative",
+            "edit",
+        },
+        "incorrect": {"select_alternative", "edit"},
+        "model_abstention_accepted": {"accept_model_abstention"},
+        "human_abstained": {"mark_human_abstention"},
+        "unsupported": {"mark_unsupported", "mark_wrong_taxonomy"},
+        "not_applicable": {"mark_not_applicable"},
+    }
+    if event.action not in allowed_actions.get(event.human_outcome, set()):
+        return "ignored_non_authoritative", "action_outcome_mismatch"
+    validation = validate_semantic_field(record, event.field_name)
+    if event.human_outcome == "correct" and (not validation.valid or validation.value_state != "known"):
+        return "ignored_non_authoritative", "accepted_semantic_value_is_not_known"
+    if event.human_outcome == "model_abstention_accepted" and (
+        not validation.valid or validation.value_state != "model_abstained"
+    ):
+        return "ignored_non_authoritative", "accepted_model_abstention_is_not_proven"
+    if event.human_outcome in {"incorrect", "correct_but_normalization_changed"} and not _actual_value(
+        event.reviewed_value
+    ):
+        return "ignored_non_authoritative", "corrected_semantic_value_missing"
+    return "valid_semantic", "authoritative_semantic_event"
 
 
 def material_requirement(record: Mapping[str, Any]) -> MaterialRequirement:
@@ -279,17 +442,9 @@ def has_real_semantic_proposal(record: Mapping[str, Any]) -> bool:
 
 def _valid_semantic_events(record: Mapping[str, Any], events: Sequence[ReviewEvent]) -> dict[str, ReviewEvent]:
     latest: dict[str, ReviewEvent] = {}
-    expected_hash = immutable_proposal_digest(record)
-    audit_id = str(record.get("audit_id", ""))
     for event in events:
-        if not _compatible_event(event) or event.sprite_id != record.get("sprite_id") or not event.field_name:
-            continue
-        if event.proposal_hash and event.proposal_hash != expected_hash:
-            continue
-        event_audit_id = str(event.metadata.get("audit_id") or event.session_id or "")
-        if event_audit_id and event_audit_id != audit_id:
-            continue
-        if event.human_outcome in SEMANTIC_TERMINAL_OUTCOMES:
+        category, _reason = _semantic_event_authority(record, event)
+        if category == "valid_semantic":
             latest[event.field_name] = event
     return latest
 
@@ -312,8 +467,7 @@ def semantic_completion(
     abstentions_unjudged = [
         name
         for name in required
-        if validate_semantic_field(record, name).value_state == "model_abstained"
-        and (name not in latest or latest[name].human_outcome != "model_abstention_accepted")
+        if validate_semantic_field(record, name).value_state == "model_abstained" and name not in latest
     ]
     reasons = [*readiness_reasons]
     if material.state == "unresolved":
@@ -359,6 +513,8 @@ def calibration_denominator_report(
     scorable: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
     abstention_judgments: list[dict[str, Any]] = []
+    abstention_corrections: list[dict[str, Any]] = []
+    non_value_outcomes: Counter[str] = Counter()
     semantic_complete = 0
     for record in records:
         sprite_id = str(record.get("sprite_id", ""))
@@ -370,15 +526,30 @@ def calibration_denominator_report(
             if event.human_outcome == "model_abstention_accepted":
                 abstention_judgments.append({"sprite_id": sprite_id, "field": name, "outcome": event.human_outcome})
                 continue
+            if (
+                validation.value_state == "model_abstained"
+                and event.human_outcome in SEMANTIC_VALUE_OUTCOMES
+                and _actual_value(event.reviewed_value)
+            ):
+                correction = {
+                    "sprite_id": sprite_id,
+                    "field": name,
+                    "outcome": event.human_outcome,
+                    "reason": "model_abstention_rejected_with_human_correction",
+                }
+                abstention_corrections.append(correction)
+                excluded.append(correction)
+                continue
             reason = ""
-            if quality[sprite_id].effective_state not in QUALITY_ELIGIBLE:
+            if event.human_outcome not in SEMANTIC_VALUE_OUTCOMES:
+                non_value_outcomes[event.human_outcome] += 1
+                reason = f"non_value_outcome:{event.human_outcome}"
+            elif quality[sprite_id].effective_state not in QUALITY_ELIGIBLE:
                 reason = quality[sprite_id].effective_state
             elif not completion["complete"]:
                 reason = "incomplete_semantic_record"
             elif not validation.valid or validation.value_state != "known":
                 reason = validation.reason
-            elif event.human_outcome == "not_applicable":
-                reason = "not_applicable"
             (scorable if not reason else excluded).append(
                 {"sprite_id": sprite_id, "field": name, "outcome": event.human_outcome, "reason": reason or None}
             )
@@ -398,10 +569,55 @@ def calibration_denominator_report(
         "scorable_field_judgments": len(scorable),
         "excluded_field_judgments": len(excluded),
         "model_abstention_appropriateness_judgments": len(abstention_judgments),
+        "model_abstention_rejected_with_correction_judgments": len(abstention_corrections),
+        "human_abstention_judgments": non_value_outcomes["human_abstained"],
+        "unsupported_judgments": non_value_outcomes["unsupported"],
+        "not_applicable_judgments": non_value_outcomes["not_applicable"],
+        "non_value_outcome_counts": {
+            outcome: non_value_outcomes[outcome] for outcome in sorted(SEMANTIC_NON_VALUE_OUTCOMES)
+        },
         "scorable": scorable,
         "excluded": excluded,
         "abstention_judgments": abstention_judgments,
+        "abstention_corrections": abstention_corrections,
     }
+
+
+def _project_inference_queue(
+    selection: Sequence[Mapping[str, Any]],
+    prefilled_by_id: Mapping[str, Mapping[str, Any]],
+    resolved: Mapping[str, QualityResolution],
+    policy: frozenset[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    base_queue: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for order, selected in enumerate(selection):
+        sprite_id = str(selected.get("sprite_id", ""))
+        decision = resolved[sprite_id]
+        if decision.effective_state in policy:
+            base_queue.append(
+                {
+                    **dict(selected),
+                    "schema_version": INFERENCE_QUEUE_SCHEMA,
+                    "audit_order": order,
+                    "quality_state": decision.effective_state,
+                    "quality_risk_penalty": (0.15 if decision.effective_state == "quality_uncertain_usable" else 0.0),
+                    "quality_event": decision.event.to_dict() if decision.event else None,
+                    "prefill_record_hash": _stable_hash(prefilled_by_id[sprite_id]),
+                }
+            )
+        else:
+            excluded.append(
+                {
+                    "schema_version": "label_v4_inference_queue_exclusion_v1",
+                    "sprite_id": sprite_id,
+                    "audit_id": selected.get("audit_id"),
+                    "audit_order": order,
+                    "quality_state": decision.effective_state,
+                    "reason": "quality_unreviewed" if not decision.complete else "excluded_by_quality_policy",
+                }
+            )
+    return base_queue, excluded
 
 
 def freeze_inference_queue(
@@ -413,7 +629,17 @@ def freeze_inference_queue(
     inclusion_policy: Sequence[str] = tuple(sorted(QUALITY_ELIGIBLE)),
     allow_partial: bool = False,
 ) -> dict[str, Any]:
-    selection_path, prefilled_path, truth_path = map(Path, (audit_selection, prefilled_records, human_truth))
+    selection_path, prefilled_path, truth_path = (
+        Path(value).resolve() for value in (audit_selection, prefilled_records, human_truth)
+    )
+    source_paths = {
+        "audit_selection": selection_path,
+        "prefilled_records": prefilled_path,
+        "human_truth": truth_path,
+    }
+    for name, source_path in source_paths.items():
+        if not source_path.is_file():
+            raise FileNotFoundError(f"inference queue source input is missing: {name}={source_path}")
     selection = _read_jsonl(selection_path)
     prefilled = _read_jsonl(prefilled_path)
     require_prefilled_records(prefilled)
@@ -435,35 +661,19 @@ def freeze_inference_queue(
     policy = frozenset(inclusion_policy)
     if not policy or not policy <= QUALITY_ELIGIBLE:
         raise ValueError("inclusion policy may contain only quality_suitable and quality_uncertain_usable")
-    base_queue: list[dict[str, Any]] = []
-    excluded: list[dict[str, Any]] = []
-    for order, selected in enumerate(selection):
-        sprite_id = str(selected.get("sprite_id", ""))
-        decision = resolved[sprite_id]
-        if decision.effective_state in policy:
-            base_queue.append(
-                {
-                    **dict(selected),
-                    "schema_version": INFERENCE_QUEUE_SCHEMA,
-                    "audit_order": order,
-                    "quality_state": decision.effective_state,
-                    "quality_risk_penalty": 0.15 if decision.effective_state == "quality_uncertain_usable" else 0.0,
-                    "quality_event": decision.event.to_dict() if decision.event else None,
-                    "prefill_record_hash": _stable_hash(by_id[sprite_id]),
-                }
-            )
-        else:
-            excluded.append(
-                {
-                    "schema_version": "label_v4_inference_queue_exclusion_v1",
-                    "sprite_id": sprite_id,
-                    "audit_id": selected.get("audit_id"),
-                    "audit_order": order,
-                    "quality_state": decision.effective_state,
-                    "reason": "quality_unreviewed" if not decision.complete else "excluded_by_quality_policy",
-                }
-            )
-    queue_id = _stable_hash(base_queue)
+    base_queue, excluded = _project_inference_queue(selection, by_id, resolved, policy)
+    source_bindings = {
+        name: {"path": str(source_path), "sha256": _file_hash(source_path)}
+        for name, source_path in source_paths.items()
+    }
+    source_hashes = {name: value["sha256"] for name, value in source_bindings.items()}
+    queue_id = _stable_hash(
+        {
+            "identity_version": "label_v4_source_bound_queue_id_v2",
+            "source_sha256": source_hashes,
+            "records": base_queue,
+        }
+    )
     queue = [{**row, "queue_id": queue_id} for row in base_queue]
     output = Path(output_root)
     if output.exists():
@@ -508,10 +718,13 @@ def freeze_inference_queue(
     manifest = {
         "schema_version": "label_v4_inference_queue_manifest_v1",
         "queue_id": queue_id,
+        "queue_identity_version": "label_v4_source_bound_queue_id_v2",
         "records": len(queue),
+        "inclusion_policy": sorted(policy),
         "audit_selection_sha256": _file_hash(selection_path),
         "prefilled_records_sha256": _file_hash(prefilled_path),
         "human_truth_sha256": _file_hash(truth_path),
+        "source_bindings": source_bindings,
         "ordered_sprite_ids_hash": _stable_hash([row["sprite_id"] for row in queue]),
         "geometry_groups_preserved": True,
         "variant_groups_preserved": True,
@@ -536,7 +749,13 @@ def freeze_inference_queue(
     return {**report, "output": str(queue_path)}
 
 
-def verify_frozen_inference_queue(queue_path: str | Path) -> dict[str, Any]:
+def verify_frozen_inference_queue(
+    queue_path: str | Path,
+    *,
+    audit_selection: str | Path | None = None,
+    prefilled_records: str | Path | None = None,
+    human_truth: str | Path | None = None,
+) -> dict[str, Any]:
     path = Path(queue_path).resolve()
     manifest_path = path.parent / "inference_queue_manifest.json"
     freeze_path = path.parent / "freeze_manifest.json"
@@ -575,7 +794,85 @@ def verify_frozen_inference_queue(queue_path: str | Path) -> dict[str, Any]:
         value = str(manifest.get(binding) or "")
         if len(value) != 64 or any(character not in "0123456789abcdef" for character in value.lower()):
             raise ValueError(f"inference queue source binding missing or malformed: {binding}")
+    supplied_sources = {
+        "audit_selection": audit_selection,
+        "prefilled_records": prefilled_records,
+        "human_truth": human_truth,
+    }
+    missing_sources = [name for name, value in supplied_sources.items() if value is None]
+    if missing_sources:
+        raise ValueError(
+            "frozen inference queue verification requires actual source inputs: " + ", ".join(missing_sources)
+        )
+    bound_sources = manifest.get("source_bindings")
+    if not isinstance(bound_sources, Mapping):
+        raise ValueError("inference queue source path bindings are missing")
+    scalar_hash_fields = {
+        "audit_selection": "audit_selection_sha256",
+        "prefilled_records": "prefilled_records_sha256",
+        "human_truth": "human_truth_sha256",
+    }
+    resolved_sources: dict[str, Path] = {}
+    for name, supplied in supplied_sources.items():
+        actual_path = Path(supplied).resolve()  # type: ignore[arg-type]
+        resolved_sources[name] = actual_path
+        if not actual_path.is_file():
+            raise FileNotFoundError(f"inference queue source input is missing: {name}={actual_path}")
+        expected = bound_sources.get(name)
+        if not isinstance(expected, Mapping):
+            raise ValueError(f"inference queue source path binding is missing: {name}")
+        if str(expected.get("path") or "") != str(actual_path):
+            raise ValueError(f"inference queue source path mismatch: {name}")
+        actual_source_hash = _file_hash(actual_path)
+        expected_hash = str(expected.get("sha256") or "")
+        if (
+            not expected_hash
+            or expected_hash != actual_source_hash
+            or expected_hash != str(manifest.get(scalar_hash_fields[name]) or "")
+        ):
+            raise ValueError(f"inference queue source SHA-256 mismatch: {name}")
+    if manifest.get("queue_identity_version") != "label_v4_source_bound_queue_id_v2":
+        raise ValueError("inference queue uses an unsupported or missing source-bound queue identity")
+    policy_value = manifest.get("inclusion_policy")
+    if not isinstance(policy_value, list):
+        raise ValueError("inference queue inclusion policy binding is missing")
+    policy = frozenset(str(value) for value in policy_value)
+    if not policy or not policy <= QUALITY_ELIGIBLE:
+        raise ValueError("inference queue inclusion policy binding is invalid")
+    source_selection = _read_jsonl(resolved_sources["audit_selection"])
+    source_prefilled = _read_jsonl(resolved_sources["prefilled_records"])
+    require_prefilled_records(source_prefilled)
+    if any(detect_audit_schema(row) != AUDIT_SELECTION_SCHEMA for row in source_selection):
+        raise ValueError("bound audit selection uses an incompatible schema")
+    selected_ids = [str(row.get("sprite_id") or "") for row in source_selection]
+    if not all(selected_ids) or len(set(selected_ids)) != len(selected_ids):
+        raise ValueError("bound audit selection has missing or duplicate sprite IDs")
+    source_by_id = {str(row.get("sprite_id") or ""): row for row in source_prefilled}
+    if set(source_by_id) != set(selected_ids):
+        raise ValueError("bound prefilled records do not exactly match the audit selection")
+    source_events = _load_events(resolved_sources["human_truth"])
+    ordered_source_records = [source_by_id[sprite_id] for sprite_id in selected_ids]
+    source_resolved = resolve_quality_decisions(ordered_source_records, source_events)
+    if any(not decision.complete for decision in source_resolved.values()):
+        raise ValueError("bound human truth does not complete the final inference queue")
+    projected_base, projected_excluded = _project_inference_queue(
+        source_selection, source_by_id, source_resolved, policy
+    )
+    projected_queue_id = _stable_hash(
+        {
+            "identity_version": "label_v4_source_bound_queue_id_v2",
+            "source_sha256": {name: _file_hash(source_path) for name, source_path in resolved_sources.items()},
+            "records": projected_base,
+        }
+    )
+    if projected_queue_id != queue_id:
+        raise ValueError("inference queue ID does not match the bound source projection")
     rows = _read_jsonl(path)
+    projected_rows = [{**row, "queue_id": projected_queue_id} for row in projected_base]
+    if rows != projected_rows:
+        raise ValueError("inference queue rows do not match the bound source projection")
+    if _read_jsonl(path.parent / "excluded_records.jsonl") != projected_excluded:
+        raise ValueError("inference queue exclusions do not match the bound source projection")
     if int(manifest.get("records", -1)) != len(rows):
         raise ValueError("inference queue record-count binding mismatch")
     ids = [str(row.get("sprite_id") or "") for row in rows]
@@ -600,10 +897,14 @@ def verify_frozen_inference_queue(queue_path: str | Path) -> dict[str, Any]:
             or event.human_outcome != str(row.get("quality_state"))
         ):
             raise ValueError("inference queue quality-event decision binding mismatch")
-    unhashed_rows = [{key: value for key, value in row.items() if key != "queue_id"} for row in rows]
-    if _stable_hash(unhashed_rows) != queue_id:
-        raise ValueError("inference queue content-to-ID binding mismatch")
-    return {"queue_id": queue_id, "queue_sha256": actual_hash, "rows": rows, "manifest": manifest, "freeze": freeze}
+    return {
+        "queue_id": queue_id,
+        "queue_sha256": actual_hash,
+        "rows": rows,
+        "manifest": manifest,
+        "freeze": freeze,
+        "source_bindings_verified": True,
+    }
 
 
 def audit_existing_events(records_path: str | Path, human_truth: str | Path) -> dict[str, Any]:
@@ -612,22 +913,39 @@ def audit_existing_events(records_path: str | Path, human_truth: str | Path) -> 
     categories: dict[str, list[dict[str, Any]]] = {
         name: []
         for name in (
-            "valid_quality_event",
-            "valid_semantic_event",
-            "unsafe_null_acceptance",
-            "premature_completion",
             "schema_incompatible",
-            "incomplete",
+            "identity_mismatch",
+            "proposal_hash_mismatch",
+            "malformed",
+            "valid_quality",
+            "valid_semantic",
+            "ignored_non_authoritative",
         )
+    }
+    diagnostics: dict[str, list[dict[str, Any]]] = {
+        "unsafe_null_acceptance": [],
+        "premature_completion": [],
     }
     parsed: list[ReviewEvent] = []
     raw_lines = [line for line in Path(human_truth).read_text(encoding="utf-8").splitlines() if line.strip()]
     for line_number, raw in enumerate(raw_lines, 1):
         try:
             value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            categories["malformed"].append({"line": line_number, "reason": f"malformed_json:{exc}"})
+            continue
+        if not isinstance(value, Mapping):
+            categories["malformed"].append({"line": line_number, "reason": "event_must_be_a_json_object"})
+            continue
+        schema_version = str(value.get("schema_version") or "")
+        if schema_version != REVIEW_EVENT_SCHEMA_VERSION:
+            reason = "missing_schema_version" if not schema_version else f"unsupported_schema:{schema_version}"
+            categories["schema_incompatible"].append({"line": line_number, "reason": reason})
+            continue
+        try:
             event = ReviewEvent.from_dict(value)
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            categories["schema_incompatible"].append({"line": line_number, "reason": str(exc)})
+        except (ValueError, TypeError) as exc:
+            categories["malformed"].append({"line": line_number, "reason": str(exc)})
             continue
         record = by_id.get(event.sprite_id)
         summary = {
@@ -636,28 +954,37 @@ def audit_existing_events(records_path: str | Path, human_truth: str | Path) -> 
             "sprite_id": event.sprite_id,
             "action": event.action,
         }
-        if record is None or (event.session_id and event.session_id != str(record.get("audit_id", ""))):
-            categories["schema_incompatible"].append({**summary, "reason": "record_or_manifest_mismatch"})
-            continue
         parsed.append(event)
         if event.action in QUALITY_ACTIONS:
-            categories["valid_quality_event"].append(summary)
+            category, reason = _quality_event_authority(record, event)
         elif event.field_name:
+            category, reason = _semantic_event_authority(record, event)
+        else:
+            category, reason = "ignored_non_authoritative", "record_action_is_not_two_pass_authority"
+        categories[category].append({**summary, "reason": reason})
+        if record is not None and event.field_name:
             validation = validate_semantic_field(record, event.field_name)
             if event.human_outcome == "correct" and not validation.valid:
-                categories["unsafe_null_acceptance"].append({**summary, "value_state": validation.value_state})
-            else:
-                categories["valid_semantic_event"].append(summary)
+                diagnostics["unsafe_null_acceptance"].append({**summary, "value_state": validation.value_state})
         if event.metadata.get("record_completed"):
-            categories["premature_completion"].append({**summary, "reason": "legacy_generic_completion_flag"})
+            diagnostics["premature_completion"].append({**summary, "reason": "legacy_generic_completion_flag"})
     quality = resolve_quality_decisions(records, parsed)
     incomplete = [sprite_id for sprite_id, decision in quality.items() if not decision.complete]
-    categories["incomplete"] = [{"sprite_id": sprite_id, "reason": "quality_unreviewed"} for sprite_id in incomplete]
+    category_counts = {name: len(items) for name, items in categories.items()}
     return {
-        "schema_version": "label_v4_existing_event_audit_v1",
+        "schema_version": "label_v4_existing_event_audit_v2",
         "events_total": len(raw_lines),
-        "category_counts": {name: len(items) for name, items in categories.items()},
+        "category_counts": category_counts,
+        "categories_exhaustive": sum(category_counts.values()) == len(raw_lines),
         "categories": categories,
+        "diagnostic_counts": {name: len(items) for name, items in diagnostics.items()},
+        "diagnostics": diagnostics,
+        "legacy_category_counts": {
+            "valid_quality_event": category_counts["valid_quality"],
+            "valid_semantic_event": category_counts["valid_semantic"],
+            "unsafe_null_acceptance": len(diagnostics["unsafe_null_acceptance"]),
+            "premature_completion": len(diagnostics["premature_completion"]),
+        },
         "incomplete": incomplete,
         "incomplete_count": len(incomplete),
         "correction_plan": [

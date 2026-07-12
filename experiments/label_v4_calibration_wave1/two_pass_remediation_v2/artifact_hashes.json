@@ -1,0 +1,22 @@
+{
+  "algorithm": "sha256",
+  "files": {
+    "adversarial_state_matrix.json": "ae377213b8c703a79e6bc77dce8efd762229a0b50ae91beea8131fcf3a77aa18",
+    "command_log.txt": "6aa707553ecc9cba4a1bd81576efd6750e4ecc2f20b53a6950b4b8c9dda3002a",
+    "denominator_matrix.json": "b196250c724f3b27d9764a81c63f023a6e6dee4607a054553cb925494bb53695",
+    "event_audit_matrix.json": "406eb5744890959a42c0f6da12ef9bd6cf4f92f99f54460cd376ba76c42bf063",
+    "frozen_hash_verification.json": "03cd56cf5a2c8c3ebbd612b6633d8b7207ecc58be124b60770b8a94fad5e36c2",
+    "implementation.patch": "f6f115ac32efeb20179ac96efbe8be7a1138efce39c2436dfce03b3747d353e6",
+    "native_dimensions_diagnostic.json": "60fb4e56cb6b81e5482fe74754ce4aa0a51872010b88bd738353ded06d66dcb7",
+    "queue_binding_matrix.json": "1719b82c282e089b5acc0358d013343b4f24a7f41f548ae9a696baa224b8331e",
+    "remediation_report.json": "03e8f0a860704467a14f6d50e1282b25cdd80366bc496b09612d8de9b60d784a",
+    "remediation_report.md": "8488121bdb7ea5e0a3060c5ae9fbffc416240c189874be23c8fc56c655b1896a",
+    "resume_matrix.json": "1cc1edd4c8b8bba0b2eb0228eb653839b2a236b4a6231f5d30af7f2da2b8b8be",
+    "semantic_completion_matrix.json": "5a2b321d4fa5cea5304fb3d89afb7541ba67770b2ddd12027354554b21a5baaa",
+    "static_check_results.txt": "dd78b69dce6b9cbf29180076838b0a3e9abcee939f6ee2081ec49a23f2de5681",
+    "synthetic_rehearsal_report.json": "1e417d77bd8760961e736492fa6f329cf71fa3ddbad9d242660b122bb2d182eb",
+    "test_results.txt": "68a2fac534346bd287ba2faa657cbf552db08a4ead521f187716109204d37648"
+  },
+  "schema_version": "label_v4_remediation_artifact_hashes_v2",
+  "self_excluded": true
+}

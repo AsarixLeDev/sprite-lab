@@ -1,0 +1,182 @@
+{
+  "blocks_quality_review": false,
+  "decoded_value_meaning": "actual exported review canvas",
+  "display_dimensions_are_separate": true,
+  "generator_defect": false,
+  "mismatch_count": 8,
+  "presentation_ambiguity_fixed_for_future_prefills": true,
+  "real_wave1_artifacts_mutated": false,
+  "recorded_value_meaning": "source-native dimensions before crop/pad/resize",
+  "records": [
+    {
+      "audit_id": "wave1-0347-oga_496_rpg_icons_32fix_ac_necklace02",
+      "audit_line": 40,
+      "blocks_quality_review": false,
+      "decoded_exported_dimensions": {
+        "height": 32,
+        "width": 32
+      },
+      "exported_rgba_hash_matches": true,
+      "meaning": "source_native_pre_transform",
+      "recorded_native_dimensions": {
+        "height": 34,
+        "width": 34
+      },
+      "resize_policy": "exact_rgba_crop_34x34_box_1_1_33_33_to_32x32",
+      "sprite_id": "oga_496_rpg_icons_32fix_ac_necklace02",
+      "tight_crop_dimensions": {
+        "height": 32,
+        "width": 27
+      }
+    },
+    {
+      "audit_id": "wave1-0350-oga_496_rpg_icons_32fix_ac_necklace05",
+      "audit_line": 41,
+      "blocks_quality_review": false,
+      "decoded_exported_dimensions": {
+        "height": 32,
+        "width": 32
+      },
+      "exported_rgba_hash_matches": true,
+      "meaning": "source_native_pre_transform",
+      "recorded_native_dimensions": {
+        "height": 34,
+        "width": 34
+      },
+      "resize_policy": "exact_rgba_crop_34x34_box_1_1_33_33_to_32x32",
+      "sprite_id": "oga_496_rpg_icons_32fix_ac_necklace05",
+      "tight_crop_dimensions": {
+        "height": 32,
+        "width": 32
+      }
+    },
+    {
+      "audit_id": "wave1-0430-oga_496_rpg_icons_32fix_i_mirror",
+      "audit_line": 42,
+      "blocks_quality_review": false,
+      "decoded_exported_dimensions": {
+        "height": 32,
+        "width": 32
+      },
+      "exported_rgba_hash_matches": true,
+      "meaning": "source_native_pre_transform",
+      "recorded_native_dimensions": {
+        "height": 34,
+        "width": 34
+      },
+      "resize_policy": "exact_rgba_crop_34x34_box_1_1_33_33_to_32x32",
+      "sprite_id": "oga_496_rpg_icons_32fix_i_mirror",
+      "tight_crop_dimensions": {
+        "height": 32,
+        "width": 32
+      }
+    },
+    {
+      "audit_id": "wave1-0531-oga_496_rpg_icons_32fix_s_thunder05",
+      "audit_line": 43,
+      "blocks_quality_review": false,
+      "decoded_exported_dimensions": {
+        "height": 32,
+        "width": 32
+      },
+      "exported_rgba_hash_matches": true,
+      "meaning": "source_native_pre_transform",
+      "recorded_native_dimensions": {
+        "height": 34,
+        "width": 34
+      },
+      "resize_policy": "exact_rgba_crop_34x34_box_1_1_33_33_to_32x32",
+      "sprite_id": "oga_496_rpg_icons_32fix_s_thunder05",
+      "tight_crop_dimensions": {
+        "height": 32,
+        "width": 31
+      }
+    },
+    {
+      "audit_id": "wave1-0659-oga_496_rpg_icons_32fix_w_sword014",
+      "audit_line": 44,
+      "blocks_quality_review": false,
+      "decoded_exported_dimensions": {
+        "height": 32,
+        "width": 32
+      },
+      "exported_rgba_hash_matches": true,
+      "meaning": "source_native_pre_transform",
+      "recorded_native_dimensions": {
+        "height": 34,
+        "width": 34
+      },
+      "resize_policy": "exact_rgba_crop_34x34_box_1_1_33_33_to_32x32",
+      "sprite_id": "oga_496_rpg_icons_32fix_w_sword014",
+      "tight_crop_dimensions": {
+        "height": 31,
+        "width": 32
+      }
+    },
+    {
+      "audit_id": "wave1-1136-shade_16x16_weapons_bronze-weapons_r012_c004",
+      "audit_line": 98,
+      "blocks_quality_review": false,
+      "decoded_exported_dimensions": {
+        "height": 32,
+        "width": 32
+      },
+      "exported_rgba_hash_matches": true,
+      "meaning": "source_native_pre_transform",
+      "recorded_native_dimensions": {
+        "height": 16,
+        "width": 16
+      },
+      "resize_policy": "transparent_center_pad_16x16_to_32x32",
+      "sprite_id": "shade_16x16_weapons_bronze-weapons_r012_c004",
+      "tight_crop_dimensions": {
+        "height": 14,
+        "width": 14
+      }
+    },
+    {
+      "audit_id": "wave1-1197-shade_16x16_weapons_bronze-weapons_r015_c006",
+      "audit_line": 99,
+      "blocks_quality_review": false,
+      "decoded_exported_dimensions": {
+        "height": 32,
+        "width": 32
+      },
+      "exported_rgba_hash_matches": true,
+      "meaning": "source_native_pre_transform",
+      "recorded_native_dimensions": {
+        "height": 16,
+        "width": 16
+      },
+      "resize_policy": "transparent_center_pad_16x16_to_32x32",
+      "sprite_id": "shade_16x16_weapons_bronze-weapons_r015_c006",
+      "tight_crop_dimensions": {
+        "height": 12,
+        "width": 14
+      }
+    },
+    {
+      "audit_id": "wave1-1225-shade_16x16_weapons_bronze-weapons_r016_c014",
+      "audit_line": 100,
+      "blocks_quality_review": false,
+      "decoded_exported_dimensions": {
+        "height": 32,
+        "width": 32
+      },
+      "exported_rgba_hash_matches": true,
+      "meaning": "source_native_pre_transform",
+      "recorded_native_dimensions": {
+        "height": 16,
+        "width": 16
+      },
+      "resize_policy": "transparent_center_pad_16x16_to_32x32",
+      "sprite_id": "shade_16x16_weapons_bronze-weapons_r016_c014",
+      "tight_crop_dimensions": {
+        "height": 16,
+        "width": 16
+      }
+    }
+  ],
+  "schema_version": "label_v4_native_dimensions_diagnostic_v1",
+  "tight_crop_is_separate": true
+}

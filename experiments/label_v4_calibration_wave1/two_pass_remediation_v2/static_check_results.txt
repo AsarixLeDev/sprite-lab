@@ -1,0 +1,14 @@
+$ python -m ruff check src/spritelab/harvest/label_v4/two_pass.py src/spritelab/harvest/label_v4/review.py src/spritelab/harvest/label_v4/audit_prefill.py src/spritelab/harvest/label_v4/assisted_v4_gui.py src/spritelab/harvest/cli/label_v4_cmds.py tests/test_label_v4_two_pass_workflow.py tests/test_label_v4_audit_prefill_gui.py
+All checks passed!
+
+$ python -m ruff format --check src/spritelab/harvest/label_v4/two_pass.py src/spritelab/harvest/label_v4/review.py src/spritelab/harvest/label_v4/audit_prefill.py src/spritelab/harvest/label_v4/assisted_v4_gui.py src/spritelab/harvest/cli/label_v4_cmds.py tests/test_label_v4_two_pass_workflow.py tests/test_label_v4_audit_prefill_gui.py
+7 files already formatted
+
+$ git diff --check
+warning: in the working copy of 'src/spritelab/harvest/cli/label_v4_cmds.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/spritelab/harvest/label_v4/assisted_v4_gui.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/spritelab/harvest/label_v4/audit_prefill.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/spritelab/harvest/label_v4/review.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/spritelab/harvest/label_v4/two_pass.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_label_v4_audit_prefill_gui.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/test_label_v4_two_pass_workflow.py', LF will be replaced by CRLF the next time Git touches it
