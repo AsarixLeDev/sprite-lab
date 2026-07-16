@@ -1,5 +1,12 @@
 # Project Brain
 
+> **Historical milestone record.** This file preserves early codec and labeling
+> decisions, but its current milestone, next tickets, and non-goals are not the
+> current repository architecture. Several listed non-goals are now implemented.
+> Use [`AGENTS.md`](AGENTS.md) for the current search/code map, [`README.md`](README.md)
+> for the product overview, and feature documents under `docs/` for current
+> workflows.
+
 ## Project Goal
 
 Build a native 32x32 palette-index pixel-art generator with clean intermediate

@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import shutil
 import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -25,6 +24,7 @@ from spritelab.harvest.sources import (
     license_requires_attribution,
     normalize_license_name,
 )
+from spritelab.utils.safe_fs import remove_confined_tree
 
 RAW_SOURCE_INVENTORY_SCHEMA_VERSION = "sprite_lab_raw_source_inventory_v1"
 SOURCE_ARCHIVE_HASH_SCHEMA_VERSION = "sprite_lab_source_archive_hashes_v1"
@@ -198,7 +198,7 @@ def write_raw_source_inventory(records: Iterable[RawSourceRecord], output_root: 
         )
         staging.replace(destination)
     except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
+        remove_confined_tree(staging, destination.parent, missing_ok=True)
         raise
     return destination
 

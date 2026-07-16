@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import tempfile
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
@@ -16,6 +15,7 @@ from spritelab.dataset_v5.raw_relations import (
     assert_no_hard_relation_crossing,
     assign_component_splits,
 )
+from spritelab.utils.safe_fs import remove_confined_tree
 
 VIEW_POLICY_VERSION = "sprite_lab_raw_candidate_views_v1"
 VIEW_BUNDLE_SCHEMA_VERSION = "sprite_lab_raw_candidate_view_bundle_v1"
@@ -173,7 +173,7 @@ def write_candidate_view_manifests(
         _write_json(staging / "view_index.json", index)
         staging.replace(destination)
     except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
+        remove_confined_tree(staging, destination.parent, missing_ok=True)
         raise
     return bundle
 

@@ -13,6 +13,7 @@ from typing import Any
 
 from spritelab.dataset_v5.raw_relations import assert_no_hard_relation_crossing
 from spritelab.dataset_v5.raw_views import SUPERVISION_CLASSES, VIEW_NAMES
+from spritelab.utils.safe_fs import remove_confined_tree
 
 CANDIDATE_DATASET_SCHEMA_VERSION = "sprite_lab_raw_candidate_dataset_v1"
 ARTIFACT_MANIFEST_SCHEMA_VERSION = "sprite_lab_recursive_artifact_manifest_v1"
@@ -218,7 +219,7 @@ def write_candidate_dataset(
         verification = verify_candidate_dataset(staging)
         staging.replace(destination)
     except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
+        remove_confined_tree(staging, destination.parent, missing_ok=True)
         raise
     return verification
 
@@ -335,7 +336,7 @@ def freeze_candidate_dataset(
         verification = verify_frozen_rebuild(staging)
         staging.replace(destination)
     except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
+        remove_confined_tree(staging, destination.parent, missing_ok=True)
         raise
     return verification
 

@@ -6,9 +6,11 @@ import base64
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -164,15 +166,35 @@ _PROBE_SCRIPT = (
 _PREPARE_SCRIPT = (
     _DECODE
     + r"""
-import os
+import os,re,tempfile
 from pathlib import Path
-w=Path(p['workspace']); root=w/'.spritelab'; root.mkdir(parents=True,exist_ok=True)
-marker=root/'prepared'/f"{p['operation_id']}.json"; marker.parent.mkdir(parents=True,exist_ok=True)
-expected={'operation_id':p['operation_id'],'remote_identity':p['remote_identity']}
+operation=str(p['operation_id'])
+if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,190}',operation): raise SystemExit('UNSAFE_OPERATION_ID')
+w=Path(p['workspace']).resolve(); root=w/'.spritelab'
+if root.is_symlink(): raise SystemExit('UNSAFE_WORKSPACE_METADATA')
+root.mkdir(parents=True,exist_ok=True)
+if not root.is_dir() or root.resolve().parent!=w: raise SystemExit('UNSAFE_WORKSPACE_METADATA')
+prepared=root/'prepared'
+if prepared.is_symlink(): raise SystemExit('UNSAFE_PREPARED_DIRECTORY')
+prepared.mkdir(exist_ok=True)
+if not prepared.is_dir() or prepared.resolve().parent!=root.resolve(): raise SystemExit('UNSAFE_PREPARED_DIRECTORY')
+staging=root/'staging'
+if staging.is_symlink(): raise SystemExit('UNSAFE_STAGING_DIRECTORY')
+staging.mkdir(exist_ok=True)
+if not staging.is_dir() or staging.resolve().parent!=root.resolve(): raise SystemExit('UNSAFE_STAGING_DIRECTORY')
+operation_dir=staging/operation
+if operation_dir.is_symlink(): raise SystemExit('UNSAFE_OPERATION_DIRECTORY')
+operation_dir.mkdir(exist_ok=True)
+if not operation_dir.is_dir() or operation_dir.resolve().parent!=staging.resolve(): raise SystemExit('UNSAFE_OPERATION_DIRECTORY')
+marker=prepared/f"{operation}.json"
+if marker.is_symlink(): raise SystemExit('UNSAFE_PREPARED_MARKER')
+expected={'operation_id':operation,'remote_identity':p['remote_identity']}
 if marker.exists() and json.loads(marker.read_text()) != expected:
     raise SystemExit('STALE_REMOTE_IDENTITY')
 if not marker.exists():
-    tmp=marker.with_suffix('.partial'); tmp.write_text(json.dumps(expected,sort_keys=True)); os.replace(tmp,marker)
+    fd,name=tempfile.mkstemp(prefix=f'.{marker.name}.',suffix='.partial',dir=marker.parent)
+    with os.fdopen(fd,'w') as handle: handle.write(json.dumps(expected,sort_keys=True)); handle.flush(); os.fsync(handle.fileno())
+    os.replace(name,marker)
 print(json.dumps(expected))
 """
 )
@@ -197,11 +219,22 @@ _FINALIZE_UPLOAD_SCRIPT = (
     + r"""
 import hashlib,os
 from pathlib import Path
+operation=str(p['operation_id']); workspace=Path(p['workspace']).resolve()
+staging=(workspace/'.spritelab'/'staging'/operation).resolve()
+if staging.parent.parent.parent!=workspace: raise SystemExit('UNSAFE_STAGING_DIRECTORY')
 src=Path(p['partial']); dst=Path(p['destination']); h=hashlib.sha256()
+if src.resolve().parent!=staging: raise SystemExit('UNSAFE_PARTIAL_FILE')
+if src.is_symlink() or not src.is_file(): raise SystemExit('UNSAFE_PARTIAL_FILE')
 with src.open('rb') as f:
     for b in iter(lambda:f.read(1048576),b''): h.update(b)
 if h.hexdigest()!=p['sha256']: src.unlink(missing_ok=True); raise SystemExit('HASH_MISMATCH')
-dst.parent.mkdir(parents=True,exist_ok=True); os.replace(src,dst); print(json.dumps({'sha256':h.hexdigest()}))
+parent=dst.parent.resolve()
+try: relative=parent.relative_to(workspace)
+except ValueError: raise SystemExit('UNSAFE_UPLOAD_DESTINATION')
+if not relative.parts: raise SystemExit('UNSAFE_UPLOAD_DESTINATION')
+dst.parent.mkdir(parents=True,exist_ok=True)
+if dst.parent.resolve()!=parent: raise SystemExit('UNSAFE_UPLOAD_DESTINATION')
+os.replace(src,dst); print(json.dumps({'sha256':h.hexdigest()}))
 """
 )
 _WORKER_SCRIPT = (
@@ -271,11 +304,20 @@ print(json.dumps({'rows':rows[p['cursor']:],'cursor':len(rows)}))
 _CLEANUP_SCRIPT = (
     _DECODE
     + r"""
-import shutil
+import re,shutil
 from pathlib import Path
-target=Path(p['workspace'])/'.spritelab'/'staging'/p['operation_id']
+operation=str(p['operation_id'])
+if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,190}',operation): raise SystemExit('UNSAFE_OPERATION_ID')
+workspace=Path(p['workspace']).resolve()
+base=(workspace/'.spritelab'/'staging').resolve()
+if base.parent.parent!=workspace: raise SystemExit('UNSAFE_STAGING_DIRECTORY')
+target=base/operation
+if target.resolve().parent!=base: raise SystemExit('UNSAFE_CLEANUP_TARGET')
+if target.is_symlink(): raise SystemExit('UNSAFE_CLEANUP_LINK')
 changed=target.exists()
-if changed: shutil.rmtree(target)
+if changed:
+    if not target.is_dir(): raise SystemExit('UNSAFE_CLEANUP_TARGET')
+    shutil.rmtree(target)
 print(json.dumps({'changed':changed}))
 """
 )
@@ -367,6 +409,7 @@ class SSHComputeBackend:
     def upload(
         self, prepared: PreparedCompute, artifacts: Sequence[Path], *, remote_subdirectory: str = "inputs"
     ) -> OperationResult:
+        self._validate_prepared(prepared)
         subdirectory = validate_identifier(remote_subdirectory, label="remote subdirectory")
         changed = False
         uploaded: list[dict[str, str]] = []
@@ -384,7 +427,13 @@ class SSHComputeBackend:
                 uploaded.append({"path": destination, "sha256": digest})
                 continue
             staging = str(
-                PurePosixPath(prepared.workspace, ".spritelab", "staging", prepared.operation_id, f"{digest}.partial")
+                PurePosixPath(
+                    prepared.workspace,
+                    ".spritelab",
+                    "staging",
+                    prepared.operation_id,
+                    f"{digest}.{secrets.token_hex(16)}.partial",
+                )
             )
             self._execute(
                 _PREPARE_SCRIPT,
@@ -400,7 +449,13 @@ class SSHComputeBackend:
                 raise ComputeBackendError((result.stderr or result.stdout or "SSH upload failed").strip())
             self._execute(
                 _FINALIZE_UPLOAD_SCRIPT,
-                {"partial": staging, "destination": destination, "sha256": digest},
+                {
+                    "workspace": self.settings.workspace,
+                    "operation_id": prepared.operation_id,
+                    "partial": staging,
+                    "destination": destination,
+                    "sha256": digest,
+                },
             )
             changed = True
             uploaded.append({"path": destination, "sha256": digest})
@@ -425,6 +480,7 @@ class SSHComputeBackend:
     def launch(
         self, prepared: PreparedCompute, request: ComputeJobRequest, *, cloud_confirmation: bool = False
     ) -> ComputeJob:
+        self._validate_prepared(prepared)
         if self.is_cloud and not cloud_confirmation:
             raise CloudConfirmationRequired("Explicit cloud confirmation is required before SSH launch.")
         verify_compute_job_request(request, backend_id=self.backend_id)
@@ -564,21 +620,31 @@ class SSHComputeBackend:
         destination.mkdir(parents=True, exist_ok=True)
         downloaded = []
         for artifact in artifacts:
+            if artifact.remote_identity != job.remote_identity:
+                raise StaleRemoteIdentityError("Remote artifact identity does not match the job.")
             relative = PurePosixPath(artifact.relative_path)
             if relative.is_absolute() or ".." in relative.parts:
                 raise ValueError("Artifact paths must be relative to the prepared workspace.")
             remote = str(PurePosixPath(self.settings.workspace, *relative.parts))
             target = destination / relative.name
-            partial = target.with_suffix(target.suffix + ".partial")
-            result = self.transport.download(remote, partial)
-            if result.returncode != 0:
+            descriptor, partial_name = tempfile.mkstemp(
+                prefix=f".{target.name}.",
+                suffix=".partial",
+                dir=destination,
+            )
+            os.close(descriptor)
+            partial = Path(partial_name)
+            try:
+                result = self.transport.download(remote, partial)
+                if result.returncode != 0:
+                    raise ComputeBackendError((result.stderr or result.stdout or "SSH download failed").strip())
+                actual = file_sha256(partial)
+                if actual != artifact.sha256:
+                    raise ArtifactVerificationError(f"Downloaded artifact hash mismatch: {artifact.relative_path}")
+                os.replace(partial, target)
+            except BaseException:
                 partial.unlink(missing_ok=True)
-                raise ComputeBackendError((result.stderr or result.stdout or "SSH download failed").strip())
-            actual = file_sha256(partial)
-            if actual != artifact.sha256:
-                partial.unlink(missing_ok=True)
-                raise ArtifactVerificationError(f"Downloaded artifact hash mismatch: {artifact.relative_path}")
-            os.replace(partial, target)
+                raise
             downloaded.append(
                 replace(
                     artifact,
@@ -618,11 +684,26 @@ class SSHComputeBackend:
         return tuple(verified)
 
     def cleanup(self, prepared: PreparedCompute) -> OperationResult:
+        self._validate_prepared(prepared)
         result = self._execute(
             _CLEANUP_SCRIPT,
-            {"workspace": prepared.workspace, "operation_id": prepared.operation_id},
+            {"workspace": self.settings.workspace, "operation_id": prepared.operation_id},
         )
         return OperationResult(bool(result.get("changed")), "Remote staging cleaned; run artifacts were preserved.")
+
+    def _validate_prepared(self, prepared: PreparedCompute) -> None:
+        try:
+            operation_id = validate_identifier(prepared.operation_id, label="prepared operation id")
+            workspace = validate_remote_path(prepared.workspace)
+            configured_workspace = validate_remote_path(self.settings.workspace)
+        except ValueError as exc:
+            raise StaleRemoteIdentityError(str(exc)) from exc
+        if prepared.backend_id != self.backend_id:
+            raise StaleRemoteIdentityError("Prepared compute belongs to a different backend.")
+        if workspace != configured_workspace:
+            raise StaleRemoteIdentityError("Prepared compute workspace does not match configured SSH workspace.")
+        if operation_id != prepared.operation_id or not re.fullmatch(r"[a-f0-9]{64}", prepared.remote_identity):
+            raise StaleRemoteIdentityError("Prepared compute has an invalid remote identity.")
 
 
 def _compute_status(value: Any) -> ComputeStatus:

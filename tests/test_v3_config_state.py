@@ -105,6 +105,16 @@ def test_config_discovery_from_child_directory(tmp_path: Path) -> None:
     assert discover_config(child) == (tmp_path / "spritelab.yaml").resolve()
 
 
+def test_config_discovery_does_not_escape_repository_boundary(tmp_path: Path) -> None:
+    (tmp_path / "spritelab.yaml").write_text(yaml.safe_dump(DEFAULT_CONFIG), encoding="utf-8")
+    repository = tmp_path / "checkout"
+    child = repository / "a/b/c"
+    child.mkdir(parents=True)
+    (repository / ".git").mkdir()
+
+    assert discover_config(child) is None
+
+
 def test_missing_config_is_error_when_required(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("spritelab.v3.config.discover_config", lambda _start: None)
     with pytest.raises(ConfigError, match="v3 init"):

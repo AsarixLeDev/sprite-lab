@@ -1,5 +1,11 @@
 # Sprite Lab developer CLI
 
+Repository agents must first read [`../AGENTS.md`](../AGENTS.md), which defines
+the canonical search map and mandatory filesystem-safety policy. The developer
+CLI's read-only guarantees complement, but do not replace, those rules. Changes
+to destructive or replacement behavior also require the review process in
+[`filesystem_security.md`](filesystem_security.md).
+
 The developer command suite keeps repository evidence and engineering diagnostics separate from the final product experience. It is available under:
 
 ```text

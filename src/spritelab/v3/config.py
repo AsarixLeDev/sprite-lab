@@ -254,6 +254,10 @@ def discover_config(start: Path | None = None) -> Path | None:
         candidate = directory / CONFIG_NAME
         if candidate.is_file():
             return candidate
+        # A repository is a project boundary. Continuing above it can make an
+        # unrelated user-level configuration redirect this project's writes.
+        if (directory / ".git").exists():
+            break
     return None
 
 

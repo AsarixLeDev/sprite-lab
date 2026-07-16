@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -299,17 +301,30 @@ def write_candidate_bundle(
     }
     bundle["candidate_evidence_sha256"] = candidate_bundle_sha256(bundle)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(bundle, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    validation = load_candidate_bundle(
-        output_path,
-        expected_context={
-            "training_dataset_identity": training_dataset_identity,
-            "training_view_identity": training_view_identity,
-        },
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".candidate",
+        dir=output_path.parent,
     )
-    if not validation.valid:
-        output_path.unlink(missing_ok=True)
-        raise ValueError("refusing invalid candidate bundle: " + "; ".join(validation.reasons))
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(bundle, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        validation = load_candidate_bundle(
+            temporary,
+            expected_context={
+                "training_dataset_identity": training_dataset_identity,
+                "training_view_identity": training_view_identity,
+            },
+        )
+        if not validation.valid:
+            raise ValueError("refusing invalid candidate bundle: " + "; ".join(validation.reasons))
+        os.replace(temporary, output_path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     return bundle
 
 

@@ -1,8 +1,22 @@
 # sprite-lab
 
-`sprite-lab` is the foundation for a native 32x32 palette-index pixel-art generator.
-This first milestone does not train a model. It only creates the clean
-representation needed for the future generator.
+`sprite-lab` is a native 32x32 palette-index pixel-art toolkit and guarded local
+product. The repository now includes sprite codecs, dataset intake and semantic
+labeling, training and evaluation backends, remote-compute adapters, and the v3
+CLI/web workflow. Early milestone notes in `PROJECT_BRAIN.md` are historical and
+do not describe the complete current system.
+
+## Contributor and agent guidance
+
+Read [`AGENTS.md`](AGENTS.md) before changing this repository. It contains the
+current architecture/search map, focused test commands, generated-directory
+boundaries, and mandatory filesystem-safety rules. Recursive deletion is
+fail-closed and must use the shared confined helper; agents must never mutate an
+unverified target or an outside-workspace path. The implementation and threat
+model are documented in
+[`docs/filesystem_security.md`](docs/filesystem_security.md).
+
+[`CLAUDE.md`](CLAUDE.md) remains the shorter developer command reference.
 
 ## v1 Sprite Generator: Quickstart
 

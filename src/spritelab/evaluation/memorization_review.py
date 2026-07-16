@@ -28,6 +28,7 @@ from spritelab.evaluation.memorization import (
     reconstruct_rgba,
 )
 from spritelab.evaluation.suite import read_jsonl
+from spritelab.utils.safe_fs import atomic_write_text
 
 REVIEW_CHOICES = (
     "same_sprite_or_memorized",
@@ -928,9 +929,7 @@ def append_review(
 
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_text(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
 def write_summaries(output_dir: Path, *, pair_count: int) -> dict[str, Any]:

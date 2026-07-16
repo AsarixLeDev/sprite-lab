@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 
 from spritelab.dataset_v5.builder import _normalized_alpha_key, alpha_mask_sha256, canonical_rgba_sha256
+from spritelab.utils.safe_fs import remove_confined_tree
 
 CONTRACT_VERSION = "dataset_v5_view_contract_v1.0.0"
 VIEW_MANIFEST_SCHEMA = "dataset_v5_view_manifest_v1.0.0"
@@ -2346,7 +2347,7 @@ def build_view(
         _write_json(staging / "view_manifest.json", manifest)
         staging.replace(output)
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        remove_confined_tree(staging, output.parent, missing_ok=True)
         raise
     return {
         "ok": True,

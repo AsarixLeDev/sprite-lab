@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import shutil
 import stat
 import tempfile
 import zipfile
@@ -26,6 +25,7 @@ from spritelab.dataset_v5.identity import (
     make_record_id,
 )
 from spritelab.dataset_v5.raw_inventory import RawSourceRecord, file_sha256
+from spritelab.utils.safe_fs import remove_confined_tree
 
 RAW_EXTRACTION_SCHEMA_VERSION = "sprite_lab_raw_extraction_v1"
 RAW_BLOB_SCHEMA_VERSION = "sprite_lab_canonical_rgba_blob_v1"
@@ -203,7 +203,7 @@ def build_raw_extraction(specs: Iterable[RawExtractionSpec], output_root: str | 
         )
         staging.replace(destination)
     except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
+        remove_confined_tree(staging, destination.parent, missing_ok=True)
         raise
     return {
         "artifact_hashes": directory_file_hashes(destination),

@@ -14,7 +14,6 @@ import hashlib
 import io
 import json
 import os
-import shutil
 import tempfile
 import urllib.parse
 import zipfile
@@ -47,6 +46,7 @@ from spritelab.dataset_v5.identity import (
 from spritelab.dataset_v5.raw_freeze import FreezeGateEvidence
 from spritelab.dataset_v5.sol import SOL_PROVIDER_SCHEMA_VERSION
 from spritelab.harvest.suitability import SuitabilityInput, audit_inputs, load_config
+from spritelab.utils.safe_fs import remove_confined_tree
 
 EVIDENCE_SCHEMA_VERSION = "sprite_lab_v5_blocked_evidence_v1"
 SOL_UNAVAILABLE = "SOL_MODEL_UNAVAILABLE"
@@ -188,7 +188,7 @@ def compile_blocked_evidence(
         )
         _copy_staging_exclusively(staging, root)
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        remove_confined_tree(staging, root.parent, missing_ok=True)
 
     report = _read_json_object(root / "rebuild_report.json")
     return {
@@ -1097,7 +1097,7 @@ def _copy_staging_exclusively(staging: Path, destination: Path) -> None:
     except Exception:
         for path in reversed(created):
             if path.is_dir():
-                shutil.rmtree(path, ignore_errors=True)
+                remove_confined_tree(path, destination, missing_ok=True)
             else:
                 path.unlink(missing_ok=True)
         raise

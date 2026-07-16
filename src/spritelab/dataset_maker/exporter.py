@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import random
-import shutil
+import tempfile
+import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from spritelab.dataset_maker.model import (
     validate_dataset_maker_item,
 )
 from spritelab.harvest.config_loader import labeling_config_metadata
+from spritelab.utils.safe_fs import remove_confined_tree, require_confined_path
 
 
 @dataclass(frozen=True)
@@ -70,9 +72,13 @@ def export_dataset_from_imported_sprites(
     if not dataset_name:
         raise ValueError("dataset_name must be non-empty and filesystem-safe.")
 
-    output_dir = Path(config.output_root) / dataset_name
-    if output_dir.exists() and any(output_dir.iterdir()) and not config.overwrite:
-        raise FileExistsError(f"output directory already exists and is not empty: {output_dir}")
+    output_root = Path(config.output_root).expanduser()
+    output_dir = require_confined_path(output_root / dataset_name, output_root)
+    if output_dir.exists():
+        if not output_dir.is_dir():
+            raise FileExistsError(f"output path exists and is not a directory: {output_dir}")
+        if any(output_dir.iterdir()) and not config.overwrite:
+            raise FileExistsError(f"output directory already exists and is not empty: {output_dir}")
 
     accepted = [sprite for sprite in imported if sprite.item.status == "accepted"]
     excluded = [sprite for sprite in imported if sprite.item.status != "accepted"]
@@ -104,20 +110,7 @@ def export_dataset_from_imported_sprites(
             )
         )
 
-    if output_dir.exists() and config.overwrite:
-        shutil.rmtree(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     warnings = _split_warnings(prepared)
-    for split_name in ("train", "val", "test"):
-        split_sprites = [sprite for sprite in prepared if sprite.split == split_name]
-        _write_split_npz(output_dir / f"{split_name}.npz", split_sprites, max_palette_slots=config.max_palette_slots)
-        _write_manifest_jsonl(output_dir / f"manifest_{split_name}.jsonl", _manifest_records(split_sprites))
-
-    _write_json(output_dir / "vocab.json", _vocab(category_to_id, prepared))
-    _write_json(output_dir / "dataset_config.json", _dataset_config(dataset_name, config.max_palette_slots))
-    _write_rejected_jsonl(output_dir / "rejected.jsonl", excluded)
-
     result = DatasetMakerExportResult(
         output_dir=output_dir,
         train_count=sum(1 for sprite in prepared if sprite.split == "train"),
@@ -129,8 +122,59 @@ def export_dataset_from_imported_sprites(
     )
     from spritelab.dataset_maker.report import build_dataset_maker_report
 
-    (output_dir / "dataset_report.md").write_text(build_dataset_maker_report(imported, result), encoding="utf-8")
+    output_root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{dataset_name}.staging-", dir=output_root))
+    try:
+        for split_name in ("train", "val", "test"):
+            split_sprites = [sprite for sprite in prepared if sprite.split == split_name]
+            _write_split_npz(
+                staging / f"{split_name}.npz",
+                split_sprites,
+                max_palette_slots=config.max_palette_slots,
+            )
+            _write_manifest_jsonl(staging / f"manifest_{split_name}.jsonl", _manifest_records(split_sprites))
+
+        _write_json(staging / "vocab.json", _vocab(category_to_id, prepared))
+        _write_json(staging / "dataset_config.json", _dataset_config(dataset_name, config.max_palette_slots))
+        _write_rejected_jsonl(staging / "rejected.jsonl", excluded)
+        (staging / "dataset_report.md").write_text(
+            build_dataset_maker_report(imported, result),
+            encoding="utf-8",
+        )
+        _publish_export(staging, output_dir, output_root, overwrite=config.overwrite)
+    except BaseException:
+        remove_confined_tree(staging, output_root, missing_ok=True)
+        raise
     return result
+
+
+def _publish_export(staging: Path, output: Path, root: Path, *, overwrite: bool) -> None:
+    """Publish a complete export while preserving the old tree on failure."""
+
+    require_confined_path(staging, root)
+    require_confined_path(output, root)
+    if not output.exists():
+        staging.replace(output)
+        return
+    if not output.is_dir():
+        raise FileExistsError(f"output path exists and is not a directory: {output}")
+    non_empty = any(output.iterdir())
+    if non_empty and not overwrite:
+        raise FileExistsError(f"output directory already exists and is not empty: {output}")
+    if not non_empty:
+        output.rmdir()
+        staging.replace(output)
+        return
+
+    backup = root / f".{output.name}.previous-{uuid.uuid4().hex}"
+    require_confined_path(backup, root)
+    output.replace(backup)
+    try:
+        staging.replace(output)
+    except BaseException:
+        backup.replace(output)
+        raise
+    remove_confined_tree(backup, root)
 
 
 def make_dataset_maker_split(

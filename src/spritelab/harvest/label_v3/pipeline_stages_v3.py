@@ -41,6 +41,7 @@ from spritelab.harvest.label_v3.stage_cache_v3 import (
     record_decision_cache_key,
 )
 from spritelab.utils.jsonl import iter_jsonl
+from spritelab.utils.safe_fs import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -394,11 +395,7 @@ def retry_v3_failures(
         recovered += 1
 
     # Rewrite the failure queue with only the still-failing entries.
-    tmp = paths.failures.with_suffix(".jsonl.tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in remaining:
-            handle.write(_canonical_line(row) + "\n")
-    tmp.replace(paths.failures)
+    atomic_write_text(paths.failures, "".join(_canonical_line(row) + "\n" for row in remaining))
 
     return {"retried": retried, "recovered": recovered, "remaining": len(remaining)}
 

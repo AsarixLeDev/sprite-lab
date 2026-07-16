@@ -8,7 +8,6 @@ import fnmatch
 import hashlib
 import json
 import os
-import shutil
 import stat
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -52,6 +51,7 @@ from spritelab.product_features.dataset.sidecar import (
     pack_source_binding,
     sidecar_is_applicable,
 )
+from spritelab.utils.safe_fs import remove_confined_tree, require_confined_path
 
 INTAKE_SCHEMA = "spritelab.dataset.intake.v1"
 STATE_SCHEMA = "spritelab.dataset.intake_state.v1"
@@ -387,14 +387,16 @@ def rebuild_raw_extraction(
     destination = output / "raw_extraction"
     candidate = output / ".raw_extraction.next"
     backup = output / ".raw_extraction.previous"
+    for managed in (destination, candidate, backup):
+        require_confined_path(managed, output)
     for stale in (candidate, backup):
         if stale.exists():
-            shutil.rmtree(stale)
+            remove_confined_tree(stale, output)
     if not accepted:
         if validate_before_publish is not None:
             validate_before_publish()
         if destination.exists():
-            shutil.rmtree(destination)
+            remove_confined_tree(destination, output)
         return
     specs = [_raw_spec(item) for item in accepted]
     try:
@@ -403,7 +405,7 @@ def rebuild_raw_extraction(
             validate_before_publish()
     except BaseException:
         if candidate.exists():
-            shutil.rmtree(candidate)
+            remove_confined_tree(candidate, output)
         raise
     try:
         if destination.exists():
@@ -413,15 +415,15 @@ def rebuild_raw_extraction(
             validate_before_publish()
     except BaseException:
         if destination.exists():
-            shutil.rmtree(destination)
+            remove_confined_tree(destination, output)
         if backup.exists():
             backup.replace(destination)
         if candidate.exists():
-            shutil.rmtree(candidate)
+            remove_confined_tree(candidate, output)
         raise
     else:
         if backup.exists():
-            shutil.rmtree(backup)
+            remove_confined_tree(backup, output)
 
 
 def recompute_summary_from_items(items: Sequence[Mapping[str, Any]], previous: Mapping[str, Any]) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -200,6 +201,45 @@ def test_overwrite_true_allows_replacing_output(tmp_path: Path) -> None:
     assert result.accepted_count == 1
     with np.load(tmp_path / "v0" / "train.npz") as data:
         assert data["sprite_id"].tolist() == ["sprite_b"]
+
+
+def test_overwrite_rejects_linked_output_and_preserves_outside_tree(tmp_path: Path) -> None:
+    output_root = tmp_path / "exports"
+    outside = tmp_path / "outside"
+    output_root.mkdir()
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    try:
+        os.symlink(outside, output_root / "v0", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable in this test session")
+
+    with pytest.raises(ValueError, match=r"escapes|link|reparse"):
+        export_dataset_from_imported_sprites(
+            [_imported("sprite_a")],
+            DatasetMakerExportConfig(dataset_name="v0", output_root=output_root, overwrite=True),
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
+def test_failed_overwrite_keeps_previous_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = DatasetMakerExportConfig(dataset_name="v0", output_root=tmp_path)
+    export_dataset_from_imported_sprites([_imported("sprite_a")], config)
+
+    def fail_publish(*_args, **_kwargs):
+        raise OSError("synthetic publish failure")
+
+    monkeypatch.setattr("spritelab.dataset_maker.exporter._publish_export", fail_publish)
+    with pytest.raises(OSError, match="synthetic publish failure"):
+        export_dataset_from_imported_sprites(
+            [_imported("sprite_b")],
+            DatasetMakerExportConfig(dataset_name="v0", output_root=tmp_path, overwrite=True),
+        )
+
+    with np.load(tmp_path / "v0" / "train.npz") as data:
+        assert data["sprite_id"].tolist() == ["sprite_a"]
 
 
 def _item(

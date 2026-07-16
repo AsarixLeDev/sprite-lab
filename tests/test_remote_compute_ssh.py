@@ -14,9 +14,16 @@ from spritelab.remote_compute import (
     ComputeStatus,
     SSHComputeBackend,
     SSHSettings,
+    StaleRemoteIdentityError,
     SubprocessSSHTransport,
 )
-from spritelab.remote_compute.ssh import _POLL_SCRIPT, RemoteResult
+from spritelab.remote_compute.ssh import (
+    _CLEANUP_SCRIPT,
+    _FINALIZE_UPLOAD_SCRIPT,
+    _POLL_SCRIPT,
+    _PREPARE_SCRIPT,
+    RemoteResult,
+)
 
 
 class FakeTransport:
@@ -24,6 +31,7 @@ class FakeTransport:
         self.polls = []
         self.upload_result = RemoteResult(0)
         self.download_bytes = b""
+        self.uploads: list[str] = []
 
     def execute(self, script, payload):
         if script == _POLL_SCRIPT and self.polls:
@@ -47,6 +55,7 @@ class FakeTransport:
         )
 
     def upload(self, local_path, remote_path):
+        self.uploads.append(str(remote_path))
         return self.upload_result
 
     def download(self, remote_path, local_path):
@@ -130,9 +139,29 @@ def test_interrupted_ssh_upload_never_reports_success(tmp_path: Path) -> None:
     local.write_text("{}", encoding="utf-8")
     from spritelab.remote_compute import PreparedCompute
 
-    prepared = PreparedCompute("ssh", "operation", "/workspace/sprite-lab", "remote-id")
+    prepared = PreparedCompute("ssh", "operation", "/workspace/sprite-lab", "a" * 64)
     with pytest.raises(Exception, match="connection reset"):
         backend.upload(prepared, [local])
+
+
+def test_ssh_upload_uses_unpredictable_confined_remote_partial(tmp_path: Path) -> None:
+    from spritelab.remote_compute import PreparedCompute
+
+    transport = FakeTransport()
+    backend = _backend(transport)
+    local = tmp_path / "input.json"
+    local.write_text("{}", encoding="utf-8")
+    digest = hashlib.sha256(local.read_bytes()).hexdigest()
+    prepared = PreparedCompute("ssh", "operation", "/workspace/sprite-lab", "a" * 64)
+
+    backend.upload(prepared, [local])
+    backend.upload(prepared, [local])
+
+    assert len(transport.uploads) == 2
+    assert len(set(transport.uploads)) == 2
+    for remote_path in transport.uploads:
+        assert remote_path.startswith(f"/workspace/sprite-lab/.spritelab/staging/operation/{digest}.")
+        assert remote_path.endswith(".partial")
 
 
 def test_download_hash_mismatch_removes_partial_file(tmp_path: Path) -> None:
@@ -143,6 +172,53 @@ def test_download_hash_mismatch_removes_partial_file(tmp_path: Path) -> None:
     with pytest.raises(ArtifactVerificationError, match="hash mismatch"):
         backend.download_artifacts(_job(), [artifact], tmp_path)
     assert not (tmp_path / "checkpoint.pt.partial").exists()
+
+
+def test_download_uses_unique_partial_and_preserves_preplanted_hard_link(tmp_path: Path) -> None:
+    transport = FakeTransport()
+    transport.download_bytes = b"corrupt"
+    backend = _backend(transport)
+    outside = tmp_path / "outside.bin"
+    predictable = tmp_path / "checkpoint.pt.partial"
+    outside.write_bytes(b"preserve")
+    try:
+        predictable.hardlink_to(outside)
+    except OSError:
+        pytest.skip("hard links are unavailable in this test session")
+    artifact = ArtifactReference("runs/checkpoint.pt", hashlib.sha256(b"expected").hexdigest(), "remote-id")
+
+    with pytest.raises(ArtifactVerificationError, match="hash mismatch"):
+        backend.download_artifacts(_job(), [artifact], tmp_path)
+
+    assert outside.read_bytes() == b"preserve"
+    assert predictable.read_bytes() == b"preserve"
+
+
+def test_cleanup_rejects_forged_prepared_workspace_and_traversal() -> None:
+    from spritelab.remote_compute import PreparedCompute
+
+    backend = _backend()
+    with pytest.raises(StaleRemoteIdentityError, match="operation id"):
+        backend.cleanup(PreparedCompute("ssh", "../../danger", "/workspace/sprite-lab", "a" * 64))
+    with pytest.raises(StaleRemoteIdentityError, match="workspace"):
+        backend.cleanup(PreparedCompute("ssh", "operation", "/workspace/other", "a" * 64))
+
+
+def test_remote_cleanup_script_has_independent_containment_checks() -> None:
+    assert "UNSAFE_OPERATION_ID" in _CLEANUP_SCRIPT
+    assert "base.parent.parent!=workspace" in _CLEANUP_SCRIPT
+    assert "target.resolve().parent!=base" in _CLEANUP_SCRIPT
+    assert "target.is_symlink()" in _CLEANUP_SCRIPT
+
+
+def test_remote_staging_scripts_reject_links_and_predictable_temporary_files() -> None:
+    assert "tempfile.mkstemp" in _PREPARE_SCRIPT
+    assert "UNSAFE_WORKSPACE_METADATA" in _PREPARE_SCRIPT
+    assert "UNSAFE_STAGING_DIRECTORY" in _PREPARE_SCRIPT
+    assert "UNSAFE_OPERATION_DIRECTORY" in _PREPARE_SCRIPT
+    assert "UNSAFE_PREPARED_MARKER" in _PREPARE_SCRIPT
+    assert "UNSAFE_PARTIAL_FILE" in _FINALIZE_UPLOAD_SCRIPT
+    assert "UNSAFE_UPLOAD_DESTINATION" in _FINALIZE_UPLOAD_SCRIPT
 
 
 def test_remote_resource_disappeared_warns_that_cost_may_continue() -> None:

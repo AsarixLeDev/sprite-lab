@@ -1,5 +1,10 @@
 # sprite-lab developer reference
 
+Read [`AGENTS.md`](AGENTS.md) first. It is the canonical repository-wide guide
+for search order, subsystem ownership, testing, and mandatory filesystem safety.
+See [`docs/filesystem_security.md`](docs/filesystem_security.md) before changing
+deletion, overwrite, staging, rollback, download, or remote-cleanup behavior.
+
 ## Commands
 
 ```powershell
@@ -19,6 +24,8 @@ mypy src
 pre-commit run --all-files
 
 # CLI entry points
+spritelab v3 <command>
+spritelab dev <command>
 spritelab train <subcommand>
 spritelab harvest <subcommand>
 spritelab ml <subcommand>
@@ -66,6 +73,12 @@ src/spritelab/
     jsonl.py               — canonical read_jsonl / write_jsonl / iter_jsonl
 ```
 
+The compact map above predates several current areas. Also search `dataset_v5/`,
+`hierarchical_labeling/`, `product_core/`, `product_features/`, `product_web/`,
+`product_ux/`, `provenance/`, `remote_compute/`, `utils/safe_fs.py`, and `v3/`.
+The cross-subsystem table in `AGENTS.md` is authoritative; `PROJECT_BRAIN.md` is
+historical.
+
 ## Conventions
 
 - **Lazy CLI imports**: all heavy imports inside command handlers (torch-optional strategy)
@@ -79,6 +92,10 @@ src/spritelab/
 - **No large files**: pre-commit guards blobs > 2 MB
 - **Tests**: CPU-only, `torch = pytest.importorskip("torch")`, use `_semantic_dataset` test helpers
 - **Training changes**: A/B bit-identical pattern required (see `tests/test_training_speed_options.py`)
+- **Filesystem safety**: destructive targets require lexical and resolved
+  containment plus link/reparse/mount rejection; use `spritelab.utils.safe_fs`
+- **Passive operations**: status/discovery must not initialize CUDA, contact a
+  provider, spend money, persist secrets, or mutate input data
 
 ## Constraints
 
@@ -87,3 +104,5 @@ src/spritelab/
 - Active workbench: `generator_challenger.py`, `generator_audits.py`, `v2_phase0_eval.py`
 - Challenger hot loop must stay sync-free (all `.cpu()` calls are cached or hoisted)
 - `palette_scale_needs_normalize` is a module-level cache, reset per training run
+- Ignored generated data can be valuable local work; it is never implicitly
+  disposable

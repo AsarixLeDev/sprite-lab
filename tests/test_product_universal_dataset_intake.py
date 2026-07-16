@@ -210,6 +210,24 @@ def test_source_confinement_rejects_reparse_seam_without_platform_symlink_suppor
         _require_source_entry_confined(candidate, root.resolve())
 
 
+def test_raw_extraction_cleanup_rejects_linked_managed_directory(tmp_path: Path) -> None:
+    output = tmp_path / "managed-output"
+    outside = tmp_path / "outside"
+    output.mkdir()
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    try:
+        os.symlink(outside, output / "raw_extraction", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable in this test session")
+
+    with pytest.raises(ValueError, match=r"escapes|link|reparse"):
+        dataset_intake.rebuild_raw_extraction(output, [])
+
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
 def test_source_discovery_fails_closed_when_walk_reports_an_unreadable_subtree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
