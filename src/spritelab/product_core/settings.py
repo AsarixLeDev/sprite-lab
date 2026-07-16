@@ -23,6 +23,8 @@ PRODUCT_SETTINGS_FILENAME = "product-settings.json"
 SETTING_PATHS = {
     "provider": ("providers", "vision"),
     "compute": ("compute", "training"),
+    "dataset": ("dataset",),
+    "labeling": ("labeling",),
 }
 SECRET_KEY_PATTERN = re.compile(
     r"(?:^|_)(?:api_?key|access_?token|auth_?token|bearer|password|passwd|private_?key|secret|token)(?:$|_)",
@@ -155,9 +157,10 @@ class ProductSettingsRepository:
         saved = self.section(name)
         if saved is not None and isinstance(saved.get("settings"), Mapping):
             return dict(saved["settings"]), int(saved.get("configuration_version", 1)), True
-        first, second = SETTING_PATHS[name]
-        parent = self.context.config.get(first, {}) if isinstance(self.context.config, Mapping) else {}
-        fallback = parent.get(second, {}) if isinstance(parent, Mapping) else {}
+        path = SETTING_PATHS[name]
+        fallback: Any = self.context.config if isinstance(self.context.config, Mapping) else {}
+        for part in path:
+            fallback = fallback.get(part, {}) if isinstance(fallback, Mapping) else {}
         return dict(fallback) if isinstance(fallback, Mapping) else {}, 0, False
 
     def save(self, name: str, settings: Mapping[str, Any]) -> dict[str, Any]:
@@ -218,14 +221,17 @@ class ProductSettingsRepository:
 
     def effective_context(self) -> ProjectContext:
         values = copy.deepcopy(dict(self.context.config))
-        for name, (first, second) in SETTING_PATHS.items():
+        for name, path in SETTING_PATHS.items():
             settings, _version, saved = self.effective_settings(name)
             if saved:
-                parent = values.setdefault(first, {})
-                if not isinstance(parent, dict):
-                    parent = {}
-                    values[first] = parent
-                parent[second] = settings
+                parent = values
+                for part in path[:-1]:
+                    child = parent.setdefault(part, {})
+                    if not isinstance(child, dict):
+                        child = {}
+                        parent[part] = child
+                    parent = child
+                parent[path[-1]] = settings
         return ProjectContext(
             project_root=self.context.project_root,
             config=values,
