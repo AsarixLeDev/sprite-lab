@@ -1,0 +1,4 @@
+schema_version: labeling_v2.1
+vlm_hallucination_objects: [gold_bar, gold_coin, coin, coin_stack, orb, stone_bottle, potion, potion_bottle, red_potion_bottle, rolled_parchment, mossy_rock]
+malformed_objects: [sho, armour, elm, ambiguou, ambiguou_object, ambiguou_shape]
+generic_objects: ['', unknown, unknown_object, unidentified, unidentified_object, ambiguous, ambiguous_object, ambiguous_shape, generic_object, shape, generic_shape, gem, tool, item, object, thing, sprite, icon, tile, grid, grid_cell, cell]

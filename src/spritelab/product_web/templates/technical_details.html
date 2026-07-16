@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Technical details · Sprite Lab{% endblock %}
+{% block content %}
+<header class="page-header"><div><span class="eyebrow">Sanitized information</span><h1>Technical details</h1><p>Implementation information that is safe to share from the local interface.</p></div></header>
+<div class="two-column"><section class="panel"><h2>Application</h2><dl class="detail-list"><div><dt>Access</dt><dd>{% if non_loopback %}Authenticated network session{% else %}This computer only{% endif %}</dd></div><div><dt>Live updates</dt><dd>Product event streams</dd></div><div><dt>External assets</dt><dd>None</dd></div></dl></section><section class="panel"><h2>Local stack</h2><ul class="check-list">{% for item in stack %}<li><span aria-hidden="true">✓</span>{{ item }}</li>{% endfor %}</ul></section></div>
+<section class="panel"><h2>Registered product features</h2>{% if plugin_titles %}<ul class="check-list">{% for title in plugin_titles %}<li><span aria-hidden="true">◇</span>{{ title }}</li>{% endfor %}</ul>{% else %}<div class="chart-empty">No feature plugins are registered</div>{% endif %}</section>
+{% endblock %}

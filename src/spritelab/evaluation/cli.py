@@ -1,0 +1,359 @@
+"""CLI for generation benchmark v1."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+from spritelab.evaluation.suite import compare_reports, human_package, score_suite, write_jsonl
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m spritelab eval", description="Reproducible sprite generation benchmark."
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    generate = sub.add_parser("generate-suite", help="Generate frozen prompts with paired noise seeds.")
+    generate.add_argument("--suite", required=True, type=Path)
+    generate.add_argument(
+        "--checkpoint", required=True, action="append", help="LABEL=PATH; repeat for paired checkpoints."
+    )
+    generate.add_argument("--out", required=True, type=Path)
+    generate.add_argument("--seeds", help="Comma-separated override; defaults to frozen suite seeds.")
+    generate.add_argument("--cfg-scale", type=float, action="append", default=[])
+    generate.add_argument("--steps", type=int, action="append", default=[])
+    generate.add_argument("--export-preset", action="append", default=[])
+    generate.add_argument("--device", default="cpu")
+    generate.add_argument("--batch-size", type=int, default=16)
+    generate.add_argument("--max-samples", type=int, default=0)
+    generate.add_argument("--palette-conditioning-source", choices=("none", "source", "retrieved"), default="none")
+    generate.add_argument("--palette-conditioning-dataset", type=Path)
+    generate.add_argument("--palette-conditioning-training-manifest", type=Path)
+    generate.add_argument("--palette-conditioning-exclude-exact-target", action="store_true")
+    generate.add_argument(
+        "--allow-legacy-conditioning-v1",
+        action="store_true",
+        help="Explicitly use the recorded schema-v1 structured vocabulary without remapping IDs.",
+    )
+    generate.add_argument("--resume", action="store_true")
+    generate.add_argument("--dry-run", action="store_true")
+    generate.set_defaults(func=_generate)
+
+    score = sub.add_parser(
+        "score-suite", help="Score generated artifacts on CPU and optionally retrieve train neighbors."
+    )
+    score.add_argument("--generated", required=True, type=Path)
+    score.add_argument("--out", required=True, type=Path)
+    score.add_argument("--training-manifest", action="append", type=Path, default=[])
+    score.add_argument("--limit", type=int, default=0)
+    score.add_argument("--gates", type=Path)
+    score.add_argument("--checkpoint", type=Path)
+    score.add_argument("--benchmark-manifest", type=Path)
+    score.add_argument("--training-dataset-identity")
+    score.add_argument("--training-view-identity")
+    score.set_defaults(func=_score)
+
+    compare = sub.add_parser("compare", help="Compare two scored suites using paired prompt/noise seeds.")
+    compare.add_argument("--baseline", required=True, type=Path)
+    compare.add_argument("--candidate", required=True, type=Path)
+    compare.add_argument("--out", required=True, type=Path)
+    compare.add_argument("--architecture-change", action="store_true")
+    compare.set_defaults(func=_compare)
+
+    human = sub.add_parser("human-package", help="Create a static blind A/B package and import schema.")
+    human.add_argument("--a", required=True, type=Path)
+    human.add_argument("--b", required=True, type=Path)
+    human.add_argument("--out", required=True, type=Path)
+    human.add_argument("--seed", type=int, default=731001)
+    human.add_argument("--mode", choices=("side-by-side", "shuffled"), default="side-by-side")
+    human.set_defaults(func=_human)
+
+    review = sub.add_parser(
+        "review-memorization",
+        help="Read-only compatibility command for historical v1 memorization reviews.",
+    )
+    review.add_argument(
+        "--report",
+        type=Path,
+        default=Path("experiments/generation_benchmark_v1/baseline_smoke"),
+        help="Scored generation benchmark v1 report directory.",
+    )
+    review.add_argument(
+        "--out",
+        type=Path,
+        default=Path("experiments/generation_benchmark_v1/exact_alpha_review"),
+        help="Append-only review output directory.",
+    )
+    review.set_defaults(func=_review_memorization)
+
+    review_v2 = sub.add_parser(
+        "review-memorization-v2",
+        help="List or append signed bound-v2 reviews from complete candidate evidence.",
+    )
+    review_v2.add_argument("--candidate-evidence", required=True, type=Path)
+    review_v2.add_argument("--review-events", required=True, type=Path)
+    review_v2.add_argument("--training-dataset-identity")
+    review_v2.add_argument("--training-view-identity")
+    review_v2.add_argument("--pair-id", help="Exact review-required pair to author; omit to list the queue.")
+    review_v2.add_argument(
+        "--outcome",
+        choices=(
+            "same_sprite_or_memorized",
+            "uncertain",
+            "different_sprite",
+            "common_generic_shape",
+            "likely_false_positive",
+        ),
+    )
+    review_v2.add_argument("--reviewer-id")
+    review_v2.add_argument("--note", default="")
+    review_v2.set_defaults(func=_review_memorization_v2)
+
+    decision = sub.add_parser(
+        "promotion-decision",
+        help="Make a read-only fail-closed promotion decision from bound evidence and reviews.",
+    )
+    decision.add_argument("--checkpoint", required=True, type=Path)
+    decision.add_argument("--benchmark-manifest", required=True, type=Path)
+    decision.add_argument("--machine-report", required=True, type=Path)
+    decision.add_argument("--generated-report", required=True, type=Path)
+    decision.add_argument("--generated-manifest", required=True, type=Path)
+    decision.add_argument("--generated-images", required=True, type=Path)
+    decision.add_argument("--training-dataset-identity", required=True)
+    decision.add_argument("--training-view-identity", required=True)
+    decision.add_argument("--training-manifest", required=True, type=Path)
+    decision.add_argument("--training-images", required=True, type=Path)
+    decision.add_argument("--candidate-evidence", required=True, type=Path)
+    decision.add_argument("--review-events", required=True, type=Path)
+    decision.add_argument("--detector-policy", required=True, type=Path)
+    decision.add_argument("--detector-policy-version")
+    decision.add_argument("--out", required=True, type=Path)
+    decision.set_defaults(func=_promotion_decision)
+    return parser
+
+
+def _checkpoint(value: str) -> tuple[str, Path]:
+    if "=" not in value:
+        path = Path(value)
+        return _slug(path.stem), path
+    label, raw = value.split("=", 1)
+    return _slug(label), Path(raw)
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_.-]+", "_", value).strip("_") or "run"
+
+
+def _generate(parsed: argparse.Namespace) -> None:
+    from spritelab.training.generator_challenger import ChallengerSampleConfig, run_sample_generator_challenger
+
+    manifest = json.loads(parsed.suite.read_text(encoding="utf-8"))
+    cases = list(manifest.get("cases") or [])
+    if parsed.max_samples:
+        cases = cases[: parsed.max_samples]
+    prompts = parsed.out / "frozen_prompts.jsonl"
+    prompt_rows: list[dict[str, Any]] = []
+    for case in cases:
+        conditions = dict(case.get("conditions") or {})
+        prompt_rows.append(
+            {
+                **conditions,
+                "prompt_id": case["id"],
+                "prompt": case["prompt"],
+                "conditions": conditions,
+                "target_palette": case.get("target_palette"),
+                "benchmark_noise_offset": case.get("noise_offset"),
+                "trusted_source": case.get("trusted_source"),
+            }
+        )
+    parsed.out.mkdir(parents=True, exist_ok=True)
+    write_jsonl(prompts, prompt_rows)
+    seeds = (
+        [int(value) for value in parsed.seeds.split(",")]
+        if parsed.seeds
+        else [int(value) for value in manifest["seeds"]]
+    )
+    cfg_scales = parsed.cfg_scale or [3.0]
+    steps = parsed.steps or [30]
+    presets = parsed.export_preset or [""]
+    plan: list[dict[str, Any]] = []
+    for label, checkpoint in map(_checkpoint, parsed.checkpoint):
+        for cfg_scale in cfg_scales:
+            for step_count in steps:
+                for preset in presets:
+                    factored = preset.lower() in {"v1.1", "v1_1", "phase1_v1_1"}
+                    for seed in seeds:
+                        run = (
+                            parsed.out
+                            / label
+                            / f"cfg_{cfg_scale:g}_steps_{step_count}_preset_{_slug(preset or 'none')}"
+                            / f"seed_{seed}"
+                        )
+                        cell = {
+                            "checkpoint": str(checkpoint),
+                            "out": str(run),
+                            "seed": seed,
+                            "noise_seed": seed * 100000,
+                            "cfg_scale": cfg_scale,
+                            "steps": step_count,
+                            "export_preset": preset,
+                        }
+                        plan.append(cell)
+                        if parsed.dry_run or (parsed.resume and (run / "generated_manifest.jsonl").is_file()):
+                            continue
+                        run_sample_generator_challenger(
+                            ChallengerSampleConfig(
+                                checkpoint=checkpoint,
+                                prompts=prompts,
+                                out_dir=run,
+                                device=parsed.device,
+                                batch_size=parsed.batch_size,
+                                max_samples=len(prompt_rows),
+                                seed=seed,
+                                noise_seed=seed * 100000,
+                                cfg_scale=cfg_scale,
+                                steps=step_count,
+                                export_preset=preset or None,
+                                project_palette=True,
+                                project_palette_target_colors=16,
+                                factored_cfg=factored,
+                                cfg_base_scale=2.5 if factored else None,
+                                cfg_color_scale=3.0 if factored else None,
+                                palette_conditioning_source=parsed.palette_conditioning_source,
+                                palette_conditioning_dataset=parsed.palette_conditioning_dataset,
+                                palette_conditioning_training_manifest=parsed.palette_conditioning_training_manifest,
+                                palette_conditioning_exclude_exact_prompt_target=(
+                                    parsed.palette_conditioning_exclude_exact_target
+                                ),
+                                allow_legacy_conditioning_v1=parsed.allow_legacy_conditioning_v1,
+                            )
+                        )
+    (parsed.out / "generation_plan.json").write_text(
+        json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(f"Generation cells: {len(plan)}; output: {parsed.out}")
+
+
+def _score(parsed: argparse.Namespace) -> None:
+    report = score_suite(
+        parsed.generated,
+        parsed.out,
+        training_manifests=parsed.training_manifest,
+        limit=parsed.limit,
+        gates_path=parsed.gates,
+        checkpoint=parsed.checkpoint,
+        benchmark_manifest=parsed.benchmark_manifest,
+        training_dataset_identity=parsed.training_dataset_identity,
+        training_view_identity=parsed.training_view_identity,
+    )
+    print(f"Scored {report['summary']['sample_count']} samples; promotion pass={report['promotion']['pass']}")
+
+
+def _compare(parsed: argparse.Namespace) -> None:
+    report = compare_reports(
+        parsed.baseline, parsed.candidate, parsed.out, architecture_change=parsed.architecture_change
+    )
+    print(f"Paired outputs: {report['paired_count']}; promotion pass={report['promotion']['pass']}")
+
+
+def _human(parsed: argparse.Namespace) -> None:
+    report = human_package(parsed.a, parsed.b, parsed.out, seed=parsed.seed, mode=parsed.mode)
+    print(f"Blind pairs: {report['pair_count']}; output: {parsed.out}")
+
+
+def _review_memorization(parsed: argparse.Namespace) -> None:
+    del parsed
+    print("Legacy memorization reviews are read-only.")
+    print()
+    print("New reviews must use:")
+    print("  python -m spritelab eval review-memorization-v2 ...")
+
+
+def _review_memorization_v2(parsed: argparse.Namespace) -> None:
+    from spritelab.evaluation.memorization_review import (
+        append_bound_review_event,
+        load_bound_review_tasks,
+        replay_review_events,
+    )
+
+    expected_context = {
+        field: value
+        for field, value in (
+            ("training_dataset_identity", parsed.training_dataset_identity),
+            ("training_view_identity", parsed.training_view_identity),
+        )
+        if value not in (None, "")
+    }
+    _, tasks = load_bound_review_tasks(parsed.candidate_evidence, expected_context=expected_context)
+    expected = {task.pair_id: task.identity for task in tasks}
+    replay = replay_review_events(parsed.review_events, expected_identities=expected)
+    if parsed.pair_id is None and parsed.outcome is None:
+        queue = []
+        for task in tasks:
+            row = task.as_dict()
+            chain = replay.chains.get(task.pair_id)
+            row["chain_status"] = chain.chain_status if chain is not None else "missing"
+            row["pending_review"] = chain.pending_review if chain is not None else True
+            queue.append(row)
+        print(json.dumps({"review_tasks": queue}, indent=2, sort_keys=True))
+        return
+    if not parsed.pair_id or not parsed.outcome or not parsed.reviewer_id:
+        raise SystemExit("--pair-id, --outcome, and --reviewer-id are required together for authoring")
+    event = append_bound_review_event(
+        parsed.candidate_evidence,
+        parsed.review_events,
+        pair_id=parsed.pair_id,
+        review_outcome=parsed.outcome,
+        reviewer_id=parsed.reviewer_id,
+        human_note=parsed.note,
+        expected_context=expected_context,
+    )
+    print(
+        f"Appended signed review pair={event['pair_id']} revision={event['revision']} "
+        f"event_sha256={event['event_sha256']}"
+    )
+
+
+def _promotion_decision(parsed: argparse.Namespace) -> None:
+    from spritelab.evaluation.promotion_decision import decide_promotion, write_decision_artifacts
+
+    if parsed.out.exists():
+        raise SystemExit(f"refusing to overwrite existing output directory: {parsed.out}")
+    decision = decide_promotion(
+        checkpoint=parsed.checkpoint,
+        benchmark_manifest=parsed.benchmark_manifest,
+        machine_report=parsed.machine_report,
+        generated_report=parsed.generated_report,
+        generated_manifest=parsed.generated_manifest,
+        generated_images=parsed.generated_images,
+        training_dataset_identity=parsed.training_dataset_identity,
+        training_view_identity=parsed.training_view_identity,
+        training_manifest=parsed.training_manifest,
+        training_images=parsed.training_images,
+        candidate_evidence=parsed.candidate_evidence,
+        review_event_log=parsed.review_events,
+        detector_policy=parsed.detector_policy,
+        detector_policy_version=parsed.detector_policy_version,
+    )
+    json_path, _ = write_decision_artifacts(parsed.out, decision)
+    print(
+        f"Promotion decision={decision['decision']}; eligible={decision['eligible_for_promotion']}; "
+        f"artifact={json_path}"
+    )
+    if decision["classification"] == "not_comparable":
+        raise SystemExit(2)
+    if not decision["eligible_for_promotion"]:
+        raise SystemExit(1)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parsed = _parser().parse_args(argv)
+    parsed.func(parsed)
+
+
+if __name__ == "__main__":
+    main()

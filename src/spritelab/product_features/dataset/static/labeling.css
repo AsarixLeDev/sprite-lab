@@ -1,0 +1,16 @@
+.labeling-status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.labeling-status-card { margin: 0; }
+.labeling-status-card h2 { font-size: 1rem; }
+.labeling-actions, .review-actions, .labeling-links { display: flex; flex-wrap: wrap; gap: .65rem; }
+.labeling-review { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(300px, 1.4fr); gap: 1.5rem; }
+.labeling-image { width: 100%; min-height: 260px; max-height: 520px; object-fit: contain; image-rendering: pixelated; border-radius: .65rem; background: repeating-conic-gradient(#273244 0 25%, #111827 0 50%) 50% / 20px 20px; }
+.render-strip { display: flex; gap: .5rem; overflow-x: auto; margin-top: .75rem; padding-bottom: .5rem; }
+.render-strip button { min-width: 7rem; }
+.labeling-evidence { display: grid; align-content: start; gap: .65rem; }
+.labeling-evidence h3 { margin: .5rem 0 0; font-size: .95rem; }
+.metadata-channel { border-left: 3px solid var(--warning, #eab308); padding-left: .75rem; }
+.metadata-channel pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.conflict-indicators:not(:empty) { border: 1px solid #ef4444; border-radius: .4rem; padding: .6rem; color: #fecaca; }
+.labeling-empty { padding: 2rem; text-align: center; opacity: .8; }
+kbd { font: inherit; padding: .05rem .3rem; border: 1px solid currentColor; border-radius: .25rem; }
+@media (max-width: 760px) { .labeling-review { grid-template-columns: 1fr; } }

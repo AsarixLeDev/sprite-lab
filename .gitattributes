@@ -1,0 +1,6 @@
+# Frozen experiment evidence must retain its committed bytes on checkout.
+experiments/** -text
+
+# These two source-bound files were frozen from CRLF working copies.
+experiments/label_v4_calibration_wave1/human_truth.jsonl text eol=crlf
+experiments/label_v4_calibration_wave1/audit_prefilled_records.jsonl text eol=crlf

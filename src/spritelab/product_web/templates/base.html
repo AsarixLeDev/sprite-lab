@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="spritelab-csrf" content="{{ csrf_token }}">
+  <title>{% block title %}Sprite Lab{% endblock %}</title>
+  <link rel="stylesheet" href="{{ request.url_for('product-static', path='app.css') }}">
+  <script src="{{ request.url_for('product-static', path='app.js') }}" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div class="app-shell">
+    <header class="topbar">
+      <button class="icon-button sidebar-toggle" type="button" aria-controls="primary-sidebar" aria-expanded="false">
+        <span aria-hidden="true">☰</span><span class="sr-only">Toggle navigation</span>
+      </button>
+      <a class="wordmark compact-wordmark" href="/" aria-label="Sprite Lab home"><span class="brand-mark" aria-hidden="true">S</span>Sprite Lab</a>
+      <div class="topbar-project">
+        <span class="eyebrow">Project</span>
+        <strong>{{ project_name }}</strong>
+      </div>
+      {% if current_run %}
+      <a class="current-run" href="/runs/{{ current_run.run_id }}">
+        <span class="run-pulse status-{{ current_run.status|lower }}" aria-hidden="true"></span>
+        <span><small>Current run</small><strong>{{ current_run.stage|replace('-', ' ')|title }}</strong></span>
+      </a>
+      {% else %}
+      <div class="current-run current-run-idle"><span class="run-pulse" aria-hidden="true"></span><span><small>Current run</small><strong>None</strong></span></div>
+      {% endif %}
+      <div class="topbar-actions">
+        <button class="icon-button" type="button" data-theme-toggle aria-label="Switch color theme" title="Switch color theme"><span aria-hidden="true">◐</span></button>
+        <button class="icon-button" type="button" data-open-dialog="notification-dialog" aria-label="Notifications" title="Notifications"><span aria-hidden="true">●</span></button>
+      </div>
+    </header>
+
+    <aside class="sidebar" id="primary-sidebar" aria-label="Primary">
+      <a class="wordmark" href="/" aria-label="Sprite Lab home"><span class="brand-mark" aria-hidden="true">S</span><span>Sprite Lab</span></a>
+      <div class="project-selector">
+        <label for="project-select">Project</label>
+        <select id="project-select" disabled title="Additional project switching is not registered">
+          <option>{{ project_name }}</option>
+        </select>
+      </div>
+      <nav class="primary-nav" aria-label="Product">
+        <ul>
+          {% for item in navigation %}
+          <li><a href="{{ item.path }}" {% if current_path == item.path or (item.path != '/' and current_path.startswith(item.path + '/')) %}aria-current="page"{% endif %}><span class="nav-icon" aria-hidden="true">{{ item.title[0] }}</span><span>{{ item.title }}</span></a></li>
+          {% endfor %}
+        </ul>
+      </nav>
+      <div class="sidebar-footer"><a href="/technical-details">Technical details</a><span>Local product</span></div>
+    </aside>
+
+    <main id="main-content" class="main-content" tabindex="-1">
+      {% if non_loopback %}
+      <div class="warning-banner" role="alert"><strong>Network access is enabled.</strong> This session requires authentication. Keep the runtime token private.</div>
+      {% endif %}
+      {% if global_blocker %}
+      <div class="blocker-banner" role="alert"><span aria-hidden="true">!</span><div><strong>Action needed</strong><p>{{ global_blocker }}</p></div></div>
+      {% endif %}
+      <div class="connection-state" data-connection-state hidden role="status" aria-live="polite"><strong>Disconnected</strong><span>Trying to reconnect…</span></div>
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+
+  <div class="toast-region" data-toast-region role="status" aria-live="polite" aria-atomic="true"></div>
+  <dialog id="notification-dialog" aria-labelledby="notification-title">
+    <div class="dialog-header"><div><span class="eyebrow">Sprite Lab</span><h2 id="notification-title">Notifications</h2></div><button class="icon-button" type="button" data-close-dialog aria-label="Close notifications">×</button></div>
+    <div class="empty-compact"><span aria-hidden="true">✓</span><strong>You’re all caught up</strong><p>New blockers and completed runs will appear here.</p></div>
+  </dialog>
+</body>
+</html>

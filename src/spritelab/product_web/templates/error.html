@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Something went wrong · Sprite Lab{% endblock %}
+{% block content %}
+<section class="panel empty-state error-state"><span class="empty-icon" aria-hidden="true">!</span><h1>Something went wrong</h1><p>Your completed work was preserved when possible.</p><div class="error-reference"><span>Error reference</span><strong>{{ error_reference }}</strong></div><button class="button secondary" type="button" data-open-dialog="safe-details-dialog">View safe details</button><a class="button primary" href="/">Return home</a></section>
+<dialog id="safe-details-dialog" aria-labelledby="safe-details-title"><div class="dialog-header"><h2 id="safe-details-title">Safe details</h2><button class="icon-button" type="button" data-close-dialog aria-label="Close details">×</button></div><p>{{ safe_details }}</p><p>Raw tracebacks and private paths are not shown here.</p></dialog>
+{% endblock %}

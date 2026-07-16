@@ -1,0 +1,62 @@
+# Sprite Lab v3 project configuration. Copy to spritelab.yaml and edit paths as needed.
+# Production actions are deliberately disabled by default.
+project:
+  name: sprite-lab
+  schema_version: 3
+paths:
+  runs: runs/v3
+  artifacts: artifacts
+dataset:
+  raw_provenance_report: artifacts/dataset/raw_provenance_report.json
+  raw_inventory: artifacts/dataset/raw_inventory.jsonl
+  extraction_report: artifacts/dataset/extraction_report.json
+  suitability_report: artifacts/dataset/suitability_report.json
+  view_manifest: artifacts/dataset/view_manifest.json
+  freeze_manifest: ''
+labeling:
+  campaign_report: artifacts/labeling/campaign_report.json
+  audit_report: artifacts/labeling/audit_report.json
+  audit_hashes: ''
+  audit_stage_source_commit: ''
+  review_queues: []
+  hierarchical_enabled: false
+  hierarchical_profile: fast_local
+  reference_cohort_size: 400
+  hierarchical_run_root: runs/v3/hierarchical-labeling
+  hierarchical_report: ''
+training:
+  audit_report: artifacts/training/audit_report.json
+  audit_hashes: artifacts/training/audit_hashes.json
+  campaign_config: ''
+  dataset_freeze: ''
+evaluation:
+  checkpoint: ''
+  benchmark: ''
+  memorization_audit: artifacts/evaluation/memorization_audit.json
+  review_log: ''
+  promotion_decision: ''
+  candidate_evidence: ''
+  training_manifests: []
+  dataset_identity: ''
+  training_view_identity: ''
+execution:
+  allow_dataset_production_freeze: false
+  allow_training: false
+  allow_generation: false
+  allow_promotion: false
+  dataset_command: []
+  training_command: []
+  evaluation_command: []
+  review_command: []
+reporting:
+  auto_open: false
+ui:
+  open_browser: true
+  host: 127.0.0.1
+  port: auto
+providers:
+  vision:
+    type: auto
+compute:
+  training:
+    type: local

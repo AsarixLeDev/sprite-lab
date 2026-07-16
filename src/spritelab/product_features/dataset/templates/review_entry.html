@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Review · Sprite Lab{% endblock %}
+{% block content %}
+<header class="page-header"><div><span class="eyebrow">Shared review</span><h1>Review</h1><p>Each review queue keeps its authoritative append-only evidence format.</p></div></header>
+<section class="plugin-card-grid" aria-label="Review queues">
+{% for queue in review_summary.queues %}<a class="plugin-card" href="{{ queue.route }}"><div><h2>{{ queue.title }}</h2><p>{{ queue.count }} item(s)</p></div><span class="status-pill">Open</span></a>{% endfor %}
+</section>
+{% if selected_queue == 'memorization' %}
+<section class="panel" aria-labelledby="memorization-heading">
+  <h2 id="memorization-heading">Memorization candidates</h2>
+  <p id="memorization-review-status" role="status" aria-live="polite">{{ review_summary.memorization_state.review_message }}</p>
+  <div class="review-queue">
+  {% for item in review_summary.memorization_candidates %}
+    <article class="review-card memorization-review-card" data-pair-id="{{ item.pair_id }}">
+      <div class="review-comparison">
+        <img src="/review/memorization/{{ item.pair_id }}/image/generated" alt="Generated image for {{ item.pair_id }}">
+        <img src="/review/memorization/{{ item.pair_id }}/image/training" alt="Training comparison image for {{ item.pair_id }}">
+      </div>
+      <div class="review-details">
+        <span class="eyebrow">{{ item.evidence_class }}</span><h3><code>{{ item.pair_id }}</code></h3>
+        <p>State: {{ item.current_review_state }}<br>Event chain: {{ item.event_chain_status }} (valid={{ item.event_chain_valid|string|lower }})</p>
+        <details><summary>Diagnostics</summary><pre>{{ item.diagnostics|tojson(indent=2) }}</pre></details>
+        {% if item.review_action_available %}
+        <div class="review-actions" aria-label="Controlled signed-v2 outcomes">
+          {% for outcome in item.controlled_review_outcomes %}<button class="button secondary" type="button" data-review-outcome="{{ outcome }}">{{ outcome|replace('_', ' ') }}</button>{% endfor %}
+        </div>
+        {% else %}<p class="dataset-summary">{{ item.action_unavailable_reason }}</p>{% endif %}
+      </div>
+    </article>
+  {% else %}<div class="empty-state"><h3>No actionable candidates</h3><p>{{ review_summary.memorization_state.action_unavailable_reason }}</p></div>{% endfor %}
+  </div>
+  <h3>Legacy reviews</h3><ul class="message-list">
+  {% for item in review_summary.memorization_state.legacy_reviews %}<li><code>{{ item.pair_id|default('unknown') }}</code> — legacy, read-only, non-authoritative</li>{% else %}<li>No legacy reviews.</li>{% endfor %}
+  </ul>
+</section>
+<link rel="stylesheet" href="/plugins/dataset.intake/static/dataset.css">
+<script src="/plugins/dataset.intake/static/review.js" defer></script>
+{% endif %}
+{% endblock %}

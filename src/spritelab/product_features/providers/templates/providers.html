@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Vision labeling · Sprite Lab{% endblock %}
+{% block content %}
+<header class="page-header">
+  <div><span class="eyebrow">Settings</span><h1>Vision labeling</h1>
+    <p>Configure the provider used for optional conservative descriptions. Saving never contacts a provider.</p></div>
+</header>
+
+{% if settings_error %}<div class="warning-banner" role="alert">{{ settings_error }}</div>{% endif %}
+<section class="panel provider-state" aria-labelledby="provider-state-title">
+  <div><span class="status-pill status-{{ provider_projection.state }}"><span aria-hidden="true"></span>{{ provider_projection.state|replace('_', ' ')|title }}</span>
+    <h2 id="provider-state-title">Provider status</h2>
+    <p id="provider-state-message">
+      {% if provider_projection.state == 'not_configured' %}No provider is configured.
+      {% elif provider_projection.state == 'configured_unverified' %}Provider has not been checked yet.
+      {% elif provider_projection.state == 'previously_verified' %}Provider was verified by an explicit action.
+      {% elif provider_projection.state == 'stale_cached' %}The previous observation is stale. Detect or test explicitly to refresh it.
+      {% else %}The last explicit check is cached; run Test connection for current state.{% endif %}
+    </p>
+    {% if provider_projection.observation_timestamp %}<small>Observed {{ provider_projection.observation_timestamp }}</small>{% endif %}
+  </div>
+  <button class="button secondary" id="detect" type="button">Detect providers</button>
+</section>
+
+<form id="vision-provider-settings" class="panel settings-form" novalidate>
+  <div class="section-heading"><div><span class="eyebrow">Configuration v{{ configuration_version }}</span><h2>Provider settings</h2></div>
+    <span>{{ "Saved for this project" if settings_saved else "Using project defaults" }}</span></div>
+  <fieldset class="choice-grid"><legend>Provider mode</legend>
+    <label><input type="radio" name="type" value="auto" {% if settings.mode.value == 'automatic' %}checked{% endif %}> <span><strong>Automatic</strong><small>Prefer a compatible local provider.</small></span></label>
+    <label><input type="radio" name="type" value="ollama" {% if settings.adapter == 'ollama' %}checked{% endif %}> <span><strong>Local Ollama</strong><small>Use a loopback Ollama endpoint.</small></span></label>
+    <label><input type="radio" name="type" value="openai_compatible" {% if settings.adapter == 'openai_compatible' and settings.mode.value != 'hosted' %}checked{% endif %}> <span><strong>vLLM / OpenAI-compatible</strong><small>Use an explicit compatible endpoint.</small></span></label>
+    <label><input type="radio" name="type" value="hosted" {% if settings.mode.value == 'hosted' %}checked{% endif %}> <span><strong>Hosted</strong><small>Images may leave this computer and may incur cost.</small></span></label>
+    <label><input type="radio" name="type" value="plugin" {% if settings.mode.value == 'custom_plugin' %}checked{% endif %}> <span><strong>Provider plugin</strong><small>Use a registered provider adapter.</small></span></label>
+  </fieldset>
+
+  <div class="hosted-warning" data-hosted-warning hidden role="note"><strong>Hosted privacy and cost warning</strong>
+    <p>Hosted image transfer is controlled by the privacy policy and still requires confirmation when configured to ask.</p></div>
+
+  <div class="form-grid" data-advanced-provider-fields>
+    <label for="provider-endpoint">Endpoint
+      <input id="provider-endpoint" name="endpoint" type="url" value="{{ settings.endpoint or '' }}" placeholder="http://127.0.0.1:11434" aria-describedby="endpoint-help endpoint-error">
+      <small id="endpoint-help">An explicit HTTP or HTTPS base URL. Credentials in URLs are rejected.</small><span id="endpoint-error" class="field-error" role="alert"></span>
+    </label>
+    <label for="provider-model">Model
+      <input id="provider-model" name="model" value="{{ settings.model or '' }}" placeholder="Auto-detect" aria-describedby="model-help model-error">
+      <small id="model-help">Use Refresh models after an explicit endpoint is configured.</small><span id="model-error" class="field-error" role="alert"></span>
+    </label>
+    <label for="credential-env">Credential environment-variable name
+      <input id="credential-env" name="credential_env" value="{{ settings.credential_env or '' }}" placeholder="SPRITELAB_VISION_API_KEY" autocomplete="off" aria-describedby="credential-help credential-error">
+      <small id="credential-help">Only the variable name is saved. Its value is resolved only during an explicit request.</small><span id="credential-error" class="field-error" role="alert"></span>
+    </label>
+    <label for="provider-location">Endpoint location
+      <select id="provider-location" name="location"><option value="">Infer loopback only</option><option value="local" {% if settings.location and settings.location.value == 'local' %}selected{% endif %}>Local</option><option value="hosted" {% if settings.location and settings.location.value == 'hosted' %}selected{% endif %}>Hosted</option></select>
+    </label>
+    <label for="privacy-policy">Privacy policy
+      <select id="privacy-policy" name="privacy_policy">
+        {% for value in ['local_only', 'ask_before_hosted', 'allow_hosted', 'hosted_only'] %}<option value="{{ value }}" {% if settings.privacy_policy.value == value %}selected{% endif %}>{{ value|replace('_', ' ')|title }}</option>{% endfor %}
+      </select>
+    </label>
+    <label for="provider-timeout">Timeout (seconds)
+      <input id="provider-timeout" name="timeout" type="number" min="0.1" max="3600" step="0.1" value="{{ settings.timeout_seconds }}">
+    </label>
+    <label for="provider-batch-size">Batch size
+      <input id="provider-batch-size" name="batch_size" type="number" min="1" max="1024" value="{{ settings.batch_size }}">
+    </label>
+  </div>
+
+  <div class="form-actions">
+    <button class="button primary" id="save" type="button">Save settings</button>
+    <button class="button secondary" id="test" type="button">Test connection</button>
+    <button class="button secondary" id="refresh-models" type="button">Refresh models</button>
+    <button class="button danger" id="clear" type="button">Clear provider configuration</button>
+  </div>
+  <div id="summary" class="action-summary" role="status" aria-live="polite">No provider request has been made on this page.</div>
+  <div id="models" class="model-results" aria-live="polite"></div>
+</form>
+<link rel="stylesheet" href="/plugins/vision.providers/static/providers.css">
+<script src="/plugins/vision.providers/static/providers.js" defer></script>
+{% endblock %}

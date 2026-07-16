@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Runs · Sprite Lab{% endblock %}
+{% block content %}
+<header class="page-header"><div><span class="eyebrow">Activity</span><h1>Runs</h1><p>Recent work, progress, reports, and resume availability.</p></div></header>
+{% if runs %}
+<section class="panel table-panel" aria-labelledby="recent-runs-title">
+  <div class="section-heading"><h2 id="recent-runs-title">Recent runs</h2><span>{{ runs|length }} shown</span></div>
+  <div class="responsive-table"><table><thead><tr><th scope="col">Run</th><th scope="col">Stage</th><th scope="col">Status</th><th scope="col">Progress</th><th scope="col">Options</th></tr></thead><tbody>
+  {% for run in runs %}<tr><th scope="row"><a href="/runs/{{ run.run_id }}">{{ run.feature|replace('-', ' ')|title }}</a><small>{{ run.run_id }}</small></th><td>{{ run.stage|replace('-', ' ')|title }}</td><td><span class="status-pill status-{{ run.status|lower }}">{{ status_label(run.status) }}</span></td><td>{% if run.total %}{{ run.current }} / {{ run.total }}{% else %}—{% endif %}</td><td>{% if run.resumable %}<span class="tag">Resume available</span>{% endif %}{% if run.report_available %}<a href="/runs/{{ run.run_id }}/report">Report</a>{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% else %}
+<section class="panel empty-state"><span class="empty-icon" aria-hidden="true">○</span><h2>No runs yet</h2><p>Training, evaluation, and dataset work will appear here when a registered plugin starts a run.</p><a class="button primary" href="/">See recommended next step</a></section>
+{% endif %}
+{% endblock %}

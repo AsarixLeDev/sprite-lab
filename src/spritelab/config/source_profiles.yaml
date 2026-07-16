@@ -1,0 +1,16 @@
+schema_version: labeling_v2.1
+profiles:
+  cc0_food: {domain: food, filename_trust: exact, expected_category_bias: [item_icon], known_path_tokens: [food, ocal, cc0], notes: Clean OCAL food object filenames.}
+  cc0_tool: {domain: tool, filename_trust: exact, expected_category_bias: [tool], known_path_tokens: [tool, ocal, cc0], notes: Clean OCAL tool object filenames.}
+  cc0_gem: {domain: gem, filename_trust: exact, expected_category_bias: [material], known_path_tokens: [gem, crystal, 7soul1, cc0], notes: Clean gem/material filenames.}
+  cc0_jewelry: {domain: jewelry, filename_trust: exact, expected_category_bias: [item_icon], known_path_tokens: [jewelry, accessory, cc0], notes: Clean jewelry/accessory filenames.}
+  cc0_key: {domain: key, filename_trust: exact, expected_category_bias: [item_icon], known_path_tokens: [key, keys, cc0], notes: Clean key object filenames.}
+  cc0_potion: {domain: potion, filename_trust: exact, expected_category_bias: [item_icon], known_path_tokens: [potion, vial, bottle, cc0], notes: Potion/container icon filenames.}
+  mushroom: {domain: plant, filename_trust: exact, expected_category_bias: [plant], known_path_tokens: [mushroom, fungus], notes: Mushroom-focused source pack.}
+  kenney_tiny_dungeon: {domain: tileset, filename_trust: none, expected_category_bias: [block, environment_prop, item_icon], known_path_tokens: [kenney, tiny, dungeon], notes: Sheet/tile names are often generic.}
+  kenney_micro_roguelike: {domain: tileset, filename_trust: none, expected_category_bias: [block, environment_prop, item_icon], known_path_tokens: [kenney, micro, roguelike], notes: Many assets are generic sheet tiles.}
+  oga_496_rpg_icons: {domain: rpg_icons, filename_trust: prefix_family, expected_category_bias: [item_icon, weapon, armor, material, effect_icon], known_path_tokens: [oga, '496', rpg, icons, 32fix], notes: 'Structured RPG icon prefixes such as W_, I_C_, S_.', sheet_specialization: rpg_496, fusion_threshold_override: 0.65}
+  shade_weapons: {domain: weapon, filename_trust: exact, expected_category_bias: [weapon], known_path_tokens: [shade, weapons], notes: 'Trusted only with declarative sheet metadata.'}
+  flare_armor: {domain: armor, filename_trust: exact, expected_category_bias: [armor], known_path_tokens: [flare, armor], notes: 'Trusted only with declarative sheet metadata.'}
+  farming_tools: {domain: tool, filename_trust: exact, expected_category_bias: [tool], known_path_tokens: [farming, calciumtrice, tools], notes: 'Trusted only with declarative sheet metadata.'}
+  generic_unknown: {domain: unknown, filename_trust: none, expected_category_bias: [unknown], known_path_tokens: [], notes: No source-specific filename guarantees.}

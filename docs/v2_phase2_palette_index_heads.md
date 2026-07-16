@@ -1,0 +1,296 @@
+# Sprite Lab v2 Phase 2 — Palette / Index Supervision
+
+Discrete sprite-structure auxiliary heads and losses.
+
+## Why Phase 2?
+
+Phase 1 tried FiLM, bottleneck attention, and per-group dropout. All variants
+improved color at the expense of category on hard OOD-core prompts. More
+conditioning-only training is unlikely to solve object/color disentanglement.
+
+Every training batch already carries discrete sprite supervision:
+
+* `palette` — ground-truth K=16 RGB palette
+* `palette_mask` — which slots are actually used
+* `index_map` — per-pixel palette index
+* `role_map` — per-pixel semantic role
+
+These are exact, not approximate. Phase 2 adds lightweight auxiliary heads
+that predict this discrete structure, so the model can learn it as part of
+the training signal rather than relying entirely on continuous RGBA +
+post-hoc k16 projection.
+
+## Flags (all default-off)
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--index-head-loss-weight` | `0.0` | Cross-entropy on index map prediction |
+| `--palette-head-loss-weight` | `0.0` | Slot-aligned MSE on palette RGB prediction |
+| `--palette-presence-loss-weight` | `0.0` | BCE on palette slot presence |
+| `--index-head-warmup-steps` | `0` | Index head inactive before this global step |
+| `--palette-head-use-gt-palette-prob` | `1.0` | Future hook for predicted vs GT palette (use 1.0 for now) |
+
+## Heads
+
+### Palette Head
+
+Input: bottleneck features (after U-Net mid blocks), globally pooled.
+Outputs:
+
+* `palette_rgb` — `[B, 16, 3]` float RGB, slot-aligned MSE against GT palette
+* `palette_presence_logits` — `[B, 16]` logits, BCE against `palette_mask`
+
+Slots correspond directly to GT palette order. No Hungarian matching needed.
+
+### Index Head
+
+Input: final feature map (before output convolution).
+Output: `[B, 16, H, W]` logits, CE against `index_map` on visible pixels
+(alpha > 0) only.
+
+Warmup: index loss weight is zero for `global_step < index_head_warmup_steps`.
+This lets velocity converge to reasonable shapes before the index map
+forces discrete structure.
+
+## Losses
+
+```text
+total_loss = velocity_loss
+  + palette_loss_weight * soft_min_palette_aux
+  + palette_head_loss_weight * loss_palette_head
+  + palette_presence_loss_weight * loss_palette_presence
+  + effective_index_weight * loss_index_head
+```
+
+where `effective_index_weight = 0 if step < warmup else index_head_loss_weight`.
+
+New loss components reported: `loss_palette_head`, `loss_palette_presence`,
+`loss_index_head`, `index_head_active`.
+
+## Sampling / Export
+
+Unchanged. The palette/index heads are training-only auxiliary losses.
+They do not replace k16 projection or change generated outputs.
+
+## First Smoke Command (1k steps)
+
+```powershell
+# Run from the cloned repository root.
+$env:PYTHONPATH = "src"
+$py = "python"
+
+& $py -m spritelab train audit-challenger-full-v4 `
+  --dataset datasets\sprite_lab_multisource_v4 `
+  --training-manifest datasets\sprite_lab_multisource_v4\training_manifest.jsonl `
+  --out experiments\challenger_full_v4_v2_phase2_palette_index_smoke_1k `
+  --architecture rectified_flow `
+  --device cuda `
+  --seed 20260706 `
+  --max-steps 1000 `
+  --batch-size 32 `
+  --num-workers 4 `
+  --lr 0.0002 `
+  --conditioning-mode caption_semantic_structured `
+  --cfg-dropout 0.1 `
+  --structured-field-dropout 0.1 `
+  --ema-decay 0.999 `
+  --sample-ema `
+  --foreground-rgb-loss-weight 2.0 `
+  --background-rgb-loss-weight 0.25 `
+  --palette-loss-weight 0.1 `
+  --film-conditioning `
+  --bottleneck-attention `
+  --index-head-loss-weight 0.25 `
+  --palette-head-loss-weight 0.10 `
+  --palette-presence-loss-weight 0.05 `
+  --index-head-warmup-steps 0 `
+  --sample-steps 30 `
+  --cfg-scale 3.0 `
+  --export-preset v1 `
+  --max-colors 32 `
+  --alpha-threshold 0.5 `
+  --max-eval-prompts 32 `
+  --max-sensitivity-prompts 8 `
+  --noise-samples 1 `
+  --sample-batch-size 32 `
+  --run-ood-compositional
+```
+
+## First Full Training Command (25k steps)
+
+```powershell
+& $py -m spritelab train audit-challenger-full-v4 `
+  --dataset datasets\sprite_lab_multisource_v4 `
+  --training-manifest datasets\sprite_lab_multisource_v4\training_manifest.jsonl `
+  --out experiments\challenger_full_v4_v2_phase2_palette_index `
+  --architecture rectified_flow `
+  --device cuda `
+  --seed 20260706 `
+  --max-steps 25000 `
+  --batch-size 32 `
+  --num-workers 4 `
+  --lr 0.0002 `
+  --conditioning-mode caption_semantic_structured `
+  --cfg-dropout 0.1 `
+  --structured-field-dropout 0.1 `
+  --ema-decay 0.999 `
+  --sample-ema `
+  --foreground-rgb-loss-weight 2.0 `
+  --background-rgb-loss-weight 0.25 `
+  --palette-loss-weight 0.1 `
+  --film-conditioning `
+  --bottleneck-attention `
+  --index-head-loss-weight 0.25 `
+  --palette-head-loss-weight 0.10 `
+  --palette-presence-loss-weight 0.05 `
+  --index-head-warmup-steps 2000 `
+  --sample-steps 30 `
+  --cfg-scale 3.0 `
+  --export-preset v1 `
+  --max-colors 32 `
+  --alpha-threshold 0.5 `
+  --max-eval-prompts 128 `
+  --max-sensitivity-prompts 32 `
+  --noise-samples 2 `
+  --sample-batch-size 32 `
+  --run-ood-compositional
+```
+
+## Evaluation After Training
+
+```powershell
+& $py -m spritelab train run-v2-phase0-eval `
+  --out experiments\v2_phase2_palette_index_eval `
+  --checkpoint experiments\challenger_full_v4_v2_phase2_palette_index\train_25k\checkpoint_last_ema.pt `
+  --dataset datasets\sprite_lab_multisource_v4 `
+  --build-prompts `
+  --prompt-count 384 `
+  --prompt-seed 20260706 `
+  --presets v1 `
+  --seeds 20260723,20260724,20260725 `
+  --max-samples 384 `
+  --eval-profile ood_core `
+  --profile-weighting family `
+  --device cuda `
+  --batch-size 32
+```
+
+## Go / No-Go Criteria
+
+Same as Phase 1, but OOD-core family-weighted with the added requirement
+that the model does not regress on blob or near-copy:
+
+```text
+category >= baseline_ood_core_category + 0.03
+color    >= baseline_ood_core_color + 0.03
+blob     <= baseline_ood_core_blob
+potion   <= baseline_ood_core_potion
+nearcopy <= baseline_ood_core_nearcopy + 0.01
+rare     <= 0.01 after projection
+QA errors = 0
+```
+
+## Caveats
+
+* Heads are always present in the model graph (small parameter overhead ~20K)
+  but losses default to 0.0 weight, so they train through gradient but don't
+  influence the loss unless explicitly enabled.
+* Index head warmup should be set long enough for velocity to produce
+  recognizable shapes (500-2000 steps).
+* Palette prediction uses slot-aligned MSE; if dataset palettes are not
+  consistently ordered, this may need Hungarian matching in a future phase.
+* Sampling and export (k16 projection) are unchanged; the heads are
+  training-only.
+
+---
+
+## Final Results
+
+### Current best checkpoint
+
+```
+experiments\challenger_full_v4_v2_phase2_palette_index\train_25k\checkpoint_last_ema.pt
+```
+
+### Recommended export settings
+
+```powershell
+--export-preset v1
+--cfg-scale 3.0
+--sample-steps 30
+--max-colors 16
+```
+
+Continuous output + k16 deterministic palette projection.
+
+### Rejected options
+
+* **v1.1 / factored CFG** — trades category for color. On Phase 2, v1.1 OOD-core: color +0.049, category -0.073. Not a default.
+* **Head decode export** — using predicted index + palette to reconstruct sprites sharply reduces color consistency (0.719 → 0.510) without improving blob rate. Rejected.
+
+### OOD-core result (384 prompts, family-weighted)
+
+| Metric | Release baseline | v2 palette/index | Delta |
+|--------|-----------------|------------------|-------|
+| Category | 0.5666 | 0.6510 | **+0.0844** |
+| Color | 0.7144 | 0.7326 | +0.0182 |
+| Blob | 0.4345 | 0.2704 | **-0.1641** |
+
+Interpretation: main gain is structure/blob reduction. Color improves modestly. Object/color disentanglement remains unresolved.
+
+### v1.1 / factored CFG on Phase 2
+
+| Preset | All prompts | OOD-core |
+|--------|-------------|----------|
+| v1 | baseline | baseline |
+| v1.1 color delta | +0.0349 | +0.0491 |
+| v1.1 category delta | -0.0407 | -0.0734 |
+
+Decision: do not promote v1.1 for Phase 2. It remains a color-control tradeoff, not a default.
+
+### Head inspection (32 batches, CUDA)
+
+| Metric | Value |
+|--------|-------|
+| Index visible-pixel accuracy | 0.9192 |
+| Index top-2 accuracy | 0.9823 |
+| Index cross-entropy | 0.2178 |
+| Palette RGB MAE | 0.0755 |
+| Palette RGB MSE | 0.0115 |
+| Palette presence F1 | 0.9876 |
+| Predicted active slots | 9.11 |
+| Target active slots | 9.10 |
+
+Interpretation: heads are learning useful discrete structure. Keep them as auxiliary training losses.
+
+### Decode probe (96 samples, cfg=3.0, 30 steps)
+
+| Variant | Category | Color | Blob | Potion | Med colors |
+|---------|----------|-------|------|--------|-----------|
+| continuous\_v1\_projected | 0.833 | 0.719 | 0.240 | 0.000 | 14 |
+| head\_index\_pred\_palette | 0.815 | 0.510 | 0.240 | 0.000 | 10 |
+| head\_index\_projected\_palette | 0.815 | 0.448 | 0.240 | 0.031 | 10 |
+
+Decision: **reject head decode as an export path.** It sharply reduces color consistency without improving blob rate or any other metric. Continue using continuous output + v1 k16 projection for export.
+
+### Training losses
+
+```text
+loss_index_head:        0.0268
+loss_palette_head:      0.0941
+loss_palette_presence:  1.2138
+```
+
+### Decision summary
+
+* **Adopt** Phase 2 palette/index auxiliary losses for training (improves OOD-core structure/blob).
+* **Reject** head decode export (hurts color, no blob gain).
+* **Reject** v1.1 / factored CFG for Phase 2 (category regression).
+* **Export**: continue k16 deterministic palette projection from continuous RGBA.
+
+### Recommended next direction
+
+* Do not train more conditioning-only variants.
+* Investigate better palette RGB supervision or color-slot alignment.
+* Investigate color disentanglement without sacrificing OOD-core category.
+* Consider palette presence loss tuning (current BCE 1.2138 is high).

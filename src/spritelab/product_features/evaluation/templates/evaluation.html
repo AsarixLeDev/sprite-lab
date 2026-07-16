@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}Evaluation · Sprite Lab{% endblock %}
+{% block content %}
+  <link rel="stylesheet" href="/evaluation/static/evaluation.css">
+  <link rel="stylesheet" href="/evaluation/static/evaluation-a11y.css">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Sprite Lab</p>
+        <h1>Evaluation</h1>
+        <p class="lede">Measure a verified checkpoint against the Standard Sprite Lab benchmark.</p>
+      </div>
+      <a class="quiet-button" href="/evaluation/api/report-data">Download report data</a>
+    </header>
+
+    <section class="integrity-banner" aria-live="polite">
+      <span class="status-dot blocked"></span>
+      <div><strong>Promotion integrity is not currently certified.</strong><br>
+        <span>Evaluation remains available for evidence gathering. This page cannot promote a checkpoint.</span>
+      </div>
+    </section>
+
+    <section class="panel setup-grid" aria-labelledby="setup-title">
+      <div>
+        <p class="section-kicker">Evaluation setup</p>
+        <h2 id="setup-title">Choose what to evaluate</h2>
+      </div>
+      <label>Checkpoint
+        <select id="eval-checkpoint" name="checkpoint"></select>
+        <small>baseline — latest complete checkpoint</small>
+      </label>
+      <label>Benchmark
+        <input id="eval-benchmark" value="Standard Sprite Lab benchmark" disabled>
+      </label>
+      <label class="segmented-label">Weights
+        <span class="segmented">
+          <input id="eval-live" type="radio" name="eval-weights" value="live"><label for="eval-live">Live</label>
+          <input id="eval-ema" type="radio" name="eval-weights" value="ema" checked><label for="eval-ema">EMA</label>
+        </span>
+      </label>
+      <div class="actions">
+        <button id="start-evaluation" class="primary">Start evaluation</button>
+        <button id="dry-run" class="secondary">Validate plan</button>
+      </div>
+      <details class="technical-details">
+        <summary>Technical details</summary>
+        <p>Advanced checkpoint identities, unavailable reasons, and paths are shown only after explicit inspection.</p>
+        <button id="load-technical" class="text-button">Load technical checkpoint details</button>
+        <pre id="technical-output">Not loaded.</pre>
+      </details>
+    </section>
+
+    <section class="panel" aria-labelledby="progress-title">
+      <div class="section-heading">
+        <div><p class="section-kicker">Evaluation progress</p><h2 id="progress-title">Stage timeline</h2></div>
+        <span id="progress-count" class="pill">0 / 10 complete</span>
+      </div>
+      <ol id="stage-timeline" class="timeline"></ol>
+    </section>
+
+    <section aria-labelledby="metrics-title">
+      <div class="section-heading">
+        <div><p class="section-kicker">Results</p><h2 id="metrics-title">Metric summary</h2></div>
+      </div>
+      <div id="metric-cards" class="metric-grid"></div>
+      <div id="charts" class="chart-grid"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="breakdowns-title">
+      <div class="section-heading">
+        <div><p class="section-kicker">Breakdowns</p><h2 id="breakdowns-title">Category and source results</h2></div>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Category</th><th>Samples</th><th>Validity</th><th>Adherence</th></tr></thead><tbody id="category-results"></tbody></table></div>
+      <p id="source-note" class="muted">Source-level results are hidden unless the evaluation permits them. Private source paths are never shown here.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="gallery-title">
+      <div class="section-heading">
+        <div><p class="section-kicker">Generated samples</p><h2 id="gallery-title">Sample gallery</h2></div>
+        <button id="comparison-mode" class="quiet-button">Comparison mode</button>
+      </div>
+      <div class="filters">
+        <label>Prompt <input id="gallery-prompt" placeholder="Filter prompt"></label>
+        <label>Seed <input id="gallery-seed" type="number" min="0" placeholder="Any"></label>
+        <label>Category <input id="gallery-category" placeholder="Any"></label>
+        <label>Sort by metric <select id="gallery-sort"><option value="">Default</option><option value="conditional_adherence">Conditional adherence</option><option value="metrics.pixel_art.unique_palette_size">Palette size</option></select></label>
+      </div>
+      <div id="sample-gallery" class="gallery"><div class="no-data">Generated samples will appear after evaluation.</div></div>
+    </section>
+
+    <section class="two-column">
+      <article class="panel" aria-labelledby="memory-title">
+        <p class="section-kicker">Memorization</p><h2 id="memory-title">Evidence state</h2>
+        <ul class="evidence-legend">
+          <li><span class="status-dot hard"></span>Hard evidence</li>
+          <li><span class="status-dot review"></span>Review required</li>
+          <li><span class="status-dot warning"></span>Warnings</li>
+          <li><span class="status-dot clear"></span>Cleared by valid review</li>
+          <li><span class="status-dot neutral"></span>Not comparable</li>
+        </ul>
+        <div id="review-callout" class="review-callout" hidden>
+          <strong id="review-message">0 memorization candidates require review</strong>
+          <a class="primary button-link" href="/review?queue=memorization">Review candidates</a>
+        </div>
+        <p class="muted">Hard evidence never has a clear action. Unsigned, malformed, or incomplete reviews are not authoritative.</p>
+      </article>
+      <article class="panel" aria-labelledby="gate-title">
+        <p class="section-kicker">Final gate</p><h2 id="gate-title">Promotion decision report</h2>
+        <div class="gate blocked"><strong>Unauthorized</strong><span>Promotion integrity is not currently certified.</span></div>
+        <p class="muted">No promotion action is available from this feature.</p>
+      </article>
+    </section>
+
+    <section class="panel compare-panel" aria-labelledby="compare-title">
+      <p class="section-kicker">Checkpoint comparison</p><h2 id="compare-title">Side-by-side results</h2>
+      <p class="muted">Compare metrics, paired samples, category and diversity changes, memorization status, and run metadata. Incompatible metric definitions are rejected.</p>
+      <div id="comparison-results" class="no-data">Choose Comparison mode in the gallery after two eligible evaluations are available.</div>
+    </section>
+
+    <section class="playground" aria-labelledby="playground-title">
+      <div class="playground-heading">
+        <div><p class="section-kicker light">Generation playground</p><h2 id="playground-title">Explore a prompt</h2></div>
+        <span class="scope-badge">EXPLORATORY</span>
+      </div>
+      <p>Playground results are kept separate from frozen benchmark results and promotion evidence.</p>
+      <div class="playground-form">
+        <label class="span-two">Prompt<textarea id="play-prompt" rows="3">Describe a 32×32 sprite</textarea></label>
+        <label>Checkpoint<select id="play-checkpoint"></select></label>
+        <label>Live or EMA<select id="play-weights"><option value="ema">EMA</option><option value="live">Live</option></select></label>
+        <label>Seed<input id="play-seed" type="number" min="0" value="42"></label>
+        <label>Number of images<input id="play-count" type="number" min="1" max="16" value="4"></label>
+      </div>
+      <details class="advanced-settings"><summary>Advanced settings</summary>
+        <div class="advanced-grid">
+          <label>Sampling steps<input id="play-steps" type="number" min="1" max="500" value="30"></label>
+          <label>CFG / guidance<input id="play-guidance" type="number" min="0" max="50" step="0.1" value="3.0"></label>
+        </div>
+      </details>
+      <label id="billable-confirm-wrap" class="confirm-cost" hidden><input id="billable-confirm" type="checkbox"> I confirm this remote or billable generation.</label>
+      <div class="actions dark-actions">
+        <button id="generate" class="primary light-primary">Generate</button>
+        <button id="save-preset" class="secondary dark-secondary">Save prompt preset</button>
+        <select id="saved-presets" aria-label="Saved prompt presets"><option value="">Saved presets</option></select>
+        <button id="rerun-preset" class="secondary dark-secondary">Rerun</button>
+      </div>
+      <p id="play-run-status" class="play-run-status" role="status" aria-live="polite">No durable Playground run is active.</p>
+      <div id="play-results" class="gallery playground-results"><div class="no-data dark-no-data">Nothing is generated until you select Generate.</div></div>
+    </section>
+  <dialog id="sample-dialog"><button id="close-dialog" class="dialog-close" aria-label="Close">×</button><div id="sample-preview"></div></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script id="evaluation-initial-state" type="application/json">{{ evaluation_initial_state|tojson }}</script>
+  <script src="/evaluation/static/evaluation.js"></script>
+{% endblock %}

@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sprite-lab"
+version = "0.1.0"
+description = "Native 32x32 palette-index pixel-art generator foundations."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "Jinja2>=3.1,<4",
+  "numpy>=1.26",
+  "Pillow>=10",
+  "PyYAML>=6.0",
+  "uvicorn>=0.34,<1",
+]
+
+[project.scripts]
+spritelab = "spritelab.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+  "httpx2>=2,<3",
+  "pytest>=8",
+  "ruff==0.15.20",
+  "mypy==2.2.0",
+  "pre-commit>=3",
+]
+ui = ["gradio>=4"]
+prefill = ["requests>=2.31"]
+prefill-transformers = ["torch>=2.0", "transformers>=4.56", "accelerate>=1.0", "pillow>=10"]
+ml = ["torch>=2.0", "tqdm>=4.66"]
+harvest = ["requests>=2.31", "tqdm>=4.66"]
+harvest-ui = ["gradio>=4"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+spritelab = [
+  "config/*.yaml",
+  "training/experiment_configs/*.yaml",
+  "**/templates/**/*.html",
+  "**/static/**/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --basetemp=.pytest_tmp_spritelab -p no:cacheprovider"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["E402"]
+"tests/**/*.py" = ["E402"]
+"examples/*.py" = ["E402"]
+"scripts/*.py" = ["E402"]
+# End-of-file canonical re-imports (consolidated _jsonable/_fmt helpers)
+"src/spritelab/training/compare_generated_runs.py" = ["E402"]
+"src/spritelab/training/compare_generator_families.py" = ["E402"]
+"src/spritelab/training/dataset_framing_review.py" = ["E402"]
+"src/spritelab/training/generated_canonicalizer.py" = ["E402"]
+"src/spritelab/training/generated_review.py" = ["E402"]
+"src/spritelab/training/generator_audits.py" = ["E402"]
+"src/spritelab/training/generator_challenger.py" = ["E402"]
+"src/spritelab/training/palette_projection.py" = ["E402"]
+"src/spritelab/training/palette_swap_review.py" = ["E402"]
+"src/spritelab/training/prompt_faithfulness.py" = ["E402"]
+"src/spritelab/training/prompt_sensitivity.py" = ["E402"]
+"src/spritelab/training/source_match_review.py" = ["E402"]
+"src/spritelab/training/v2_phase0_eval.py" = ["E402"]
+"src/spritelab/data/quality_report.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+ignore_missing_imports = true
+pretty = true
+show_error_codes = true
+warn_unused_configs = true
+check_untyped_defs = false
+disallow_untyped_defs = false
+disable_error_code = ["arg-type", "assignment", "misc", "union-attr", "attr-defined", "call-overload", "type-arg", "return-value", "index", "operator", "no-any-return", "valid-type", "var-annotated", "no-redef", "func-returns-value"]

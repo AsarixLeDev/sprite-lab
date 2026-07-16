@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Test / tooling caches
+.pytest_tmp_*/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Generated data, datasets, training runs, and experiment artifacts.
+# These are large, machine-specific, and reproducible from documented commands
+# (see docs/v1_default.md) rather than tracked in source control.
+/artifacts/
+/data/
+/data_sources/
+/datasets/
+/evals/
+/experiments/
+/generated/
+/harvest_runs/
+/out/
+/outputs/
+/runs/
+.prefill_cache*/
+
+# Local project settings and credentials. Commit only documented examples.
+/spritelab.yaml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local scratch / one-off artifacts
+/.claude/
+/*.csv
+/scratch*/
+/.worktrees/

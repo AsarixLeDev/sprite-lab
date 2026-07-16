@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Pack information · Sprite Lab{% endblock %}
+{% block content %}
+<header class="page-header"><div><span class="eyebrow">Pack intake</span><h1>Complete source and license information</h1>
+  <p>Answer once for each independently licensed pack. Sprite Lab records your declaration but cannot verify ownership or give legal advice.</p></div></header>
+<div id="metadata-status" class="dataset-summary" role="status" aria-live="polite">
+  {{ inspection.image_count }} PNG file(s) in {{ inspection.pack_count }} proposed pack(s).
+</div>
+<main class="metadata-pack-list" data-approval-id="{{ approval_id or '' }}">
+{% for pack in inspection.packs %}
+<section class="panel metadata-pack" data-pack-id="{{ pack.pack_id }}">
+  <div class="section-heading"><div><span class="eyebrow">{{ pack.image_count }} image(s)</span><h2>{{ pack.relative_root }}</h2></div>
+    <span class="status-pill">{{ 'Complete' if pack.wizard_complete else 'Needs information' }}</span></div>
+  <p>Boundary: {{ pack.boundary_evidence|replace('_', ' ') }}.</p>
+  {% if 'conflicting_source_evidence' in pack.missing_fields or 'conflicting_license_evidence' in pack.missing_fields %}
+  <div class="grouping-question" role="alert"><p><strong>Evidence files disagree.</strong> Review the conflicting source or license files, then save one explicit pack declaration. The declaration is bound to the current evidence and becomes stale if those files change.</p></div>
+  {% endif %}
+  {% if pack.boundary_status == 'needs_confirmation' %}
+  <div class="grouping-question"><p><strong>Confirm this proposed pack boundary.</strong> Possible child packs: {{ pack.proposed_children|join(', ') }}</p>
+    <button class="button secondary" type="button" data-grouping="keep_proposal">Keep proposed pack</button>
+    <button class="button secondary" type="button" data-grouping="split_children">Split into child packs</button></div>
+  {% endif %}
+  <form class="metadata-form">
+    <div class="metadata-grid">
+      <label>Creator or rights holder<input name="creator_or_rights_holder" required value="{{ pack.prefill.get('creator_or_rights_holder', '') }}"></label>
+      <label>Pack title<input name="pack_title" required value="{{ pack.prefill.get('pack_title', '') }}"></label>
+      <label>Source type<select name="source_type" required>
+        {% set selected = pack.prefill.get('source_type', '') %}
+        <option value="">Choose…</option><option value="opengameart" {% if selected == 'opengameart' %}selected{% endif %}>OpenGameArt</option>
+        <option value="kenney" {% if selected == 'kenney' %}selected{% endif %}>Kenney</option>
+        <option value="other_downloaded" {% if selected == 'other_downloaded' %}selected{% endif %}>Other downloaded source</option>
+        <option value="my_original_work" {% if selected == 'my_original_work' %}selected{% endif %}>My original work</option>
+        <option value="custom_private" {% if selected == 'custom_private' %}selected{% endif %}>Custom/private agreement</option>
+      </select></label>
+      <label>Source page URL<input name="source_page_url" type="url" value="{{ pack.prefill.get('source_page_url', '') }}"></label>
+      <label>License<select name="license_identifier" required>
+        {% set license = pack.prefill.get('license_identifier', '') %}
+        <option value="" {% if not license %}selected{% endif %}>Chooseâ€¦</option>
+        {% for value, title in [('cc0','CC0'),('public_domain','Public domain'),('cc_by','CC BY'),('cc_by_sa','CC BY-SA'),('mit','MIT'),('apache_2','Apache-2.0'),('bsd','BSD'),('wtfpl','WTFPL'),('custom','Custom'),('private_permission','Private permission'),('unknown','Unknown')] %}
+        <option value="{{ value }}" {% if license == value %}selected{% endif %}>{{ title }}</option>{% endfor %}
+      </select></label>
+      <label>License URL<input name="license_url" type="url" value="{{ pack.prefill.get('license_url', '') }}"></label>
+      <label>License evidence file<input name="license_evidence_file" value="{{ pack.prefill.get('license_evidence_file', '') }}"></label>
+      <label>Attribution text<textarea name="attribution_text">{{ pack.prefill.get('attribution_text', '') }}</textarea></label>
+      <label>Direct download URL <span>(optional)</span><input name="direct_download_url" type="url"></label>
+      <label>Version <span>(optional)</span><input name="version"></label>
+      <label>Acquisition date <span>(optional)</span><input name="acquisition_date" type="date"></label>
+      <label>Notes <span>(optional)</span><textarea name="notes"></textarea></label>
+    </div>
+    <label class="confirm-hosted"><input name="original_work_declaration" type="checkbox"> I explicitly declare that this is my original work and that I hold the rights needed for the recorded use.</label>
+    <label class="confirm-hosted"><input name="permission_confirmed" type="checkbox"> I confirm that I have permission under the custom/private agreement.</label>
+    <div class="form-actions"><button class="button primary" type="submit">Save pack information</button>
+      <button class="button secondary export-metadata" type="button">Export metadata files…</button></div>
+  </form>
+</section>
+{% else %}<section class="panel"><h2>No packs found</h2><p>{{ inspection.error or 'Choose a folder containing PNG files.' }}</p></section>{% endfor %}
+</main>
+<section class="panel"><h2>Next</h2><p id="metadata-next">Save every incomplete pack. Unknown licenses remain quarantined.</p>
+  {% if wizard_session_active %}
+  <div class="form-actions">
+    <button class="button primary" id="metadata-complete" type="button" {% if inspection.wizard_required %}disabled{% endif %}>Complete and continue</button>
+    <button class="button secondary" id="metadata-cancel" type="button">Cancel</button>
+  </div>
+  {% else %}<a class="button primary" href="/dataset">Return to dataset</a>{% endif %}</section>
+<link rel="stylesheet" href="/plugins/dataset.intake/static/dataset.css">
+<script src="/plugins/dataset.intake/static/metadata.js" defer></script>
+{% endblock %}

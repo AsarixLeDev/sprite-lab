@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Logs · Sprite Lab{% endblock %}
+{% block content %}
+<header class="page-header"><div><a class="back-link" href="/runs/{{ run.run_id }}">← Run details</a><span class="eyebrow">Safe stream</span><h1>Logs</h1><p>Runtime messages are escaped and common credential values are redacted.</p></div><span class="status-pill status-{{ run.status|lower }}">{{ status_label(run.status) }}</span></header>
+<section class="panel log-panel" data-log-run="{{ run.run_id }}"><div class="section-heading"><h2>Recent output</h2><span role="status" aria-live="polite">{% if run.terminal %}Run complete{% else %}Streaming{% endif %}</span></div>{% if log_text %}<pre data-log-output>{{ log_text }}</pre>{% else %}<div class="empty-state"><span class="empty-icon" aria-hidden="true">…</span><h3>No log messages yet</h3><p>This page will update when safe messages arrive.</p></div>{% endif %}</section>
+{% endblock %}

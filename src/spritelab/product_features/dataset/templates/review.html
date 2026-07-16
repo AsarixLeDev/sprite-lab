@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Dataset exception review · Sprite Lab{% endblock %}
+{% block content %}
+<header class="page-header"><div><span class="eyebrow">Optional review</span><h1>Review exceptions</h1><p>Rescue eligible false rejections. Missing legal evidence cannot be overridden.</p></div></header>
+{% set reasons = [] %}{% for item in review_queue["items"] %}{% for reason in item.reasons %}{% if reason not in reasons %}{% set _ = reasons.append(reason) %}{% endif %}{% endfor %}{% endfor %}
+<section class="panel review-toolbar" aria-label="Review controls" data-keyboard-shortcuts="ArrowLeft ArrowRight K E">
+  <button class="button secondary" id="previous" type="button">← Previous</button><button class="button secondary" id="next" type="button">Next →</button>
+  <label for="reason-filter">Reason<select id="reason-filter"><option value="">All default exceptions</option>{% for reason in reasons|sort %}<option value="{{ reason }}">{{ reason }}</option>{% endfor %}</select></label>
+  <button class="button secondary" id="contact-sheet" type="button">Contact sheet</button><button class="button secondary" id="confirm-exclusions" type="button">Confirm all current exclusions</button>
+</section>
+<div id="review-status" class="dataset-summary" role="status" aria-live="polite">Use Previous and Next, or the arrow keys, to move through visible exceptions.</div>
+<section id="queue" class="review-queue" aria-live="polite">
+{% for item in review_queue["items"] %}<article class="review-card" data-index="{{ loop.index0 }}" data-item-id="{{ item.item_id }}" data-reasons="{{ item.reasons|join(', ') }}" data-default-visible="{{ item.default_visible|string|lower }}" data-current-decision="{{ item.current_decision }}" {% if not item.default_visible %}hidden{% endif %}>
+  <img src="{{ item.thumbnail_url }}" alt="Thumbnail for {{ item.relative_path }}"><div class="review-details"><span class="eyebrow">{{ "Legal evidence" if 'legal' in item.reason_categories else "Technical check" }}</span><h2>{{ item.relative_path }}</h2>
+    <p>{{ item.reasons|join(', ') or 'review required' }}</p><p>Source: {{ item.source.path or 'missing' }}<br>License: {{ item.license.license or 'missing' }}</p>
+    {% if item.sheet_plan %}<div class="sheet-proposal"><img src="/dataset/review/sheets/{{ item.item_id }}/preview/proposal" alt="Proposed crop grid for {{ item.relative_path }}">
+      <div><strong>Proposed extracted previews</strong><div class="sheet-crops">{% for crop in item.sheet_plan.proposed_crops %}<img src="/dataset/review/sheets/{{ item.item_id }}/preview/{{ loop.index0 }}" alt="Proposed crop {{ loop.index }}">{% endfor %}</div></div></div>
+      <div class="review-actions"><button class="button primary" data-sheet-action="keep_proposal" type="button">Keep proposal</button>
+        <label>Columns <input data-grid-columns type="number" min="1" max="1024" value="{{ item.sheet_plan.grid_columns or 1 }}"></label>
+        <label>Rows <input data-grid-rows type="number" min="1" max="1024" value="{{ item.sheet_plan.grid_rows or 1 }}"></label>
+        <button class="button secondary" data-sheet-action="adjust_grid" type="button">Adjust grid</button>
+        <button class="button danger" data-sheet-action="exclude_sheet" type="button">Exclude sheet</button></div>
+    {% elif item.queue_kind == 'near_duplicate_exception' %}<p>This possible near duplicate is retained. Inspection never deletes it.</p>
+    {% elif item.review_rescuable %}<div class="review-actions"><button class="button primary keep{% if item.current_decision == 'keep' %} selected{% endif %}" data-decision="keep" type="button" aria-label="Keep — Rescue image {{ item.relative_path }}">Rescue image <kbd>K</kbd></button>
+      <button class="button danger exclude{% if item.current_decision == 'exclude' %} selected{% endif %}" data-decision="exclude" type="button" aria-label="Exclude {{ item.relative_path }}">Exclude <kbd>E</kbd></button></div>
+    {% else %}<p><strong>This exclusion is locked.</strong> Image review cannot override provenance, license, unreadable pixels, or other non-rescuable gates.</p>{% endif %}</div></article>
+{% else %}<div class="panel empty-state"><h2>No exceptions need review</h2><p>You can continue to training.</p></div>{% endfor %}
+</section>
+<script id="review-data" type="application/json">{{ review_queue["items"]|tojson }}</script>
+<link rel="stylesheet" href="/plugins/dataset.intake/static/dataset.css">
+<script src="/plugins/dataset.intake/static/review.js" defer></script>
+{% endblock %}

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Home · Sprite Lab{% endblock %}
+{% block content %}
+<header class="page-header home-header">
+  <div><span class="eyebrow">Workspace overview</span><h1>Sprite Lab</h1><p>Everything you need to move your sprite model forward.</p></div>
+  {% if current_run %}<a class="button secondary" href="/runs/{{ current_run.run_id }}">View current run</a>{% endif %}
+</header>
+
+<section aria-labelledby="readiness-title">
+  <div class="section-heading"><div><span class="eyebrow">At a glance</span><h2 id="readiness-title">Project readiness</h2></div><span class="updated-label">Live project status</span></div>
+  <div class="status-grid">
+    {% for key in ['dataset', 'training', 'evaluation'] %}
+    {% set card = cards[key] %}
+    <a class="status-card" href="{{ card.path }}">
+      <div class="card-topline"><span class="card-icon" aria-hidden="true">{{ card.title[0] }}</span><span class="status-pill status-{{ card.status|lower }}"><span aria-hidden="true"></span>{{ card.status_label }}</span></div>
+      <h3>{{ card.title }}</h3>
+      {% if card.value %}<strong class="card-value">{{ card.value }}</strong>{% endif %}
+      <p>{{ card.message }}</p>
+      <span class="text-link">View {{ card.title|lower }} <span aria-hidden="true">→</span></span>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="recommendation" aria-labelledby="recommendation-title">
+  <div class="recommendation-icon" aria-hidden="true">→</div>
+  <div><span class="eyebrow">Recommended next step</span><h2 id="recommendation-title">{{ recommendation.title }}</h2><p>Sprite Lab uses the available project state to suggest one clear next move.</p></div>
+  <a class="button primary" href="{{ recommendation.path }}">{{ recommendation.action }} <span aria-hidden="true">→</span></a>
+</section>
+
+{% if current_run %}
+<section class="panel live-summary" data-run-id="{{ current_run.run_id }}" aria-labelledby="live-run-title">
+  <div class="section-heading"><div><span class="eyebrow">Current run</span><h2 id="live-run-title" data-live="stage">{{ current_run.stage|replace('-', ' ')|title }}</h2></div><span class="status-pill status-{{ current_run.status|lower }}" data-live="status">{{ status_label(current_run.status) }}</span></div>
+  <p data-live="message">{{ current_run.message }}</p>
+  <div class="progress-row"><progress value="{{ current_run.current }}" {% if current_run.total %}max="{{ current_run.total }}"{% endif %} aria-label="Run progress"></progress><span data-live="counter">{{ current_run.current }}{% if current_run.total is not none %} / {{ current_run.total }}{% endif %}</span></div>
+</section>
+{% endif %}
+
+{% if plugin_cards %}
+<section aria-labelledby="plugin-status-title">
+  <div class="section-heading"><div><span class="eyebrow">Extensions</span><h2 id="plugin-status-title">Feature status</h2></div></div>
+  <div class="plugin-card-grid">
+    {% for card in plugin_cards %}<a class="plugin-card" href="{{ card.path }}"><div><h3>{{ card.title }}</h3><p>{{ card.message }}</p></div><span class="status-pill status-{{ card.status|lower }}">{{ status_label(card.status) }}</span></a>{% endfor %}
+  </div>
+  {% if plugin_actions %}<div class="plugin-actions" aria-label="Feature actions">{% for action in plugin_actions %}<a class="button secondary" href="{{ action.path }}">{{ action.title }}</a>{% endfor %}</div>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

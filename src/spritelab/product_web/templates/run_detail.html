@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Run · Sprite Lab{% endblock %}
+{% block content %}
+<div data-run-id="{{ run.run_id }}">
+<header class="page-header run-header"><div><a class="back-link" href="/runs">← All runs</a><span class="eyebrow">{{ run.feature|replace('-', ' ')|title }}</span><h1 data-live="stage">{{ run.stage|replace('-', ' ')|title }}</h1><p data-live="message">{{ run.message }}</p></div><span class="status-pill status-{{ run.status|lower }}" data-live="status">{{ status_label(run.status) }}</span></header>
+<section class="panel progress-panel" aria-labelledby="progress-title">
+  <div class="section-heading"><h2 id="progress-title">Progress</h2><strong data-live="percent">{% if run.progress_percent is not none %}{{ '%.0f'|format(run.progress_percent) }}%{% else %}In progress{% endif %}</strong></div>
+  <progress value="{{ run.current }}" {% if run.total %}max="{{ run.total }}"{% endif %} aria-label="Run progress"></progress>
+  <div class="run-metrics">
+    {{ metric_card('Counter', (run.current|string + ' / ' + run.total|string) if run.total is not none else run.current) }}
+    {{ metric_card('Elapsed', duration(run.elapsed_seconds)) }}
+    {{ metric_card('ETA', duration(run.eta_seconds)) }}
+    {{ metric_card('Events', run.event_count) }}
+  </div>
+  {% if run.metrics.get('pause_available') or run.metrics.get('cancel_available') %}<div class="run-actions" aria-label="Run actions">
+    {% if run.metrics.get('pause_available') %}<button class="button secondary" data-async-action="/runs/{{ run.run_id }}/actions/pause">Pause</button>{% endif %}
+    {% if run.metrics.get('cancel_available') %}<button class="button danger" data-async-action="/runs/{{ run.run_id }}/actions/cancel">Cancel</button>{% endif %}
+  </div>{% endif %}
+</section>
+<div class="two-column">
+  <section class="panel">{{ run_timeline(run.timeline) }}</section>
+  <section class="panel" aria-labelledby="messages-title"><div class="section-heading"><h2 id="messages-title">Recent messages</h2><span aria-live="polite" data-live="connection">Live</span></div>{% if run.recent_messages %}<ol class="message-list" data-live-messages>{% for message in run.recent_messages %}<li>{{ message }}</li>{% endfor %}</ol>{% else %}<div class="chart-empty">No messages yet</div>{% endif %}</section>
+</div>
+{% if metric_series %}<section aria-labelledby="metrics-title"><div class="section-heading"><h2 id="metrics-title">Metrics</h2><span>Recorded points only</span></div><div class="chart-grid">{% for name, points in metric_series.items() %}{{ line_chart(points, title=name|replace('_', ' ')|title) }}{% endfor %}</div></section>{% endif %}
+<div class="two-column">
+  <section class="panel" aria-labelledby="artifacts-title"><div class="section-heading"><h2 id="artifacts-title">Artifacts</h2>{% if run.report_available %}<a href="/runs/{{ run.run_id }}/report">Open report</a>{% endif %}</div>{% if run.artifacts %}<ul class="artifact-list">{% for artifact in run.artifacts %}<li><span aria-hidden="true">□</span>{{ artifact }}</li>{% endfor %}</ul>{% else %}<div class="chart-empty">No artifacts recorded</div>{% endif %}</section>
+  <section class="panel" aria-labelledby="log-preview-title"><div class="section-heading"><h2 id="log-preview-title">Logs</h2><a href="/runs/{{ run.run_id }}/logs">Open logs</a></div>{% if log_text %}<pre class="log-preview">{{ log_text[-1800:] }}</pre>{% else %}<div class="chart-empty">No log messages</div>{% endif %}</section>
+</div>
+</div>
+{% endblock %}

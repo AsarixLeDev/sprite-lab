@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ feature.title }} · Sprite Lab{% endblock %}
+{% block content %}
+<header class="page-header"><div><span class="eyebrow">Product area</span><h1>{{ feature.title }}</h1><p>A dedicated Sprite Lab workspace for {{ feature.title|lower }}.</p></div><span class="status-pill status-{{ feature.status|lower }}">{{ feature.status_label }}</span></header>
+<section class="panel feature-state" aria-labelledby="feature-state-title">
+  {% if feature.status == 'UNAVAILABLE' %}
+  <div class="empty-state"><span class="empty-icon" aria-hidden="true">◇</span><h2 id="feature-state-title">{{ feature.title }} is not available yet</h2><p><strong>Reason:</strong><br>{{ feature.message }}</p><a class="button secondary" href="/">Back to home</a></div>
+  {% elif feature.status == 'RUNNING' %}
+  <div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span><div><h2 id="feature-state-title">{{ feature.title }} is running</h2><p>{{ feature.message }}</p></div></div>
+  {% elif feature.status == 'FAILED' %}
+  <div class="empty-state error-state"><span class="empty-icon" aria-hidden="true">!</span><h2 id="feature-state-title">{{ feature.title }} needs attention</h2><p>{{ feature.message }}</p><a class="button secondary" href="/runs">View runs</a></div>
+  {% else %}
+  <div class="empty-state"><span class="empty-icon" aria-hidden="true">✓</span><h2 id="feature-state-title">{{ feature.status_label }}</h2><p>{{ feature.message }}</p>{% if feature.value %}<strong class="large-value">{{ feature.value }}</strong>{% endif %}</div>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,8 @@
+.sample-card{display:block;width:100%;padding:0;color:inherit;text-align:left;font:inherit;min-height:44px}
+.sample-card:focus-visible,.primary:focus-visible,.secondary:focus-visible,.quiet-button:focus-visible,.text-button:focus-visible,.button-link:focus-visible{outline:3px solid #1d65a6;outline-offset:3px}
+.sample-art{display:grid}.chart-summary{color:var(--muted);font-size:12px}.chart-table{margin-top:12px}.chart-table summary{min-height:44px;padding:10px 0;cursor:pointer}
+button,select,input,textarea,a.button-link{min-height:44px}.dialog-close{min-width:44px;min-height:44px}
+.play-run-status{min-height:24px;margin:14px 0 0;color:#d6e3da;overflow-wrap:anywhere}
+@media (forced-colors:active){.bar,.status-dot{forced-color-adjust:none;background:CanvasText}.sample-card:focus-visible{outline:3px solid Highlight}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition-duration:.01ms!important;animation-duration:.01ms!important}}
+@media(max-width:390px){.playground,.panel{padding:16px}.actions>*{width:100%}.review-callout{align-items:stretch;flex-direction:column}.table-wrap{max-width:100%}}

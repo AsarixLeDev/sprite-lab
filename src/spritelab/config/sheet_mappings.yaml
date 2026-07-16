@@ -1,0 +1,83 @@
+schema_version: labeling_v2.1
+sheet_mappings:
+  shade_weapons:
+    source_id: shade_16x16_weapons
+    files:
+      - glob: "**/iron-weapons.png"
+        tile_width: 16
+        tile_height: 16
+        metadata: {category: weapon, material: iron, variant_group_id: "shade:r{row:03d}:c{column:03d}"}
+      - glob: "**/steel-weapons.png"
+        tile_width: 16
+        tile_height: 16
+        metadata: {category: weapon, material: steel, variant_group_id: "shade:r{row:03d}:c{column:03d}"}
+      - glob: "**/bronze-weapons.png"
+        tile_width: 16
+        tile_height: 16
+        metadata: {category: weapon, material: bronze, variant_group_id: "shade:r{row:03d}:c{column:03d}"}
+      - glob: "**/gold-weapons.png"
+        tile_width: 16
+        tile_height: 16
+        metadata: {category: weapon, material: gold, variant_group_id: "shade:r{row:03d}:c{column:03d}"}
+    metadata: {domain: weapon}
+    coordinates: {}
+    excluded_cells: []
+  flare_armor_transparent:
+    source_id: flare_armor_transparent
+    files:
+      - glob: "armor_0.png"
+        tile_width: 64
+        tile_height: 64
+        metadata: {category: armor}
+    metadata: {domain: armor}
+    coordinates:
+      r000_c000: {object_name: tunic, material: cloth}
+      r000_c001: {object_name: gloves, material: cloth}
+      r000_c002: {object_name: trousers, material: cloth}
+      r000_c003: {object_name: shoes, material: cloth}
+      r000_c004: {object_name: boots, material: cloth}
+      r001_c000: {object_name: hood, material: robes}
+      r001_c001: {object_name: robe, material: robes}
+      r001_c002: {object_name: gloves, material: robes}
+      r001_c003: {object_name: skirt, material: robes}
+      r001_c004: {object_name: boots, material: robes}
+      r002_c000: {object_name: leather_hood, material: leather}
+      r002_c001: {object_name: leather_tunic, material: leather}
+      r002_c002: {object_name: leather_gloves, material: leather}
+      r002_c003: {object_name: leather_leggings, material: leather}
+      r002_c004: {object_name: leather_boots, material: leather}
+      r003_c000: {object_name: chainmail_coif, material: chainmail}
+      r003_c001: {object_name: chainmail_tunic, material: chainmail}
+      r003_c002: {object_name: chainmail_gloves, material: chainmail}
+      r003_c003: {object_name: chainmail_leggings, material: chainmail}
+      r003_c004: {object_name: chainmail_boots, material: chainmail}
+      r004_c000: {object_name: plate_helmet, material: plate}
+      r004_c001: {object_name: plate_chestplate, material: plate}
+      r004_c002: {object_name: plate_gauntlets, material: plate}
+      r004_c003: {object_name: plate_leggings, material: plate}
+      r004_c004: {object_name: plate_boots, material: plate}
+    excluded_cells: []
+  farming_tools_calciumtrice:
+    source_id: farming_tools_calciumtrice
+    files:
+      - glob: "farm tool icons calciumtrice.png"
+        tile_width: 64
+        tile_height: 64
+        metadata: {category: tool}
+    metadata: {domain: tool}
+    coordinates:
+      r000_c000: {object_name: backpack}
+      r000_c001: {object_name: seed_bag}
+      r000_c002: {object_name: shovel, material: bronze, variant_group_id: "farming:shovel"}
+      r000_c003: {object_name: pickaxe, material: bronze, variant_group_id: "farming:pickaxe"}
+      r000_c004: {object_name: axe, material: bronze, variant_group_id: "farming:axe"}
+      r000_c005: {object_name: scythe, material: bronze, variant_group_id: "farming:scythe"}
+      r001_c002: {object_name: shovel, material: iron, variant_group_id: "farming:shovel"}
+      r001_c003: {object_name: pickaxe, material: iron, variant_group_id: "farming:pickaxe"}
+      r001_c004: {object_name: axe, material: iron, variant_group_id: "farming:axe"}
+      r001_c005: {object_name: scythe, material: iron, variant_group_id: "farming:scythe"}
+      r002_c002: {object_name: shovel, material: steel, variant_group_id: "farming:shovel"}
+      r002_c003: {object_name: pickaxe, material: steel, variant_group_id: "farming:pickaxe"}
+      r002_c004: {object_name: axe, material: steel, variant_group_id: "farming:axe"}
+      r002_c005: {object_name: scythe, material: steel, variant_group_id: "farming:scythe"}
+    excluded_cells: [r001_c000, r001_c001, r002_c000, r002_c001]
