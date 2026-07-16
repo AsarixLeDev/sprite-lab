@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import uuid
 from collections.abc import Callable, Mapping
 from importlib.resources import files
 from typing import Any
@@ -41,17 +43,124 @@ def create_router(
     repository = ProductSettingsRepository(context)
     cached_service: TrainingService | None = service
     cached_version: int | None = None
+    cached_config_stamp: int | None = None
+    preparation_lock = threading.Lock()
+    preparation: dict[str, Any] = {
+        "status": "not_started",
+        "current": 0,
+        "total": 0,
+        "logs": [],
+        "result": None,
+        "error": None,
+    }
 
     def current_service() -> TrainingService:
-        nonlocal cached_service, cached_version
+        nonlocal cached_config_stamp, cached_service, cached_version
         if service is not None:
             return service
         _raw, version, _saved = repository.effective_settings("compute")
-        if cached_service is None or cached_version != version:
+        try:
+            config_stamp = context.config_path.stat().st_mtime_ns if context.config_path is not None else None
+        except OSError:
+            config_stamp = None
+        if cached_service is None or cached_version != version or cached_config_stamp != config_stamp:
             assert service_factory is not None
             cached_service = service_factory()
             cached_version = version
+            cached_config_stamp = config_stamp
         return cached_service
+
+    @router.get("/training/api/preparation")
+    @product_api
+    def preparation_state() -> JSONResponse:
+        with preparation_lock:
+            return JSONResponse(dict(preparation))
+
+    @router.post("/training/api/preparation")
+    @product_api
+    async def start_preparation(request: Request) -> JSONResponse:
+        payload = await _json_mapping(request)
+        if payload is None:
+            return api_error(400, "invalid_training_preparation", "Preparation settings must be a JSON object.")
+        if payload.get("authorize_freeze") is not True:
+            return api_error(422, "freeze_authorization_required", "Confirm the image-only production freeze first.")
+        with preparation_lock:
+            if preparation["status"] == "running":
+                return JSONResponse(dict(preparation), status_code=409)
+            preparation.update(
+                {
+                    "job_id": uuid.uuid4().hex,
+                    "status": "running",
+                    "current": 0,
+                    "total": 0,
+                    "logs": ["Preparation queued on a background worker."],
+                    "result": None,
+                    "error": None,
+                }
+            )
+
+        def update(current: int, total: int, message: str) -> None:
+            with preparation_lock:
+                preparation["current"] = current
+                preparation["total"] = total
+                preparation["logs"] = [*preparation["logs"], message][-200:]
+
+        def run() -> None:
+            try:
+                from spritelab.product_features.training.preparation import (
+                    TrainingPreparationError,
+                    prepare_active_dataset,
+                )
+            except Exception:
+                with preparation_lock:
+                    preparation["status"] = "failed"
+                    preparation["error"] = {
+                        "code": "training_preparation_failed",
+                        "message": "Training preparation failed safely before launch.",
+                    }
+                    preparation["logs"] = [
+                        *preparation["logs"],
+                        "Preparation stopped safely; review server logs for details.",
+                    ][-200:]
+                return
+            try:
+                result = prepare_active_dataset(
+                    context,
+                    authorize_freeze=True,
+                    authorize_training=payload.get("authorize_training") is True,
+                    progress=update,
+                )
+            except TrainingPreparationError as exc:
+                with preparation_lock:
+                    preparation["status"] = "failed"
+                    preparation["error"] = {"code": exc.code, "message": exc.public_message}
+                    preparation["logs"] = [
+                        *preparation["logs"],
+                        "Preparation stopped safely; no local paths were exposed.",
+                    ][-200:]
+            except Exception:
+                with preparation_lock:
+                    preparation["status"] = "failed"
+                    preparation["error"] = {
+                        "code": "training_preparation_failed",
+                        "message": "Training preparation failed safely before launch.",
+                    }
+                    preparation["logs"] = [
+                        *preparation["logs"],
+                        "Preparation stopped safely; review server logs for details.",
+                    ][-200:]
+            else:
+                with preparation_lock:
+                    preparation["status"] = "complete"
+                    preparation["result"] = result
+                    preparation["logs"] = [
+                        *preparation["logs"],
+                        "Artifacts are ready. The independent training-infrastructure audit remains mandatory.",
+                    ][-200:]
+
+        threading.Thread(target=run, name="spritelab-training-preparation", daemon=True).start()
+        with preparation_lock:
+            return JSONResponse(dict(preparation), status_code=202)
 
     def settings() -> tuple[ComputeSettings, int, bool]:
         raw, version, saved = repository.effective_settings("compute")

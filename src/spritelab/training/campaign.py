@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -327,7 +328,7 @@ def campaign_schema() -> dict[str, Any]:
     }
 
 
-def plan_campaign(spec: Mapping[str, Any]) -> dict[str, Any]:
+def plan_campaign(spec: Mapping[str, Any], *, execution_root: str | Path | None = None) -> dict[str, Any]:
     """Resolve a deterministic v1 campaign manifest from an input specification."""
 
     raw = deepcopy(dict(spec))
@@ -391,7 +392,13 @@ def plan_campaign(spec: Mapping[str, Any]) -> dict[str, Any]:
                 "--config",
                 str(resolved_config),
             ]
-            resolved_run_config = _resolved_run_config(raw, cell, seed=seed, output_root=str(output_root))
+            resolved_run_config = _resolved_run_config(
+                raw,
+                cell,
+                seed=seed,
+                output_root=str(output_root),
+                execution_root=Path(execution_root or Path.cwd()),
+            )
             run = {
                 "run_id": run_id,
                 "campaign_id": campaign_id,
@@ -655,6 +662,26 @@ def validate_campaign(campaign: Mapping[str, Any]) -> dict[str, Any]:
         resolved = run.get("resolved_config")
         if not isinstance(resolved, Mapping) or run.get("resolved_config_sha256") != stable_hash(resolved):
             errors.append(f"run {run.get('run_id')} resolved config identity does not match")
+        elif resolved.get("schema_version") != "spritelab_experiment_config_v1":
+            errors.append(f"run {run.get('run_id')} resolved config is not an experiment configuration")
+        else:
+            required_experiment_fields = {
+                "name",
+                "ablation",
+                "dataset",
+                "model",
+                "conditioning",
+                "loss",
+                "optimizer",
+                "augmentation",
+                "seeds",
+                "runtime",
+                "sampling",
+                "ema",
+            }
+            missing = sorted(required_experiment_fields - set(resolved))
+            if missing:
+                errors.append(f"run {run.get('run_id')} resolved experiment config is missing: {', '.join(missing)}")
         if run.get("execution_contract_sha256") != stable_hash(_execution_contract_payload(run)):
             errors.append(f"run {run.get('run_id')} execution contract identity does not match")
     return {
@@ -824,6 +851,18 @@ def execute_campaign(
         raise CampaignResumeError("valid resumable campaign requires explicit resume / --resume")
     if campaign_config_path is None:
         raise CampaignValidationError("execution requires the exact authoritative campaign configuration path")
+    normalised_environment = {str(key): str(value) for key, value in dict(execution_environment or {}).items()}
+    determinism_mode = str(dict(campaign.get("determinism") or {}).get("mode", "off")).strip().lower()
+    uses_cuda = any(
+        str(dict(run.get("resolved_config") or {}).get("runtime", {}).get("device", "auto")) != "cpu"
+        for run in campaign.get("expected_runs") or []
+    )
+    if determinism_mode in {"strict", "warn"} and uses_cuda:
+        cublas_config = normalised_environment.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        if cublas_config not in {":4096:8", ":16:8"}:
+            raise CampaignValidationError(
+                "strict or warning CUDA determinism requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8"
+            )
     states = {row["run_id"]: row for row in resume_report["runs"]}
     missing_configs = [
         str(run["resolved_config_path"])
@@ -858,7 +897,7 @@ def execute_campaign(
             project_root=project_root or Path.cwd(),
             execute_confirmed=True,
             campaign_profile=campaign_profile,
-            environment=execution_environment,
+            environment=normalised_environment,
             resume=state["status"] == "valid_resumable",
         )
         if validated.receipt.campaign_identity_sha256 != campaign.get("campaign_identity"):
@@ -879,7 +918,14 @@ def execute_campaign(
                 campaign_identity=str(campaign["campaign_identity"]),
                 run_identity=str(run["run_identity"]),
             )
-            result = subprocess.run(command, check=True, cwd=str(project_root or Path.cwd()))
+            environment = os.environ.copy()
+            environment.update(validated.environment)
+            result = subprocess.run(
+                command,
+                check=True,
+                cwd=str(project_root or Path.cwd()),
+                env=environment,
+            )
         else:
             result = runner(
                 command,
@@ -1453,13 +1499,16 @@ def _campaign_identity_payload(campaign: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _resolved_run_config(
-    raw: Mapping[str, Any], cell: Mapping[str, Any], *, seed: int, output_root: str
+    raw: Mapping[str, Any],
+    cell: Mapping[str, Any],
+    *,
+    seed: int,
+    output_root: str,
+    execution_root: Path,
 ) -> dict[str, Any]:
-    value = {
-        "campaign_id": raw.get("campaign_id"),
-        "cell_id": cell.get("cell_id"),
-        "seed": seed,
-        "output_root": output_root,
+    """Translate one campaign run into the schema consumed by experiment run."""
+
+    campaign = {
         "model": deepcopy(raw.get("model") or {}),
         "training": deepcopy(raw.get("training") or {}),
         "optimizer": deepcopy(raw.get("optimizer") or {}),
@@ -1471,13 +1520,159 @@ def _resolved_run_config(
         "identities": deepcopy(raw.get("identities") or {}),
     }
     for dotted, replacement in dict(cell.get("overrides") or {}).items():
-        _set_dotted(value, str(dotted), deepcopy(replacement))
+        _set_dotted(campaign, str(dotted), deepcopy(replacement))
     for dotted, replacement in dict(cell.get("comparison_values") or {}).items():
         path = str(dotted)
         if "." not in path:
             path = f"model.{path}"
-        _set_dotted(value, path, deepcopy(replacement))
-    return value
+        _set_dotted(campaign, path, deepcopy(replacement))
+
+    identities = dict(campaign["identities"])
+    manifest_path = Path(str(identities.get("split_manifest_path") or "training_manifest.jsonl"))
+    vocabulary_path = Path(str(identities.get("conditioning_vocabulary_path") or "conditioning_vocabulary.json"))
+
+    def portable(path: str | Path) -> str:
+        return os.path.relpath(Path(path), start=execution_root).replace("\\", "/")
+
+    model = {
+        "architecture": "rectified_flow",
+        "sprite_size": 32,
+        "base_channels": 64,
+        "channel_mults": [1, 2, 4],
+        "res_blocks_per_level": 2,
+        "embed_dim": 64,
+        "film_conditioning": False,
+        "bottleneck_attention": False,
+        "auxiliary_heads_mode": "absent",
+    }
+    model.update(dict(campaign["model"]))
+    if model.get("auxiliary_heads_mode") == "off":
+        model["auxiliary_heads_mode"] = "absent"
+    elif model.get("auxiliary_heads_mode") == "on":
+        model["auxiliary_heads_mode"] = "palette_index"
+
+    training = dict(campaign["training"])
+    schedule = dict(campaign["schedule"])
+    optimizer = {
+        "name": "adamw",
+        "learning_rate": 0.0002,
+        "schedule": str(schedule.get("name", "none")),
+        "warmup_steps": int(schedule.get("warmup_steps", 0)),
+        "gradient_clip": 0.0,
+    }
+    optimizer.update(dict(campaign["optimizer"]))
+    optimizer["schedule"] = str(schedule.get("name", optimizer.get("schedule", "none")))
+    optimizer["warmup_steps"] = int(schedule.get("warmup_steps", optimizer.get("warmup_steps", 0)))
+
+    loss = {
+        "strategy": "uniform_velocity",
+        "foreground_rgb_weight": 1.0,
+        "background_rgb_weight": 1.0,
+        "palette_aux_weight": 0.0,
+        "auxiliary_heads": False,
+        "index_head_weight": 0.0,
+        "palette_head_weight": 0.0,
+        "palette_presence_weight": 0.0,
+    }
+    loss.update(dict(campaign["loss"]))
+    loss["strategy"] = str(loss.get("strategy") or loss.get("name") or "uniform_velocity")
+
+    evaluation = dict(campaign["evaluation"])
+    checkpoint = dict(campaign["checkpoint"])
+    determinism = dict(campaign["determinism"])
+    resolved: dict[str, Any] = {
+        "schema_version": "spritelab_experiment_config_v1",
+        "name": f"{raw.get('campaign_id')}__{cell.get('cell_id')}__seed_{seed}",
+        "ablation": "baseline",
+        "dataset": {
+            "directory": portable(manifest_path.parent),
+            "training_manifest": portable(manifest_path),
+            "split_manifest": portable(manifest_path),
+            "split": "train",
+        },
+        "model": model,
+        "conditioning": {
+            "mode": "caption_semantic",
+            "caption_max_length": 32,
+            "semantic_max_length": 48,
+            "cfg_dropout": 0.1,
+            "field_dropout": {},
+            "vocabulary_path": portable(vocabulary_path),
+            "palette": {"enabled": False, "dropout": 0.0, "strength": 1.0},
+        },
+        "loss": loss,
+        "optimizer": optimizer,
+        "augmentation": {"palette_swap_probability": 0.0, "horizontal_flip_probability": 0.0},
+        "seeds": {
+            "training": seed,
+            "data_loader": seed,
+            "evaluation": seed + 1,
+            "sampling": seed,
+        },
+        "runtime": {
+            "out_dir": portable(output_root),
+            "device": str(training.get("device", "auto")),
+            "precision": str(training.get("precision", "fp32")),
+            "batch_size": int(training.get("micro_batch_size", 1)),
+            "micro_batch_size": int(training.get("micro_batch_size", 1)),
+            "gradient_accumulation_steps": int(training.get("gradient_accumulation", 1)),
+            "effective_batch_size": int(training.get("effective_batch_size", 1)),
+            "max_steps": int(training.get("max_optimizer_steps", 1)),
+            "num_workers": 0,
+            "validation_mode": "auto",
+            "sample_every": int(evaluation.get("cadence", 0)),
+            "save_every": int(checkpoint.get("cadence", 0)),
+            "determinism": str(determinism.get("mode", "off")),
+        },
+        "sampling": {
+            "cfg_scale": float(evaluation.get("cfg_value", 3.0)),
+            "steps": int(evaluation.get("sampling_steps", 30)),
+            "max_samples": 64,
+        },
+        "ema": {"enabled": True, "decay": 0.999, "update_every": 1},
+        "sampler": {"name": "stateful_permutation_v1", "shuffle": True},
+        "timestep_sampling": {"strategy": "uniform"},
+        "noise_schedule": "rectified_flow_linear_path",
+        "self_conditioning": False,
+        "campaign_bindings": {
+            key: identities.get(key)
+            for key in (
+                "dataset_view_manifest_hash",
+                "split_manifest_hash",
+                "conditioning_vocabulary_hash",
+                "model_config_hash",
+                "optimizer_config_hash",
+                "schedule_config_hash",
+                "loss_config_hash",
+                "determinism_config_hash",
+            )
+        },
+        "campaign": {
+            "campaign_id": raw.get("campaign_id"),
+            "cell_id": cell.get("cell_id"),
+            "seed": seed,
+        },
+        # Retain the authoritative campaign projections used by completion and
+        # resume auditing. The experiment loader permits these bound extras.
+        "training": training,
+        "schedule": schedule,
+        "determinism": determinism,
+        "evaluation": evaluation,
+        "checkpoint": checkpoint,
+    }
+    experiment_overrides = raw.get("experiment")
+    if isinstance(experiment_overrides, Mapping):
+        _deep_update(resolved, experiment_overrides)
+    return resolved
+
+
+def _deep_update(target: dict[str, Any], values: Mapping[str, Any]) -> None:
+    for key, value in values.items():
+        current = target.get(str(key))
+        if isinstance(current, dict) and isinstance(value, Mapping):
+            _deep_update(current, value)
+        else:
+            target[str(key)] = deepcopy(value)
 
 
 def _execution_contract_payload(run: Mapping[str, Any]) -> dict[str, Any]:

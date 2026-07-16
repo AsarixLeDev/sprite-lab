@@ -22,6 +22,7 @@ from spritelab.product_features.training.config import (
 from spritelab.product_features.training.service import TrainingService, backend_from_context
 from spritelab.product_features.training.web import create_router
 from spritelab.remote_compute import ComputeBackend, HostedBackendRegistry
+from spritelab.v3.config import ProjectConfig
 
 PLUGIN_ID = "training"
 
@@ -36,7 +37,9 @@ def create_plugin(*, hosted_backends: Iterable[ComputeBackend] = ()) -> ProductP
     hosted = HostedBackendRegistry(hosted_backends)
 
     def service(context: ProjectContext) -> TrainingService:
-        effective, _settings, _version, _saved = effective_compute_context(context)
+        loaded = ProjectConfig.load(context.project_root)
+        fresh = ProjectContext(loaded.root, loaded.values, loaded.path, loaded.runs_dir)
+        effective, _settings, _version, _saved = effective_compute_context(fresh)
         return TrainingService(effective, backend_from_context(effective, hosted_backends=hosted))
 
     def status_provider(context: ProjectContext) -> ProductResult:

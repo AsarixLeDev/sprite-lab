@@ -119,9 +119,33 @@ def _prepare_manifest(config_path: Path, *, write: bool) -> dict:
     train_rows = [row for row in rows if row.get("split") == dataset.get("split", "train")]
     if not train_rows:
         raise ValueError("training manifest has no rows for configured split")
-    tokenizer = SpriteTextTokenizer.build_from_records(
+    generated_tokenizer = SpriteTextTokenizer.build_from_records(
         train_rows, max_length=int(config["conditioning"].get("caption_max_length", 32))
     )
+    vocabulary_path = config["conditioning"].get("vocabulary_path")
+    if vocabulary_path:
+        vocabulary_file = _resolve(config_path, vocabulary_path)
+        try:
+            tokenizer_payload = json.loads(vocabulary_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("configured conditioning vocabulary is unreadable") from exc
+        if not isinstance(tokenizer_payload, dict) or tokenizer_payload != generated_tokenizer.to_json_dict():
+            raise ValueError("configured conditioning vocabulary does not match the training split")
+        tokenizer = tokenizer_payload
+    else:
+        tokenizer = generated_tokenizer.to_json_dict()
+    bindings = config.get("campaign_bindings")
+    if isinstance(bindings, dict):
+        from spritelab.training.experiment_system import file_sha256
+
+        expected_manifest_hash = bindings.get("split_manifest_hash")
+        if expected_manifest_hash and expected_manifest_hash != file_sha256(manifest_path):
+            raise ValueError("campaign split-manifest identity does not match the experiment input")
+        expected_vocabulary_hash = bindings.get("conditioning_vocabulary_hash")
+        if expected_vocabulary_hash and (
+            not vocabulary_path or expected_vocabulary_hash != file_sha256(_resolve(config_path, vocabulary_path))
+        ):
+            raise ValueError("campaign conditioning-vocabulary identity does not match the experiment input")
     structured = None
     if "structured" in str(config["conditioning"]["mode"]):
         structured = build_structured_conditioning_vocab(train_rows).to_json_dict()
@@ -129,7 +153,7 @@ def _prepare_manifest(config_path: Path, *, write: bool) -> dict:
         config,
         dataset_manifest=manifest_path,
         split_manifest=_resolve(config_path, dataset.get("split_manifest", dataset["training_manifest"])),
-        tokenizer=tokenizer.to_json_dict(),
+        tokenizer=tokenizer,
         structured_vocab=structured,
         repo=Path.cwd(),
     )
@@ -200,6 +224,12 @@ def _run(parsed: argparse.Namespace) -> None:
         "bottleneck_attention": bool(model.get("bottleneck_attention", False)),
         "palette_conditioning": bool(conditioning.get("palette", {}).get("enabled", False)),
         "palette_conditioning_dropout": float(conditioning.get("palette", {}).get("dropout", 0.0)),
+        "palette_conditioning_dim": int(model.get("palette_conditioning_dim", 64)),
+        "palette_conditioning_inject": str(model.get("palette_conditioning_inject", "decoder")),
+        "auxiliary_heads_mode": model.get("auxiliary_heads_mode"),
+        "gradient_accumulation_steps": int(runtime.get("gradient_accumulation_steps", 1)),
+        "caption_max_length": int(conditioning.get("caption_max_length", 32)),
+        "semantic_max_length": int(conditioning.get("semantic_max_length", 48)),
         "experiment_manifest": manifest,
         "resume_from": parsed.resume,
         "unsafe_resume": bool(parsed.unsafe_resume),

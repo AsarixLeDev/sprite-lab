@@ -22,6 +22,17 @@ A profile is only a selector. It selects an existing campaign specification from
 
 The recommended profile may also select a campaign document directly when the configured document has no `product_profiles` mapping. Custom configuration is intentionally an advanced API input and is still validated as a normal backend campaign.
 
+## Preparing an accepted dataset
+
+The Training page can prepare the active accepted product dataset after two separate, explicit choices:
+
+- freeze authorization publishes an immutable image-only view after source-hash verification, canonical 32x32 encoding, dataset QA, training-manifest QA, and a production-loader check;
+- training authorization sets `execution.allow_training: true`, but does not launch anything and does not satisfy the independent audit gate.
+
+Preparation writes content-addressed artifacts under the project, binds their identity to stable item IDs, verified source bytes, and the exact preparation-recipe source hashes, records a whole-publication hash inventory, freezes a deterministic generic image-only conditioning vocabulary, validates the recommended campaign through `plan_campaign` and `validate_campaign`, and updates `spritelab.yaml` atomically. Semantic and hierarchical proposals are not consumed by this image-only path. Persisted preparation artifacts and API responses do not expose absolute local paths. Reuse refuses a publication when any inventoried artifact changed. A concurrent preparation request is refused while the active background job continues.
+
+Campaign resolved configurations are complete `spritelab_experiment_config_v1` documents. They are validated through the same experiment-manifest loader used by `train experiment run`; they are not campaign-only documents passed to an incompatible command.
+
 ## Mandatory launch checks
 
 Before any backend `prepare`, `upload`, or `launch` call, the feature verifies:
@@ -64,6 +75,9 @@ Remote checkpoints are not safe-resume points until the backend identity is veri
 Every preview is marked `exploratory: true`, `benchmark_evidence: false`, and `promotion_evidence: false`. Preview generation can be disabled. A preview exception emits a warning event and never changes the training status.
 
 ## Feature routes
+
+- `GET /training/api/preparation` - passive background-preparation state and privacy-safe logs.
+- `POST /training/api/preparation` - explicitly authorized image-only preparation; starts no training process.
 
 - `GET /training` — page shell; no backend probe or launch.
 - `GET /training/api/state` — current plan and blockers; device check deferred.

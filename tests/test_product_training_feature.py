@@ -220,6 +220,7 @@ def test_fake_local_execution_uses_existing_campaign_execution_gate(tmp_path: Pa
     assert backend.calls.count("launch") == 3
     assert backend.calls.count("prepare") == 3
     assert {request.event_path.name for request in backend.requests} == {"events.jsonl"}
+    assert {request.environment["CUBLAS_WORKSPACE_CONFIG"] for request in backend.requests} == {":4096:8"}
     assert not list((tmp_path / "runs").rglob("product_events.jsonl"))
     for job_id, job in list(backend._jobs.items()):
         backend._jobs[job_id] = replace(job, status=ComputeStatus.COMPLETE)

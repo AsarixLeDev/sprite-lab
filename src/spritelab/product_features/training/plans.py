@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,32 @@ def _read_mapping(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TrainingProfileError("Training campaign configuration must be a mapping.")
     return value
+
+
+def _resolve_selected_campaign_paths(spec: Mapping[str, Any], directory: Path) -> dict[str, Any]:
+    """Resolve portable campaign bindings relative to the selected document."""
+
+    result = deepcopy(dict(spec))
+
+    def resolve(value: Any) -> str:
+        candidate = Path(str(value)).expanduser()
+        return str(candidate if candidate.is_absolute() else (directory / candidate).resolve())
+
+    identities = result.get("identities")
+    if isinstance(identities, dict):
+        for field in (
+            "dataset_view_manifest_path",
+            "split_manifest_path",
+            "conditioning_vocabulary_path",
+        ):
+            if identities.get(field):
+                identities[field] = resolve(identities[field])
+    evaluation = result.get("evaluation")
+    if isinstance(evaluation, dict) and evaluation.get("benchmark_manifest_path"):
+        evaluation["benchmark_manifest_path"] = resolve(evaluation["benchmark_manifest_path"])
+    if result.get("output_root"):
+        result["output_root"] = resolve(result["output_root"])
+    return result
 
 
 def select_campaign_spec(
@@ -167,7 +194,12 @@ class TrainingPlanResolver:
                     config_directory=campaign_path.parent,
                     custom_spec=custom_spec,
                 )
-                campaign = dict(spec) if spec.get("schema_version") == CAMPAIGN_SCHEMA_VERSION else plan_campaign(spec)
+                spec = _resolve_selected_campaign_paths(spec, campaign_path.parent)
+                campaign = (
+                    dict(spec)
+                    if spec.get("schema_version") == CAMPAIGN_SCHEMA_VERSION
+                    else plan_campaign(spec, execution_root=context.project_root)
+                )
             except TrainingProfileError as exc:
                 gates.append(TrainingGate("profile_translation", False, str(exc)))
             except (TypeError, ValueError, OSError) as exc:
