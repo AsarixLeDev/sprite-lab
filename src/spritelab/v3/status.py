@@ -32,7 +32,6 @@ from spritelab.product_core.audit_evidence import (
 from spritelab.product_core.contracts import ProjectContext
 from spritelab.product_features.dataset.certification import labeling_audit_verification
 from spritelab.product_features.evaluation.checkpoints import discover_checkpoint_candidates
-from spritelab.training.campaign import CampaignValidationError, training_code_identity_source_paths
 from spritelab.v3.config import ProjectConfig, configured_training_identities
 from spritelab.v3.model import AuditStatus, Evidence, ProjectState, StageState, StageStatus
 
@@ -79,35 +78,22 @@ def _source_commit(root: Path) -> str | None:
 def _training_audit_status(config: ProjectConfig, report: dict[str, Any] | None) -> AuditStatus:
     if report is None:
         return AuditStatus.NOT_AUDITED
-    hashes_path = config.path_for("training", "audit_hashes")
-    hashes = _read_json(hashes_path)
-    if not hashes or not isinstance(hashes.get("files"), list):
-        return AuditStatus.STALE
-    audited_paths: list[str] = []
-    for item in hashes["files"]:
-        if not isinstance(item, dict) or not item.get("path") or not item.get("sha256_before"):
-            return AuditStatus.STALE
-        relative = Path(str(item["path"])).as_posix()
-        audited_paths.append(relative)
-        target = config.root / relative
-        if not target.is_file() or _sha256(target) != item["sha256_before"]:
-            return AuditStatus.STALE
-    if len(audited_paths) != len(set(audited_paths)):
-        return AuditStatus.STALE
+    from spritelab.product_features.training.activation import (
+        ConditionedActivationError,
+        load_conditioned_training_activation,
+        training_audit_status,
+    )
+    from spritelab.product_features.training.models import TrainingProfile
+
     try:
-        required_paths = {
-            path.relative_to(config.root.resolve()).as_posix()
-            for path in training_code_identity_source_paths(config.root)
-        }
-    except (OSError, ValueError, CampaignValidationError):
+        activation = load_conditioned_training_activation(
+            config,
+            TrainingProfile.RECOMMENDED,
+            require_audit=False,
+        )
+    except (ConditionedActivationError, OSError, TypeError, KeyError):
         return AuditStatus.STALE
-    if not required_paths.issubset(set(audited_paths)):
-        return AuditStatus.STALE
-    gates = report.get("gates", {})
-    verdicts = [str(value).upper() for value in gates.values()] if isinstance(gates, dict) else []
-    if "FAIL" in verdicts:
-        return AuditStatus.FAIL
-    return AuditStatus.PASS if verdicts and all(value == "PASS" for value in verdicts) else AuditStatus.INCONCLUSIVE
+    return training_audit_status(config, report, activation)
 
 
 @dataclass(frozen=True)

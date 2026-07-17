@@ -35,7 +35,9 @@ TRAINING_CODE_IDENTITY_MANDATORY_FILES = (
     "src/spritelab/product_core/contracts.py",
     "src/spritelab/product_core/events.py",
     "src/spritelab/product_features/dataset/certification.py",
+    "src/spritelab/product_features/training/activation.py",
     "src/spritelab/product_features/training/dashboard.py",
+    "src/spritelab/product_features/training/preparation_jobs.py",
     "src/spritelab/product_features/training/service.py",
     "src/spritelab/product_runtime.py",
     "src/spritelab/product_web/app.py",
@@ -44,13 +46,21 @@ TRAINING_CODE_IDENTITY_MANDATORY_FILES = (
     "src/spritelab/training/launch.py",
 )
 
+TRAINING_CODE_IDENTITY_RECURSIVE_ROOTS = ("src/spritelab",)
+
 TRAINING_CODE_IDENTITY_SEMANTIC_ROLES = {
     "src/spritelab/product_core/contracts.py": "finite ProductEvent construction and deserialization contract",
     "src/spritelab/product_core/events.py": "strict event JSON parsing, validation, and serialization",
     "src/spritelab/product_features/dataset/certification.py": (
         "labeling-scope authorization used by v3 conditioned-view, freeze, and training gates"
     ),
+    "src/spritelab/product_features/training/activation.py": (
+        "conditioned Dataset-v5 publication, campaign, audit, launch, and resume applicability"
+    ),
     "src/spritelab/product_features/training/dashboard.py": "training event interpretation and chart projection",
+    "src/spritelab/product_features/training/preparation_jobs.py": (
+        "durable image-only baseline preparation state, recovery, and event history"
+    ),
     "src/spritelab/product_features/training/service.py": "training append, replay, reconstruction, pause, and resume adapter",
     "src/spritelab/product_runtime.py": "product plugin composition and training capability registration",
     "src/spritelab/product_web/app.py": "generic product run-action validation and resume routing",
@@ -1687,17 +1697,10 @@ def _execution_contract_payload(run: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def training_code_identity_source_paths(repo_root: str | Path | None = None) -> tuple[Path, ...]:
-    """Return every production source that can affect safe training execution or event replay."""
+    """Bind all tracked production Python and reject an incomplete worktree inventory."""
 
     root = Path(repo_root).resolve() if repo_root is not None else Path(__file__).resolve().parents[3]
-    source = root / "src" / "spritelab"
-    recursive_roots = (
-        source / "training",
-        source / "product_features" / "training",
-        source / "remote_compute",
-        source / "v3",
-        source / "product_core",
-    )
+    recursive_roots = tuple(root / relative for relative in TRAINING_CODE_IDENTITY_RECURSIVE_ROOTS)
     missing = [path for path in recursive_roots if not path.is_dir()]
     if missing:
         raise CampaignValidationError(
@@ -1727,11 +1730,53 @@ def training_code_identity_source_paths(repo_root: str | Path | None = None) -> 
         raise CampaignValidationError(f"tracked code-identity source inventory failed: {exc}") from exc
     if inventory.returncode != 0:
         raise CampaignValidationError("tracked code-identity source inventory failed")
-    bound = {
+    tracked = {
         root / relative for raw in stdout.split(b"\0") if raw and (relative := raw.decode("utf-8")).endswith(".py")
     }
-    bound.update(mandatory)
-    return tuple(sorted(bound, key=lambda path: path.relative_to(root).as_posix()))
+    missing_tracked = [path for path in tracked if not path.is_file()]
+    if missing_tracked:
+        raise CampaignValidationError(
+            "tracked production Python source is missing: "
+            + ", ".join(path.relative_to(root).as_posix() for path in sorted(missing_tracked))
+        )
+    source_root = root / "src" / "spritelab"
+    discovered: set[Path] = set()
+    pending = [source_root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = tuple(os.scandir(directory))
+        except OSError as exc:
+            raise CampaignValidationError("production Python inventory could not be scanned safely") from exc
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise CampaignValidationError("production Python inventory changed while scanning") from exc
+            attributes = int(getattr(metadata, "st_file_attributes", 0))
+            reparse = bool(attributes & 0x400)
+            if entry.is_symlink() or reparse or os.path.ismount(path):
+                raise CampaignValidationError(
+                    f"production source inventory crosses an unsafe seam: {path.relative_to(root).as_posix()}"
+                )
+            if entry.is_dir(follow_symlinks=False):
+                pending.append(path)
+            elif entry.is_file(follow_symlinks=False) and path.suffix == ".py":
+                discovered.add(path)
+    untracked = discovered - tracked
+    if untracked:
+        raise CampaignValidationError(
+            "untracked production Python source would escape code identity: "
+            + ", ".join(path.relative_to(root).as_posix() for path in sorted(untracked))
+        )
+    if not set(mandatory).issubset(tracked):
+        absent = set(mandatory) - tracked
+        raise CampaignValidationError(
+            "mandatory production Python source is not tracked: "
+            + ", ".join(path.relative_to(root).as_posix() for path in sorted(absent))
+        )
+    return tuple(sorted(tracked, key=lambda path: path.relative_to(root).as_posix()))
 
 
 def _code_identity() -> dict[str, Any]:
@@ -1762,7 +1807,7 @@ def _code_identity() -> dict[str, Any]:
         raise CampaignValidationError("code identity has no bound production sources")
     payload = {
         "schema_version": CODE_IDENTITY_SCHEMA_VERSION,
-        "contract": "tracked_recursive_training_product_remote_v4_product_core_runtime_and_shared_event_surface",
+        "contract": "all_tracked_production_python_v5_with_untracked_rejection",
         "files": records,
     }
     payload["sha256"] = stable_hash(payload)

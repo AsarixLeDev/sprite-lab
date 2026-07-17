@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from spritelab.product_core import ProductResult, ProductRun, ProductStatus, ProjectContext
+from spritelab.product_features.training import activation as activation_module
 from spritelab.remote_compute import (
     ArtifactReference,
     ComputeJob,
@@ -28,7 +29,6 @@ from spritelab.training.launch import receipt_with_recomputed_hash
 from spritelab.v3.config import DEFAULT_CONFIG, ProjectConfig
 from spritelab.v3.model import AuditStatus, ProjectState, StageState, StageStatus
 from spritelab.v3.orchestration import ExecutionOptions, _validated_product_training_identity, train
-from spritelab.v3.status import _training_audit_status
 from training_launch_test_utils import compute_request, validated_launch
 
 
@@ -152,6 +152,24 @@ def test_v3_valid_dry_run_issues_no_receipt_and_valid_fake_launches_exact_matrix
         "spritelab.product_features.training.plans.build_project_state", lambda *_: _ready_state(tmp_path)
     )
     monkeypatch.setattr("spritelab.v3.orchestration.backend_from_context", lambda *_: backend)
+
+    class AuthorizedActivation:
+        def __init__(self, campaign: dict) -> None:
+            self.campaign = campaign
+            self.selected_spec = campaign
+
+        def to_contract_dict(self) -> dict:
+            return {
+                "schema_version": "spritelab.training.conditioned-dataset-contract.v2",
+                "ready": True,
+                "campaign_identity_sha256": self.campaign["campaign_identity"],
+                "paths_exposed": False,
+            }
+
+    monkeypatch.setattr(
+        "spritelab.product_features.training.service.load_conditioned_training_activation",
+        lambda *_args, **kwargs: AuthorizedActivation(kwargs["expected_campaign"]),
+    )
     dry_run = train(config, [], ExecutionOptions(dry_run=True))
     assert dry_run.status == "COMPLETE"
     assert dry_run.data["validation"]["receipts_issued"] == 0
@@ -539,21 +557,20 @@ def test_training_audit_surface_stales_on_adapter_change_but_not_documentation(
     docs = tmp_path / "docs/readme.md"
     docs.parent.mkdir()
     docs.write_text("one\n", encoding="utf-8")
-    hashes = tmp_path / "audit-hashes.json"
     digest = __import__("hashlib").sha256(adapter.read_bytes()).hexdigest()
-    hashes.write_text(
-        json.dumps({"files": [{"path": adapter.relative_to(tmp_path).as_posix(), "sha256_before": digest}]}),
-        encoding="utf-8",
+    files = [{"path": adapter.relative_to(tmp_path).as_posix(), "sha256_before": digest}]
+    monkeypatch.setattr(
+        activation_module,
+        "TRAINING_CODE_IDENTITY_RECURSIVE_ROOTS",
+        ("src/spritelab",),
     )
-    config = _config(tmp_path)
-    config.values["training"]["audit_hashes"] = str(hashes)
-    monkeypatch.setattr("spritelab.v3.status.training_code_identity_source_paths", lambda _root: (adapter,))
-    report = {"gates": {"launch_surface": "PASS"}}
-    assert _training_audit_status(config, report) == AuditStatus.PASS
+    monkeypatch.setattr(activation_module, "training_code_identity_source_paths", lambda _root: (adapter,))
+
+    assert activation_module._verify_audited_code_inventory(tmp_path, files) is True
     docs.write_text("two\n", encoding="utf-8")
-    assert _training_audit_status(config, report) == AuditStatus.PASS
+    assert activation_module._verify_audited_code_inventory(tmp_path, files) is True
     adapter.write_text("validated = False\n", encoding="utf-8")
-    assert _training_audit_status(config, report) == AuditStatus.STALE
+    assert activation_module._verify_audited_code_inventory(tmp_path, files) is False
 
 
 @pytest.mark.parametrize(
@@ -578,13 +595,15 @@ def test_training_audit_is_stale_after_each_bound_launch_surface_changes(
     target = tmp_path / relative_path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("before\n", encoding="utf-8")
-    hashes = tmp_path / "audit-hashes.json"
     digest = __import__("hashlib").sha256(target.read_bytes()).hexdigest()
-    hashes.write_text(json.dumps({"files": [{"path": relative_path, "sha256_before": digest}]}), encoding="utf-8")
-    config = _config(tmp_path)
-    config.values["training"]["audit_hashes"] = str(hashes)
-    monkeypatch.setattr("spritelab.v3.status.training_code_identity_source_paths", lambda _root: (target,))
-    report = {"gates": {"launch_surface": "PASS"}}
-    assert _training_audit_status(config, report) == AuditStatus.PASS
+    files = [{"path": relative_path, "sha256_before": digest}]
+    monkeypatch.setattr(
+        activation_module,
+        "TRAINING_CODE_IDENTITY_RECURSIVE_ROOTS",
+        ("src/spritelab",),
+    )
+    monkeypatch.setattr(activation_module, "training_code_identity_source_paths", lambda _root: (target,))
+
+    assert activation_module._verify_audited_code_inventory(tmp_path, files) is True
     target.write_text("after\n", encoding="utf-8")
-    assert _training_audit_status(config, report) == AuditStatus.STALE
+    assert activation_module._verify_audited_code_inventory(tmp_path, files) is False

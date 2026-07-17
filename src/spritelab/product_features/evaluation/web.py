@@ -14,6 +14,7 @@ from spritelab.product_features.evaluation.dashboard import (
     compare_evaluations,
     filter_gallery,
 )
+from spritelab.product_features.evaluation.local_generator import LocalCheckpointPlaygroundGenerator
 from spritelab.product_features.evaluation.playground import (
     GenerationCancelledError,
     GenerationRequest,
@@ -49,8 +50,13 @@ def create_evaluation_router(
     playground = PlaygroundService(
         evaluation.catalog,
         output_root=evaluation.output_root / "playground",
-        generator=playground_generator,
+        generator=playground_generator
+        or LocalCheckpointPlaygroundGenerator(
+            project_root=context.project_root,
+            work_root=context.runs_directory / "playground-sampler-work",
+        ),
         runs_directory=evaluation.runs_directory,
+        catalog_provider=lambda: evaluation.catalog,
     )
 
     @router.get("/evaluation", response_class=HTMLResponse)

@@ -186,6 +186,43 @@ def test_rng_state_restoration() -> None:
     assert torch.equal(actual[2], expected[2])
 
 
+def test_checkpoint_loader_requires_weights_only_without_unsafe_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from spritelab.training import checkpoint_io
+
+    calls: list[dict[str, object]] = []
+    checkpoint_path = tmp_path / "checkpoint.pt"
+    checkpoint_path.write_bytes(b"synthetic")
+
+    class SafeTorch:
+        @staticmethod
+        def load(source, **kwargs):
+            calls.append({"file_like": callable(getattr(source, "read", None)), **kwargs})
+            return {"model_type": "synthetic"}
+
+    monkeypatch.setattr(checkpoint_io, "torch", SafeTorch())
+    assert checkpoint_io.load_checkpoint(checkpoint_path) == {"model_type": "synthetic"}
+    assert calls == [
+        {
+            "file_like": True,
+            "map_location": "cpu",
+            "weights_only": True,
+        }
+    ]
+
+    class UnsupportedTorch:
+        @staticmethod
+        def load(source, **kwargs):
+            del source, kwargs
+            raise TypeError("weights_only unsupported")
+
+    monkeypatch.setattr(checkpoint_io, "torch", UnsupportedTorch())
+    with pytest.raises(RuntimeError, match="safe weights-only"):
+        checkpoint_io.load_checkpoint(checkpoint_path)
+
+
 def test_checkpoint_saves_ema_optimizer_scheduler_scaler_and_manifest(tmp_path: Path) -> None:
     model = _model()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)

@@ -6,7 +6,7 @@ import copy
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
@@ -173,6 +173,21 @@ def _find_secret_key(value: Any, path: tuple[str, ...] = ()) -> str | None:
     return None
 
 
+def _validate_project_relative_artifact_path(value: Any, *, key: str, allow_empty: bool) -> str:
+    if not isinstance(value, str) or value != value.strip() or "\\" in value or "\x00" in value:
+        raise ConfigError(f"{key} must be a canonical project-relative path.")
+    if not value:
+        if allow_empty:
+            return value
+        raise ConfigError(f"{key} must not be empty.")
+    path = PurePosixPath(value)
+    if path.is_absolute() or PureWindowsPath(value).is_absolute() or PureWindowsPath(value).drive:
+        raise ConfigError(f"{key} must not be absolute.")
+    if path.as_posix() != value or any(part in {"", ".", ".."} for part in path.parts):
+        raise ConfigError(f"{key} must be a canonical project-relative path without traversal.")
+    return value
+
+
 def _validate(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ConfigError("Configuration must be a YAML mapping.")
@@ -195,6 +210,24 @@ def _validate(data: Any) -> dict[str, Any]:
         merged[section].update(values)
     if merged["project"]["schema_version"] != 3:
         raise ConfigError("project.schema_version must be 3.")
+    for section, key, allow_empty in (
+        ("dataset", "freeze_manifest", True),
+        ("training", "dataset_freeze", True),
+        ("training", "campaign_config", True),
+        ("training", "audit_report", False),
+        ("training", "audit_hashes", False),
+    ):
+        _validate_project_relative_artifact_path(
+            merged[section][key],
+            key=f"{section}.{key}",
+            allow_empty=allow_empty,
+        )
+    dataset_freeze = merged["dataset"]["freeze_manifest"]
+    training_freeze = merged["training"]["dataset_freeze"]
+    if (dataset_freeze or training_freeze) and dataset_freeze != training_freeze:
+        raise ConfigError(
+            "dataset.freeze_manifest and training.dataset_freeze must name the same project-relative file."
+        )
     for key in ("dataset_command", "training_command", "evaluation_command", "review_command"):
         value = merged["execution"][key]
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):

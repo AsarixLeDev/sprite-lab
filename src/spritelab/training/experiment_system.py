@@ -829,7 +829,18 @@ def validate_inference_parity(current: Mapping[str, Any], checkpoint: Mapping[st
 
 
 def capture_rng_state() -> dict[str, Any]:
-    state: dict[str, Any] = {"python": random.getstate(), "numpy": np.random.get_state()}
+    numpy_state = np.random.get_state()
+    state: dict[str, Any] = {
+        "python": random.getstate(),
+        "numpy": {
+            "schema_version": "spritelab.numpy-rng-state.v1",
+            "bit_generator": str(numpy_state[0]),
+            "keys": [int(value) for value in numpy_state[1].tolist()],
+            "position": int(numpy_state[2]),
+            "has_gauss": int(numpy_state[3]),
+            "cached_gaussian": float(numpy_state[4]),
+        },
+    }
     if torch is not None:
         state["torch_cpu"] = torch.get_rng_state()
         state["torch_cuda"] = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
@@ -838,7 +849,28 @@ def capture_rng_state() -> dict[str, Any]:
 
 def restore_rng_state(state: Mapping[str, Any]) -> None:
     random.setstate(state["python"])
-    np.random.set_state(state["numpy"])
+    numpy_state = state["numpy"]
+    if isinstance(numpy_state, Mapping):
+        if numpy_state.get("schema_version") != "spritelab.numpy-rng-state.v1":
+            raise ValueError("unsupported NumPy RNG-state schema")
+        keys = numpy_state.get("keys")
+        if not isinstance(keys, (list, tuple)) or not all(type(value) is int for value in keys):
+            raise ValueError("NumPy RNG-state keys must be primitive integers")
+        np.random.set_state(
+            (
+                str(numpy_state["bit_generator"]),
+                np.asarray(keys, dtype=np.uint32),
+                int(numpy_state["position"]),
+                int(numpy_state["has_gauss"]),
+                float(numpy_state["cached_gaussian"]),
+            )
+        )
+    elif isinstance(numpy_state, (tuple, list)):
+        # Compatibility is limited to a legacy state already present in trusted
+        # memory. Checkpoint loading never falls back to unsafe pickle mode.
+        np.random.set_state(tuple(numpy_state))
+    else:
+        raise ValueError("NumPy RNG state is malformed")
     if torch is not None and "torch_cpu" in state:
         torch.set_rng_state(state["torch_cpu"])
         if torch.cuda.is_available() and state.get("torch_cuda"):

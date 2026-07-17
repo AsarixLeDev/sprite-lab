@@ -38,6 +38,7 @@ class CheckpointCandidate:
     weights: str
     verification_state: str
     availability: CheckpointAvailability
+    checkpoint_sha256: str | None = None
     unavailable_reasons: tuple[str, ...] = ()
     path: Path | None = field(default=None, repr=False, compare=False)
     run_directory: Path | None = field(default=None, repr=False, compare=False)
@@ -69,6 +70,7 @@ class CheckpointCandidate:
                     "dataset_identity": self.dataset_identity,
                     "view_identity": self.view_identity,
                     "checkpoint_path": str(self.path) if self.path else None,
+                    "checkpoint_sha256": self.checkpoint_sha256,
                     "run_directory": str(self.run_directory) if self.run_directory else None,
                 }
             )

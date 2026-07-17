@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -26,19 +27,158 @@ _EVIDENCE_SOURCE_KEY = "_checkpoint_evidence_source"
 
 
 def file_sha256(path: Path) -> str:
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+    descriptor = os.open(path, flags)
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or int(getattr(before, "st_nlink", 1)) != 1:
+            raise OSError("checkpoint is not one regular single-link file")
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
             digest.update(chunk)
-    return digest.hexdigest()
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            getattr(before, "st_mtime_ns", None),
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            getattr(after, "st_mtime_ns", None),
+        ) or (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            getattr(after, "st_mtime_ns", None),
+        ) != (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            getattr(current, "st_mtime_ns", None),
+        ):
+            raise OSError("checkpoint changed while hashing")
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
 
 
 def _read_object(path: Path) -> dict[str, Any]:
+    descriptor = -1
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or int(getattr(before, "st_nlink", 1)) != 1
+            or before.st_size > 4 * 1024 * 1024
+        ):
+            return {}
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > 4 * 1024 * 1024:
+                return {}
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        before_identity = (before.st_dev, before.st_ino, before.st_size, getattr(before, "st_mtime_ns", None))
+        after_identity = (after.st_dev, after.st_ino, after.st_size, getattr(after, "st_mtime_ns", None))
+        current_identity = (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            getattr(current, "st_mtime_ns", None),
+        )
+        if before_identity != after_identity or after_identity != current_identity:
+            return {}
+        value = json.loads(b"".join(chunks).decode("utf-8", errors="strict"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     return value if isinstance(value, dict) else {}
+
+
+def _is_reparse(stat_result: os.stat_result) -> bool:
+    attributes = int(getattr(stat_result, "st_file_attributes", 0))
+    marker = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return bool(attributes & marker)
+
+
+def _safe_direct_run_directory(path: Path, runs_directory: Path) -> bool:
+    try:
+        if path.parent != runs_directory or os.path.ismount(path):
+            return False
+        info = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and not _is_reparse(info)
+
+
+def _safe_regular_descendant(path: Path, root: Path) -> bool:
+    """Validate lexical and resolved containment without crossing link/mount seams."""
+
+    try:
+        lexical_root = Path(os.path.abspath(root))
+        lexical_path = Path(os.path.abspath(path))
+        relative = lexical_path.relative_to(lexical_root)
+        if not relative.parts:
+            return False
+        current = lexical_root
+        for part in relative.parts:
+            current = current / part
+            info = current.lstat()
+            if stat.S_ISLNK(info.st_mode) or _is_reparse(info) or os.path.ismount(current):
+                return False
+        final = lexical_path.lstat()
+        if not stat.S_ISREG(final.st_mode) or final.st_nlink != 1:
+            return False
+        resolved_root = root.resolve(strict=True)
+        resolved_path = lexical_path.resolve(strict=True)
+        resolved_path.relative_to(resolved_root)
+        return resolved_path == lexical_path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _safe_directory_descendant(path: Path, root: Path) -> bool:
+    try:
+        lexical_root = Path(os.path.abspath(root))
+        lexical_path = Path(os.path.abspath(path))
+        relative = lexical_path.relative_to(lexical_root)
+        if not relative.parts:
+            return False
+        current = lexical_root
+        for part in relative.parts:
+            current = current / part
+            info = current.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or _is_reparse(info)
+                or os.path.ismount(current)
+            ):
+                return False
+        lexical_path.resolve(strict=True).relative_to(root.resolve(strict=True))
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _safe_read_object(path: Path, root: Path) -> dict[str, Any]:
+    return _read_object(path) if _safe_regular_descendant(path, root) else {}
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -94,9 +234,9 @@ def expected_training_view_identity(config: Mapping[str, Any]) -> str | None:
 
 def _checkpoint_rows(run_directory: Path, state: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    completion = _read_object(run_directory / "run_completion_marker.json")
-    manifest = _read_object(run_directory / "checkpoint_manifest.json")
-    verification = _read_object(run_directory / "checkpoint_verification.json")
+    completion = _safe_read_object(run_directory / "run_completion_marker.json", run_directory)
+    manifest = _safe_read_object(run_directory / "checkpoint_manifest.json", run_directory)
+    verification = _safe_read_object(run_directory / "checkpoint_verification.json", run_directory)
     sources = (
         ("state.checkpoints", state.get("checkpoints")),
         ("state.checkpoint", state.get("checkpoint")),
@@ -195,7 +335,60 @@ def _resolve_checkpoint_path(run_directory: Path, row: Mapping[str, Any]) -> Pat
     if not raw:
         return None
     path = Path(str(raw)).expanduser()
-    return path.resolve() if path.is_absolute() else (run_directory / path).resolve()
+    if ".." in path.parts:
+        raise ValueError("checkpoint path cannot contain parent traversal")
+    lexical = path if path.is_absolute() else run_directory / path
+    return lexical.resolve()
+
+
+def _checkpoint_lexical_path(run_directory: Path, row: Mapping[str, Any]) -> Path | None:
+    raw = _first(row.get("path"), row.get("checkpoint"), row.get("checkpoint_path"), row.get("file"))
+    if not raw:
+        return None
+    path = Path(str(raw)).expanduser()
+    if ".." in path.parts:
+        return None
+    return path if path.is_absolute() else run_directory / path
+
+
+def _checkpoint_hash_evidence(row: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    hashes: set[str] = set()
+    malformed = False
+    for evidence in _evidence_rows(row):
+        for field in ("sha256", "checkpoint_sha256", "file_sha256"):
+            claim = evidence.get(field)
+            if claim in (None, ""):
+                continue
+            if not isinstance(claim, str) or claim != claim.strip() or not _SHA256_PATTERN.fullmatch(claim.lower()):
+                malformed = True
+            else:
+                hashes.add(claim.lower())
+    if malformed:
+        return None, "malformed"
+    if len(hashes) > 1:
+        return None, "conflict"
+    return next(iter(hashes), None), None
+
+
+def _checkpoint_path_safety_reason(
+    row: Mapping[str, Any],
+    path: Path,
+    run_directory: Path,
+) -> str | None:
+    for evidence in _evidence_rows(row):
+        lexical = _checkpoint_lexical_path(run_directory, evidence)
+        if lexical is None:
+            return "Checkpoint path crosses an unsafe link, mount, traversal, or hard-link seam."
+        if not os.path.lexists(lexical):
+            return "Checkpoint artifact is missing."
+        if not _safe_regular_descendant(lexical, run_directory):
+            return "Checkpoint path crosses an unsafe link, mount, traversal, or hard-link seam."
+        try:
+            if lexical.resolve(strict=True) != path.resolve(strict=True):
+                return "Checkpoint path aliases do not identify one exact artifact."
+        except OSError:
+            return "Checkpoint artifact is missing."
+    return None
 
 
 def _step(row: Mapping[str, Any], path: Path | None, state: Mapping[str, Any]) -> int | None:
@@ -312,10 +505,17 @@ def _candidate_id(run_id: str, step: int | None, weights: str, path: Path | None
 
 
 def _verification(
-    state: Mapping[str, Any], row: Mapping[str, Any], path: Path | None, *, schema_valid: bool
+    state: Mapping[str, Any],
+    row: Mapping[str, Any],
+    path: Path | None,
+    *,
+    run_directory: Path,
 ) -> tuple[str, list[str]]:
-    if path is None or not path.is_file():
+    if path is None:
         return "MISSING", ["Checkpoint artifact is missing."]
+    path_reason = _checkpoint_path_safety_reason(row, path, run_directory)
+    if path_reason:
+        return ("MISSING" if "missing" in path_reason.lower() else "FAILED"), [path_reason]
 
     pass_states = {"PASS", "PASSED", "VERIFIED", "VALID"}
     fail_states = {
@@ -329,7 +529,6 @@ def _verification(
     explicit_verified = False
     explicit_failed = False
     malformed = False
-    hashes: set[str] = set()
     evidence_rows = _evidence_rows(row)
 
     state_verification = _nested(state, "backend_identity", "verification_state")
@@ -371,15 +570,6 @@ def _verification(
                 elif not claim:
                     explicit_failed = True
 
-        for field in ("sha256", "checkpoint_sha256", "file_sha256"):
-            claim = evidence.get(field)
-            if claim in (None, ""):
-                continue
-            if not isinstance(claim, str) or claim != claim.strip() or not _SHA256_PATTERN.fullmatch(claim.lower()):
-                malformed = True
-            else:
-                hashes.add(claim.lower())
-
     for claim in verification_claims:
         if not isinstance(claim, str) or claim != claim.strip():
             malformed = True
@@ -392,24 +582,24 @@ def _verification(
         else:
             malformed = True
 
-    if malformed:
-        return "FAILED", ["Checkpoint verification or hash evidence is malformed or unsupported."]
-    if len(hashes) > 1:
+    expected_hash, hash_error = _checkpoint_hash_evidence(row)
+    if hash_error == "conflict":
         return "FAILED", ["Checkpoint SHA-256 evidence disagrees across durable sources."]
-    if hashes:
-        try:
-            if file_sha256(path) != next(iter(hashes)):
-                return "FAILED", ["Checkpoint SHA-256 does not match verified run state."]
-            explicit_verified = True
-        except OSError:
-            return "FAILED", ["Checkpoint artifact could not be read for verification."]
+    if malformed or hash_error == "malformed":
+        return "FAILED", ["Checkpoint verification or hash evidence is malformed or unsupported."]
+    if expected_hash is None:
+        return "UNVERIFIED", ["Checkpoint lacks a durable per-file SHA-256 binding."]
+    try:
+        if file_sha256(path) != expected_hash:
+            return "FAILED", ["Checkpoint SHA-256 does not match verified run state."]
+        explicit_verified = True
+    except OSError:
+        return "FAILED", ["Checkpoint artifact could not be read for verification."]
     if explicit_failed:
         return "FAILED", ["Checkpoint verification state is not passing across all durable sources."]
-    # A canonical v3 state is itself the minimum verified state contract. An
-    # explicit per-checkpoint hash or verdict strengthens it but is not required.
-    if explicit_verified or schema_valid:
+    if explicit_verified:
         return "VERIFIED", []
-    return "UNVERIFIED", ["Checkpoint is not bound to canonical verified v3 run state."]
+    return "UNVERIFIED", ["Checkpoint is not bound to a durable per-file SHA-256."]
 
 
 def _availability(
@@ -429,6 +619,10 @@ def _availability(
     run_command = str(state.get("command") or command.get("command") or "").lower()
     if state.get("run_id") and str(state["run_id"]) != run_directory.name:
         return CheckpointAvailability.INVALID, "FAILED", ("Run identity does not match its durable directory.",)
+    if not schema_valid:
+        return CheckpointAvailability.INVALID, "FAILED", ("Run state schema is missing or unsupported.",)
+    if command.get("_unsafe_artifact") is True:
+        return CheckpointAvailability.INVALID, "FAILED", ("Run command evidence crosses an unsafe filesystem seam.",)
     if run_command not in {"train", "training", "training.start"}:
         return CheckpointAvailability.FOREIGN, "FOREIGN", ("Run is not a Sprite Lab training run.",)
     declared_root = command.get("project_root")
@@ -441,6 +635,10 @@ def _availability(
             return CheckpointAvailability.FOREIGN, "FOREIGN", ("Run belongs to a different project root.",)
     if path is not None and not _inside(path, run_directory):
         return CheckpointAvailability.FOREIGN, "FOREIGN", ("Checkpoint is outside its verified run directory.",)
+    if path is not None and (path_reason := _checkpoint_path_safety_reason(row, path, run_directory)):
+        if "missing" in path_reason.lower():
+            return CheckpointAvailability.MISSING, "MISSING", (path_reason,)
+        return CheckpointAvailability.INVALID, "FAILED", (path_reason,)
     if _recursive_truthy((state, row), frozenset({"unsafe_resume", "unsafe_resume_record", "unsafe_resume_requested"})):
         return (
             CheckpointAvailability.UNSAFE_RESUME,
@@ -449,14 +647,7 @@ def _availability(
         )
     if status != "COMPLETE":
         return CheckpointAvailability.INCOMPLETE, "INCOMPLETE", (f"Training run state is {status}.",)
-    verification, verification_reasons = _verification(state, row, path, schema_valid=schema_valid)
-    reasons.extend(verification_reasons)
-    if verification == "MISSING":
-        return CheckpointAvailability.MISSING, verification, tuple(reasons)
-    if verification == "FAILED":
-        return CheckpointAvailability.INVALID, verification, tuple(reasons)
-    if verification != "VERIFIED":
-        return CheckpointAvailability.UNVERIFIED, verification, tuple(reasons)
+    verification = "UNVERIFIED"
     dataset_values, malformed_dataset = _dataset_identity_values(state, row)
     if malformed_dataset:
         return (
@@ -497,6 +688,19 @@ def _availability(
             verification,
             ("Checkpoint training-view identity does not match the active training-view identity.",),
         )
+    verification, verification_reasons = _verification(
+        state,
+        row,
+        path,
+        run_directory=run_directory,
+    )
+    reasons.extend(verification_reasons)
+    if verification == "MISSING":
+        return CheckpointAvailability.MISSING, verification, tuple(reasons)
+    if verification == "FAILED":
+        return CheckpointAvailability.INVALID, verification, tuple(reasons)
+    if verification != "VERIFIED":
+        return CheckpointAvailability.UNVERIFIED, verification, tuple(reasons)
     return CheckpointAvailability.ELIGIBLE, verification, ()
 
 
@@ -511,18 +715,27 @@ def discover_checkpoint_candidates(
 
     eligible: list[CheckpointCandidate] = []
     unavailable: list[CheckpointCandidate] = []
-    if not runs_directory.is_dir():
+    if not _safe_directory_descendant(runs_directory, project_root):
         return CheckpointCatalog((), (), None)
-    for run_directory in sorted((path for path in runs_directory.iterdir() if path.is_dir()), key=lambda p: p.name):
+    for run_directory in sorted(
+        (path for path in runs_directory.iterdir() if _safe_direct_run_directory(path, runs_directory)),
+        key=lambda p: p.name,
+    ):
         state_path = run_directory / "state.json"
-        if not state_path.is_file():
+        if not _safe_regular_descendant(state_path, run_directory):
             continue
-        state = _read_object(state_path)
-        command = _read_object(run_directory / "command.json")
+        state = _safe_read_object(state_path, run_directory)
+        command_path = run_directory / "command.json"
+        command = _safe_read_object(command_path, run_directory)
+        if os.path.lexists(command_path) and not command:
+            command = {"_unsafe_artifact": True}
         run_id = str(state.get("run_id") or run_directory.name)
         rows = _checkpoint_rows(run_directory, state) or [{}]
         for row in rows:
-            path = _resolve_checkpoint_path(run_directory, row)
+            try:
+                path = _resolve_checkpoint_path(run_directory, row)
+            except (OSError, RuntimeError, ValueError):
+                path = None
             step = _step(row, path, state)
             weights = _weights(row, path)
             identity = _dataset_identity(state, row)
@@ -564,6 +777,7 @@ def discover_checkpoint_candidates(
                 view_identity_summary=_view_summary(view_identity, state),
                 checkpoint_step=step,
                 weights=weights,
+                checkpoint_sha256=_checkpoint_hash_evidence(row)[0],
                 verification_state=verification,
                 availability=availability,
                 unavailable_reasons=reasons,

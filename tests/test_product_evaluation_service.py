@@ -37,6 +37,14 @@ def _project(tmp_path: Path) -> tuple[dict, Path]:
             "status": "COMPLETE",
             "started_at": "2026-07-13T10:00:00+00:00",
             "backend_identity": {"dataset_identity": "dataset-v1", "view_identity": "view-v1"},
+            "checkpoints": [
+                {
+                    "path": "checkpoints/checkpoint_step_000100_ema.pt",
+                    "step": 100,
+                    "weights": "ema",
+                    "sha256": sha256(checkpoint.read_bytes()).hexdigest(),
+                }
+            ],
         },
     )
     _write_json(run / "command.json", {"command": "train", "project_root": str(tmp_path)})

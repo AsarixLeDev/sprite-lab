@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +19,10 @@ from spritelab.product_core import (
     ProjectContext,
     strict_json_dumps,
     strict_json_loads,
+)
+from spritelab.product_features.training.activation import (
+    ConditionedActivationError,
+    load_conditioned_training_activation,
 )
 from spritelab.product_features.training.config import ComputeSettings
 from spritelab.product_features.training.dashboard import DashboardState
@@ -111,10 +115,12 @@ class TrainingService:
         backend: ComputeBackend,
         *,
         resolver: TrainingPlanResolver | None = None,
+        activation_loader: Callable[..., Any] | None = None,
     ) -> None:
         self.context = context
         self.backend = backend
         self.resolver = resolver or TrainingPlanResolver()
+        self.activation_loader = activation_loader or load_conditioned_training_activation
         self.sessions: dict[str, TrainingSession] = {}
         self.repository = EventRepository(context.runs_directory, private_roots=(context.project_root,))
 
@@ -186,6 +192,28 @@ class TrainingService:
             )
         campaign = plan.campaign
         assert campaign is not None
+        try:
+            activation = self.activation_loader(
+                self.context,
+                profile,
+                custom_spec=custom_spec,
+                expected_campaign=campaign,
+                require_audit=True,
+            )
+        except (ConditionedActivationError, OSError, TypeError, KeyError) as exc:
+            code = exc.code if isinstance(exc, ConditionedActivationError) else "conditioned_activation_invalid"
+            message = (
+                exc.public_message
+                if isinstance(exc, ConditionedActivationError)
+                else "The exact conditioned training activation could not be verified safely."
+            )
+            return ProductResult(
+                status=ProductStatus.BLOCKED,
+                feature="training",
+                message="Training was not launched because its conditioned activation is not applicable.",
+                blockers=(ProductBlocker(code, message),),
+                data={**plan.to_dict(), "backend_launches": 0},
+            )
         config = project_config_from_context(self.context)
         campaign_config_path = config.path_for("training", "campaign_config")
         if campaign_config_path is None or not campaign_config_path.is_file():
@@ -235,7 +263,12 @@ class TrainingService:
             backend_id=self.backend.backend_id,
             backend_run_reference=session_id,
             backend_identity={"backend_id": self.backend.backend_id},
-            extra={"plan": _plan_to_state(plan), "jobs": [], "cursors": {}},
+            extra={
+                "plan": _plan_to_state(plan),
+                "jobs": [],
+                "cursors": {},
+                "conditioned_activation": activation.to_contract_dict(),
+            },
         )
         self._apply(
             session,
@@ -568,13 +601,48 @@ class TrainingService:
                 blockers=(ProductBlocker("cloud_confirmation", "Confirm hosted cost before resume."),),
                 data={"backend_launches": 0, "unsafe_resume_available": False},
             )
-        plan = self.plan(session.plan.profile, before_launch=True)
+        try:
+            activation = self.activation_loader(
+                self.context,
+                session.plan.profile,
+                expected_campaign=session.plan.campaign,
+                require_audit=True,
+            )
+        except (ConditionedActivationError, OSError, TypeError, KeyError) as exc:
+            code = exc.code if isinstance(exc, ConditionedActivationError) else "conditioned_activation_invalid"
+            message = (
+                exc.public_message
+                if isinstance(exc, ConditionedActivationError)
+                else "The exact conditioned training activation could not be verified safely."
+            )
+            return ProductResult(
+                ProductStatus.BLOCKED,
+                "Safe resume was refused because the retained conditioned activation is no longer applicable.",
+                feature="training",
+                blockers=(ProductBlocker(code, message),),
+                data={"backend_launches": 0, "unsafe_resume_available": False},
+            )
+        custom_spec = activation.selected_spec if session.plan.profile is TrainingProfile.CUSTOM else None
+        plan = self.plan(session.plan.profile, custom_spec=custom_spec, before_launch=True)
         if plan.blockers or plan.campaign is None:
             return ProductResult(
                 ProductStatus.BLOCKED,
                 "Safe resume gates are no longer satisfied.",
                 feature="training",
                 blockers=tuple(ProductBlocker(item.gate_id, item.message, item.resolution) for item in plan.blockers),
+                data={"backend_launches": 0, "unsafe_resume_available": False},
+            )
+        if plan.campaign.get("campaign_identity") != activation.campaign.get("campaign_identity"):
+            return ProductResult(
+                ProductStatus.BLOCKED,
+                "Safe resume was refused because the selected campaign changed.",
+                feature="training",
+                blockers=(
+                    ProductBlocker(
+                        "selected_campaign_changed",
+                        "The retained run, current profile, and conditioned activation do not bind the same campaign.",
+                    ),
+                ),
                 data={"backend_launches": 0, "unsafe_resume_available": False},
             )
         campaign = plan.campaign

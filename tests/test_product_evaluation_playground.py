@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -35,6 +37,7 @@ def _candidate(tmp_path: Path, *, weights: str) -> CheckpointCandidate:
         weights=weights,
         verification_state="VERIFIED",
         availability=CheckpointAvailability.ELIGIBLE,
+        checkpoint_sha256=sha256(path.read_bytes()).hexdigest(),
         path=path,
         run_directory=tmp_path,
     )
@@ -465,3 +468,70 @@ def test_authoritative_playground_state_missing_events_is_not_comparable(tmp_pat
     assert any("events.jsonl is missing" in reason for reason in restored["integrity_reasons"])
     assert restored["benchmark_eligible"] is False
     assert restored["promotion_evidence_eligible"] is False
+
+
+def test_generation_refreshes_catalog_and_fails_if_eligibility_changes(tmp_path: Path) -> None:
+    initial = _catalog(tmp_path)
+    refreshes = 0
+
+    def provider() -> CheckpointCatalog:
+        nonlocal refreshes
+        refreshes += 1
+        return initial if refreshes == 1 else CheckpointCatalog((), (), None)
+
+    service = PlaygroundService(
+        initial,
+        output_root=tmp_path / "playground",
+        generator=FakeGenerator(),
+        catalog_provider=provider,
+    )
+    with pytest.raises(GenerationSafetyError, match="eligibility changed"):
+        service.generate(
+            GenerationRequest(prompt="fresh catalog", checkpoint_id="checkpoint-ema", image_count=1),
+            explicit_action=True,
+        )
+    assert refreshes == 2
+    assert service.latest_run()["status"] == "FAILED"
+
+
+def test_explicit_cancellation_cannot_be_overwritten_by_completion(tmp_path: Path) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingGenerator(FakeGenerator):
+        def generate(self, **kwargs):
+            self.calls.append(kwargs)
+            started.set()
+            assert release.wait(timeout=10)
+            return [GeneratedAsset(b"blocked")]
+
+    service = PlaygroundService(
+        _catalog(tmp_path),
+        output_root=tmp_path / "playground",
+        generator=BlockingGenerator(),
+    )
+    errors: list[BaseException] = []
+
+    def run_generation() -> None:
+        try:
+            service.generate(
+                GenerationRequest(prompt="cancel race", checkpoint_id="checkpoint-ema", image_count=1),
+                explicit_action=True,
+            )
+        except BaseException as exc:  # expected typed cancellation from the worker thread
+            errors.append(exc)
+
+    worker = threading.Thread(target=run_generation)
+    worker.start()
+    assert started.wait(timeout=10)
+    active = service.latest_run()
+    assert active is not None
+    service.cancel(active["run_id"], reason="test cancellation")
+    release.set()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    assert errors and isinstance(errors[0], GenerationCancelledError)
+    cancelled = service.reconstruct(active["run_id"])
+    assert cancelled["status"] == "CANCELLED"
+    assert cancelled["report_available"] is False

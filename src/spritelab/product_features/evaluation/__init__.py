@@ -7,6 +7,10 @@ from spritelab.product_features.evaluation.dashboard import (
     compare_evaluations,
     filter_gallery,
 )
+from spritelab.product_features.evaluation.local_generator import (
+    LocalCheckpointPlaygroundGenerator,
+    LocalPlaygroundGenerationError,
+)
 from spritelab.product_features.evaluation.memorization_display import (
     PROMOTION_INTEGRITY_MESSAGE,
     MemorizationDisplayState,
@@ -43,6 +47,8 @@ __all__ = [
     "GenerationRequest",
     "GenerationSafetyError",
     "IncompatibleMetricDefinitions",
+    "LocalCheckpointPlaygroundGenerator",
+    "LocalPlaygroundGenerationError",
     "MemorizationDisplayState",
     "PlaygroundService",
     "build_dashboard",

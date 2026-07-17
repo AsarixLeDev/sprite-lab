@@ -4,14 +4,13 @@
 <header class="page-header"><div><span class="eyebrow">Step 2</span><h1>Training</h1><p>Configure compute, pass the existing campaign gates, and follow durable live progress.</p></div></header>
 
 <section class="panel preparation-panel" aria-labelledby="training-preparation-title">
-  <div class="section-heading"><div><span class="eyebrow">Dataset and campaign preparation</span><h2 id="training-preparation-title">Prepare accepted images for training</h2></div><span id="preparation-state">Not started</span></div>
-  <p>Verify every accepted source hash, encode canonical 32 x 32 arrays, run dataset QA, freeze an image-only view, and validate a recommended three-seed campaign.</p>
+  <div class="section-heading"><div><span class="eyebrow">Optional baseline preparation</span><h2 id="training-preparation-title">Build an immutable image-only baseline</h2></div><span id="preparation-state">Not started</span></div>
+  <p>Verify every accepted source hash, encode canonical 32 x 32 arrays, run dataset QA, and validate a non-launchable three-seed baseline draft.</p>
   <div class="preparation-authorizations">
-    <label><input id="authorize-freeze" type="checkbox"> I explicitly authorize publication of this image-only production freeze.</label>
-    <label><input id="authorize-training" type="checkbox"> I explicitly authorize training in this project after every remaining gate passes.</label>
+    <label><input id="authorize-baseline" type="checkbox"> I explicitly authorize publication of immutable image-only baseline artifacts.</label>
   </div>
-  <p class="audit-gate-note"><strong>Still mandatory:</strong> preparation does not create, replace, or bypass the independent training-infrastructure audit. Training stays blocked until an applicable audit reports PASS.</p>
-  <div class="form-actions"><button class="button primary" id="prepare-training" type="button">Prepare training artifacts</button></div>
+  <div class="audit-gate-note" id="conditioned-contract-note"><strong>This never unlocks training.</strong> Start training requires a separately published conditioned Dataset-v5 freeze with immutable validation and independent labeling-audit identities, an exactly bound launch-authorized campaign, explicit execution policy, and a passing independent training-infrastructure audit.</div>
+  <div class="form-actions"><button class="button primary" id="prepare-training" type="button">Build image-only baseline</button></div>
   <label class="progress-label" for="preparation-progress">Preparation progress <span id="preparation-progress-label">0 / 0</span></label>
   <progress id="preparation-progress" value="0" max="1">0%</progress>
   <div id="preparation-message" class="action-summary" role="status" aria-live="polite">No files have been prepared.</div>

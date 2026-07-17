@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import threading
-import uuid
 from collections.abc import Callable, Mapping
 from importlib.resources import files
 from typing import Any
@@ -23,6 +22,10 @@ from spritelab.product_core import (
 )
 from spritelab.product_features.training.config import ComputeSettings
 from spritelab.product_features.training.models import TrainingProfile
+from spritelab.product_features.training.preparation_jobs import (
+    PreparationJobRepository,
+    PreparationJobStateError,
+)
 from spritelab.product_features.training.service import TrainingService
 
 PLUGIN_ID = "training"
@@ -44,15 +47,8 @@ def create_router(
     cached_service: TrainingService | None = service
     cached_version: int | None = None
     cached_config_stamp: int | None = None
-    preparation_lock = threading.Lock()
-    preparation: dict[str, Any] = {
-        "status": "not_started",
-        "current": 0,
-        "total": 0,
-        "logs": [],
-        "result": None,
-        "error": None,
-    }
+    preparation_jobs = PreparationJobRepository(context)
+    preparation_jobs.reconstruct()
 
     def current_service() -> TrainingService:
         nonlocal cached_config_stamp, cached_service, cached_version
@@ -73,8 +69,7 @@ def create_router(
     @router.get("/training/api/preparation")
     @product_api
     def preparation_state() -> JSONResponse:
-        with preparation_lock:
-            return JSONResponse(dict(preparation))
+        return JSONResponse(_preparation_projection(preparation_jobs.load()))
 
     @router.post("/training/api/preparation")
     @product_api
@@ -82,85 +77,73 @@ def create_router(
         payload = await _json_mapping(request)
         if payload is None:
             return api_error(400, "invalid_training_preparation", "Preparation settings must be a JSON object.")
-        if payload.get("authorize_freeze") is not True:
-            return api_error(422, "freeze_authorization_required", "Confirm the image-only production freeze first.")
-        with preparation_lock:
-            if preparation["status"] == "running":
-                return JSONResponse(dict(preparation), status_code=409)
-            preparation.update(
-                {
-                    "job_id": uuid.uuid4().hex,
-                    "status": "running",
-                    "current": 0,
-                    "total": 0,
-                    "logs": ["Preparation queued on a background worker."],
-                    "result": None,
-                    "error": None,
-                }
+        if payload.get("authorize_baseline") is not True:
+            return api_error(422, "baseline_authorization_required", "Confirm the immutable image-only baseline first.")
+        if payload.get("authorize_training") is True or payload.get("authorize_freeze") is True:
+            return api_error(
+                422,
+                "baseline_cannot_authorize_training",
+                "Image-only baseline preparation cannot authorize a production freeze or training.",
+                recoverable=False,
+                next_action="Publish and audit a conditioned Dataset-v5 freeze through the dataset workflow.",
+            )
+        try:
+            from spritelab.product_features.training.preparation import (
+                TrainingPreparationError,
+                preparation_job_identities,
+                prepare_active_dataset,
             )
 
+            identities = preparation_job_identities(context)
+            preparation = preparation_jobs.begin(identities)
+        except TrainingPreparationError as exc:
+            return api_error(409, exc.code, exc.public_message)
+        except PreparationJobStateError:
+            state = preparation_jobs.load()
+            return JSONResponse(_preparation_projection(state), status_code=409)
+        job_id = str(preparation["job_id"])
+        owner_token = str(preparation["worker_owner"])
+
         def update(current: int, total: int, message: str) -> None:
-            with preparation_lock:
-                preparation["current"] = current
-                preparation["total"] = total
-                preparation["logs"] = [*preparation["logs"], message][-200:]
+            preparation_jobs.progress(job_id, owner_token, current, total, message)
 
         def run() -> None:
             try:
-                from spritelab.product_features.training.preparation import (
-                    TrainingPreparationError,
-                    prepare_active_dataset,
-                )
-            except Exception:
-                with preparation_lock:
-                    preparation["status"] = "failed"
-                    preparation["error"] = {
-                        "code": "training_preparation_failed",
-                        "message": "Training preparation failed safely before launch.",
-                    }
-                    preparation["logs"] = [
-                        *preparation["logs"],
-                        "Preparation stopped safely; review server logs for details.",
-                    ][-200:]
-                return
-            try:
                 result = prepare_active_dataset(
                     context,
-                    authorize_freeze=True,
-                    authorize_training=payload.get("authorize_training") is True,
+                    authorize_baseline=True,
                     progress=update,
                 )
             except TrainingPreparationError as exc:
-                with preparation_lock:
-                    preparation["status"] = "failed"
-                    preparation["error"] = {"code": exc.code, "message": exc.public_message}
-                    preparation["logs"] = [
-                        *preparation["logs"],
-                        "Preparation stopped safely; no local paths were exposed.",
-                    ][-200:]
+                preparation_jobs.transition(
+                    job_id,
+                    owner_token,
+                    status="failed",
+                    error={"code": exc.code, "message": exc.public_message},
+                    message="Preparation stopped safely; no local paths were exposed.",
+                )
             except Exception:
-                with preparation_lock:
-                    preparation["status"] = "failed"
-                    preparation["error"] = {
+                preparation_jobs.transition(
+                    job_id,
+                    owner_token,
+                    status="failed",
+                    error={
                         "code": "training_preparation_failed",
                         "message": "Training preparation failed safely before launch.",
-                    }
-                    preparation["logs"] = [
-                        *preparation["logs"],
-                        "Preparation stopped safely; review server logs for details.",
-                    ][-200:]
+                    },
+                    message="Preparation stopped safely; review server logs for details.",
+                )
             else:
-                with preparation_lock:
-                    preparation["status"] = "complete"
-                    preparation["result"] = result
-                    preparation["logs"] = [
-                        *preparation["logs"],
-                        "Artifacts are ready. The independent training-infrastructure audit remains mandatory.",
-                    ][-200:]
+                preparation_jobs.transition(
+                    job_id,
+                    owner_token,
+                    status="complete",
+                    result=result,
+                    message="Immutable baseline artifacts are ready. No production or training authorization changed.",
+                )
 
         threading.Thread(target=run, name="spritelab-training-preparation", daemon=True).start()
-        with preparation_lock:
-            return JSONResponse(dict(preparation), status_code=202)
+        return JSONResponse(_preparation_projection(preparation), status_code=202)
 
     def settings() -> tuple[ComputeSettings, int, bool]:
         raw, version, saved = repository.effective_settings("compute")
@@ -193,10 +176,34 @@ def create_router(
     @product_api
     def training_state(profile: str = "recommended") -> JSONResponse:
         try:
-            result = current_service().status(TrainingProfile(profile))
+            selected_profile = TrainingProfile(profile)
+            result = current_service().status(selected_profile)
         except (ValueError, LookupError) as exc:
             return api_error(422, "training_profile_invalid", str(exc))
-        return JSONResponse(result.to_dict())
+        payload = result.to_dict()
+        contract = _conditioned_contract(context, selected_profile)
+        data = dict(payload.get("data") or {})
+        data["conditioned_dataset_contract"] = contract
+        if not contract.get("ready"):
+            data["ready"] = False
+            data["availability_state"] = "Training unavailable"
+            if payload.get("status") == ProductStatus.READY.value:
+                payload["status"] = ProductStatus.BLOCKED.value
+                payload["message"] = "Training requires an audited conditioned Dataset-v5 freeze and bound campaign."
+            payload["blockers"] = [
+                *list(payload.get("blockers") or []),
+                *[
+                    {
+                        "code": str(item.get("code") or "conditioned_dataset_contract"),
+                        "message": str(item.get("message") or "The conditioned dataset contract is incomplete."),
+                        "resolution": "Complete the conditioned Dataset-v5 freeze, audits, campaign binding, and execution policy.",
+                    }
+                    for item in contract.get("blockers", [])
+                    if isinstance(item, Mapping)
+                ],
+            ]
+        payload["data"] = data
+        return JSONResponse(payload)
 
     @router.get("/training/api/settings")
     @product_api
@@ -329,6 +336,15 @@ def create_router(
         except ValueError:
             return api_error(422, "training_profile_invalid", "The selected training profile is invalid.")
         custom = payload.get("custom") if isinstance(payload.get("custom"), dict) else None
+        contract = _conditioned_contract(context, profile, custom_spec=custom)
+        if not contract.get("ready"):
+            return api_error(
+                409,
+                "conditioned_dataset_contract_required",
+                "Training requires an audited conditioned Dataset-v5 freeze and an exactly bound campaign.",
+                recoverable=True,
+                next_action="Complete the conditioned dataset, independent audits, campaign binding, and execution authorizations.",
+            )
         result = current_service().start(
             profile,
             custom_spec=custom,
@@ -399,6 +415,35 @@ async def _json_mapping(request: Any) -> dict[str, Any] | None:
     except (ValueError, json.JSONDecodeError):
         return None
     return dict(value) if isinstance(value, Mapping) else None
+
+
+def _preparation_projection(state: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in state.items() if key not in {"worker_owner", "worker_pid"}}
+
+
+def _conditioned_contract(
+    context: ProjectContext,
+    profile: TrainingProfile = TrainingProfile.RECOMMENDED,
+    *,
+    custom_spec: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    try:
+        from spritelab.product_features.training.preparation import conditioned_training_contract
+
+        return conditioned_training_contract(context, profile, custom_spec=custom_spec)
+    except Exception:
+        return {
+            "schema_version": "spritelab.training.conditioned-dataset-contract.v2",
+            "ready": False,
+            "profile": profile.value,
+            "blockers": [
+                {
+                    "code": "conditioned_dataset_contract",
+                    "message": "The conditioned dataset contract could not be verified safely.",
+                }
+            ],
+            "paths_exposed": False,
+        }
 
 
 def _next_action(result: ProductResult, fallback: str) -> str:

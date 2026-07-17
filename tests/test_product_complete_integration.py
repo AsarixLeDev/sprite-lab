@@ -6,6 +6,7 @@ import json
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -164,6 +165,14 @@ def synthetic_project(tmp_path_factory: pytest.TempPathFactory) -> SyntheticProj
                 "dataset_identity": "synthetic-dataset-v1",
                 "view_identity": "synthetic-view-v1",
             },
+            "checkpoints": [
+                {
+                    "path": "checkpoints/checkpoint_step_000100_ema.pt",
+                    "step": 100,
+                    "weights": "ema",
+                    "sha256": sha256(checkpoint.read_bytes()).hexdigest(),
+                }
+            ],
         },
     )
     _write_json(run / "command.json", {"command": "train", "project_root": str(root)})

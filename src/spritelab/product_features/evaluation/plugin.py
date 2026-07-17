@@ -155,8 +155,12 @@ def capability_probe(context: ProjectContext) -> tuple[ProductCapability, ...]:
         ProductCapability(
             "evaluation.playground",
             "Exploratory prompt playground",
-            ProductStatus.UNAVAILABLE,
-            "A typed generator adapter is required; opening the page does not generate.",
+            ProductStatus.READY if checkpoint_ready else ProductStatus.BLOCKED,
+            (
+                "The local typed generator is ready for an explicit exploratory action."
+                if checkpoint_ready
+                else "The local generator is installed; an eligible active-dataset checkpoint is required."
+            ),
         ),
         ProductCapability(
             "evaluation.promotion_display",

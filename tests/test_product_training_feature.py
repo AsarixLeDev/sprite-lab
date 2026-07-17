@@ -10,9 +10,11 @@ import pytest
 from spritelab.product_core import ProductEvent, ProductResult, ProductStatus, ProjectContext
 from spritelab.product_features.evaluation.checkpoints import discover_checkpoint_candidates
 from spritelab.product_features.training import build_plugin
+from spritelab.product_features.training.activation import ConditionedActivationError
+from spritelab.product_features.training.dashboard import DashboardState
 from spritelab.product_features.training.models import ResolvedTrainingPlan, TrainingProfile
 from spritelab.product_features.training.plans import TrainingPlanResolver
-from spritelab.product_features.training.service import TrainingService
+from spritelab.product_features.training.service import TrainingService, TrainingSession
 from spritelab.product_features.training.web import create_router
 from spritelab.remote_compute import ComputeEstimate, ComputeStatus, FakeComputeBackend, LocalComputeBackend
 from spritelab.training.campaign import DEFAULT_SEEDS, file_sha256, plan_campaign, stable_hash
@@ -128,6 +130,25 @@ def _spec(tmp_path: Path) -> dict:
     }
 
 
+class _AuthorizedTestActivation:
+    def __init__(self, campaign: dict, selected_spec: dict | None = None) -> None:
+        self.campaign = campaign
+        self.selected_spec = selected_spec or campaign
+
+    def to_contract_dict(self) -> dict:
+        return {
+            "schema_version": "spritelab.training.conditioned-dataset-contract.v2",
+            "ready": True,
+            "campaign_identity_sha256": self.campaign["campaign_identity"],
+            "paths_exposed": False,
+        }
+
+
+def _authorize_test_activation(*_args, **kwargs) -> _AuthorizedTestActivation:
+    campaign = kwargs["expected_campaign"]
+    return _AuthorizedTestActivation(campaign)
+
+
 def test_current_project_training_is_blocked_and_launches_nothing() -> None:
     root = Path(__file__).resolve().parents[1]
     backend = FakeComputeBackend()
@@ -214,7 +235,12 @@ def test_fake_local_execution_uses_existing_campaign_execution_gate(tmp_path: Pa
     campaign_path = tmp_path / "campaign.json"
     _write_json(campaign_path, campaign)
     values["training"]["campaign_config"] = str(campaign_path)
-    service = TrainingService(_context(tmp_path, values), backend, resolver=Resolver())
+    service = TrainingService(
+        _context(tmp_path, values),
+        backend,
+        resolver=Resolver(),
+        activation_loader=_authorize_test_activation,
+    )
     result = service.start()
     assert result.status == ProductStatus.RUNNING
     assert backend.calls.count("launch") == 3
@@ -252,7 +278,12 @@ def test_validated_receipt_view_identity_reaches_product_checkpoint_catalog(tmp_
     _write_json(campaign_path, campaign)
     values["training"]["campaign_config"] = str(campaign_path)
     context = _context(tmp_path, values)
-    service = TrainingService(context, FakeComputeBackend(), resolver=Resolver())
+    service = TrainingService(
+        context,
+        FakeComputeBackend(),
+        resolver=Resolver(),
+        activation_loader=_authorize_test_activation,
+    )
 
     started = service.start()
     assert started.status == ProductStatus.RUNNING
@@ -369,6 +400,250 @@ def test_training_page_load_never_probes_prepares_or_launches_cloud(tmp_path: Pa
     assert backend.calls == []
 
 
+def test_web_start_fails_closed_without_a_conditioned_dataset_contract(tmp_path: Path) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    class ReadyLookingService:
+        def __init__(self) -> None:
+            self.starts = 0
+
+        def status(self, _profile: TrainingProfile) -> ProductResult:
+            return ProductResult(
+                ProductStatus.READY,
+                "Synthetic service plan looks ready.",
+                feature="training",
+                data={"ready": True, "availability_state": "Training available"},
+            )
+
+        def start(self, *args, **kwargs) -> ProductResult:
+            del args, kwargs
+            self.starts += 1
+            return ProductResult(ProductStatus.RUNNING, "Started.", feature="training")
+
+    service = ReadyLookingService()
+    app = FastAPI()
+    app.include_router(create_router(_context(tmp_path, deepcopy(DEFAULT_CONFIG)), service))  # type: ignore[arg-type]
+    client = TestClient(app)
+
+    state = client.get("/training/api/state").json()
+    assert state["status"] == "BLOCKED"
+    assert state["data"]["ready"] is False
+    contract = state["data"]["conditioned_dataset_contract"]
+    assert contract["schema_version"] == "spritelab.training.conditioned-dataset-contract.v2"
+    assert contract["ready"] is False
+    assert contract["blockers"]
+    assert contract["paths_exposed"] is False
+
+    response = client.post("/training/api/start", json={"profile": "recommended"})
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "conditioned_dataset_contract_required"
+    assert service.starts == 0
+
+
+def test_web_preserves_safe_start_for_an_exactly_bound_conditioned_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    freeze = tmp_path / "conditioned-freeze.json"
+    _write_json(
+        freeze,
+        {
+            "schema_version": "spritelab.dataset.freeze.conditioned.v5",
+            "dataset_version": 5,
+            "dataset_kind": "conditioned",
+            "requires_semantic_labels": True,
+            "status": "complete",
+            "production_authorized": True,
+            "labeling_audit_sha256": "a" * 64,
+            "validation_report_sha256": "b" * 64,
+        },
+    )
+    spec = _spec(tmp_path)
+    spec["identities"]["dataset_freeze_hash"] = file_sha256(freeze)
+    campaign = tmp_path / "conditioned-campaign.json"
+    _write_json(
+        campaign,
+        {
+            "product_profiles": {
+                "recommended": {
+                    "display": {"display_name": "Conditioned Dataset-v5 campaign"},
+                    "campaign": spec,
+                }
+            }
+        },
+    )
+    values = deepcopy(DEFAULT_CONFIG)
+    values["dataset"]["freeze_manifest"] = str(freeze)
+    values["training"]["dataset_freeze"] = str(freeze)
+    values["training"]["campaign_config"] = str(campaign)
+    values["execution"]["allow_dataset_production_freeze"] = True
+    values["execution"]["allow_training"] = True
+
+    class ConditionedService:
+        def __init__(self) -> None:
+            self.starts = 0
+
+        def status(self, _profile: TrainingProfile) -> ProductResult:
+            return ProductResult(
+                ProductStatus.READY,
+                "All independent gates passed.",
+                feature="training",
+                data={"ready": True, "availability_state": "Training available"},
+            )
+
+        def start(self, *args, **kwargs) -> ProductResult:
+            del args, kwargs
+            self.starts += 1
+            return ProductResult(ProductStatus.RUNNING, "Started.", feature="training")
+
+    service = ConditionedService()
+    seen: list[TrainingProfile] = []
+
+    def exact_contract(_context, profile, *, custom_spec=None):
+        del custom_spec
+        seen.append(profile)
+        return {
+            "schema_version": "spritelab.training.conditioned-dataset-contract.v2",
+            "ready": True,
+            "profile": profile.value,
+            "blockers": [],
+            "paths_exposed": False,
+        }
+
+    monkeypatch.setattr(
+        "spritelab.product_features.training.preparation.conditioned_training_contract",
+        exact_contract,
+    )
+    app = FastAPI()
+    app.include_router(create_router(_context(tmp_path, values), service))  # type: ignore[arg-type]
+    client = TestClient(app)
+
+    state = client.get("/training/api/state").json()
+    assert state["status"] == "READY"
+    assert state["data"]["ready"] is True
+    assert state["data"]["conditioned_dataset_contract"]["ready"] is True
+    assert client.post("/training/api/start", json={"profile": "recommended"}).status_code == 200
+    assert service.starts == 1
+    assert seen == [TrainingProfile.RECOMMENDED, TrainingProfile.RECOMMENDED]
+
+
+@pytest.mark.parametrize("profile", [TrainingProfile.QUALITY, TrainingProfile.CUSTOM])
+def test_start_authorizes_the_exact_quality_or_custom_campaign_before_backend_calls(
+    tmp_path: Path,
+    profile: TrainingProfile,
+) -> None:
+    campaign = plan_campaign(_spec(tmp_path))
+    plan = ResolvedTrainingPlan(
+        profile,
+        "Exact selected campaign",
+        2_400,
+        True,
+        "fake",
+        campaign,
+        (),
+        ComputeEstimate(60, 0, trustworthy=True),
+    )
+
+    class Resolver:
+        def resolve(self, *args, **kwargs):
+            return plan
+
+    requested_custom = {"campaign_id": "exact-custom-request"} if profile is TrainingProfile.CUSTOM else None
+    observed: list[dict] = []
+
+    def refuse_after_observing(_context, selected_profile, **kwargs):
+        observed.append(
+            {
+                "profile": selected_profile,
+                "custom_spec": kwargs.get("custom_spec"),
+                "campaign_identity": kwargs["expected_campaign"]["campaign_identity"],
+                "require_audit": kwargs.get("require_audit"),
+            }
+        )
+        raise ConditionedActivationError("synthetic_refusal", "Synthetic exact-binding refusal.")
+
+    backend = FakeComputeBackend()
+    service = TrainingService(
+        _context(tmp_path, deepcopy(DEFAULT_CONFIG)),
+        backend,
+        resolver=Resolver(),
+        activation_loader=refuse_after_observing,
+    )
+    result = service.start(profile, custom_spec=requested_custom)
+
+    assert result.status is ProductStatus.BLOCKED
+    assert observed == [
+        {
+            "profile": profile,
+            "custom_spec": requested_custom,
+            "campaign_identity": campaign["campaign_identity"],
+            "require_audit": True,
+        }
+    ]
+    assert "prepare" not in backend.calls and "launch" not in backend.calls
+
+
+def test_resume_reauthorizes_the_retained_profile_activation_and_campaign(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    campaign = plan_campaign(_spec(tmp_path))
+    plan = ResolvedTrainingPlan(
+        TrainingProfile.CUSTOM,
+        "Retained custom campaign",
+        2_400,
+        True,
+        "fake",
+        campaign,
+        (),
+        ComputeEstimate(60, 0, trustworthy=True),
+    )
+    dashboard = DashboardState(
+        str(campaign["campaign_id"]),
+        "fake",
+        status=ProductStatus.PAUSED,
+        resume_available=True,
+    )
+    backend = FakeComputeBackend()
+    observed: list[dict] = []
+
+    def refuse_after_observing(_context, selected_profile, **kwargs):
+        observed.append(
+            {
+                "profile": selected_profile,
+                "campaign_identity": kwargs["expected_campaign"]["campaign_identity"],
+                "require_audit": kwargs.get("require_audit"),
+            }
+        )
+        raise ConditionedActivationError("synthetic_resume_refusal", "Synthetic resume refusal.")
+
+    service = TrainingService(
+        _context(tmp_path, deepcopy(DEFAULT_CONFIG)),
+        backend,
+        resolver=object(),  # type: ignore[arg-type]
+        activation_loader=refuse_after_observing,
+    )
+    session = TrainingSession(str(campaign["campaign_id"]), backend, plan, dashboard=dashboard)
+    monkeypatch.setattr(service, "_session", lambda _run_id: session)
+    monkeypatch.setattr(service, "_verify_session_migrations", lambda _session: None)
+
+    result = service.resume(str(campaign["campaign_id"]))
+
+    assert result.status is ProductStatus.BLOCKED
+    assert observed == [
+        {
+            "profile": TrainingProfile.CUSTOM,
+            "campaign_identity": campaign["campaign_identity"],
+            "require_audit": True,
+        }
+    ]
+    assert "prepare" not in backend.calls and "resume" not in backend.calls
+
+
 def test_cli_remains_python_m_spritelab_v3_train() -> None:
     from spritelab.v3.cli import build_parser
 
@@ -401,14 +676,24 @@ def test_training_run_reconstructs_from_canonical_events_after_service_recreatio
     values["training"]["campaign_config"] = str(campaign_path)
     context = _context(tmp_path, values)
     backend = FakeComputeBackend()
-    first = TrainingService(context, backend, resolver=Resolver())
+    first = TrainingService(
+        context,
+        backend,
+        resolver=Resolver(),
+        activation_loader=_authorize_test_activation,
+    )
     started = first.start()
     assert started.status == ProductStatus.RUNNING
     run_id = campaign["campaign_id"]
     run_directory = context.runs_directory / run_id  # type: ignore[operator]
     assert (run_directory / "events.jsonl").is_file()
     assert not (run_directory / "product_events.jsonl").exists()
-    recreated = TrainingService(context, backend, resolver=Resolver())
+    recreated = TrainingService(
+        context,
+        backend,
+        resolver=Resolver(),
+        activation_loader=_authorize_test_activation,
+    )
     assert recreated.latest_run_id() == run_id
     dashboard = recreated.dashboard(run_id)
     assert dashboard.status == ProductStatus.RUNNING

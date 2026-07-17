@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -22,10 +24,48 @@ def _require_torch() -> Any:
 
 def load_checkpoint(checkpoint: str | Path) -> dict[str, Any]:
     th = _require_torch()
+    path = Path(checkpoint)
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+    descriptor = os.open(path, flags)
     try:
-        return th.load(Path(checkpoint), map_location="cpu", weights_only=False)
-    except TypeError:
-        return th.load(Path(checkpoint), map_location="cpu")
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or int(getattr(before, "st_nlink", 1)) != 1:
+            raise ValueError("checkpoint must be one regular single-link file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            try:
+                loaded = th.load(handle, map_location="cpu", weights_only=True)
+            except TypeError as exc:
+                raise RuntimeError("This PyTorch build does not support safe weights-only checkpoint loading.") from exc
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_nlink,
+            getattr(before, "st_mtime_ns", None),
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_nlink,
+            getattr(after, "st_mtime_ns", None),
+        )
+        current_identity = (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_nlink,
+            getattr(current, "st_mtime_ns", None),
+        )
+        if before_identity != after_identity or after_identity != current_identity:
+            raise RuntimeError("checkpoint changed while it was loaded")
+    finally:
+        os.close(descriptor)
+    if not isinstance(loaded, Mapping):
+        raise ValueError("checkpoint root must be a mapping")
+    return dict(loaded)
 
 
 def tokenizer_from_checkpoint(checkpoint: Mapping[str, Any]) -> SpriteTextTokenizer:

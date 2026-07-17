@@ -351,9 +351,45 @@ def test_latest_complete_checkpoint_is_default_and_public_view_redacts_paths(tmp
     state = json.loads((newer / "state.json").read_text(encoding="utf-8"))
     state["ended_at"] = "2026-07-13T11:00:00+00:00"
     _write_json(newer / "state.json", state)
-    (older / "checkpoints" / "checkpoint_step_000100.pt").write_bytes(b"old")
-    (newer / "checkpoints" / "checkpoint_step_000200.pt").write_bytes(b"new")
-    (newer / "checkpoints" / "checkpoint_step_000200_ema.pt").write_bytes(b"ema")
+    older_checkpoint = older / "checkpoints" / "checkpoint_step_000100.pt"
+    live_checkpoint = newer / "checkpoints" / "checkpoint_step_000200.pt"
+    ema_checkpoint = newer / "checkpoints" / "checkpoint_step_000200_ema.pt"
+    older_checkpoint.write_bytes(b"old")
+    live_checkpoint.write_bytes(b"new")
+    ema_checkpoint.write_bytes(b"ema")
+    for run, rows in (
+        (
+            older,
+            [
+                {
+                    "path": "checkpoints/checkpoint_step_000100.pt",
+                    "step": 100,
+                    "weights": "live",
+                    "sha256": sha256(older_checkpoint.read_bytes()).hexdigest(),
+                }
+            ],
+        ),
+        (
+            newer,
+            [
+                {
+                    "path": "checkpoints/checkpoint_step_000200.pt",
+                    "step": 200,
+                    "weights": "live",
+                    "sha256": sha256(live_checkpoint.read_bytes()).hexdigest(),
+                },
+                {
+                    "path": "checkpoints/checkpoint_step_000200_ema.pt",
+                    "step": 200,
+                    "weights": "ema",
+                    "sha256": sha256(ema_checkpoint.read_bytes()).hexdigest(),
+                },
+            ],
+        ),
+    ):
+        durable_state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+        durable_state["checkpoints"] = rows
+        _write_json(run / "state.json", durable_state)
     catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
     default = catalog.find(None)
     assert default is not None
@@ -370,3 +406,34 @@ def test_foreign_checkpoint_is_not_eligible(tmp_path: Path) -> None:
     (run / "checkpoints" / "checkpoint_last.pt").write_bytes(b"checkpoint")
     catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
     assert catalog.unavailable[0].availability is CheckpointAvailability.FOREIGN
+
+
+def test_schema_or_verdict_without_per_file_hash_is_never_eligible(tmp_path: Path) -> None:
+    run = _run(tmp_path, "verdict-only")
+    checkpoint = run / "checkpoints" / "checkpoint.pt"
+    checkpoint.write_bytes(b"verdict-only")
+    state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+    state["checkpoints"] = [{"path": "checkpoints/checkpoint.pt", "verified": True}]
+    _write_json(run / "state.json", state)
+
+    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+
+    assert catalog.eligible == ()
+    assert catalog.unavailable[0].availability is CheckpointAvailability.UNVERIFIED
+    assert "SHA-256" in catalog.unavailable[0].unavailable_reasons[0]
+
+
+def test_hard_linked_checkpoint_is_never_eligible(tmp_path: Path) -> None:
+    run = _run(tmp_path, "hard-linked")
+    checkpoint, _checkpoint_sha256 = _checkpoint_evidence(run)
+    outside_alias = tmp_path / "checkpoint-alias.pt"
+    try:
+        outside_alias.hardlink_to(checkpoint)
+    except OSError:
+        pytest.skip("hard links are unavailable on this filesystem")
+
+    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+
+    assert catalog.eligible == ()
+    assert catalog.unavailable[0].availability is CheckpointAvailability.INVALID
+    assert "hard-link" in catalog.unavailable[0].unavailable_reasons[0]

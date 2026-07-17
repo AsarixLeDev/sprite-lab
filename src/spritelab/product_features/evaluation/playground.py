@@ -23,6 +23,7 @@ from spritelab.product_core import (
 )
 from spritelab.product_features.evaluation.models import CheckpointCatalog
 from spritelab.product_web.events import EventRepository
+from spritelab.v3.run_state import lock_file
 
 PLAYGROUND_SCHEMA = "spritelab.product.playground-generation.v1"
 PLAYGROUND_RUN_SCHEMA = "spritelab.product.playground-run.v1"
@@ -66,6 +67,9 @@ class PlaygroundGenerator(Protocol):
         guidance: float,
         image_count: int,
         weights: str,
+        expected_sha256: str,
+        expected_step: int,
+        expected_variant: str,
     ) -> Sequence[GeneratedAsset | bytes | Mapping[str, Any] | Path]: ...
 
 
@@ -80,8 +84,10 @@ class GenerationRequest:
     image_count: int = DEFAULT_IMAGE_COUNT
 
     def __post_init__(self) -> None:
-        if not self.prompt.strip():
-            raise ValueError("Prompt cannot be empty.")
+        if not self.prompt.strip() or len(self.prompt.strip()) > 2_000:
+            raise ValueError("Prompt must contain between 1 and 2,000 characters.")
+        if any(ord(character) < 32 and character not in "\n\t" for character in self.prompt):
+            raise ValueError("Prompt contains unsupported control characters.")
         if self.weights not in {"live", "ema"}:
             raise ValueError("weights must be 'live' or 'ema'.")
         if type(self.seed) is not int or self.seed < 0:
@@ -166,8 +172,10 @@ class PlaygroundService:
         runs_directory: Path | None = None,
         run_id_factory: Callable[[], str] | None = None,
         initialization_hook: Callable[[str, Path], None] | None = None,
+        catalog_provider: Callable[[], CheckpointCatalog] | None = None,
     ) -> None:
         self.catalog = catalog
+        self.catalog_provider = catalog_provider
         self.output_root = output_root.resolve()
         self.generator = generator
         self.run_id_factory = run_id_factory or _new_run_id
@@ -201,10 +209,19 @@ class PlaygroundService:
             raise GenerationSafetyError("Generation requires an explicit Generate action.")
         if self.generator is None:
             raise GeneratorUnavailableError("No typed generation adapter is configured.")
+        if getattr(self.generator, "requires_fresh_catalog", False) and self.catalog_provider is None:
+            raise GenerationSafetyError("The local generation adapter requires a fresh checkpoint catalog provider.")
         if self.confirmation_required and not confirm_billable:
             raise GenerationSafetyError("Remote or billable generation requires explicit cost confirmation.")
-        checkpoint = self.catalog.find(request.checkpoint_id, weights=request.weights)
-        if checkpoint is None or checkpoint.path is None:
+        current_catalog = self.catalog_provider() if self.catalog_provider is not None else self.catalog
+        self.catalog = current_catalog
+        checkpoint = current_catalog.find(request.checkpoint_id, weights=request.weights)
+        if (
+            checkpoint is None
+            or checkpoint.path is None
+            or checkpoint.checkpoint_sha256 is None
+            or checkpoint.checkpoint_step is None
+        ):
             raise GenerationSafetyError("The selected checkpoint and live/EMA variant is not eligible.")
         started_at = _utc_now()
         run_id = _run_id or self.run_id_factory()
@@ -214,7 +231,7 @@ class PlaygroundService:
             "checkpoint_run_id": checkpoint.run_id,
             "checkpoint_step": checkpoint.checkpoint_step,
             "weights": request.weights,
-            "sha256": _file_sha256(checkpoint.path),
+            "sha256": checkpoint.checkpoint_sha256,
         }
         adapter_identity = self._adapter_identity()
         command = {
@@ -352,65 +369,93 @@ class PlaygroundService:
                     guidance=request.guidance,
                     image_count=request.image_count,
                     weights=request.weights,
+                    expected_sha256=checkpoint.checkpoint_sha256,
+                    expected_step=checkpoint.checkpoint_step,
+                    expected_variant=checkpoint.weights,
                 )
             )
+            self._assert_active(run_id)
             for index, raw in enumerate(raw_assets):
-                if index >= request.image_count:
-                    raise RuntimeError("Generator returned more images than requested.")
-                content, media_type = _asset_bytes(raw)
-                digest = hashlib.sha256(content).hexdigest()
-                extension = ".png" if media_type == "image/png" else ".bin"
-                reference = f"artifacts/image_{index:03d}{extension}"
-                _atomic_bytes(directory / reference, content)
-                completed_at = _utc_now()
-                result = {
-                    "result_id": f"{run_id}-{index:03d}",
-                    "checkpoint_identity": checkpoint.checkpoint_id,
-                    "checkpoint_run_id": checkpoint.run_id,
-                    "checkpoint_step": checkpoint.checkpoint_step,
-                    "weights": request.weights,
-                    "prompt": request.prompt,
-                    "seed": request.seed + index,
-                    "generation_parameters": generation_parameters,
-                    "timestamp": completed_at,
-                    "output_hash": digest,
-                    "application_version": _application_version(),
-                    "media_type": media_type,
-                    "output_reference": reference,
-                    "scope": EXPLORATORY_SCOPE,
-                    "frozen_benchmark_eligible": False,
-                    "promotion_evidence_eligible": False,
-                }
-                identity = {
-                    "artifact_id": result["result_id"],
-                    "reference": reference,
-                    "sha256": digest,
-                    "size_bytes": len(content),
-                    "media_type": media_type,
-                }
-                results.append(result)
-                artifact_identities.append(identity)
-                self.repository.update_state(
-                    run_id,
-                    stage="image_completed",
-                    results=results,
-                    artifact_identities=artifact_identities,
-                    output_hashes=[item["sha256"] for item in artifact_identities],
-                    progress={"current": len(results), "total": request.image_count},
-                )
-                self._append(
-                    run_id,
-                    stage="image_completed",
-                    event_type="image_completed",
-                    status=ProductStatus.RUNNING,
-                    current=len(results),
-                    total=request.image_count,
-                    message=f"Exploratory image {index + 1} of {request.image_count} completed.",
-                    metrics={"result": result, "artifact_identity": identity, "exploratory": True},
-                    artifacts=(reference,),
-                )
+                with lock_file(directory / ".playground-lifecycle.lock"):
+                    self._assert_active(run_id)
+                    if index >= request.image_count:
+                        raise RuntimeError("Generator returned more images than requested.")
+                    content, media_type = _asset_bytes(raw)
+                    digest = hashlib.sha256(content).hexdigest()
+                    extension = ".png" if media_type == "image/png" else ".bin"
+                    reference = f"artifacts/image_{index:03d}{extension}"
+                    _atomic_bytes(directory / reference, content)
+                    completed_at = _utc_now()
+                    result = {
+                        "result_id": f"{run_id}-{index:03d}",
+                        "checkpoint_identity": checkpoint.checkpoint_id,
+                        "checkpoint_run_id": checkpoint.run_id,
+                        "checkpoint_step": checkpoint.checkpoint_step,
+                        "weights": request.weights,
+                        "prompt": request.prompt,
+                        "seed": request.seed + index,
+                        "generation_parameters": generation_parameters,
+                        "timestamp": completed_at,
+                        "output_hash": digest,
+                        "application_version": _application_version(),
+                        "media_type": media_type,
+                        "output_reference": reference,
+                        "scope": EXPLORATORY_SCOPE,
+                        "frozen_benchmark_eligible": False,
+                        "promotion_evidence_eligible": False,
+                    }
+                    identity = {
+                        "artifact_id": result["result_id"],
+                        "reference": reference,
+                        "sha256": digest,
+                        "size_bytes": len(content),
+                        "media_type": media_type,
+                    }
+                    results.append(result)
+                    artifact_identities.append(identity)
+                    self.repository.update_state(
+                        run_id,
+                        stage="image_completed",
+                        results=results,
+                        artifact_identities=artifact_identities,
+                        output_hashes=[item["sha256"] for item in artifact_identities],
+                        progress={"current": len(results), "total": request.image_count},
+                    )
+                    self._append(
+                        run_id,
+                        stage="image_completed",
+                        event_type="image_completed",
+                        status=ProductStatus.RUNNING,
+                        current=len(results),
+                        total=request.image_count,
+                        message=f"Exploratory image {index + 1} of {request.image_count} completed.",
+                        metrics={"result": result, "artifact_identity": identity, "exploratory": True},
+                        artifacts=(reference,),
+                    )
             if len(results) != request.image_count:
                 raise RuntimeError("Generator returned a different number of images than requested.")
+            refreshed_catalog = self.catalog_provider() if self.catalog_provider is not None else self.catalog
+            self.catalog = refreshed_catalog
+            refreshed = refreshed_catalog.find(request.checkpoint_id, weights=request.weights)
+            if (
+                refreshed is None
+                or refreshed.path != checkpoint.path
+                or refreshed.checkpoint_sha256 != checkpoint.checkpoint_sha256
+                or refreshed.checkpoint_step != checkpoint.checkpoint_step
+                or refreshed.weights != checkpoint.weights
+            ):
+                raise GenerationSafetyError("Checkpoint eligibility changed before generation completion.")
+            final_adapter_identity = self._adapter_identity()
+            if final_adapter_identity != adapter_identity:
+                raise GenerationSafetyError("Generation adapter code identity changed while sampling.")
+            runtime_identity = getattr(self.generator, "last_runtime_identity", None)
+            if not isinstance(runtime_identity, Mapping):
+                runtime_identity = {
+                    "schema_version": "spritelab.playground-runtime-identity.v1",
+                    "runtime_reported": False,
+                }
+            else:
+                runtime_identity = dict(runtime_identity)
             ended_at = _utc_now()
             product_run = ProductRun(
                 run_id=run_id,
@@ -431,6 +476,7 @@ class PlaygroundService:
                 "request": request_payload,
                 "checkpoint_identity": checkpoint_identity,
                 "generation_adapter_identity": adapter_identity,
+                "runtime_identity": runtime_identity,
                 "started_at": started_at,
                 "ended_at": ended_at,
                 "results": results,
@@ -438,46 +484,53 @@ class PlaygroundService:
                 "excluded_from_frozen_benchmark": True,
                 "excluded_from_promotion_evidence": True,
             }
-            report_path = directory / "report" / "report.json"
-            report_bytes = _json_bytes(report)
-            _atomic_bytes(report_path, report_bytes)
-            report_identity = {
-                "reference": "report/report.json",
-                "sha256": hashlib.sha256(report_bytes).hexdigest(),
-                "size_bytes": len(report_bytes),
-            }
-            self.repository.update_state(
-                run_id,
-                status=ProductStatus.COMPLETE.value,
-                stage="generation_completed",
-                ended_at=ended_at,
-                results=results,
-                artifact_identities=artifact_identities,
-                output_hashes=[item["sha256"] for item in artifact_identities],
-                progress={"current": len(results), "total": request.image_count},
-                report_identity=report_identity,
-            )
-            self._append(
-                run_id,
-                stage="generation_completed",
-                event_type="generation_completed",
-                status=ProductStatus.COMPLETE,
-                current=len(results),
-                total=request.image_count,
-                message="Exploratory Playground generation completed durably.",
-                metrics={
-                    "output_hashes": [item["sha256"] for item in artifact_identities],
-                    "exploratory": True,
-                    "benchmark_eligible": False,
-                    "promotion_evidence_eligible": False,
-                },
-                artifacts=tuple(item["reference"] for item in artifact_identities),
-            )
+            with lock_file(directory / ".playground-lifecycle.lock"):
+                self._assert_active(run_id)
+                report_path = directory / "report" / "report.json"
+                report_bytes = _json_bytes(report)
+                _atomic_bytes(report_path, report_bytes)
+                report_identity = {
+                    "reference": "report/report.json",
+                    "sha256": hashlib.sha256(report_bytes).hexdigest(),
+                    "size_bytes": len(report_bytes),
+                }
+                self.repository.update_state(
+                    run_id,
+                    status=ProductStatus.COMPLETE.value,
+                    stage="generation_completed",
+                    ended_at=ended_at,
+                    results=results,
+                    artifact_identities=artifact_identities,
+                    output_hashes=[item["sha256"] for item in artifact_identities],
+                    progress={"current": len(results), "total": request.image_count},
+                    report_identity=report_identity,
+                    runtime_identity=runtime_identity,
+                )
+                self._append(
+                    run_id,
+                    stage="generation_completed",
+                    event_type="generation_completed",
+                    status=ProductStatus.COMPLETE,
+                    current=len(results),
+                    total=request.image_count,
+                    message="Exploratory Playground generation completed durably.",
+                    metrics={
+                        "output_hashes": [item["sha256"] for item in artifact_identities],
+                        "runtime_identity": runtime_identity,
+                        "exploratory": True,
+                        "benchmark_eligible": False,
+                        "promotion_evidence_eligible": False,
+                    },
+                    artifacts=tuple(item["reference"] for item in artifact_identities),
+                )
         except GenerationCancelledError as exc:
-            self._record_cancellation(run_id, str(exc) or "Generation adapter cancelled the run.")
+            with lock_file(directory / ".playground-lifecycle.lock"):
+                if self.repository.state(run_id).get("status") != "CANCELLED":
+                    self._record_cancellation(run_id, str(exc) or "Generation adapter cancelled the run.")
             raise
         except Exception as exc:
-            self._record_failure(run_id, exc)
+            with lock_file(directory / ".playground-lifecycle.lock"):
+                self._record_failure(run_id, exc)
             raise
         return self.reconstruct(run_id)
 
@@ -682,6 +735,7 @@ class PlaygroundService:
             "seed": state.get("seed"),
             "generation_parameters": dict(state.get("generation_parameters") or {}),
             "generation_adapter_identity": dict(state.get("generation_adapter_identity") or {}),
+            "runtime_identity": dict(state.get("runtime_identity") or {}),
             "started_at": state.get("started_at"),
             "ended_at": state.get("ended_at"),
             "results": state_results,
@@ -728,8 +782,23 @@ class PlaygroundService:
             raise KeyError(f"Unknown Playground run: {run_id}")
         if str(state.get("status")) in {ProductStatus.COMPLETE.value, ProductStatus.FAILED.value, "CANCELLED"}:
             return self.reconstruct(run_id)
-        self._record_cancellation(run_id, reason)
+        directory = self.repository.run_directory(run_id)
+        if directory is None:
+            raise KeyError(f"Unknown Playground run: {run_id}")
+        with lock_file(directory / ".playground-lifecycle.lock"):
+            state = self.repository.state(run_id)
+            if str(state.get("status")) not in {ProductStatus.COMPLETE.value, ProductStatus.FAILED.value, "CANCELLED"}:
+                self._record_cancellation(run_id, reason)
         return self.reconstruct(run_id)
+
+    def _assert_active(self, run_id: str) -> None:
+        state = self.repository.state(run_id)
+        if state.get("status") == "CANCELLED":
+            cancellation = state.get("cancellation")
+            reason = cancellation.get("reason") if isinstance(cancellation, Mapping) else None
+            raise GenerationCancelledError(str(reason or "Generation was cancelled."))
+        if state.get("status") != ProductStatus.RUNNING.value:
+            raise GenerationSafetyError("Playground run is no longer active.")
 
     def legacy_generations(self) -> list[dict[str, Any]]:
         """Expose metadata-only historical outputs without upgrading their authority."""
@@ -764,6 +833,14 @@ class PlaygroundService:
             "remote": bool(getattr(self.generator, "remote", False)),
             "billable": bool(getattr(self.generator, "billable", False)),
         }
+        code_identity = getattr(self.generator, "code_identity_sha256", None)
+        if (
+            isinstance(code_identity, str)
+            and len(code_identity) == 64
+            and code_identity == code_identity.lower()
+            and all(character in "0123456789abcdef" for character in code_identity)
+        ):
+            identity["code_identity_sha256"] = code_identity
         identity["sha256"] = hashlib.sha256(
             strict_json_bytes(identity, sort_keys=True, separators=(",", ":"))
         ).hexdigest()
@@ -800,6 +877,8 @@ class PlaygroundService:
 
     def _record_failure(self, run_id: str, error: Exception) -> None:
         state = self.repository.state(run_id)
+        if state.get("status") in {"CANCELLED", ProductStatus.COMPLETE.value}:
+            return
         ended_at = _utc_now()
         failure = {
             "type": type(error).__name__,
@@ -829,6 +908,8 @@ class PlaygroundService:
 
     def _record_cancellation(self, run_id: str, reason: str) -> None:
         state = self.repository.state(run_id)
+        if state.get("status") in {"CANCELLED", ProductStatus.COMPLETE.value, ProductStatus.FAILED.value}:
+            return
         ended_at = _utc_now()
         cancellation = {"reason": reason, "timestamp": ended_at}
         self._append(
