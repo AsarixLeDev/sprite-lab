@@ -5,7 +5,7 @@ import zipfile
 import pytest
 
 from _harvest_testdata import make_sprite_png, make_zip_of_pngs
-from spritelab.harvest.archive import archive_member_summary, extract_archive
+from spritelab.harvest.archive import ArchiveSecurityError, archive_member_summary, extract_archive
 from spritelab.harvest.sheet_mappings import metadata_for_sheet_cell
 from spritelab.harvest.sources import SourceRecord, normalize_license_name, source_record_from_dict
 
@@ -22,12 +22,12 @@ def test_zip_member_filters_are_case_sensitive_and_reported(tmp_path):
     assert sorted(path.name for path in root.iterdir()) == ["iron.png", "steel.png"]
 
 
-def test_zero_selected_images_fails_and_unsafe_members_stay_rejected(tmp_path):
+def test_unsafe_members_fail_before_filter_selection(tmp_path):
     pack = tmp_path / "pack.zip"
     with zipfile.ZipFile(pack, "w") as archive:
         archive.writestr("../unsafe.png", b"x")
         archive.writestr("readme.txt", "x")
-    with pytest.raises(ValueError, match="zero PNG"):
+    with pytest.raises(ArchiveSecurityError, match="unsafe archive member"):
         archive_member_summary(pack, include_member_globs=["*.png"])
     assert not (tmp_path / "unsafe.png").exists()
 

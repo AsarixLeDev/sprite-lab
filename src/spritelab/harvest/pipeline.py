@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import stat
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlparse
 
@@ -15,13 +19,14 @@ from spritelab.dataset_maker.exporter import (
 )
 from spritelab.dataset_maker.importer import ImportedSprite, ImportOptions, import_png_as_dataset_item
 from spritelab.dataset_maker.model import DatasetMakerItem, normalize_sprite_id
-from spritelab.harvest.archive import archive_member_summary, extract_archive
+from spritelab.harvest.archive import DEFAULT_MAX_ARCHIVE_BYTES, archive_member_summary, extract_archive
 from spritelab.harvest.autolabel import merge_auto_labels, suggest_metadata_from_path
-from spritelab.harvest.download import compute_sha256, download_file
+from spritelab.harvest.download import DEFAULT_MAX_DOWNLOAD_BYTES, compute_sha256, download_file
 from spritelab.harvest.extract import HarvestCandidate, discover_png_candidates, filter_candidate_basic
 from spritelab.harvest.sheet_mappings import metadata_for_sheet_cell
 from spritelab.harvest.sheets import SheetSliceConfig, center_pad_to_32, looks_like_sprite_sheet, slice_sheet_to_pngs
 from spritelab.harvest.sources import SourceRecord, is_license_allowed_for_training, utc_timestamp
+from spritelab.utils.safe_fs import UnsafeFilesystemOperation, atomic_write_text, require_confined_path
 
 
 @dataclass(frozen=True)
@@ -57,7 +62,7 @@ def harvest_source_to_imported_sprites(
 ) -> list[HarvestedSprite]:
     """Resolve a source to PNGs, slice/pad as configured, and import each one."""
 
-    work_dir = Path(work_dir)
+    work_dir = _validated_work_root(work_dir)
     root, source = _resolve_source_root(source, work_dir, options=options)
     candidates = [
         filter_candidate_basic(candidate)
@@ -65,8 +70,8 @@ def harvest_source_to_imported_sprites(
     ]
 
     final_pngs: list[tuple[HarvestCandidate, Path, list[str]]] = []
-    sliced_dir = work_dir / "sliced"
-    padded_dir = work_dir / "padded"
+    sliced_dir = _ensure_confined_directory(work_dir / "sliced", work_dir)
+    padded_dir = _ensure_confined_directory(work_dir / "padded", work_dir)
     for candidate in candidates:
         if candidate.status == "rejected":
             final_pngs.append((candidate, candidate.extracted_path, list(candidate.rejection_reasons)))
@@ -77,7 +82,7 @@ def harvest_source_to_imported_sprites(
         elif (
             options.slice_sheets and options.sheet_config.enabled and looks_like_sprite_sheet(candidate.extracted_path)
         ):
-            tile_dir = sliced_dir / candidate.candidate_id
+            tile_dir = _ensure_confined_directory(sliced_dir / candidate.candidate_id, sliced_dir)
             tiles = slice_sheet_to_pngs(candidate.extracted_path, tile_dir, options.sheet_config)
             for tile in tiles:
                 if (
@@ -85,13 +90,12 @@ def harvest_source_to_imported_sprites(
                     and options.sheet_config.tile_width <= 32
                     and options.sheet_config.tile_height <= 32
                 ):
-                    tile = center_pad_to_32(tile, padded_dir / f"{tile.stem}.png")
+                    padded_tile = require_confined_path(padded_dir / f"{tile.stem}.png", padded_dir)
+                    tile = center_pad_to_32(tile, padded_tile)
                 final_pngs.append((candidate, tile, []))
         elif options.allow_center_pad_to_32 and candidate.width <= 32 and candidate.height <= 32:
-            padded = center_pad_to_32(
-                candidate.extracted_path,
-                padded_dir / f"{candidate.candidate_id}.png",
-            )
+            padded_path = require_confined_path(padded_dir / f"{candidate.candidate_id}.png", padded_dir)
+            padded = center_pad_to_32(candidate.extracted_path, padded_path)
             final_pngs.append((candidate, padded, []))
         else:
             # Let the Dataset Maker importer handle it (resize or reject).
@@ -254,48 +258,77 @@ def _resolve_source_root(
     if source.local_root_path:
         return Path(source.local_root_path), source
     if source.local_archive_path:
-        extracted = work_dir / "extracted" / source.source_id
-        if not (extracted.exists() and any(extracted.iterdir())):
-            summary = archive_member_summary(
-                source.local_archive_path,
-                include_member_globs=options.include_member_globs,
-                exclude_member_globs=options.exclude_member_globs,
-            )
-            extract_archive(
-                source.local_archive_path,
-                extracted,
-                overwrite=True,
-                include_member_globs=options.include_member_globs,
-                exclude_member_globs=options.exclude_member_globs,
-            )
-        else:
-            summary = archive_member_summary(
-                source.local_archive_path,
-                include_member_globs=options.include_member_globs,
-                exclude_member_globs=options.exclude_member_globs,
-            )
+        extracted_root = _ensure_confined_directory(work_dir / "extracted", work_dir)
+        extracted = require_confined_path(extracted_root / source.source_id, extracted_root)
+        summary = archive_member_summary(
+            source.local_archive_path,
+            include_member_globs=options.include_member_globs,
+            exclude_member_globs=options.exclude_member_globs,
+        )
+        digest = compute_sha256(source.local_archive_path, max_bytes=DEFAULT_MAX_ARCHIVE_BYTES)
+        _verify_expected_source_digest(source, digest)
+        extract_archive(
+            source.local_archive_path,
+            extracted,
+            overwrite=True,
+            include_member_globs=options.include_member_globs,
+            exclude_member_globs=options.exclude_member_globs,
+            expected_sha256=digest,
+        )
         return extracted, replace(
             source,
-            download_sha256=compute_sha256(source.local_archive_path),
+            download_sha256=digest,
             download_size_bytes=Path(source.local_archive_path).stat().st_size,
             original_filename=Path(source.local_archive_path).name,
             archive_member_summary=summary,
         )
     if source.download_url:
-        downloads = work_dir / "downloads"
+        downloads = _ensure_confined_directory(work_dir / "downloads", work_dir)
+        source_cache = _ensure_confined_directory(downloads / source.source_id, downloads)
         is_direct_file = source.download_kind == "file"
         suffix = ".png" if is_direct_file else ".zip"
-        original_filename = Path(unquote(urlparse(source.download_url).path)).name or f"{source.source_id}{suffix}"
-        archive_path = downloads / original_filename
-        if not archive_path.exists():
+        original_filename = _download_original_filename(source.download_url, source.source_id, suffix)
+        identity = hashlib.sha256(f"{source.download_kind}\0{source.download_url}".encode()).hexdigest()[:24]
+        cache_dir = _ensure_confined_directory(source_cache / identity, source_cache)
+        archive_path = require_confined_path(
+            cache_dir / _cache_payload_name(original_filename, source.source_id, suffix),
+            cache_dir,
+        )
+        binding_path = require_confined_path(cache_dir / "binding.json", cache_dir)
+        _assert_cache_directory_entries(cache_dir, {archive_path.name, binding_path.name})
+        expected_digest = _expected_source_digest(source)
+        cached = _load_bound_download(
+            archive_path,
+            binding_path,
+            source=source,
+            expected_digest=expected_digest,
+        )
+        if cached is None:
             download_file(
-                source.download_url, archive_path, allowed_content_types=("image/png",) if is_direct_file else ()
+                source.download_url,
+                archive_path,
+                overwrite=True,
+                allowed_content_types=("image/png",) if is_direct_file else (),
+                expected_sha256=expected_digest,
             )
+            digest = compute_sha256(archive_path, max_bytes=DEFAULT_MAX_DOWNLOAD_BYTES)
+            size = archive_path.stat().st_size
+            downloaded_at = utc_timestamp()
+            _write_download_binding(
+                binding_path,
+                source=source,
+                digest=digest,
+                size=size,
+                downloaded_at=downloaded_at,
+            )
+        else:
+            digest, size, downloaded_at = cached
+        _assert_cache_directory_entries(cache_dir, {archive_path.name, binding_path.name})
         downloaded = replace(
             source,
-            download_sha256=compute_sha256(archive_path),
-            download_size_bytes=archive_path.stat().st_size,
-            downloaded_at_utc=utc_timestamp(),
+            download_sha256=digest,
+            download_size_bytes=size,
+            downloaded_at_utc=downloaded_at,
             original_filename=original_filename,
         )
         if is_direct_file:
@@ -305,30 +338,186 @@ def _resolve_source_root(
                 with Image.open(archive_path) as image:
                     if image.format != "PNG":
                         raise ValueError(f"downloaded attachment is {image.format}, expected PNG")
+                    image.load()
             except OSError as exc:
                 raise ValueError("downloaded attachment is not a decodable PNG") from exc
-            extracted = work_dir / "extracted" / source.source_id
-            extracted.mkdir(parents=True, exist_ok=True)
-            target = extracted / archive_path.name
-            if not target.exists():
-                target.write_bytes(archive_path.read_bytes())
-            return extracted, downloaded
-        extracted = work_dir / "extracted" / source.source_id
+            return cache_dir, downloaded
+        extracted_root = _ensure_confined_directory(work_dir / "extracted", work_dir)
+        extracted = require_confined_path(extracted_root / source.source_id, extracted_root)
         summary = archive_member_summary(
             archive_path,
             include_member_globs=options.include_member_globs,
             exclude_member_globs=options.exclude_member_globs,
         )
-        if not (extracted.exists() and any(extracted.iterdir())):
-            extract_archive(
-                archive_path,
-                extracted,
-                overwrite=True,
-                include_member_globs=options.include_member_globs,
-                exclude_member_globs=options.exclude_member_globs,
-            )
+        extract_archive(
+            archive_path,
+            extracted,
+            overwrite=True,
+            include_member_globs=options.include_member_globs,
+            exclude_member_globs=options.exclude_member_globs,
+            expected_sha256=digest,
+        )
         return extracted, replace(downloaded, archive_member_summary=summary)
     raise ValueError(f"{source.source_id}: source has no local_root_path, local_archive_path, or download_url.")
+
+
+def _ensure_confined_directory(path: Path, root: Path) -> Path:
+    try:
+        path = require_confined_path(path, root)
+    except UnsafeFilesystemOperation as exc:
+        raise ValueError(f"harvest work path crosses a link or reparse boundary: {path}") from exc
+    if not os.path.lexists(path):
+        path.mkdir()
+    metadata = path.lstat()
+    if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode) or path.is_mount():
+        raise ValueError(f"harvest work path is not a confined directory: {path}")
+    return path
+
+
+def _validated_work_root(path: str | Path) -> Path:
+    raw_path = os.fspath(path)
+    if not raw_path.strip() or raw_path.strip() in {".", ".."}:
+        raise ValueError("harvest work directory must be a specific non-root path")
+    work_dir = Path(os.path.abspath(os.path.expanduser(raw_path)))
+    existing_ancestor = work_dir.parent
+    while not os.path.lexists(existing_ancestor):
+        parent = existing_ancestor.parent
+        if parent == existing_ancestor:
+            raise ValueError(f"could not find an existing ancestor for harvest work directory: {work_dir}")
+        existing_ancestor = parent
+    metadata = existing_ancestor.lstat()
+    if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(f"harvest work directory crosses an unsafe ancestor: {existing_ancestor}")
+    work_dir = require_confined_path(work_dir, existing_ancestor)
+    _create_work_directories(work_dir, existing_ancestor)
+    work_dir = require_confined_path(work_dir, existing_ancestor)
+    metadata = work_dir.lstat()
+    if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError(f"harvest work directory is not a confined directory: {work_dir}")
+    return work_dir
+
+
+def _create_work_directories(target: Path, root: Path) -> None:
+    current = root
+    for part in target.relative_to(root).parts:
+        current = current / part
+        try:
+            current.mkdir()
+        except FileExistsError:
+            pass
+        metadata = current.lstat()
+        if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode) or current.is_mount():
+            raise ValueError(f"harvest work directory crosses an unsafe directory seam: {current}")
+        require_confined_path(current, root)
+
+
+def _download_original_filename(url: str, source_id: str, suffix: str) -> str:
+    path = unquote(urlparse(url).path).replace("\\", "/")
+    name = PurePosixPath(path).name
+    name = "".join(character if ord(character) >= 32 else "_" for character in name).strip()
+    return name[:255] or f"{source_id}{suffix}"
+
+
+def _cache_payload_name(original_filename: str, source_id: str, suffix: str) -> str:
+    stem = normalize_sprite_id(PurePosixPath(original_filename.replace("\\", "/")).stem)
+    return f"{stem or source_id}{suffix}"
+
+
+def _expected_source_digest(source: SourceRecord) -> str | None:
+    value = source.download_sha256 or source.sha256
+    if not value:
+        return None
+    normalized = value.strip().lower()
+    if len(normalized) != 64 or any(character not in "0123456789abcdef" for character in normalized):
+        raise ValueError(f"{source.source_id}: expected download SHA256 is not a valid digest")
+    return normalized
+
+
+def _verify_expected_source_digest(source: SourceRecord, actual_digest: str) -> None:
+    expected = _expected_source_digest(source)
+    if expected is not None and actual_digest != expected:
+        raise ValueError(f"{source.source_id}: archive SHA256 mismatch: expected {expected}, got {actual_digest}")
+
+
+def _load_bound_download(
+    archive_path: Path,
+    binding_path: Path,
+    *,
+    source: SourceRecord,
+    expected_digest: str | None,
+) -> tuple[str, int, str] | None:
+    archive_exists = os.path.lexists(archive_path)
+    binding_exists = os.path.lexists(binding_path)
+    if not archive_exists or not binding_exists:
+        return None
+    _require_safe_cache_file(archive_path)
+    _require_safe_cache_file(binding_path)
+    try:
+        payload = json.loads(binding_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if (
+        payload.get("schema_version") != "spritelab.harvest-download-cache.v1"
+        or payload.get("source_id") != source.source_id
+        or payload.get("download_url") != source.download_url
+        or payload.get("download_kind") != source.download_kind
+    ):
+        return None
+    size = archive_path.stat().st_size
+    if size > DEFAULT_MAX_DOWNLOAD_BYTES:
+        return None
+    digest = compute_sha256(archive_path, max_bytes=DEFAULT_MAX_DOWNLOAD_BYTES)
+    if payload.get("sha256") != digest or payload.get("size_bytes") != size:
+        return None
+    if expected_digest is not None and digest != expected_digest:
+        return None
+    downloaded_at = payload.get("downloaded_at_utc")
+    if not isinstance(downloaded_at, str) or not downloaded_at:
+        return None
+    return digest, size, downloaded_at
+
+
+def _write_download_binding(
+    binding_path: Path,
+    *,
+    source: SourceRecord,
+    digest: str,
+    size: int,
+    downloaded_at: str,
+) -> None:
+    payload = {
+        "download_kind": source.download_kind,
+        "download_url": source.download_url,
+        "downloaded_at_utc": downloaded_at,
+        "schema_version": "spritelab.harvest-download-cache.v1",
+        "sha256": digest,
+        "size_bytes": size,
+        "source_id": source.source_id,
+    }
+    atomic_write_text(binding_path, json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def _assert_cache_directory_entries(cache_dir: Path, allowed_names: set[str]) -> None:
+    for path in cache_dir.iterdir():
+        if path.name not in allowed_names:
+            raise ValueError(f"download cache contains an unbound entry: {path}")
+        _require_safe_cache_file(path)
+
+
+def _require_safe_cache_file(path: Path) -> None:
+    metadata = path.lstat()
+    if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ValueError(f"download cache entry is not a confined regular file: {path}")
+
+
+def _is_link_or_reparse(metadata: os.stat_result) -> bool:
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
 
 
 def _apply_source_metadata(

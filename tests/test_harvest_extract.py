@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import os
+import struct
+import zlib
+
+import pytest
+
 from _harvest_testdata import make_source, make_sprite_png
-from spritelab.harvest.extract import discover_png_candidates, filter_candidate_basic
+from spritelab.harvest.extract import UnsafeSourceTreeError, discover_png_candidates, filter_candidate_basic
 
 
 def _make_tree(root):
@@ -64,3 +70,62 @@ def test_basic_filter_size_limits(tmp_path):
     filtered = filter_candidate_basic(candidate)
     assert filtered.status == "rejected"
     assert any("too small" in reason for reason in filtered.rejection_reasons)
+
+
+def test_rejects_png_pixel_bomb_before_decoding_payload(tmp_path):
+    def png_chunk(kind, payload):
+        checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+    ihdr = struct.pack(">IIBBBBB", 5000, 5000, 8, 6, 0, 0, 0)
+    (tmp_path / "bomb.png").write_bytes(b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr) + png_chunk(b"IEND", b""))
+
+    candidate = discover_png_candidates(tmp_path, make_source())[0]
+
+    assert candidate.status == "rejected"
+    assert "safe decode limit" in candidate.rejection_reasons[0]
+
+
+def test_rejects_symlinked_candidate_and_preserves_outside_file(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    outside = make_sprite_png(tmp_path / "outside.png")
+    original = outside.read_bytes()
+    try:
+        os.symlink(outside, root / "linked.png")
+    except OSError:
+        pytest.skip("symbolic links are unavailable in this test session")
+
+    with pytest.raises(UnsafeSourceTreeError, match="link or reparse"):
+        discover_png_candidates(root, make_source())
+
+    assert outside.read_bytes() == original
+
+
+def test_rejects_hardlinked_candidate_and_preserves_outside_file(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    outside = make_sprite_png(tmp_path / "outside.png")
+    original = outside.read_bytes()
+    try:
+        os.link(outside, root / "linked.png")
+    except OSError:
+        pytest.skip("hard links are unavailable in this test session")
+
+    with pytest.raises(UnsafeSourceTreeError, match="hard-linked"):
+        discover_png_candidates(root, make_source())
+
+    assert outside.read_bytes() == original
+
+
+def test_rejects_symlinked_source_root(tmp_path):
+    root = tmp_path / "source"
+    make_sprite_png(root / "sprite.png")
+    alias = tmp_path / "alias"
+    try:
+        os.symlink(root, alias, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symbolic links are unavailable in this test session")
+
+    with pytest.raises(UnsafeSourceTreeError, match="candidate root"):
+        discover_png_candidates(alias, make_source())

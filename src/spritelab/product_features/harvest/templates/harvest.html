@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Harvest · Sprite Lab{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="/harvest/static/harvest.css">
+<main class="harvest-shell" data-harvest-root>
+  <header class="page-header">
+    <div><p class="eyebrow">Controlled acquisition</p><h1>Harvest</h1>
+      <p>Inventory first, reuse what exists, then acquire only exact-digest CC0 or public-domain sources through a separately certified backend.</p></div>
+    <span class="harvest-network-note">Inventory is local and network-free</span>
+  </header>
+
+  <section class="panel" aria-labelledby="harvest-inventory-title">
+    <div class="section-heading"><div><p class="eyebrow">Required first step</p><h2 id="harvest-inventory-title">Existing inventory</h2></div>
+      <button class="button secondary" id="harvest-refresh" type="button">Refresh inventory</button></div>
+    <p id="harvest-summary" role="status" aria-live="polite">Loading managed and legacy runs…</p>
+    <div id="harvest-legacy" class="harvest-evidence-grid"></div>
+  </section>
+
+  <section class="panel harvest-grid" aria-labelledby="harvest-start-title">
+    <div><p class="eyebrow">New immutable run</p><h2 id="harvest-start-title">Authorize a measured deficit</h2>
+      <p>Sprite Lab never accepts a browser path or arbitrary URL. The selected source has an administrator-owned evidence snapshot, exact host policy, expected response hash, and certified resource limits.</p>
+      <div id="harvest-source-evidence" class="harvest-evidence"></div>
+      <details><summary>Certified limits</summary><pre id="harvest-limits"></pre></details>
+    </div>
+    <form id="harvest-start-form" novalidate>
+      <label>Configured source <select id="harvest-source" required></select></label>
+      <label>Required usable items <input id="harvest-required" type="number" min="1" value="1" required></label>
+      <label>Assessed reusable items <input id="harvest-assessed" type="number" min="0" value="0" required></label>
+      <label>Reuse conclusion <select id="harvest-reuse-decision"><option value="reuse_exhausted">No reusable items</option><option value="deficit_confirmed">Existing items leave a deficit</option></select></label>
+      <label class="harvest-check"><input id="harvest-inventory-reviewed" type="checkbox" required> I reviewed the exact managed and legacy inventory shown above.</label>
+      <label class="harvest-check"><input id="harvest-zero-cost" type="checkbox" required> I authorize this confirmed zero-cost source.</label>
+      <label class="harvest-check"><input id="harvest-license" type="checkbox" required> I authorize the displayed CC0/public-domain evidence.</label>
+      <button class="button primary" id="harvest-start" type="submit">Start certified Harvest</button>
+    </form>
+  </section>
+
+  <section class="panel" aria-labelledby="harvest-runs-title">
+    <div class="section-heading"><div><p class="eyebrow">Durable polling</p><h2 id="harvest-runs-title">Managed jobs</h2></div><span id="harvest-poll-state">Idle</span></div>
+    <div id="harvest-runs" class="harvest-runs"></div>
+  </section>
+  <section class="panel" aria-labelledby="harvest-detail-title">
+    <div class="section-heading"><div><p class="eyebrow">Receipts and handoff</p><h2 id="harvest-detail-title">Selected evidence</h2></div></div>
+    <pre id="harvest-detail">Select Evidence or Dataset handoff on a managed run.</pre>
+  </section>
+</main>
+<script id="harvest-initial-state" type="application/json">{{ harvest_initial_state|tojson }}</script>
+<script src="/harvest/static/harvest.js" defer></script>
+{% endblock %}

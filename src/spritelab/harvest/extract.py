@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import BinaryIO
 
 from PIL import Image, UnidentifiedImageError
 
 from spritelab.harvest.archive import appledouble_detection_basis
-from spritelab.harvest.download import compute_sha256
 from spritelab.harvest.sources import SourceRecord
+from spritelab.utils.safe_fs import UnsafeFilesystemOperation, require_confined_path
+
+_MAX_DISCOVERY_PIXELS = 16_777_216
+_MAX_CANDIDATE_FILE_BYTES = 256 * 1024 * 1024
+
+
+class UnsafeSourceTreeError(ValueError):
+    """Raised when candidate discovery encounters a link or alias seam."""
 
 
 @dataclass(frozen=True)
@@ -51,26 +61,22 @@ def discover_png_candidates(
 ) -> list[HarvestCandidate]:
     """Discover PNG candidates in deterministic relative-path order."""
 
-    root = Path(root)
-    if not root.is_dir():
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(root))))
+    if not os.path.lexists(root):
         raise NotADirectoryError(f"candidate root is not a directory: {root}")
-
-    iterator = root.rglob("*") if recursive else root.glob("*")
-    paths = sorted(
-        (
-            path
-            for path in iterator
-            if path.is_file() and path.suffix.lower() == ".png" and (include_hidden or not _is_hidden(path, root))
-        ),
-        key=lambda path: path.relative_to(root).as_posix().lower(),
-    )
+    root_metadata = root.lstat()
+    if _is_link_or_reparse(root_metadata):
+        raise UnsafeSourceTreeError(f"candidate root may not be a link or reparse point: {root}")
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise NotADirectoryError(f"candidate root is not a directory: {root}")
+    paths = _collect_png_paths(root, recursive=recursive, include_hidden=include_hidden)
 
     candidates: list[HarvestCandidate] = []
     for path in paths:
         relative = path.relative_to(root).as_posix()
-        detection_basis = appledouble_detection_basis(relative, _safe_prefix(path, 4))
+        image_sha256, prefix, image_details, load_error = _inspect_candidate_file(path, root)
+        detection_basis = appledouble_detection_basis(relative, prefix)
         if detection_basis:
-            image_sha256 = _safe_sha256(path)
             candidates.append(
                 HarvestCandidate(
                     candidate_id=make_candidate_id(source.source_id, relative, image_sha256),
@@ -90,12 +96,7 @@ def discover_png_candidates(
                 )
             )
             continue
-        try:
-            with Image.open(path) as image:
-                width, height = image.size
-                mode = image.mode
-        except (OSError, UnidentifiedImageError) as exc:
-            image_sha256 = _safe_sha256(path)
+        if load_error is not None or image_details is None:
             candidates.append(
                 HarvestCandidate(
                     candidate_id=make_candidate_id(source.source_id, relative, image_sha256),
@@ -108,11 +109,11 @@ def discover_png_candidates(
                     height=0,
                     mode="",
                     status="rejected",
-                    rejection_reasons=(f"could not load PNG: {exc}",),
+                    rejection_reasons=(f"could not load PNG: {load_error}",),
                 )
             )
             continue
-        image_sha256 = compute_sha256(path)
+        width, height, mode = image_details
         candidates.append(
             HarvestCandidate(
                 candidate_id=make_candidate_id(source.source_id, relative, image_sha256),
@@ -165,16 +166,159 @@ def _is_hidden(path: Path, root: Path) -> bool:
     return any(part.startswith(".") for part in path.relative_to(root).parts)
 
 
-def _safe_sha256(path: Path) -> str:
+def _collect_png_paths(root: Path, *, recursive: bool, include_hidden: bool) -> list[Path]:
+    candidates: list[Path] = []
+
+    def visit(directory: Path, *, descend: bool) -> None:
+        _validate_directory(directory, root)
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: (entry.name.casefold(), entry.name))
+        except OSError as exc:
+            raise UnsafeSourceTreeError(f"could not enumerate source directory safely: {directory}") from exc
+        for entry in entries:
+            path = _require_source_path(Path(entry.path), root)
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                raise UnsafeSourceTreeError(f"could not inspect source entry safely: {path}") from exc
+            if _is_link_or_reparse(metadata):
+                raise UnsafeSourceTreeError(f"source tree contains a link or reparse point: {path}")
+            if stat.S_ISDIR(metadata.st_mode):
+                if path.is_mount():
+                    raise UnsafeSourceTreeError(f"source tree contains a nested mount point: {path}")
+                if descend:
+                    visit(path, descend=True)
+                continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise UnsafeSourceTreeError(f"source tree contains a special filesystem entry: {path}")
+            if metadata.st_nlink != 1:
+                raise UnsafeSourceTreeError(f"source tree contains a hard-linked file: {path}")
+            if path.suffix.lower() == ".png" and (include_hidden or not _is_hidden(path, root)):
+                candidates.append(path)
+
+    visit(root, descend=recursive)
+    return sorted(
+        candidates,
+        key=lambda path: (path.relative_to(root).as_posix().casefold(), path.relative_to(root).as_posix()),
+    )
+
+
+def _validate_directory(directory: Path, root: Path) -> None:
+    if directory != root:
+        _require_source_path(directory, root)
     try:
-        return compute_sha256(path)
-    except OSError:
-        return ""
+        metadata = directory.lstat()
+    except OSError as exc:
+        raise UnsafeSourceTreeError(f"could not inspect source directory safely: {directory}") from exc
+    if (
+        _is_link_or_reparse(metadata)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or (directory != root and directory.is_mount())
+    ):
+        raise UnsafeSourceTreeError(f"source directory changed type during discovery: {directory}")
 
 
-def _safe_prefix(path: Path, size: int) -> bytes:
+def _inspect_candidate_file(
+    path: Path,
+    root: Path,
+) -> tuple[str, bytes, tuple[int, int, str] | None, str | None]:
+    _require_source_path(path, root)
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise UnsafeSourceTreeError(f"could not inspect candidate safely: {path}") from exc
+    _validate_candidate_metadata(path, before)
+    if before.st_size > _MAX_CANDIDATE_FILE_BYTES:
+        return (
+            "",
+            b"",
+            None,
+            f"file exceeds the {_MAX_CANDIDATE_FILE_BYTES}-byte safe candidate limit",
+        )
     try:
         with path.open("rb") as handle:
-            return handle.read(size)
-    except OSError:
-        return b""
+            opened = os.fstat(handle.fileno())
+            if _identity(before) != _identity(opened):
+                raise UnsafeSourceTreeError(f"candidate changed while it was opened: {path}")
+            image_sha256, prefix = _hash_open_file(handle)
+            try:
+                handle.seek(0)
+                with Image.open(handle) as image:
+                    width, height = image.size
+                    if width <= 0 or height <= 0 or width * height > _MAX_DISCOVERY_PIXELS:
+                        image_details = None
+                        load_error = (
+                            f"image dimensions {width}x{height} exceed the "
+                            f"{_MAX_DISCOVERY_PIXELS}-pixel safe decode limit"
+                        )
+                    else:
+                        image.load()
+                        image_details = (width, height, image.mode)
+                        load_error = None
+            except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+                image_details = None
+                load_error = str(exc)
+            after = os.fstat(handle.fileno())
+    except UnsafeSourceTreeError:
+        raise
+    except OSError as exc:
+        return "", b"", None, str(exc)
+    if _identity(before) != _identity(after):
+        raise UnsafeSourceTreeError(f"candidate changed while it was read: {path}")
+    return image_sha256, prefix, image_details, load_error
+
+
+def _hash_open_file(handle: BinaryIO) -> tuple[str, bytes]:
+    digest = hashlib.sha256()
+    prefix = b""
+    while True:
+        chunk = handle.read(1 << 20)
+        if not chunk:
+            break
+        if not prefix:
+            prefix = chunk[:4]
+        digest.update(chunk)
+    return digest.hexdigest(), prefix
+
+
+def _validate_candidate_metadata(path: Path, metadata: os.stat_result) -> None:
+    if _is_link_or_reparse(metadata) or not stat.S_ISREG(metadata.st_mode):
+        raise UnsafeSourceTreeError(f"candidate is not a confined regular file: {path}")
+    if metadata.st_nlink != 1:
+        raise UnsafeSourceTreeError(f"candidate is hard-linked outside its source identity: {path}")
+
+
+def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_mode,
+        metadata.st_nlink,
+    )
+
+
+def _is_link_or_reparse(metadata: os.stat_result) -> bool:
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
+
+
+def _require_source_path(path: Path, root: Path) -> Path:
+    try:
+        return require_confined_path(path, root)
+    except UnsafeFilesystemOperation as exc:
+        raise UnsafeSourceTreeError(f"source path crosses a link or reparse boundary: {path}") from exc
+
+
+__all__ = [
+    "HarvestCandidate",
+    "UnsafeSourceTreeError",
+    "discover_png_candidates",
+    "filter_candidate_basic",
+    "make_candidate_id",
+]

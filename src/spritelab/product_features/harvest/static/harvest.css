@@ -1,0 +1,28 @@
+:root { color-scheme: light dark; font-family: Inter, system-ui, sans-serif; }
+body { margin: 0; background: #101719; color: #edf5f1; }
+.harvest-shell { max-width: 1080px; margin: 0 auto; padding: 2rem; }
+.page-header, .section-heading { display: flex; align-items: start; justify-content: space-between; gap: 1.5rem; }
+.page-header { margin-bottom: 1.5rem; }
+.eyebrow { color: #77d8ae; font-size: .75rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+h1, h2 { margin: .15rem 0 .5rem; }
+.panel { border: 1px solid #314641; border-radius: 16px; background: #172320; margin: 1rem 0; padding: 1.25rem; }
+.harvest-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .8fr); gap: 2rem; }
+form, label { display: grid; gap: .45rem; }
+form { gap: .9rem; }
+.harvest-check { display: grid; grid-template-columns: auto 1fr; align-items: start; }
+select, input, button { font: inherit; border: 1px solid #49645d; border-radius: 8px; padding: .65rem .8rem; }
+button { cursor: pointer; background: #82e9bb; color: #0b2119; font-weight: 700; }
+button.secondary { background: transparent; color: inherit; }
+.harvest-network-note, .status-pill { border-radius: 999px; background: #203a32; color: #9ff0cc; padding: .4rem .7rem; font-size: .8rem; }
+.harvest-runs { display: grid; gap: .75rem; }
+.harvest-run { border-top: 1px solid #314641; padding-top: .8rem; display: grid; gap: .75rem; }
+.harvest-run > div:first-child { display: flex; flex-wrap: wrap; align-items: center; gap: .7rem; }
+.harvest-run p { margin: .25rem 0; }
+.harvest-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+code { display: block; overflow-wrap: anywhere; color: #aadbc6; }
+pre { max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 10px; background: #0d1714; padding: .9rem; }
+details { margin-top: 1rem; }
+.harvest-evidence-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .75rem; }
+.harvest-evidence { border: 1px solid #314641; border-radius: 10px; padding: .75rem; }
+.harvest-evidence p { margin: .35rem 0; }
+@media (max-width: 720px) { .harvest-grid { grid-template-columns: 1fr; } .page-header { display: block; } }
