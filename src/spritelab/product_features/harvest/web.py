@@ -7,6 +7,7 @@ from typing import Any
 
 from starlette.requests import Request
 
+from spritelab.harvest.source_prefill import available_source_presets, build_source_prefill
 from spritelab.product_core import ProjectContext, api_error, product_api, strict_json_dumps
 from spritelab.product_features.harvest.service import HarvestError, HarvestService
 
@@ -56,6 +57,8 @@ _PROBE_KEYS = frozenset(
     }
 )
 _PROBE_URL_KEYS = frozenset({"source_page", "license_evidence_url", "terms_evidence_url", "direct_download_url"})
+_PREFILL_KEYS = frozenset({"source_page", "preset"})
+_PREFILL_URL_KEYS = frozenset({"source_page"})
 _PROMOTE_KEYS = frozenset({"explicit_action", "authorize_catalog_promotion"})
 _PATH_KEY_FRAGMENTS = ("path", "directory", "folder", "output", "destination", "uri", "argv", "command")
 
@@ -82,6 +85,7 @@ def create_harvest_router(
         initial = {
             "inventory": harvest.inventory(),
             "catalog": harvest.sources(),
+            "source_prefill_presets": available_source_presets(),
         }
         renderer = getattr(request.app.state, "spritelab_render_plugin_template", None)
         if callable(renderer):
@@ -114,6 +118,26 @@ def create_harvest_router(
     @product_api
     def sources() -> dict[str, Any]:
         return harvest.sources()
+
+    @router.post("/harvest/api/source-prefill")
+    @product_api
+    def source_prefill(payload: dict[str, Any]) -> Any:
+        rejected = _validate_payload(payload, _PREFILL_KEYS, allowed_url_keys=_PREFILL_URL_KEYS)
+        if rejected is not None:
+            return rejected
+        try:
+            prefill = build_source_prefill(
+                _required_string(payload, "source_page"),
+                preset_id=_required_string(payload, "preset"),
+            )
+        except ValueError:
+            return api_error(
+                422,
+                "invalid_harvest_source_prefill",
+                "The source page or selected preset is not valid for smart prefill.",
+                next_action="Paste a public HTTPS pack page without a query or fragment, then choose Auto-detect.",
+            )
+        return {"prefill": prefill.to_dict()}
 
     @router.post("/harvest/api/jobs")
     @product_api

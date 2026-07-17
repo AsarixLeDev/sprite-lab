@@ -7,6 +7,7 @@ import struct
 import zlib
 
 import pytest
+from PIL import Image
 
 from _harvest_testdata import make_source, make_sprite_png
 from spritelab.harvest.extract import UnsafeSourceTreeError, discover_png_candidates, filter_candidate_basic
@@ -84,6 +85,51 @@ def test_rejects_png_pixel_bomb_before_decoding_payload(tmp_path):
 
     assert candidate.status == "rejected"
     assert "safe decode limit" in candidate.rejection_reasons[0]
+
+
+def test_rejects_animated_png_before_candidate_filtering(tmp_path):
+    path = tmp_path / "animated.png"
+    first = Image.new("RGBA", (32, 32), (255, 0, 0, 255))
+    second = Image.new("RGBA", (32, 32), (0, 0, 255, 255))
+    first.save(path, format="PNG", save_all=True, append_images=[second], duration=100, loop=0)
+
+    candidate = discover_png_candidates(tmp_path, make_source())[0]
+
+    assert candidate.status == "rejected"
+    assert candidate.width == 0
+    assert candidate.height == 0
+    assert "animated or multi-frame PNG/APNG images are not supported" in candidate.rejection_reasons[0]
+
+
+def test_canonical_pixel_identity_ignores_png_encoding_details(tmp_path):
+    image = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+    image.putpixel((4, 7), (10, 20, 30, 255))
+    image.putpixel((8, 9), (200, 100, 50, 128))
+    image.save(tmp_path / "compact.png", format="PNG", compress_level=9)
+    image.save(tmp_path / "stored.png", format="PNG", compress_level=0)
+
+    compact, stored = discover_png_candidates(tmp_path, make_source())
+
+    assert compact.image_sha256 != stored.image_sha256
+    assert compact.pixel_sha256 == stored.pixel_sha256
+    assert compact.visible_pixel_count == stored.visible_pixel_count == 2
+    assert compact.pixel_variation is stored.pixel_variation is True
+
+
+@pytest.mark.parametrize(
+    ("rgba", "expected_reason"),
+    [
+        ((0, 0, 0, 0), "fully transparent"),
+        ((25, 50, 75, 255), "one constant RGBA value"),
+    ],
+)
+def test_basic_filter_rejects_obviously_unusable_pixels(tmp_path, rgba, expected_reason):
+    Image.new("RGBA", (32, 32), rgba).save(tmp_path / "unusable.png", format="PNG")
+
+    filtered = filter_candidate_basic(discover_png_candidates(tmp_path, make_source())[0])
+
+    assert filtered.status == "rejected"
+    assert any(expected_reason in reason for reason in filtered.rejection_reasons)
 
 
 def test_rejects_symlinked_candidate_and_preserves_outside_file(tmp_path):

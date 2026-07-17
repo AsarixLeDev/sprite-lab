@@ -6,7 +6,7 @@ import os
 import threading
 import time
 import zipfile
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,6 @@ import pytest
 import spritelab.harvest.archive as archive_module
 import spritelab.harvest.download as download_module
 import spritelab.product_features.harvest.catalog_writer as catalog_writer_module
-import spritelab.product_features.harvest.trusted_backend as trusted_backend_module
 from _harvest_testdata import make_zip_of_pngs
 from spritelab.harvest.archive import ArchiveCancelled, ArchiveSnapshot, archive_member_summary, extract_archive
 from spritelab.harvest.download import (
@@ -55,6 +54,7 @@ from spritelab.product_features.harvest.certification import (
     BACKEND_AUDIT_REPORT_SCHEMA,
     BACKEND_CAPABILITIES_RELATIVE_PATH,
     BACKEND_CAPABILITY_CERTIFICATE_SCHEMA,
+    REQUIRED_BACKEND_AUDIT_GATES,
     BackendCapabilityCertificateError,
     load_backend_capability_certificate,
     load_backend_capability_evidence,
@@ -207,6 +207,13 @@ def _capabilities() -> CertifiedBackendCapabilities:
         enforces_probe_no_decode_extract_import=True,
         enforces_deterministic_evidence_verification=True,
         enforces_transactional_catalog_promotion=True,
+        enforces_direct_static_image_derivation=True,
+        enforces_retained_anchored_state=True,
+        enforces_whole_operation_deadline=True,
+        enforces_durable_import_control=True,
+        enforces_same_pack_license_and_zero_cost=True,
+        enforces_technical_usability_and_pixel_uniqueness=True,
+        enforces_non_self_attested_production_bindings=True,
     )
 
 
@@ -266,6 +273,7 @@ def _write_capability_evidence(project: Path, capabilities: CertifiedBackendCapa
         "implementation_identity_sha256": hardened_backend_code_identity(),
         "module_sha256": modules,
         "runtime_dependencies": hardened_backend_runtime_dependencies(),
+        "gate_results": dict.fromkeys(sorted(REQUIRED_BACKEND_AUDIT_GATES), "PASS"),
     }
     report["report_identity"] = _identity(report)
     report_bytes = strict_json_dumps(report, sort_keys=True).encode("utf-8")
@@ -281,34 +289,7 @@ def _write_capability_evidence(project: Path, capabilities: CertifiedBackendCapa
         "audit_report_sha256": hashlib.sha256(report_bytes).hexdigest(),
         "module_sha256": modules,
         "runtime_dependencies": hardened_backend_runtime_dependencies(),
-        "capabilities": {
-            "backend_id": capabilities.backend_id,
-            "backend_version": capabilities.backend_version,
-            "downloader_id": capabilities.downloader_id,
-            "downloader_version": capabilities.downloader_version,
-            "code_identity_sha256": capabilities.code_identity_sha256,
-            "dataset_import_callback_id": capabilities.dataset_import_callback_id,
-            "dataset_import_callback_code_identity_sha256": (capabilities.dataset_import_callback_code_identity_sha256),
-            "dataset_import_callback_runtime_identity_sha256": (
-                capabilities.dataset_import_callback_runtime_identity_sha256
-            ),
-            "enforces_http_success": True,
-            "enforces_https_direct_url": True,
-            "resolves_and_blocks_private_networks": True,
-            "validates_every_redirect": True,
-            "enforces_response_mime_allowlist": True,
-            "enforces_expected_response_hash": True,
-            "enforces_per_file_hashes": True,
-            "enforces_file_count_and_byte_limits": True,
-            "enforces_depth_and_name_policy": True,
-            "enforces_archive_limits": True,
-            "enforces_duration_and_cancellation": True,
-            "enforces_bounded_evidence_fetch": True,
-            "enforces_quarantine_hash_probe": True,
-            "enforces_probe_no_decode_extract_import": True,
-            "enforces_deterministic_evidence_verification": True,
-            "enforces_transactional_catalog_promotion": True,
-        },
+        "capabilities": asdict(capabilities),
     }
     certificate["certificate_identity"] = _identity(certificate)
     (project / BACKEND_CAPABILITIES_RELATIVE_PATH).write_text(
@@ -804,23 +785,85 @@ def test_independent_certificate_activates_default_plugin_without_network(tmp_pa
         load_backend_capability_certificate(project)
 
 
-@pytest.mark.parametrize("distribution", ["numpy", "PyYAML"])
-def test_independent_certificate_rejects_conditioned_runtime_dependency_drift(
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "audit gates fields do not match"),
+        ("extra", "audit gates fields do not match"),
+        ("failed", "did not each record PASS"),
+    ],
+)
+def test_independent_certificate_requires_exact_individual_pass_for_every_audit_gate(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    _write_capability_evidence(project, _capabilities())
+    report_path = project / BACKEND_AUDIT_REPORT_RELATIVE_PATH
+    certificate_path = project / BACKEND_CAPABILITIES_RELATIVE_PATH
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert set(report["gate_results"]) == REQUIRED_BACKEND_AUDIT_GATES
+    assert {
+        "direct_static_image_derivation",
+        "retained_anchored_state",
+        "whole_operation_deadline",
+        "durable_import_control",
+        "same_pack_license_and_zero_cost",
+        "technical_usability_and_pixel_uniqueness",
+        "non_self_attested_production_bindings",
+    } <= set(report["gate_results"])
+    if mutation == "missing":
+        report["gate_results"].pop("durable_import_control")
+    elif mutation == "extra":
+        report["gate_results"]["self_asserted_shortcut"] = "PASS"
+    else:
+        report["gate_results"]["whole_operation_deadline"] = "FAIL"
+    report["report_identity"] = _identity({key: value for key, value in report.items() if key != "report_identity"})
+    report_bytes = strict_json_dumps(report, sort_keys=True).encode("utf-8")
+    report_path.write_bytes(report_bytes)
+    certificate = json.loads(certificate_path.read_text(encoding="utf-8"))
+    certificate["audit_report_sha256"] = hashlib.sha256(report_bytes).hexdigest()
+    certificate["certificate_identity"] = _identity(
+        {key: value for key, value in certificate.items() if key != "certificate_identity"}
+    )
+    certificate_path.write_text(strict_json_dumps(certificate, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(BackendCapabilityCertificateError, match=message):
+        load_backend_capability_certificate(project)
+
+
+@pytest.mark.parametrize("distribution", ["NumPy", "PyYAML"])
+def test_independent_certificate_rejects_conditioned_runtime_dependency_inventory_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     distribution: str,
 ) -> None:
+    from spritelab.product_features.conditioned_v5 import identity as conditioned_identity
+
     project = tmp_path / "project"
     project.mkdir()
     capabilities = _capabilities()
     _write_capability_evidence(project, capabilities)
-    original_version = trusted_backend_module.importlib.metadata.version
+    original_inventory = conditioned_identity.installed_distribution_inventory
 
-    def drifted_version(name: str) -> str:
-        version = original_version(name)
-        return f"{version}+drift" if name.casefold() == distribution.casefold() else version
+    def drifted_inventory(name: str) -> dict[str, Any]:
+        inventory = original_inventory(name)
+        if name.casefold() != distribution.casefold():
+            return inventory
+        replacement = dict(inventory)
+        replacement_files = {locator: dict(binding) for locator, binding in inventory["files"].items()}
+        changed_locator = min(replacement_files)
+        changed_binding = replacement_files[changed_locator]
+        changed_binding["sha256"] = "f" * 64 if changed_binding["sha256"] != "f" * 64 else "e" * 64
+        replacement["files"] = replacement_files
+        replacement["inventory_sha256"] = _identity(
+            {key: value for key, value in replacement.items() if key != "inventory_sha256"}
+        )
+        return replacement
 
-    monkeypatch.setattr(trusted_backend_module.importlib.metadata, "version", drifted_version)
+    monkeypatch.setattr(conditioned_identity, "installed_distribution_inventory", drifted_inventory)
     with pytest.raises(BackendCapabilityCertificateError, match="runtime dependencies changed"):
         load_backend_capability_certificate(project)
 

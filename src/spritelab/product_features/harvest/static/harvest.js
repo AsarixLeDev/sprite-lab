@@ -9,12 +9,39 @@
   const runsNode = $("#harvest-runs");
   const probesNode = $("#harvest-probes");
   const probeSummary = $("#harvest-probe-summary");
+  const prefillSummary = $("#harvest-prefill-summary");
+  const prefillPreset = $("#probe-prefill-preset");
   const detail = $("#harvest-detail");
   const inFlight = new Set();
-  let state = {inventory: {runs: [], probe_runs: [], legacy_runs: []}, catalog: {sources: []}};
+  const pendingKeys = new Map();
+  const idempotencyStoragePrefix = "spritelab.harvest.pending-idempotency.v1:";
+  let state = {inventory: {runs: [], probe_runs: [], legacy_runs: []}, catalog: {sources: []}, source_prefill_presets: []};
+  let activeJobs = [];
   try { state = JSON.parse($("#harvest-initial-state")?.textContent || "{}"); } catch (_error) { /* safe defaults */ }
 
-  const idempotency = (prefix) => `${prefix}-${crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36)}`;
+  const newIdempotency = (prefix) => `${prefix}-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
+  const idempotencyScope = (scope) => {
+    if (!/^[A-Za-z0-9._:-]{1,100}$/.test(scope)) throw new Error("Harvest action identity is invalid.");
+    return `${idempotencyStoragePrefix}${scope}`;
+  };
+  function pendingIdempotency(scope, prefix) {
+    const storageKey = idempotencyScope(scope);
+    let value = pendingKeys.get(storageKey);
+    if (!value) {
+      try { value = window.sessionStorage.getItem(storageKey); } catch (_error) { /* in-memory fallback */ }
+    }
+    if (!value || !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value)) {
+      value = newIdempotency(prefix);
+      pendingKeys.set(storageKey, value);
+      try { window.sessionStorage.setItem(storageKey, value); } catch (_error) { /* in-memory fallback */ }
+    }
+    return value;
+  }
+  function clearIdempotency(scope) {
+    const storageKey = idempotencyScope(scope);
+    pendingKeys.delete(storageKey);
+    try { window.sessionStorage.removeItem(storageKey); } catch (_error) { /* in-memory fallback */ }
+  }
   const element = (tag, text, className) => {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = String(text);
@@ -37,13 +64,70 @@
       throw new Error("Unexpected Harvest response. Reload the page and try again.");
     }
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.message || "Harvest request failed.");
+    if (!response.ok) {
+      const error = new Error(payload.message || "Harvest request failed.");
+      error.definitive = response.status >= 400 && response.status < 500 && ![408, 425, 429].includes(response.status);
+      throw error;
+    }
     return payload;
+  }
+  async function idempotentRequest(scope, prefix, url, payload) {
+    const idempotencyKey = pendingIdempotency(scope, prefix);
+    try {
+      const result = await request(url, {
+        method: "POST",
+        body: JSON.stringify({...payload, idempotency_key: idempotencyKey}),
+      });
+      clearIdempotency(scope);
+      return result;
+    } catch (error) {
+      if (error.definitive) clearIdempotency(scope);
+      throw error;
+    }
   }
   async function once(key, control, action) {
     if (inFlight.has(key)) return;
     inFlight.add(key); setBusy(control, true);
     try { await action(); } finally { inFlight.delete(key); setBusy(control, false); }
+  }
+  const prefillFields = {
+    source_id: "#probe-source-id", title: "#probe-title", creator: "#probe-creator",
+    source_page: "#probe-source-page", license_id: "#probe-license-id",
+    license_evidence_url: "#probe-license-url", terms_evidence_url: "#probe-terms-url",
+    direct_download_url: "#probe-direct-url", attribution_text: "#probe-attribution",
+    taxonomy_hints: "#probe-taxonomy",
+  };
+  const reviewLabels = {
+    creator: "creator", license_id: "license", license_evidence_url: "license evidence",
+    terms_evidence_url: "site terms", direct_download_url: "exact download link",
+    attribution_text: "attribution",
+  };
+  function applySourcePrefill(prefill) {
+    for (const [field, selector] of Object.entries(prefillFields)) {
+      const control = $(selector);
+      if (!control) continue;
+      const raw = prefill[field];
+      control.value = Array.isArray(raw) ? raw.join(", ") : String(raw || "");
+    }
+    const licenseEvidence = $("#probe-license-url");
+    delete licenseEvidence.dataset.smartLicense;
+    if (prefill.license_id === "cc0-1.0" && prefill.license_evidence_url === "https://creativecommons.org/publicdomain/zero/1.0/") {
+      licenseEvidence.dataset.smartLicense = "cc0-1.0";
+    }
+    const review = (prefill.review_fields || []).map((field) => reviewLabels[field] || field).join(", ");
+    prefillSummary.textContent = `${prefill.preset_label} draft ready. ${prefill.guidance} Review: ${review || "all fields"}.`;
+  }
+  function renderPrefillPresets() {
+    if (!prefillPreset) return;
+    const existing = new Set([...prefillPreset.options].map((option) => option.value));
+    for (const preset of state.source_prefill_presets || []) {
+      if (!preset?.preset_id || existing.has(preset.preset_id)) continue;
+      const option = element("option", preset.label);
+      option.value = preset.preset_id;
+      option.title = preset.description || "";
+      prefillPreset.append(option);
+      existing.add(preset.preset_id);
+    }
   }
   function reuseEvidence() {
     const assessed = Number.parseInt($("#harvest-assessed").value, 10);
@@ -58,16 +142,16 @@
       deficit_items: Math.max(required - assessed, 0),
     };
   }
-  function authorization(prefix) {
+  function authorization() {
     return {
-      idempotency_key: idempotency(prefix), explicit_action: true,
+      explicit_action: true,
       authorize_zero_cost: $("#harvest-zero-cost").checked,
       authorize_permissive_license: $("#harvest-license").checked,
       authorize_existing_inventory_reviewed: $("#harvest-inventory-reviewed").checked,
       reuse_evidence: reuseEvidence(),
     };
   }
-  function probePayload(prefix) {
+  function probePayload() {
     const taxonomy = $("#probe-taxonomy").value.split(",").map((value) => value.trim()).filter(Boolean);
     return {
       source_id: $("#probe-source-id").value.trim(), title: $("#probe-title").value.trim(),
@@ -79,7 +163,7 @@
       attribution_text: $("#probe-attribution").value.trim(), taxonomy_hints: taxonomy,
       inventory_identity: state.inventory.inventory_identity,
       backend_capability_evidence_identity: state.catalog.backend_capability_evidence?.evidence_identity || "",
-      idempotency_key: idempotency(prefix), explicit_action: true,
+      explicit_action: true,
       authorize_network: $("#probe-network").checked,
       authorize_hash_probe: $("#probe-hash").checked,
       authorize_zero_cost: $("#probe-zero-cost").checked,
@@ -117,6 +201,7 @@
   }
   function renderInventory(inventory, jobs = null) {
     state.inventory = inventory;
+    activeJobs = jobs || inventory.runs || [];
     $("#harvest-assessed").value = String(inventory.known_usable_items || 0);
     summary.textContent = `${inventory.run_count} acquisitions, ${inventory.probe_run_count || 0} source probes, ${inventory.legacy_run_count} legacy read-only; ${inventory.known_usable_items} known usable; ${inventory.unsafe_entries} unsafe ignored.`;
     const legacy = $("#harvest-legacy"); legacy.replaceChildren();
@@ -146,13 +231,14 @@
       const operational = document.createElement("details");
       operational.append(element("summary", "Taxonomy, limits, and durable logs"));
       const operationalText = element("pre");
-      operationalText.textContent = JSON.stringify({taxonomy_counts: run.taxonomy_counts || {}, limits: run.limits || {}, logs: run.events || []}, null, 2);
+      operationalText.textContent = JSON.stringify({taxonomy_counts: run.taxonomy_counts || {}, limits: run.limits || {}, dataset_import: run.dataset_import || {}, logs: run.events || []}, null, 2);
       operational.append(operationalText);
       const controls = element("div", undefined, "harvest-actions");
       const evidence = action("Evidence", async () => { detail.textContent = JSON.stringify(await request(`/harvest/api/jobs/${encodeURIComponent(run.run_id)}/evidence`), null, 2); }); evidence.dataset.run = run.run_id; controls.append(evidence);
       if (["QUEUED", "RUNNING", "CANCELLING"].includes(run.status)) { const cancel = action("Cancel", async () => { await request(`/harvest/api/jobs/${encodeURIComponent(run.run_id)}/cancel`, {method: "POST", body: JSON.stringify({explicit_action: true})}); await refresh(); }); cancel.dataset.run = run.run_id; controls.append(cancel); }
-      if (["FAILED", "CANCELLED", "INTERRUPTED"].includes(run.status)) { const retry = action("Retry", async () => { await request(`/harvest/api/jobs/${encodeURIComponent(run.run_id)}/retry`, {method: "POST", body: JSON.stringify(authorization("retry"))}); await refresh(); }); retry.dataset.run = run.run_id; controls.append(retry); }
-      if (run.handoff_ready) { const handoff = action("Dataset handoff", async () => { const value = await request(`/harvest/api/jobs/${encodeURIComponent(run.run_id)}/handoff`); detail.textContent = JSON.stringify(value, null, 2); if (value.dataset_import_available) { const importButton = action("Import into Dataset", async () => { const receipt = await request(`/harvest/api/jobs/${encodeURIComponent(run.run_id)}/import`, {method: "POST", body: JSON.stringify({explicit_action: true, idempotency_key: idempotency("dataset-import")})}); detail.textContent = JSON.stringify(receipt, null, 2); }); importButton.dataset.run = run.run_id; controls.append(importButton); } }); handoff.dataset.run = run.run_id; controls.append(handoff); }
+      if (["RUNNING", "CANCELLING"].includes(run.dataset_import?.status)) { const cancelImport = action("Cancel Dataset import", async () => { await request(`/harvest/api/jobs/${encodeURIComponent(run.run_id)}/cancel`, {method: "POST", body: JSON.stringify({explicit_action: true})}); await refresh(); }); cancelImport.dataset.run = run.run_id; controls.append(cancelImport); }
+      if (["FAILED", "CANCELLED", "INTERRUPTED"].includes(run.status)) { const retry = action("Retry", async () => { await idempotentRequest(`retry:${run.run_id}`, "retry", `/harvest/api/jobs/${encodeURIComponent(run.run_id)}/retry`, authorization()); await refresh(); }); retry.dataset.run = run.run_id; controls.append(retry); }
+      if (run.handoff_ready) { const handoff = action("Dataset handoff", async () => { const value = await request(`/harvest/api/jobs/${encodeURIComponent(run.run_id)}/handoff`); detail.textContent = JSON.stringify(value, null, 2); if (value.dataset_import_available && !value.dataset_import?.completed) { const importButton = action("Import into Dataset", async () => { const importRequest = idempotentRequest(`dataset-import:${run.run_id}`, "dataset-import", `/harvest/api/jobs/${encodeURIComponent(run.run_id)}/import`, {explicit_action: true}); window.setTimeout(() => { refresh().catch((error) => { summary.textContent = error.message; }); }, 100); const receipt = await importRequest; detail.textContent = JSON.stringify(receipt, null, 2); await refresh(); }); importButton.dataset.run = run.run_id; controls.append(importButton); } }); handoff.dataset.run = run.run_id; controls.append(handoff); }
       card.append(heading, metrics, provenance, progress, operational, controls); runsNode.append(card);
     }
   }
@@ -179,7 +265,7 @@
       if (["FAILED", "CANCELLED", "INTERRUPTED"].includes(probe.status)) {
         const retry = action("Retry with form", async () => {
           const form = $("#harvest-probe-form"); if (!form.reportValidity()) return;
-          await request(`/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/retry`, {method: "POST", body: JSON.stringify(probePayload("probe-retry"))}); await refresh();
+          await idempotentRequest(`probe-retry:${probe.probe_id}`, "probe-retry", `/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/retry`, probePayload()); await refresh();
         }); retry.dataset.run = probe.probe_id; controls.append(retry);
       }
       if (probe.status === "READY") {
@@ -208,27 +294,51 @@
     }));
     inventory.probe_runs = probes;
     renderInventory(inventory, jobs);
-    const active = [...(inventory.runs || []), ...(inventory.probe_runs || [])].some((run) => ["QUEUED", "RUNNING", "CANCELLING"].includes(run.status));
+    const active = [...jobs, ...(inventory.probe_runs || [])].some((run) => ["QUEUED", "RUNNING", "CANCELLING"].includes(run.status) || ["RUNNING", "CANCELLING"].includes(run.dataset_import?.status));
     $("#harvest-poll-state").textContent = active ? "Polling active work" : "No active work";
   }
   $("#harvest-start-form").addEventListener("submit", (event) => {
     event.preventDefault(); const button = $("#harvest-start");
     once("start", button, async () => {
-      const payload = {source_id: sourceSelect.value, ...authorization("start")};
-      await request("/harvest/api/jobs", {method: "POST", body: JSON.stringify(payload)}); await refresh();
+      const payload = {source_id: sourceSelect.value, ...authorization()};
+      await idempotentRequest(`start:${sourceSelect.value}`, "start", "/harvest/api/jobs", payload); await refresh();
     }).catch((error) => { summary.textContent = error.message; });
   });
   $("#harvest-refresh").addEventListener("click", (event) => once("refresh", event.currentTarget, refresh).catch((error) => { summary.textContent = error.message; }));
+  $("#harvest-smart-prefill")?.addEventListener("click", (event) => {
+    const sourcePage = $("#probe-source-page");
+    if (!sourcePage.reportValidity()) return;
+    once("source-prefill", event.currentTarget, async () => {
+      const value = await request("/harvest/api/source-prefill", {
+        method: "POST",
+        body: JSON.stringify({source_page: sourcePage.value.trim(), preset: prefillPreset.value}),
+      });
+      applySourcePrefill(value.prefill);
+    }).catch((error) => { prefillSummary.textContent = error.message; });
+  });
+  $("#probe-license-id")?.addEventListener("change", (event) => {
+    const evidence = $("#probe-license-url");
+    const cc0 = "https://creativecommons.org/publicdomain/zero/1.0/";
+    if (event.currentTarget.value === "cc0-1.0" && !evidence.value.trim()) {
+      evidence.value = cc0;
+      evidence.dataset.smartLicense = "cc0-1.0";
+    } else if (event.currentTarget.value !== "cc0-1.0" && evidence.dataset.smartLicense === "cc0-1.0" && evidence.value === cc0) {
+      evidence.value = "";
+      delete evidence.dataset.smartLicense;
+    }
+  });
   $("#harvest-probe-form")?.addEventListener("submit", (event) => {
     event.preventDefault(); const form = event.currentTarget; const button = $("#harvest-probe-start");
     if (!form.reportValidity()) return;
     once("probe-start", button, async () => {
-      const value = await request("/harvest/api/probes", {method: "POST", body: JSON.stringify(probePayload("probe-start"))});
+      const sourceId = $("#probe-source-id").value.trim();
+      const value = await idempotentRequest(`probe-start:${sourceId}`, "probe-start", "/harvest/api/probes", probePayload());
       probeSummary.textContent = `Probe ${value.probe.probe_id} recorded. Progress is durable and safe to reload.`; await refresh();
     }).catch((error) => { probeSummary.textContent = error.message; });
   });
   sourceSelect.addEventListener("change", renderSourceEvidence);
+  renderPrefillPresets();
   renderSources(state.catalog || {sources: []}); renderInventory(state.inventory || {runs: [], legacy_runs: []});
-  Promise.all([request("/harvest/api/sources"), request("/harvest/api/inventory")]).then(([catalog, inventory]) => { renderSources(catalog); renderInventory(inventory); }).catch((error) => { summary.textContent = error.message; });
-  window.setInterval(() => { if ([...(state.inventory.runs || []), ...(state.inventory.probe_runs || [])].some((run) => ["QUEUED", "RUNNING", "CANCELLING"].includes(run.status))) refresh().catch((error) => { summary.textContent = error.message; }); }, 1500);
+  Promise.all([request("/harvest/api/sources"), refresh()]).then(([catalog]) => { renderSources(catalog); }).catch((error) => { summary.textContent = error.message; });
+  window.setInterval(() => { if ([...activeJobs, ...(state.inventory.probe_runs || [])].some((run) => ["QUEUED", "RUNNING", "CANCELLING"].includes(run.status) || ["RUNNING", "CANCELLING"].includes(run.dataset_import?.status))) refresh().catch((error) => { summary.textContent = error.message; }); }, 1500);
 })();

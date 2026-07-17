@@ -24,8 +24,8 @@ from spritelab.product_features.harvest.trusted_backend import (
 )
 from spritelab.utils.safe_fs import AnchoredDirectory, UnsafeFilesystemOperation
 
-BACKEND_CAPABILITY_CERTIFICATE_SCHEMA = "spritelab.harvest.backend-capability-certificate.v4"
-BACKEND_AUDIT_REPORT_SCHEMA = "spritelab.harvest.backend-audit-report.v4"
+BACKEND_CAPABILITY_CERTIFICATE_SCHEMA = "spritelab.harvest.backend-capability-certificate.v5"
+BACKEND_AUDIT_REPORT_SCHEMA = "spritelab.harvest.backend-audit-report.v5"
 BACKEND_CAPABILITIES_RELATIVE_PATH = Path("artifacts") / "harvest" / "backend_capabilities.json"
 BACKEND_AUDIT_REPORT_RELATIVE_PATH = Path("artifacts") / "harvest" / "backend_audit_report.json"
 MAX_CAPABILITY_EVIDENCE_BYTES = 1 << 20
@@ -54,6 +54,7 @@ _AUDIT_REPORT_KEYS = frozenset(
         "implementation_identity_sha256",
         "module_sha256",
         "runtime_dependencies",
+        "gate_results",
         "report_identity",
     }
 )
@@ -71,6 +72,34 @@ _CAPABILITY_TEXT_KEYS = frozenset(
     }
 )
 _CAPABILITY_BOOL_KEYS = _CAPABILITY_KEYS - _CAPABILITY_TEXT_KEYS
+_CAPABILITY_GATE_FIELDS = {
+    "enforces_http_success": "http_success",
+    "enforces_https_direct_url": "https_direct_url",
+    "resolves_and_blocks_private_networks": "private_network_block",
+    "validates_every_redirect": "every_redirect",
+    "enforces_response_mime_allowlist": "response_mime",
+    "enforces_expected_response_hash": "expected_response_hash",
+    "enforces_per_file_hashes": "per_file_hashes",
+    "enforces_file_count_and_byte_limits": "file_count_and_bytes",
+    "enforces_depth_and_name_policy": "depth_and_name_policy",
+    "enforces_archive_limits": "archive_limits",
+    "enforces_duration_and_cancellation": "duration_and_cancellation",
+    "enforces_bounded_evidence_fetch": "bounded_evidence_fetch",
+    "enforces_quarantine_hash_probe": "quarantine_hash_probe",
+    "enforces_probe_no_decode_extract_import": "probe_no_decode_extract_import",
+    "enforces_deterministic_evidence_verification": "deterministic_evidence_verification",
+    "enforces_transactional_catalog_promotion": "transactional_catalog_promotion",
+    "enforces_direct_static_image_derivation": "direct_static_image_derivation",
+    "enforces_retained_anchored_state": "retained_anchored_state",
+    "enforces_whole_operation_deadline": "whole_operation_deadline",
+    "enforces_durable_import_control": "durable_import_control",
+    "enforces_same_pack_license_and_zero_cost": "same_pack_license_and_zero_cost",
+    "enforces_technical_usability_and_pixel_uniqueness": "technical_usability_and_pixel_uniqueness",
+    "enforces_non_self_attested_production_bindings": "non_self_attested_production_bindings",
+}
+if frozenset(_CAPABILITY_GATE_FIELDS) != _CAPABILITY_BOOL_KEYS:
+    raise RuntimeError("Harvest certified capability fields and audit gates have drifted.")
+REQUIRED_BACKEND_AUDIT_GATES = frozenset(_CAPABILITY_GATE_FIELDS.values())
 
 
 class BackendCapabilityCertificateError(ValueError):
@@ -97,7 +126,7 @@ class BackendCapabilityEvidence:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "spritelab.harvest.backend-capability-evidence.v3",
+            "schema_version": "spritelab.harvest.backend-capability-evidence.v4",
             "auditor_id": self.auditor_id,
             "audited_at": self.audited_at,
             "issued_at": self.issued_at,
@@ -165,6 +194,9 @@ def _validate_certificate(
         raise BackendCapabilityCertificateError("Harvest backend capability certificate schema is unsupported.")
     if report["schema_version"] != BACKEND_AUDIT_REPORT_SCHEMA or report["outcome"] != "PASS":
         raise BackendCapabilityCertificateError("Harvest backend audit did not record PASS.")
+    gate_results = _exact_mapping(report["gate_results"], REQUIRED_BACKEND_AUDIT_GATES, "audit gates")
+    if any(result != "PASS" for result in gate_results.values()):
+        raise BackendCapabilityCertificateError("Harvest backend audit gates did not each record PASS.")
     auditor_id = certificate["auditor_id"]
     if (
         not isinstance(auditor_id, str)
@@ -384,6 +416,7 @@ __all__ = [
     "BACKEND_AUDIT_REPORT_SCHEMA",
     "BACKEND_CAPABILITIES_RELATIVE_PATH",
     "BACKEND_CAPABILITY_CERTIFICATE_SCHEMA",
+    "REQUIRED_BACKEND_AUDIT_GATES",
     "BackendCapabilityCertificateError",
     "BackendCapabilityEvidence",
     "load_backend_capability_certificate",

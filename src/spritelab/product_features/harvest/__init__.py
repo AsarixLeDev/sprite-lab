@@ -60,6 +60,7 @@ def create_plugin(
     probe_resolver: object | None = None,
     probe_transport: object | None = None,
     probe_downloader: object | None = None,
+    allow_unverified_test_backend: bool = False,
 ) -> ProductPlugin:
     """Create an injectable plugin without probing or constructing its backend.
 
@@ -120,10 +121,8 @@ def create_plugin(
             else:
                 active_capabilities = None
                 active_evidence = None
-        active_callback = (
-            dataset_import_callback_factory(context)
-            if dataset_import_callback_factory is not None
-            else dataset_import_callback
+        active_callback_factory = (
+            (lambda: dataset_import_callback_factory(context)) if dataset_import_callback_factory is not None else None
         )
         harvest_service = HarvestService(
             context.project_root,
@@ -135,10 +134,12 @@ def create_plugin(
                 (lambda: repository_configuration(context)) if load_repository_capabilities else None
             ),
             limits=limits,
-            dataset_import_callback=active_callback,
+            dataset_import_callback=dataset_import_callback,
+            dataset_import_callback_factory=active_callback_factory,
             probe_resolver=probe_resolver,
             probe_transport=probe_transport,
             probe_downloader=probe_downloader,
+            allow_unverified_test_backend=allow_unverified_test_backend,
         )
         return harvest_service, configuration_error, active_capabilities
 

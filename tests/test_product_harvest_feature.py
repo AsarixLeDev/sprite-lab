@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import threading
 import time
+import zipfile
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import APIRouter
 from fastapi.testclient import TestClient
+from PIL import Image
 
+import spritelab.product_features.harvest as harvest_feature_module
 import spritelab.product_features.harvest.catalog as harvest_catalog_module
 import spritelab.product_features.harvest.service as harvest_service_module
+import spritelab.product_features.harvest.trusted_backend as trusted_backend_module
+from spritelab.harvest.download import DownloadReceipt, ReceiptDownloadResult
 from spritelab.product_core import ProductStatus, ProjectContext
 from spritelab.product_features.harvest import create_plugin
 from spritelab.product_features.harvest.catalog import (
@@ -28,6 +35,7 @@ from spritelab.product_features.harvest.catalog_verifier import (
     CATALOG_EVIDENCE_VERIFIER_ID,
     catalog_evidence_verifier_code_identity,
 )
+from spritelab.product_features.harvest.certification import BackendCapabilityEvidence
 from spritelab.product_features.harvest.service import HarvestError, HarvestService
 from spritelab.product_features.harvest.storage import (
     HarvestStorageError,
@@ -42,6 +50,8 @@ from spritelab.product_features.harvest.trusted_backend import (
     AcquisitionReceipt,
     AcquisitionResult,
     CertifiedBackendCapabilities,
+    DatasetImportCancelled,
+    DatasetImportDeadlineExceeded,
     DatasetImportRequest,
     DatasetImportResult,
     HarvestLimits,
@@ -158,6 +168,13 @@ def _capabilities(*, code_identity: str = SHA_A, callback: Any = None) -> Certif
         enforces_probe_no_decode_extract_import=True,
         enforces_deterministic_evidence_verification=True,
         enforces_transactional_catalog_promotion=True,
+        enforces_direct_static_image_derivation=True,
+        enforces_retained_anchored_state=True,
+        enforces_whole_operation_deadline=True,
+        enforces_durable_import_control=True,
+        enforces_same_pack_license_and_zero_cost=True,
+        enforces_technical_usability_and_pixel_uniqueness=True,
+        enforces_non_self_attested_production_bindings=True,
     )
 
 
@@ -273,6 +290,7 @@ def _service(
             ),
             limits=limits,
             dataset_import_callback=callback,
+            allow_unverified_test_backend=True,
         ),
         observed,
         certified,
@@ -330,6 +348,7 @@ def test_passive_inventory_indexes_legacy_runs_without_mutation_or_backend(tmp_p
         sources=(_source(),),
         backend_factory=forbidden,
         backend_capabilities=_capabilities(),
+        allow_unverified_test_backend=True,
     )
     inventory = service.inventory()
     assert inventory["legacy_run_count"] == 1
@@ -342,6 +361,26 @@ def test_passive_inventory_indexes_legacy_runs_without_mutation_or_backend(tmp_p
     assert constructed == 0
 
 
+@pytest.mark.parametrize("name", ["harvest-corrupt1", f"probe-{'a' * 32}"])
+def test_managed_shaped_corrupt_inventory_never_falls_back_to_legacy(tmp_path: Path, name: str) -> None:
+    project = tmp_path / "project"
+    entry = project / "harvest_runs" / name
+    entry.mkdir(parents=True)
+    sources = b'{"source_id":"plausible-legacy"}\n'
+    candidates = b'{"candidate_id":"plausible-legacy-item"}\n'
+    (entry / "sources.jsonl").write_bytes(sources)
+    (entry / "candidates.jsonl").write_bytes(candidates)
+
+    inventory = HarvestService(project).inventory()
+
+    assert inventory["run_count"] == 0
+    assert inventory["probe_run_count"] == 0
+    assert inventory["legacy_run_count"] == 0
+    assert inventory["unsafe_entries"] == 1
+    assert (entry / "sources.jsonl").read_bytes() == sources
+    assert (entry / "candidates.jsonl").read_bytes() == candidates
+
+
 def test_real_product_shell_requires_csrf_and_js_supplies_it(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -351,6 +390,7 @@ def test_real_product_shell_requires_csrf_and_js_supplies_it(tmp_path: Path) -> 
         sources=(_source(),),
         backend_capabilities=capabilities,
         backend_factory=lambda: FixtureBackend(capabilities, calls),
+        allow_unverified_test_backend=True,
     )
     app = create_app(ProjectContext(project), plugins=(plugin,))
     client = TestClient(app)
@@ -400,6 +440,10 @@ def test_real_product_shell_requires_csrf_and_js_supplies_it(tmp_path: Path) -> 
     javascript = client.get("/harvest/static/harvest.js").text
     assert '"X-CSRF-Token": csrf' in javascript
     assert "inFlight" in javascript
+    assert "sessionStorage" in javascript
+    assert "Cancel Dataset import" in javascript
+    assert "run.dataset_import?.status" in javascript
+    assert "fresh-browser-session" not in javascript
 
 
 def test_receipts_bind_inventory_source_backend_limits_response_and_files(tmp_path: Path) -> None:
@@ -596,6 +640,381 @@ def test_backend_must_have_complete_certification_before_start(tmp_path: Path) -
     assert not (project / "harvest_runs").exists()
 
 
+def test_injected_backend_requires_independent_live_evidence_or_explicit_test_seam(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    capabilities = _capabilities()
+
+    with pytest.raises(ValueError, match="Production Harvest backends require current independently reloaded"):
+        HarvestService(
+            project,
+            sources=(_source(),),
+            backend_factory=lambda: FixtureBackend(capabilities, []),
+            backend_capabilities=capabilities,
+        )
+
+    service = HarvestService(
+        project,
+        sources=(_source(),),
+        backend_factory=lambda: FixtureBackend(capabilities, []),
+        backend_capabilities=capabilities,
+        allow_unverified_test_backend=True,
+    )
+    assert len(service.sources()["sources"]) == 1
+
+
+def test_constructed_evidence_cannot_self_attest_production_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capabilities = _capabilities()
+    now = datetime.now(timezone.utc)
+    evidence = BackendCapabilityEvidence(
+        capabilities=capabilities,
+        auditor_id="constructed.evidence",
+        audited_at=(now - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+        issued_at=(now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+        expires_at=(now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        audit_report_sha256=SHA_A,
+        audit_report_identity=SHA_A,
+        certificate_identity=SHA_A,
+        implementation_identity_sha256=SHA_A,
+    )
+    monkeypatch.setattr(harvest_service_module, "hardened_backend_code_identity", lambda: SHA_B)
+    monkeypatch.setattr(
+        harvest_service_module,
+        "conditioned_dataset_import_callback_binding",
+        lambda: {
+            "dataset_import_callback_id": capabilities.dataset_import_callback_id,
+            "dataset_import_callback_code_identity_sha256": capabilities.dataset_import_callback_code_identity_sha256,
+            "dataset_import_callback_runtime_identity_sha256": (
+                capabilities.dataset_import_callback_runtime_identity_sha256
+            ),
+        },
+    )
+
+    with pytest.raises(ValueError, match="not bound to current backend and callback code"):
+        HarvestService(
+            tmp_path,
+            sources=(_source(),),
+            backend_factory=lambda: FixtureBackend(capabilities, []),
+            backend_capabilities=capabilities,
+            backend_capability_evidence=evidence,
+            live_configuration_loader=lambda: ((_source(),), evidence),
+        )
+
+
+def test_dataset_callback_must_support_deadline_and_cancellation_even_in_test_seam(tmp_path: Path) -> None:
+    class UncontrolledCallback:
+        callback_id = "dataset.uncontrolled"
+        code_identity_sha256 = SHA_A
+        runtime_identity_sha256 = SHA_B
+
+        def import_harvest(self, request: Any, *, idempotency_key: str) -> DatasetImportResult:
+            del request, idempotency_key
+            return DatasetImportResult("dataset.imported", 0, 0)
+
+    callback = UncontrolledCallback()
+    capabilities = _capabilities(callback=callback)
+    with pytest.raises(ValueError, match="lacks deadline and cancellation control"):
+        HarvestService(
+            tmp_path,
+            sources=(_source(),),
+            backend_factory=lambda: FixtureBackend(capabilities, []),
+            backend_capabilities=capabilities,
+            dataset_import_callback=callback,
+            allow_unverified_test_backend=True,
+        )
+
+
+def test_hardened_backend_quarantines_non_32_and_animated_pngs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def png(size: int, *, animated: bool = False) -> bytes:
+        output = io.BytesIO()
+        first = Image.new("RGBA", (size, size), (255, 0, 0, 255))
+        first.putpixel((0, 0), (0, 0, 255, 255))
+        if animated:
+            second = Image.new("RGBA", (size, size), (0, 255, 0, 255))
+            second.putpixel((0, 0), (255, 255, 0, 255))
+            first.save(output, format="PNG", save_all=True, append_images=[second], duration=10, loop=0)
+        else:
+            first.save(output, format="PNG")
+        return output.getvalue()
+
+    archive_output = io.BytesIO()
+    with zipfile.ZipFile(archive_output, "w") as archive:
+        archive.writestr("exact.png", png(32))
+        archive.writestr("large.png", png(64))
+        archive.writestr("animated.png", png(32, animated=True))
+    archive_bytes = archive_output.getvalue()
+    source = replace(_source(), expected_response_sha256=hashlib.sha256(archive_bytes).hexdigest())
+    capabilities = _capabilities()
+    monkeypatch.setattr(trusted_backend_module, "hardened_backend_code_identity", lambda: SHA_A)
+    monkeypatch.setattr(
+        trusted_backend_module,
+        "conditioned_dataset_import_callback_binding",
+        lambda: {
+            "dataset_import_callback_id": "dataset.conditioned-intake",
+            "dataset_import_callback_code_identity_sha256": SHA_A,
+            "dataset_import_callback_runtime_identity_sha256": SHA_B,
+        },
+    )
+
+    def downloader(_url: str, output: Path, **_kwargs: Any) -> ReceiptDownloadResult:
+        output.write_bytes(archive_bytes)
+        return ReceiptDownloadResult(
+            output,
+            DownloadReceipt(
+                final_url=DOWNLOAD_URL,
+                redirect_chain=(),
+                http_status=200,
+                response_mime_type="application/zip",
+                response_bytes=len(archive_bytes),
+                response_sha256=source.expected_response_sha256,
+                elapsed_seconds=0.01,
+            ),
+        )
+
+    artifacts = tmp_path / "run" / "artifacts"
+    artifacts.mkdir(parents=True)
+    backend = trusted_backend_module.HardenedArchiveAcquisitionBackend(capabilities, downloader=downloader)
+    result = backend.acquire(
+        source,
+        artifacts,
+        HarvestLimits(max_files=10, max_total_bytes=1 << 20),
+        cancel_requested=lambda: False,
+        progress=lambda _stage, _current, _total: None,
+    )
+    files = {item.relative_path: item for item in result.receipt.files}
+
+    assert files["exact.png"].usable is True
+    assert files["exact.png"].quarantine_reason is None
+    assert files["large.png"].usable is False
+    assert files["large.png"].quarantine_reason == "not_exact_32x32"
+    assert files["animated.png"].usable is False
+    assert files["animated.png"].quarantine_reason == "animated_png_unsupported"
+    assert sum(item.usable for item in result.receipt.files) == 1
+    assert sum(not item.usable for item in result.receipt.files) == 2
+
+
+@pytest.mark.parametrize(
+    ("image_format", "mime_type", "derived"),
+    [("PNG", "image/png", False), ("GIF", "image/gif", True), ("WEBP", "image/webp", True)],
+)
+def test_hardened_backend_acquires_direct_static_images_with_bound_derivation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    image_format: str,
+    mime_type: str,
+    derived: bool,
+) -> None:
+    image = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+    image.putpixel((3, 4), (255, 0, 0, 255))
+    image.putpixel((9, 12), (0, 255, 0, 200))
+    encoded = io.BytesIO()
+    save_options = {"lossless": True} if image_format == "WEBP" else {}
+    image.save(encoded, format=image_format, **save_options)
+    raw = encoded.getvalue()
+    source = replace(_source(), expected_response_sha256=hashlib.sha256(raw).hexdigest())
+    capabilities = _capabilities()
+    monkeypatch.setattr(trusted_backend_module, "hardened_backend_code_identity", lambda: SHA_A)
+    monkeypatch.setattr(
+        trusted_backend_module,
+        "conditioned_dataset_import_callback_binding",
+        lambda: {
+            "dataset_import_callback_id": "dataset.conditioned-intake",
+            "dataset_import_callback_code_identity_sha256": SHA_A,
+            "dataset_import_callback_runtime_identity_sha256": SHA_B,
+        },
+    )
+
+    def downloader(_url: str, output: Path, **_kwargs: Any) -> ReceiptDownloadResult:
+        output.write_bytes(raw)
+        return ReceiptDownloadResult(
+            output,
+            DownloadReceipt(
+                final_url=DOWNLOAD_URL,
+                redirect_chain=(),
+                http_status=200,
+                response_mime_type=mime_type,
+                response_bytes=len(raw),
+                response_sha256=source.expected_response_sha256,
+                elapsed_seconds=0.01,
+            ),
+        )
+
+    run = tmp_path / image_format.casefold()
+    artifacts = run / "artifacts"
+    artifacts.mkdir(parents=True)
+    result = trusted_backend_module.HardenedArchiveAcquisitionBackend(
+        capabilities,
+        downloader=downloader,
+    ).acquire(
+        source,
+        artifacts,
+        HarvestLimits(max_files=2, max_total_bytes=1 << 20),
+        cancel_requested=lambda: False,
+        progress=lambda _stage, _current, _total: None,
+    )
+
+    derivation = result.receipt.direct_image_derivation
+    assert derivation is not None
+    assert set(derivation) == {
+        "schema_version",
+        "kind",
+        "source_format",
+        "source_mime_type",
+        "raw_byte_count",
+        "raw_sha256",
+        "frame_count",
+        "width",
+        "height",
+        "decoded_rgba_sha256",
+        "output_relative_path",
+        "output_mime_type",
+        "output_byte_count",
+        "output_sha256",
+        "recipe_identity",
+        "derived",
+        "source_bytes_modified",
+    }
+    assert derivation["schema_version"] == "spritelab.harvest.direct-image-derivation.v1"
+    assert derivation["source_mime_type"] == mime_type
+    assert derivation["raw_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert derivation["derived"] is derived
+    assert derivation["source_bytes_modified"] is False
+    assert (run / "downloads" / "response.zip").read_bytes() == raw
+    assert len(result.receipt.files) == 1
+    assert result.receipt.files[0].relative_path == "direct-image.png"
+    assert result.receipt.files[0].usable is True
+    assert result.receipt.archive_members == 0
+    with Image.open(artifacts / "direct-image.png") as published:
+        assert published.format == "PNG"
+        assert published.size == (32, 32)
+    service = HarvestService(
+        run,
+        sources=(source,),
+        backend_factory=lambda: pytest.fail("receipt validation cannot construct a backend"),
+        backend_capabilities=capabilities,
+        allow_unverified_test_backend=True,
+    )
+    validated = service._validate_acquisition_result(source, result, actual_elapsed=0.02)
+    assert validated["schema_version"] == "spritelab.harvest.acquisition-receipt.v2"
+    assert validated["response_kind"] == "direct_static_image"
+    assert validated["direct_image_derivation"] == derivation
+
+
+@pytest.mark.parametrize(("image_format", "mime_type"), [("GIF", "image/gif"), ("PNG", "image/png")])
+def test_direct_image_publication_rejects_animation_before_artifact_write(
+    tmp_path: Path,
+    image_format: str,
+    mime_type: str,
+) -> None:
+    first = Image.new("RGBA", (32, 32), (255, 0, 0, 255))
+    second = Image.new("RGBA", (32, 32), (0, 0, 255, 255))
+    encoded = io.BytesIO()
+    first.save(encoded, format=image_format, save_all=True, append_images=[second], duration=20, loop=0)
+    raw = encoded.getvalue()
+    run = tmp_path / "animated-direct"
+    downloads = run / "downloads"
+    artifacts = run / "artifacts"
+    downloads.mkdir(parents=True)
+    artifacts.mkdir()
+    raw_path = downloads / "response.zip"
+    raw_path.write_bytes(raw)
+
+    with (
+        AnchoredDirectory(downloads, downloads) as source_anchor,
+        AnchoredDirectory(artifacts, artifacts) as destination_anchor,
+    ):
+        with pytest.raises(ValueError, match="animated or multi-frame"):
+            trusted_backend_module._publish_direct_static_image(
+                source_anchor,
+                raw_path.name,
+                destination_anchor,
+                response_mime_type=mime_type,
+                expected_sha256=hashlib.sha256(raw).hexdigest(),
+                expected_bytes=len(raw),
+                max_file_bytes=1 << 20,
+                cancel_requested=lambda: False,
+                deadline=time.monotonic() + 5,
+            )
+
+    assert raw_path.read_bytes() == raw
+    assert list(artifacts.iterdir()) == []
+
+
+def test_hardened_backend_counts_only_technically_usable_exact_pixel_unique_images(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def png_bytes(image: Image.Image, *, compress_level: int = 6) -> bytes:
+        output = io.BytesIO()
+        image.save(output, format="PNG", compress_level=compress_level)
+        return output.getvalue()
+
+    sprite = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+    sprite.putpixel((5, 5), (255, 10, 20, 255))
+    sprite.putpixel((6, 5), (10, 255, 20, 128))
+    archive_output = io.BytesIO()
+    with zipfile.ZipFile(archive_output, "w") as archive:
+        archive.writestr("a-primary.png", png_bytes(sprite, compress_level=0))
+        archive.writestr("b-duplicate.png", png_bytes(sprite, compress_level=9))
+        archive.writestr("c-transparent.png", png_bytes(Image.new("RGBA", (32, 32), (0, 0, 0, 0))))
+        archive.writestr("d-constant.png", png_bytes(Image.new("RGBA", (32, 32), (10, 20, 30, 255))))
+    raw = archive_output.getvalue()
+    source = replace(_source(), expected_response_sha256=hashlib.sha256(raw).hexdigest())
+    capabilities = _capabilities()
+    monkeypatch.setattr(trusted_backend_module, "hardened_backend_code_identity", lambda: SHA_A)
+    monkeypatch.setattr(
+        trusted_backend_module,
+        "conditioned_dataset_import_callback_binding",
+        lambda: {
+            "dataset_import_callback_id": "dataset.conditioned-intake",
+            "dataset_import_callback_code_identity_sha256": SHA_A,
+            "dataset_import_callback_runtime_identity_sha256": SHA_B,
+        },
+    )
+
+    def downloader(_url: str, output: Path, **_kwargs: Any) -> ReceiptDownloadResult:
+        output.write_bytes(raw)
+        return ReceiptDownloadResult(
+            output,
+            DownloadReceipt(
+                final_url=DOWNLOAD_URL,
+                redirect_chain=(),
+                http_status=200,
+                response_mime_type="application/zip",
+                response_bytes=len(raw),
+                response_sha256=source.expected_response_sha256,
+                elapsed_seconds=0.01,
+            ),
+        )
+
+    artifacts = tmp_path / "dedupe" / "artifacts"
+    artifacts.mkdir(parents=True)
+    result = trusted_backend_module.HardenedArchiveAcquisitionBackend(
+        capabilities,
+        downloader=downloader,
+    ).acquire(
+        source,
+        artifacts,
+        HarvestLimits(max_files=8, max_total_bytes=1 << 20),
+        cancel_requested=lambda: False,
+        progress=lambda _stage, _current, _total: None,
+    )
+    files = {item.relative_path: item for item in result.receipt.files}
+
+    assert files["a-primary.png"].usable is True
+    assert files["b-duplicate.png"].usable is False
+    assert files["b-duplicate.png"].quarantine_reason == "duplicate_exact_pixels"
+    assert files["c-transparent.png"].quarantine_reason == "fully_transparent"
+    assert files["d-constant.png"].quarantine_reason == "constant_rgba_image"
+    assert sum(item.usable for item in result.receipt.files) == 1
+
+
 def test_handoff_and_idempotent_reuse_rehash_every_file(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -636,6 +1055,93 @@ def test_same_source_active_conflict_and_cross_instance_lock(tmp_path: Path) -> 
         with pytest.raises(HarvestStorageError, match="holds the mutation lock"):
             with RepositoryMutationLock(lock_root, timeout_seconds=0.05):
                 pass
+
+
+def test_run_creation_binds_the_exact_new_directory_before_any_evidence_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    output_root = project / "harvest_runs"
+    run_id = "harvest-creation-anchor"
+    run = output_root / run_id
+    moved = output_root / f"{run_id}-held"
+    capabilities = _capabilities()
+    service = HarvestService(
+        project,
+        sources=(_source(),),
+        backend_factory=lambda: FixtureBackend(capabilities, []),
+        backend_capabilities=capabilities,
+        run_id_factory=lambda: run_id,
+        allow_unverified_test_backend=True,
+    )
+    real_open = AnchoredDirectory.open_directory_immovable
+    swapped = False
+
+    def swap_new_run_before_anchor(anchor: AnchoredDirectory, name: str):
+        nonlocal swapped
+        if not swapped and anchor.directory == output_root and name == run_id:
+            try:
+                os.replace(run, moved)
+                run.mkdir()
+            except OSError:
+                pytest.skip("the platform refused the pre-anchor run-directory swap")
+            (run / "sentinel.bin").write_bytes(b"replacement must remain untouched")
+            swapped = True
+        return real_open(anchor, name)
+
+    monkeypatch.setattr(AnchoredDirectory, "open_directory_immovable", swap_new_run_before_anchor)
+    with pytest.raises(HarvestError, match="changed between creation and retained anchoring"):
+        service.start("open.source", **_start_arguments(service, "creation-anchor-request"))
+
+    assert swapped is True
+    assert (run / "sentinel.bin").read_bytes() == b"replacement must remain untouched"
+    assert list(run.iterdir()) == [run / "sentinel.bin"]
+    assert moved.is_dir()
+    assert list(moved.iterdir()) == []
+
+
+def test_output_root_creation_binds_the_exact_new_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    output_root = project / "harvest_runs"
+    moved = project / "harvest_runs-held"
+    capabilities = _capabilities()
+    service = HarvestService(
+        project,
+        sources=(_source(),),
+        backend_factory=lambda: FixtureBackend(capabilities, []),
+        backend_capabilities=capabilities,
+        allow_unverified_test_backend=True,
+    )
+    real_open = AnchoredDirectory.open_directory_immovable
+    swapped = False
+
+    def swap_new_root_before_anchor(anchor: AnchoredDirectory, name: str):
+        nonlocal swapped
+        if not swapped and anchor.directory == project and name == output_root.name:
+            try:
+                os.replace(output_root, moved)
+                output_root.mkdir()
+            except OSError:
+                pytest.skip("the platform refused the pre-anchor output-root swap")
+            (output_root / "sentinel.bin").write_bytes(b"replacement root must remain untouched")
+            swapped = True
+        return real_open(anchor, name)
+
+    monkeypatch.setattr(AnchoredDirectory, "open_directory_immovable", swap_new_root_before_anchor)
+    with pytest.raises(HarvestError, match="managed Harvest root could not be created safely"):
+        service.start("open.source", **_start_arguments(service, "output-anchor-request"))
+
+    assert swapped is True
+    assert (output_root / "sentinel.bin").read_bytes() == b"replacement root must remain untouched"
+    assert list(output_root.iterdir()) == [output_root / "sentinel.bin"]
+    assert moved.is_dir()
+    assert list(moved.iterdir()) == []
 
 
 @pytest.mark.parametrize("operation", ["read", "append", "exclusive", "atomic"])
@@ -736,6 +1242,115 @@ def test_passive_legacy_inventory_does_not_follow_parent_aba(tmp_path: Path, mon
     assert (outside / "sources.jsonl").read_bytes() == outside_payload
 
 
+@pytest.mark.parametrize("scan", ["inventory", "active"])
+def test_managed_scans_consume_held_child_anchor_during_parent_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scan: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service, _calls, _capability = _service(project)
+    started, _created = service.start("open.source", **_start_arguments(service, f"anchor-{scan}-0001"))
+    worker = service._workers[started["run_id"]]
+    _wait(service, started["run_id"], "COMPLETE")
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+    run = project / "harvest_runs" / started["run_id"]
+    moved = run.with_name(f"{run.name}-held")
+    outside = tmp_path / f"outside-{scan}"
+    outside.mkdir()
+    outside_state = (run / "state.json").read_bytes()
+    outside_request = (run / "request.json").read_bytes()
+    (outside / "state.json").write_bytes(outside_state)
+    (outside / "request.json").write_bytes(outside_request)
+    real_open = AnchoredDirectory.open_file
+    swapped = False
+
+    def swap_before_managed_read(anchor, name, flags, mode=0o600):
+        nonlocal swapped
+        if not swapped and anchor.directory == run and name == "state.json":
+            try:
+                os.replace(run, moved)
+                os.symlink(outside, run, target_is_directory=True)
+            except OSError:
+                if moved.exists() and not os.path.lexists(run):
+                    os.replace(moved, run)
+                pytest.skip("the platform refused the held managed-run rename")
+            swapped = True
+        return real_open(anchor, name, flags, mode)
+
+    monkeypatch.setattr(AnchoredDirectory, "open_file", swap_before_managed_read)
+    try:
+        if scan == "inventory":
+            inventory = service.inventory()
+            assert inventory["run_count"] == 0
+            assert inventory["unsafe_entries"] == 1
+        else:
+            assert service._active_managed_run() == started["run_id"]
+    finally:
+        if swapped:
+            os.unlink(run)
+            os.replace(moved, run)
+
+    assert (outside / "state.json").read_bytes() == outside_state
+    assert (outside / "request.json").read_bytes() == outside_request
+
+
+@pytest.mark.parametrize("action", ["job", "handoff", "evidence", "cancel"])
+def test_run_actions_retain_one_anchor_across_multi_record_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service, _calls, _capability = _service(project)
+    started, _created = service.start("open.source", **_start_arguments(service, f"action-anchor-{action}"))
+    _wait(service, started["run_id"], "COMPLETE")
+    service._workers[started["run_id"]].join(timeout=3)
+    run = project / "harvest_runs" / started["run_id"]
+    moved = run.with_name(f"{run.name}-held")
+    outside = tmp_path / f"outside-{action}"
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel.write_bytes(b"outside action sentinel")
+    original_read_state = service._read_state
+    swapped = False
+
+    def swapping_read_state(run_dir: Path, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal swapped
+        if not swapped:
+            try:
+                os.replace(run, moved)
+                os.symlink(outside, run, target_is_directory=True)
+            except OSError:
+                if moved.exists() and not os.path.lexists(run):
+                    os.replace(moved, run)
+                pytest.skip("the platform refused the held run-action rename")
+            swapped = True
+        return original_read_state(run_dir, *args, **kwargs)
+
+    monkeypatch.setattr(service, "_read_state", swapping_read_state)
+    try:
+        with pytest.raises((HarvestError, UnsafeFilesystemOperation, OSError)):
+            if action == "job":
+                service.job(started["run_id"])
+            elif action == "handoff":
+                service.handoff(started["run_id"])
+            elif action == "evidence":
+                service.evidence(started["run_id"])
+            else:
+                service.cancel(started["run_id"], explicit_action=True)
+    finally:
+        if swapped:
+            os.unlink(run)
+            os.replace(moved, run)
+
+    assert sentinel.read_bytes() == b"outside action sentinel"
+    assert list(outside.iterdir()) == [sentinel]
+
+
 def test_worker_transaction_keeps_all_evidence_in_held_run_after_parent_aba(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -784,6 +1399,7 @@ def test_worker_transaction_keeps_all_evidence_in_held_run_after_parent_aba(tmp_
             entered=entered,
             release=release,
         ),
+        allow_unverified_test_backend=True,
     )
     started, _created = service.start("open.source", **_start_arguments(service, "worker-anchor-0001"))
     assert entered.wait(timeout=2)
@@ -919,6 +1535,7 @@ def test_progress_is_coalesced_for_more_than_2500_files(tmp_path: Path) -> None:
         backend_factory=lambda: ScalingBackend(capabilities, []),
         backend_capabilities=capabilities,
         limits=limits,
+        allow_unverified_test_backend=True,
     )
     started, _created = service.start("open.source", **_start_arguments(service, "scale-events-0001"))
     deadline = time.monotonic() + 30
@@ -1013,6 +1630,60 @@ class HandoffBarrierService(HarvestService):
         return super()._build_handoff(*args, **kwargs)
 
 
+class SlowHandoffService(HarvestService):
+    def _build_handoff(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        time.sleep(0.15)
+        return super()._build_handoff(*args, **kwargs)
+
+
+def test_whole_operation_deadline_bounds_backend_construction(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    capabilities = _capabilities()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_factory() -> FixtureBackend:
+        entered.set()
+        release.wait(2)
+        return FixtureBackend(capabilities, [])
+
+    service = HarvestService(
+        project,
+        sources=(_source(),),
+        backend_factory=slow_factory,
+        backend_capabilities=capabilities,
+        limits=HarvestLimits(max_duration_seconds=0.05),
+        allow_unverified_test_backend=True,
+    )
+    began = time.monotonic()
+    started, _created = service.start("open.source", **_start_arguments(service, "slow-constructor-0001"))
+    assert entered.wait(1)
+    failed = _wait(service, started["run_id"], "FAILED")
+    elapsed = time.monotonic() - began
+    release.set()
+
+    assert elapsed < 0.5
+    assert failed["stage"] == "failed"
+    assert not (project / "harvest_runs" / started["run_id"] / "handoff.json").exists()
+
+
+def test_whole_operation_deadline_is_rechecked_after_handoff_build(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service, _calls, _capabilities_record = _service(
+        project,
+        limits=HarvestLimits(max_duration_seconds=0.05),
+        service_type=SlowHandoffService,
+    )
+
+    started, _created = service.start("open.source", **_start_arguments(service, "slow-finalization-0001"))
+    failed = _wait(service, started["run_id"], "FAILED")
+
+    assert failed["stage"] == "failed"
+    assert not (project / "harvest_runs" / started["run_id"] / "handoff.json").exists()
+
+
 def test_cancellation_is_rechecked_before_handoff_publication(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -1044,6 +1715,7 @@ class FakeDatasetImport:
     callback_id = "dataset.import"
     code_identity_sha256 = SHA_A
     runtime_identity_sha256 = SHA_B
+    supports_operation_control = True
 
     def __init__(self) -> None:
         self.calls: list[DatasetImportRequest] = []
@@ -1053,11 +1725,56 @@ class FakeDatasetImport:
         request: DatasetImportRequest,
         *,
         idempotency_key: str,
+        deadline_monotonic: float,
+        cancel_requested: Any,
     ) -> DatasetImportResult:
         assert idempotency_key == "dataset-import-0001"
+        assert deadline_monotonic > time.monotonic()
+        assert cancel_requested() is False
         assert request.artifacts_directory.name == "artifacts"
         self.calls.append(request)
         return DatasetImportResult("dataset.imported", 1, 0)
+
+
+def test_copied_callback_identity_cannot_self_attest_production_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback = FakeDatasetImport()
+    capabilities = _capabilities(callback=callback)
+    now = datetime.now(timezone.utc)
+    evidence = BackendCapabilityEvidence(
+        capabilities=capabilities,
+        auditor_id="independent.callback",
+        audited_at=(now - timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+        issued_at=(now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+        expires_at=(now + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+        audit_report_sha256=SHA_A,
+        audit_report_identity=SHA_A,
+        certificate_identity=SHA_A,
+        implementation_identity_sha256=SHA_A,
+    )
+    monkeypatch.setattr(harvest_service_module, "hardened_backend_code_identity", lambda: SHA_A)
+    monkeypatch.setattr(
+        harvest_service_module,
+        "conditioned_dataset_import_callback_binding",
+        lambda: {
+            "dataset_import_callback_id": callback.callback_id,
+            "dataset_import_callback_code_identity_sha256": callback.code_identity_sha256,
+            "dataset_import_callback_runtime_identity_sha256": callback.runtime_identity_sha256,
+        },
+    )
+
+    with pytest.raises(ValueError, match="audited conditioned callback implementation"):
+        HarvestService(
+            tmp_path,
+            sources=(_source(),),
+            backend_factory=lambda: FixtureBackend(capabilities, []),
+            backend_capabilities=capabilities,
+            backend_capability_evidence=evidence,
+            live_configuration_loader=lambda: ((_source(),), evidence),
+            dataset_import_callback=callback,
+        )
 
 
 def test_dataset_import_callback_is_explicit_rehashed_and_idempotent(tmp_path: Path) -> None:
@@ -1068,11 +1785,220 @@ def test_dataset_import_callback_is_explicit_rehashed_and_idempotent(tmp_path: P
     started, _created = service.start("open.source", **_start_arguments(service, "import-source-0001"))
     _wait(service, started["run_id"], "COMPLETE")
     receipt = service.import_to_dataset(started["run_id"], explicit_action=True, idempotency_key="dataset-import-0001")
-    repeated = service.import_to_dataset(started["run_id"], explicit_action=True, idempotency_key="dataset-import-0001")
+    repeated = service.import_to_dataset(
+        started["run_id"],
+        explicit_action=True,
+        idempotency_key="fresh-browser-session-0002",
+    )
     assert repeated == receipt
     assert receipt["schema_version"] == "spritelab.harvest.dataset-import-receipt.v1"
     assert receipt["paths_exposed"] is False
     assert len(callback.calls) == 1
+    import_summary = service.job(started["run_id"])["dataset_import"]
+    assert import_summary["status"] == "COMPLETE"
+    assert import_summary["completed"] is True
+    assert import_summary["request_identity"] == receipt["request_identity"]
+
+
+@pytest.mark.parametrize("record_name", ["dataset_import_request.json", "dataset_import_receipt.json"])
+def test_dataset_import_durable_records_reject_schema_extensions(tmp_path: Path, record_name: str) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    callback = FakeDatasetImport()
+    service, _calls, _capabilities_record = _service(project, callback=callback)
+    started, _created = service.start("open.source", **_start_arguments(service, f"import-schema-{record_name[:7]}"))
+    _wait(service, started["run_id"], "COMPLETE")
+    service.import_to_dataset(
+        started["run_id"],
+        explicit_action=True,
+        idempotency_key="dataset-import-0001",
+    )
+    record_path = project / "harvest_runs" / started["run_id"] / record_name
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["unexpected_private_path"] = "C:/outside"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(HarvestError) as invalid:
+        service.job(started["run_id"])
+
+    assert invalid.value.code == "invalid_harvest_import"
+
+
+def test_dataset_import_recovers_durably_across_service_and_browser_session(tmp_path: Path) -> None:
+    class RecoverableDatasetImport:
+        callback_id = "dataset.recoverable"
+        code_identity_sha256 = SHA_A
+        runtime_identity_sha256 = SHA_B
+        supports_operation_control = True
+
+        def __init__(self, *, fail: bool, calls: list[str]) -> None:
+            self.fail = fail
+            self.calls = calls
+
+        def import_harvest(
+            self,
+            request: DatasetImportRequest,
+            *,
+            idempotency_key: str,
+            deadline_monotonic: float,
+            cancel_requested: Any,
+        ) -> DatasetImportResult:
+            assert request.artifacts_directory.name == "artifacts"
+            assert deadline_monotonic > time.monotonic()
+            assert cancel_requested() is False
+            self.calls.append(idempotency_key)
+            if self.fail:
+                raise RuntimeError("injected callback interruption")
+            return DatasetImportResult("dataset.recovered", 1, 0)
+
+    project = tmp_path / "project"
+    project.mkdir()
+    calls: list[str] = []
+    first_callback = RecoverableDatasetImport(fail=True, calls=calls)
+    first, _backend_calls, _capabilities_record = _service(project, callback=first_callback)
+    started, _created = first.start("open.source", **_start_arguments(first, "import-recovery-source"))
+    _wait(first, started["run_id"], "COMPLETE")
+    with pytest.raises(HarvestError) as failed:
+        first.import_to_dataset(
+            started["run_id"],
+            explicit_action=True,
+            idempotency_key="original-import-session",
+        )
+    assert failed.value.code == "dataset_import_failed"
+    assert first.job(started["run_id"])["dataset_import"]["status"] == "FAILED"
+
+    recovered_callback = RecoverableDatasetImport(fail=False, calls=calls)
+    recovered = HarvestService(
+        project,
+        sources=(first._sources["open.source"],),
+        backend_factory=lambda: FixtureBackend(_capabilities_record, []),
+        backend_capabilities=_capabilities_record,
+        dataset_import_callback=recovered_callback,
+        allow_unverified_test_backend=True,
+    )
+    receipt = recovered.import_to_dataset(
+        started["run_id"],
+        explicit_action=True,
+        idempotency_key="replacement-browser-session",
+    )
+
+    assert calls == ["original-import-session", "original-import-session"]
+    assert receipt["idempotency_key"] == "original-import-session"
+    state = json.loads(
+        (project / "harvest_runs" / started["run_id"] / "dataset_import_state.json").read_text(encoding="utf-8")
+    )
+    assert state["attempt"] == 2
+    assert state["status"] == "COMPLETE"
+
+
+def test_dataset_import_cancellation_is_durable_and_reaches_callback(tmp_path: Path) -> None:
+    class BlockingDatasetImport:
+        callback_id = "dataset.blocking"
+        code_identity_sha256 = SHA_A
+        runtime_identity_sha256 = SHA_B
+        supports_operation_control = True
+
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.cancel_observed = threading.Event()
+
+        def import_harvest(
+            self,
+            request: DatasetImportRequest,
+            *,
+            idempotency_key: str,
+            deadline_monotonic: float,
+            cancel_requested: Any,
+        ) -> DatasetImportResult:
+            del request, idempotency_key
+            self.entered.set()
+            while time.monotonic() < deadline_monotonic:
+                if cancel_requested():
+                    self.cancel_observed.set()
+                    raise DatasetImportCancelled()
+                time.sleep(0.005)
+            raise AssertionError("callback deadline elapsed before cancellation arrived")
+
+    project = tmp_path / "project"
+    project.mkdir()
+    callback = BlockingDatasetImport()
+    service, _backend_calls, _capabilities_record = _service(project, callback=callback)
+    started, _created = service.start("open.source", **_start_arguments(service, "import-cancel-source"))
+    _wait(service, started["run_id"], "COMPLETE")
+    failures: list[BaseException] = []
+
+    def import_in_background() -> None:
+        try:
+            service.import_to_dataset(
+                started["run_id"],
+                explicit_action=True,
+                idempotency_key="cancel-import-session",
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=import_in_background)
+    worker.start()
+    assert callback.entered.wait(2)
+    cancelling = service.cancel(started["run_id"], explicit_action=True)
+    worker.join(3)
+
+    assert not worker.is_alive()
+    assert cancelling["dataset_import"]["status"] in {"CANCELLING", "CANCELLED"}
+    assert callback.cancel_observed.is_set()
+    assert len(failures) == 1
+    assert isinstance(failures[0], HarvestError)
+    assert failures[0].code == "dataset_import_cancelled"
+    summary = service.job(started["run_id"])["dataset_import"]
+    assert summary["status"] == "CANCELLED"
+    cancellation = project / "harvest_runs" / started["run_id"] / "dataset_import_cancellation_1.json"
+    assert cancellation.exists()
+
+
+def test_dataset_import_deadline_covers_callback_and_receipt_finalization(tmp_path: Path) -> None:
+    class DeadlineDatasetImport:
+        callback_id = "dataset.deadline"
+        code_identity_sha256 = SHA_A
+        runtime_identity_sha256 = SHA_B
+        supports_operation_control = True
+
+        def import_harvest(
+            self,
+            request: DatasetImportRequest,
+            *,
+            idempotency_key: str,
+            deadline_monotonic: float,
+            cancel_requested: Any,
+        ) -> DatasetImportResult:
+            del request, idempotency_key
+            while time.monotonic() < deadline_monotonic:
+                assert cancel_requested() is False
+                time.sleep(0.002)
+            raise DatasetImportDeadlineExceeded()
+
+    project = tmp_path / "project"
+    project.mkdir()
+    callback = DeadlineDatasetImport()
+    service, _backend_calls, _capabilities_record = _service(
+        project,
+        callback=callback,
+        limits=HarvestLimits(max_duration_seconds=2.0),
+    )
+    started, _created = service.start("open.source", **_start_arguments(service, "import-deadline-source"))
+    _wait(service, started["run_id"], "COMPLETE")
+
+    with pytest.raises(HarvestError) as expired:
+        service.import_to_dataset(
+            started["run_id"],
+            explicit_action=True,
+            idempotency_key="deadline-import-session",
+        )
+
+    assert expired.value.code == "dataset_import_duration_exceeded"
+    summary = service.job(started["run_id"])["dataset_import"]
+    assert summary["status"] == "FAILED"
+    assert summary["error_code"] == "dataset_import_duration_exceeded"
+    assert not (project / "harvest_runs" / started["run_id"] / "dataset_import_receipt.json").exists()
 
 
 def test_dataset_import_callback_runtime_drift_fails_before_invocation(tmp_path: Path) -> None:
@@ -1105,22 +2031,432 @@ def test_default_plugin_remains_passive_and_unavailable(tmp_path: Path) -> None:
     assert not (project / "harvest_runs").exists()
 
 
-def test_context_bound_dataset_callback_factory_receives_trusted_project_root(tmp_path: Path) -> None:
+def test_context_bound_dataset_callback_factory_runs_only_for_explicit_import(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
+    callback = FakeDatasetImport()
     observed: list[Path] = []
+    captured_services: list[HarvestService] = []
 
     def callback_factory(context: ProjectContext) -> FakeDatasetImport:
         observed.append(context.project_root)
-        return FakeDatasetImport()
+        return callback
 
-    plugin = create_plugin(sources=(), dataset_import_callback_factory=callback_factory)
-    result = plugin.status_provider(ProjectContext(project))
-    assert result.status is ProductStatus.UNAVAILABLE
+    def capture_router(_context: ProjectContext, *, service: HarvestService) -> APIRouter:
+        captured_services.append(service)
+        return APIRouter()
+
+    monkeypatch.setattr(harvest_feature_module, "create_harvest_router", capture_router)
+    capabilities = _capabilities(callback=callback)
+    backend_calls: list[dict[str, Any]] = []
+    plugin = create_plugin(
+        sources=(_source(),),
+        backend_factory=lambda: FixtureBackend(capabilities, backend_calls),
+        backend_capabilities=capabilities,
+        dataset_import_callback_factory=callback_factory,
+        allow_unverified_test_backend=True,
+    )
+    context = ProjectContext(project)
+
+    assert plugin.status_provider(context).status is ProductStatus.READY
+    assert plugin.capability_probe(context)
+    assert plugin.web_router_factory is not None
+    plugin.web_router_factory(context)
+    assert observed == []
+
+    service = captured_services[0]
+    started, _created = service.start(
+        "open.source",
+        **_start_arguments(service, "lazy-import-0001"),
+    )
+    _wait(service, started["run_id"], "COMPLETE")
+    assert observed == []
+
+    service.import_to_dataset(
+        started["run_id"],
+        explicit_action=True,
+        idempotency_key="dataset-import-0001",
+    )
     assert observed == [project]
+    assert len(callback.calls) == 1
+
     with pytest.raises(ValueError, match="mutually exclusive"):
         create_plugin(
             sources=(),
-            dataset_import_callback=FakeDatasetImport(),
+            dataset_import_callback=callback,
             dataset_import_callback_factory=callback_factory,
         )
+
+
+class SimulatedCrash(Exception):
+    """Escapes the import protocol exactly like a process death mid-publication."""
+
+
+def _import_state(project: Path, run_id: str) -> dict[str, Any]:
+    return json.loads((project / "harvest_runs" / run_id / "dataset_import_state.json").read_text(encoding="utf-8"))
+
+
+def test_stale_import_attempt_cannot_finalize_over_newer_attempt(tmp_path: Path) -> None:
+    class GatedDatasetImport:
+        callback_id = "dataset.gated"
+        code_identity_sha256 = SHA_A
+        runtime_identity_sha256 = SHA_B
+        supports_operation_control = True
+
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.calls: list[str] = []
+
+        def import_harvest(
+            self,
+            request: DatasetImportRequest,
+            *,
+            idempotency_key: str,
+            deadline_monotonic: float,
+            cancel_requested: Any,
+        ) -> DatasetImportResult:
+            del request, deadline_monotonic, cancel_requested
+            self.calls.append(idempotency_key)
+            if len(self.calls) == 1:
+                self.entered.set()
+                assert self.release.wait(15)
+            return DatasetImportResult("dataset.gated", 1, 0)
+
+    project = tmp_path / "project"
+    project.mkdir()
+    callback = GatedDatasetImport()
+    service, _backend_calls, _capabilities_record = _service(
+        project,
+        callback=callback,
+        limits=HarvestLimits(max_duration_seconds=2.0),
+    )
+    started, _created = service.start("open.source", **_start_arguments(service, "late-attempt-source"))
+    _wait(service, started["run_id"], "COMPLETE")
+    failures: list[BaseException] = []
+
+    def stale_import() -> None:
+        try:
+            service.import_to_dataset(started["run_id"], explicit_action=True, idempotency_key="late-attempt-n")
+        except BaseException as exc:
+            failures.append(exc)
+
+    stale = threading.Thread(target=stale_import)
+    stale.start()
+    assert callback.entered.wait(5)
+    first_state = _import_state(project, started["run_id"])
+    assert first_state["attempt"] == 1
+    deadline_at = datetime.fromisoformat(str(first_state["deadline_at"]).replace("Z", "+00:00"))
+    while datetime.now(timezone.utc) <= deadline_at:
+        time.sleep(0.02)
+
+    live_receipt = service.import_to_dataset(
+        started["run_id"],
+        explicit_action=True,
+        idempotency_key="live-attempt-n1",
+    )
+    callback.release.set()
+    stale.join(5)
+
+    assert not stale.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], HarvestError)
+    assert failures[0].code == "dataset_import_duration_exceeded"
+    # The stale attempt never modified the newer attempt's durable outcome.
+    final_state = _import_state(project, started["run_id"])
+    assert final_state["attempt"] == 2
+    assert final_state["status"] == "COMPLETE"
+    assert final_state["error_code"] is None
+    commit = json.loads(
+        (project / "harvest_runs" / started["run_id"] / "dataset_import_terminal_commit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert commit["attempt"] == 2
+    assert live_receipt["idempotency_key"] == "late-attempt-n"
+    assert callback.calls == ["late-attempt-n", "late-attempt-n"]
+    summary = service.job(started["run_id"])["dataset_import"]
+    assert summary["status"] == "COMPLETE"
+    assert summary["completed"] is True
+
+
+@pytest.mark.parametrize("crash_point", ["receipt_written_state_unwritten", "state_written_commit_unwritten"])
+def test_receipt_without_terminal_commit_never_reports_complete_and_recovers(
+    tmp_path: Path,
+    crash_point: str,
+) -> None:
+    class CountingDatasetImport:
+        callback_id = "dataset.crash-recovery"
+        code_identity_sha256 = SHA_A
+        runtime_identity_sha256 = SHA_B
+        supports_operation_control = True
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def import_harvest(
+            self,
+            request: DatasetImportRequest,
+            *,
+            idempotency_key: str,
+            deadline_monotonic: float,
+            cancel_requested: Any,
+        ) -> DatasetImportResult:
+            del request, deadline_monotonic, cancel_requested
+            self.calls.append(idempotency_key)
+            return DatasetImportResult("dataset.crash-recovery", 1, 0)
+
+    project = tmp_path / "project"
+    project.mkdir()
+    callback = CountingDatasetImport()
+    service, _backend_calls, capabilities = _service(project, callback=callback)
+    started, _created = service.start("open.source", **_start_arguments(service, "crash-import-source"))
+    _wait(service, started["run_id"], "COMPLETE")
+    run_dir = project / "harvest_runs" / started["run_id"]
+
+    if crash_point == "receipt_written_state_unwritten":
+
+        def crash_terminal(*_args: Any, **_kwargs: Any) -> None:
+            raise SimulatedCrash("process died after the receipt write")
+
+        service._commit_dataset_import_terminal = crash_terminal  # type: ignore[method-assign]
+    else:
+        real_write = service._write_exclusive_json
+
+        def crash_commit(path: Path, payload: Any, *, parent_anchor: Any = None) -> None:
+            if path.name == "dataset_import_terminal_commit.json":
+                raise SimulatedCrash("process died before the terminal commit write")
+            return real_write(path, payload, parent_anchor=parent_anchor)
+
+        service._write_exclusive_json = crash_commit  # type: ignore[method-assign]
+
+    with pytest.raises(SimulatedCrash):
+        service.import_to_dataset(started["run_id"], explicit_action=True, idempotency_key="crash-import-session")
+
+    assert (run_dir / "dataset_import_receipt.json").exists()
+    assert not (run_dir / "dataset_import_terminal_commit.json").exists()
+    # The receipt alone never implies completion.
+    crashed_summary = service.job(started["run_id"])["dataset_import"]
+    assert crashed_summary["status"] == "INTERRUPTED"
+    assert crashed_summary["completed"] is False
+    assert callback.calls == ["crash-import-session"]
+
+    fresh_callback = CountingDatasetImport()
+    recovered = HarvestService(
+        project,
+        sources=(service._sources["open.source"],),
+        backend_factory=lambda: FixtureBackend(capabilities, []),
+        backend_capabilities=capabilities,
+        dataset_import_callback=fresh_callback,
+        allow_unverified_test_backend=True,
+    )
+    receipt = recovered.import_to_dataset(
+        started["run_id"],
+        explicit_action=True,
+        idempotency_key="recovery-session",
+    )
+
+    # Recovery rebinds the durable receipt without re-invoking the callback.
+    assert fresh_callback.calls == []
+    assert receipt["idempotency_key"] == "crash-import-session"
+    recovered_state = _import_state(project, started["run_id"])
+    assert recovered_state["status"] == "COMPLETE"
+    commit = json.loads((run_dir / "dataset_import_terminal_commit.json").read_text(encoding="utf-8"))
+    assert commit["attempt"] == recovered_state["attempt"]
+    assert commit["status"] == "COMPLETE"
+    summary = recovered.job(started["run_id"])["dataset_import"]
+    assert summary["status"] == "COMPLETE"
+    assert summary["completed"] is True
+    # Recovery is idempotent across repeated explicit requests.
+    repeated = recovered.import_to_dataset(
+        started["run_id"],
+        explicit_action=True,
+        idempotency_key="third-browser-session",
+    )
+    assert repeated == receipt
+    assert fresh_callback.calls == []
+
+
+def test_import_lock_wait_past_deadline_fails_before_any_publication(tmp_path: Path) -> None:
+    class RecordingDatasetImport:
+        callback_id = "dataset.lock-wait"
+        code_identity_sha256 = SHA_A
+        runtime_identity_sha256 = SHA_B
+        supports_operation_control = True
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def import_harvest(
+            self,
+            request: DatasetImportRequest,
+            *,
+            idempotency_key: str,
+            deadline_monotonic: float,
+            cancel_requested: Any,
+        ) -> DatasetImportResult:
+            del request, deadline_monotonic, cancel_requested
+            self.calls.append(idempotency_key)
+            return DatasetImportResult("dataset.lock-wait", 1, 0)
+
+    project = tmp_path / "project"
+    project.mkdir()
+    callback = RecordingDatasetImport()
+    service, _backend_calls, _capabilities_record = _service(
+        project,
+        callback=callback,
+        limits=HarvestLimits(max_duration_seconds=2.0),
+    )
+    started, _created = service.start("open.source", **_start_arguments(service, "lock-wait-source"))
+    _wait(service, started["run_id"], "COMPLETE")
+    run_dir = project / "harvest_runs" / started["run_id"]
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_lock() -> None:
+        with service._lock:
+            lock_held.set()
+            release_lock.wait(15)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert lock_held.wait(2)
+    entered_call = threading.Event()
+    failures: list[BaseException] = []
+
+    def blocked_import() -> None:
+        entered_call.set()
+        try:
+            service.import_to_dataset(started["run_id"], explicit_action=True, idempotency_key="lock-wait-session")
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=blocked_import)
+    worker.start()
+    assert entered_call.wait(2)
+    time.sleep(2.3)
+    release_lock.set()
+    holder.join(5)
+    worker.join(5)
+
+    assert not worker.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], HarvestError)
+    assert failures[0].code == "dataset_import_duration_exceeded"
+    # Nothing was published after the lock wait outlived the deadline.
+    assert callback.calls == []
+    assert not (run_dir / "dataset_import_request.json").exists()
+    assert not (run_dir / "dataset_import_state.json").exists()
+    assert service.job(started["run_id"])["dataset_import"]["status"] == "NOT_STARTED"
+
+
+def test_import_cancellation_during_commit_prevents_receipt_publication(tmp_path: Path) -> None:
+    class ReleasingDatasetImport:
+        callback_id = "dataset.commit-cancel"
+        code_identity_sha256 = SHA_A
+        runtime_identity_sha256 = SHA_B
+        supports_operation_control = True
+
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+            self.calls: list[str] = []
+
+        def import_harvest(
+            self,
+            request: DatasetImportRequest,
+            *,
+            idempotency_key: str,
+            deadline_monotonic: float,
+            cancel_requested: Any,
+        ) -> DatasetImportResult:
+            del request, deadline_monotonic, cancel_requested
+            self.calls.append(idempotency_key)
+            if len(self.calls) == 1:
+                self.entered.set()
+                assert self.release.wait(15)
+            return DatasetImportResult("dataset.commit-cancel", 1, 0)
+
+    project = tmp_path / "project"
+    project.mkdir()
+    callback = ReleasingDatasetImport()
+    service, _backend_calls, _capabilities_record = _service(project, callback=callback)
+    started, _created = service.start("open.source", **_start_arguments(service, "commit-cancel-source"))
+    _wait(service, started["run_id"], "COMPLETE")
+    run_dir = project / "harvest_runs" / started["run_id"]
+    failures: list[BaseException] = []
+
+    def import_in_background() -> None:
+        try:
+            service.import_to_dataset(started["run_id"], explicit_action=True, idempotency_key="commit-cancel-run")
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=import_in_background)
+    worker.start()
+    assert callback.entered.wait(5)
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_lock() -> None:
+        with service._lock:
+            lock_held.set()
+            release_lock.wait(15)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert lock_held.wait(2)
+    # The callback succeeds while the commit lock is contended; durable
+    # cancellation evidence lands before the import can take the lock, so the
+    # post-lock recheck must refuse the terminal publication.
+    callback.release.set()
+    time.sleep(0.2)
+    (run_dir / "dataset_import_cancellation_1.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "spritelab.harvest.dataset-import-cancellation.v1",
+                "run_id": started["run_id"],
+                "attempt": 1,
+                "explicit_action": True,
+                "requested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "paths_exposed": False,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    release_lock.set()
+    holder.join(5)
+    worker.join(5)
+
+    assert not worker.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], HarvestError)
+    assert failures[0].code == "dataset_import_cancelled"
+    assert not (run_dir / "dataset_import_receipt.json").exists()
+    assert not (run_dir / "dataset_import_terminal_commit.json").exists()
+    cancelled_state = _import_state(project, started["run_id"])
+    assert cancelled_state["attempt"] == 1
+    assert cancelled_state["status"] == "CANCELLED"
+    assert cancelled_state["error_code"] == "dataset_import_cancelled"
+    summary = service.job(started["run_id"])["dataset_import"]
+    assert summary["status"] == "CANCELLED"
+    assert summary["completed"] is False
+
+    # A fresh explicit attempt after the cancellation completes durably.
+    receipt = service.import_to_dataset(
+        started["run_id"],
+        explicit_action=True,
+        idempotency_key="post-cancel-attempt",
+    )
+    assert receipt["idempotency_key"] == "commit-cancel-run"
+    assert callback.calls == ["commit-cancel-run", "commit-cancel-run"]
+    final_state = _import_state(project, started["run_id"])
+    assert final_state["attempt"] == 2
+    assert final_state["status"] == "COMPLETE"
+    assert (run_dir / "dataset_import_terminal_commit.json").exists()
+    assert service.job(started["run_id"])["dataset_import"]["status"] == "COMPLETE"

@@ -35,12 +35,25 @@ class HarvestCandidate:
     width: int
     height: int
     mode: str
+    pixel_sha256: str | None = None
+    visible_pixel_count: int | None = None
+    pixel_variation: bool | None = None
     status: str = "candidate"
     rejection_reasons: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     artifact_kind: str = "image"
     extraction_disposition: str = "candidate"
     forensic_evidence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _DecodedPngDetails:
+    width: int
+    height: int
+    mode: str
+    pixel_sha256: str
+    visible_pixel_count: int
+    pixel_variation: bool
 
 
 def make_candidate_id(source_id: str, relative_path: str, image_sha256: str) -> str:
@@ -133,7 +146,6 @@ def discover_png_candidates(
                 )
             )
             continue
-        width, height, mode = image_details
         candidates.append(
             HarvestCandidate(
                 candidate_id=make_candidate_id(source.source_id, relative, image_sha256),
@@ -142,9 +154,12 @@ def discover_png_candidates(
                 extracted_path=path,
                 relative_path=relative,
                 image_sha256=image_sha256,
-                width=width,
-                height=height,
-                mode=mode,
+                width=image_details.width,
+                height=image_details.height,
+                mode=image_details.mode,
+                pixel_sha256=image_details.pixel_sha256,
+                visible_pixel_count=image_details.visible_pixel_count,
+                pixel_variation=image_details.pixel_variation,
             )
         )
     return candidates
@@ -190,7 +205,7 @@ def _inspect_anchored_candidate_file(
     root: AnchoredDirectory,
     relative: Path,
     display_path: Path,
-) -> tuple[str, bytes, tuple[int, int, str] | None, str | None]:
+) -> tuple[str, bytes, _DecodedPngDetails | None, str | None]:
     with ExitStack() as stack:
         parent = root
         for part in relative.parts[:-1]:
@@ -212,23 +227,7 @@ def _inspect_anchored_candidate_file(
                 raise UnsafeSourceTreeError(f"candidate changed while it was opened: {display_path}")
             with os.fdopen(descriptor, "rb", closefd=False) as handle:
                 image_sha256, prefix = _hash_open_file(handle)
-                try:
-                    handle.seek(0)
-                    with Image.open(handle) as image:
-                        width, height = image.size
-                        if width <= 0 or height <= 0 or width * height > _MAX_DISCOVERY_PIXELS:
-                            image_details = None
-                            load_error = (
-                                f"image dimensions {width}x{height} exceed the "
-                                f"{_MAX_DISCOVERY_PIXELS}-pixel safe decode limit"
-                            )
-                        else:
-                            image.load()
-                            image_details = (width, height, image.mode)
-                            load_error = None
-                except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
-                    image_details = None
-                    load_error = str(exc)
+                image_details, load_error = _load_single_frame_png(handle)
             after = os.fstat(descriptor)
         finally:
             os.close(descriptor)
@@ -260,6 +259,10 @@ def filter_candidate_basic(
             warnings.append(f"non-32x32 image ({candidate.width}x{candidate.height}); may need slicing or padding.")
         else:
             reasons.append(f"expected 32x32, got {candidate.width}x{candidate.height}.")
+    if candidate.visible_pixel_count == 0:
+        reasons.append("image is fully transparent.")
+    elif candidate.pixel_variation is False:
+        reasons.append("image contains only one constant RGBA value.")
     if reasons:
         return replace(
             candidate,
@@ -330,7 +333,7 @@ def _validate_directory(directory: Path, root: Path) -> None:
 def _inspect_candidate_file(
     path: Path,
     root: Path,
-) -> tuple[str, bytes, tuple[int, int, str] | None, str | None]:
+) -> tuple[str, bytes, _DecodedPngDetails | None, str | None]:
     _require_source_path(path, root)
     try:
         before = path.lstat()
@@ -350,23 +353,7 @@ def _inspect_candidate_file(
             if _identity(before) != _identity(opened):
                 raise UnsafeSourceTreeError(f"candidate changed while it was opened: {path}")
             image_sha256, prefix = _hash_open_file(handle)
-            try:
-                handle.seek(0)
-                with Image.open(handle) as image:
-                    width, height = image.size
-                    if width <= 0 or height <= 0 or width * height > _MAX_DISCOVERY_PIXELS:
-                        image_details = None
-                        load_error = (
-                            f"image dimensions {width}x{height} exceed the "
-                            f"{_MAX_DISCOVERY_PIXELS}-pixel safe decode limit"
-                        )
-                    else:
-                        image.load()
-                        image_details = (width, height, image.mode)
-                        load_error = None
-            except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
-                image_details = None
-                load_error = str(exc)
+            image_details, load_error = _load_single_frame_png(handle)
             after = os.fstat(handle.fileno())
     except UnsafeSourceTreeError:
         raise
@@ -388,6 +375,45 @@ def _hash_open_file(handle: BinaryIO) -> tuple[str, bytes]:
             prefix = chunk[:4]
         digest.update(chunk)
     return digest.hexdigest(), prefix
+
+
+def _load_single_frame_png(handle: BinaryIO) -> tuple[_DecodedPngDetails | None, str | None]:
+    """Decode only an exact, single-frame PNG through an already-held file."""
+
+    try:
+        handle.seek(0)
+        with Image.open(handle) as image:
+            width, height = image.size
+            if image.format != "PNG":
+                return None, "file extension does not contain a PNG image"
+            frame_count = getattr(image, "n_frames", 1)
+            if type(frame_count) is not int or frame_count != 1 or bool(getattr(image, "is_animated", False)):
+                return None, "animated or multi-frame PNG/APNG images are not supported"
+            if width <= 0 or height <= 0 or width * height > _MAX_DISCOVERY_PIXELS:
+                return (
+                    None,
+                    f"image dimensions {width}x{height} exceed the {_MAX_DISCOVERY_PIXELS}-pixel safe decode limit",
+                )
+            image.load()
+            original_mode = image.mode
+            rgba = image.convert("RGBA")
+            pixels = rgba.tobytes()
+            first_pixel = pixels[:4]
+            return (
+                _DecodedPngDetails(
+                    width=width,
+                    height=height,
+                    mode=original_mode,
+                    pixel_sha256=hashlib.sha256(pixels).hexdigest(),
+                    visible_pixel_count=sum(1 for alpha in pixels[3::4] if alpha != 0),
+                    pixel_variation=any(
+                        pixels[offset : offset + 4] != first_pixel for offset in range(4, len(pixels), 4)
+                    ),
+                ),
+                None,
+            )
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+        return None, str(exc)
 
 
 def _validate_candidate_metadata(path: Path, metadata: os.stat_result) -> None:

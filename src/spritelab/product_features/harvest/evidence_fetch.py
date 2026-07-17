@@ -59,6 +59,7 @@ _BLOCK_HTML_ELEMENTS = frozenset(
         "title",
     }
 )
+_UNIT_HTML_ELEMENTS = frozenset({"article", "dd", "dt", "li", "section"})
 _SPACE = re.compile(r"\s+")
 _PLAIN_URL = re.compile(r"https://[^\s<>\"']+")
 _ROBOTS_FIELD = re.compile(r"^([A-Za-z][A-Za-z-]*):[ \t]*(.*)$")
@@ -248,6 +249,9 @@ class VerifiedPageEvidence:
     license_evidence_text: str
     direct_download_url: str
     direct_download_host: str
+    source_pack_evidence_text: str
+    zero_cost_verified: bool
+    license_conflict_checked: bool
     verification_identity: str
 
 
@@ -276,6 +280,16 @@ class AutomationTermsEvidence:
         }
 
 
+@dataclass(frozen=True)
+class _PageBlock:
+    """One completed visible block with every proper descendant block index."""
+
+    tag: str
+    text: str
+    links: tuple[str, ...]
+    descendants: tuple[int, ...]
+
+
 class _InertHTMLParser(HTMLParser):
     def __init__(self, base_url: str) -> None:
         super().__init__(convert_charrefs=True)
@@ -287,7 +301,8 @@ class _InertHTMLParser(HTMLParser):
         self.links: list[str] = []
         self.link_labels: list[tuple[str, str]] = []
         self.segments: list[str] = []
-        self._segment_buffers: list[tuple[str, list[str]]] = []
+        self.linked_segments: list[_PageBlock] = []
+        self._segment_buffers: list[tuple[str, list[str], list[str], list[int]]] = []
         self._anchor_buffers: list[tuple[str, list[str]]] = []
         self._characters = 0
 
@@ -301,7 +316,7 @@ class _InertHTMLParser(HTMLParser):
         if normalized == "title":
             self._title_depth += 1
         if normalized in _BLOCK_HTML_ELEMENTS:
-            self._segment_buffers.append((normalized, []))
+            self._segment_buffers.append((normalized, [], [], []))
         if normalized == "a" and len(self.links) < MAX_PAGE_LINKS:
             hrefs = [value for name, value in attrs if name.casefold() == "href" and value]
             if len(hrefs) == 1:
@@ -311,6 +326,8 @@ class _InertHTMLParser(HTMLParser):
                     pass
                 else:
                     self.links.append(link)
+                    for _tag, _values, block_links, _descendants in self._segment_buffers:
+                        block_links.append(link)
                     self._anchor_buffers.append((link, []))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -333,12 +350,18 @@ class _InertHTMLParser(HTMLParser):
             self.link_labels.append((link, _normalize_text(" ".join(values))))
         if not self._ignored_depth and normalized in _BLOCK_HTML_ELEMENTS:
             for index in range(len(self._segment_buffers) - 1, -1, -1):
-                block_tag, values = self._segment_buffers[index]
+                block_tag, values, block_links, descendants = self._segment_buffers[index]
                 if block_tag == normalized:
                     del self._segment_buffers[index]
                     segment = _normalize_text(" ".join(values))
                     if segment:
+                        block_index = len(self.linked_segments)
                         self.segments.append(segment)
+                        self.linked_segments.append(
+                            _PageBlock(block_tag, segment, tuple(sorted(set(block_links))), tuple(descendants))
+                        )
+                        for _tag, _values, _links, open_descendants in self._segment_buffers[:index]:
+                            open_descendants.append(block_index)
                     break
 
     def handle_data(self, data: str) -> None:
@@ -348,7 +371,7 @@ class _InertHTMLParser(HTMLParser):
         retained = data[:remaining]
         self._characters += len(retained)
         self._text.append(retained)
-        for _tag, values in self._segment_buffers:
+        for _tag, values, _links, _descendants in self._segment_buffers:
             values.append(retained)
         for _link, values in self._anchor_buffers:
             values.append(retained)
@@ -473,10 +496,10 @@ def verify_evidence_pages(
     license_id: str,
     direct_download_url: str,
 ) -> VerifiedPageEvidence:
-    source_text, source_links, source_segments, _source_link_labels = _parse_page(
+    _source_text, source_links, source_segments, _source_link_labels, source_blocks = _parse_page(
         source_bytes, source_snapshot.mime_type, source_url
     )
-    license_text, _license_links, _license_segments, _license_link_labels = _parse_page(
+    license_text, _license_links, _license_segments, _license_link_labels, _license_blocks = _parse_page(
         license_bytes, license_snapshot.mime_type, license_url
     )
     normalized_title = _normalize_text(title)
@@ -489,24 +512,81 @@ def verify_evidence_pages(
     if normalized_license not in INITIAL_LICENSE_POLICY:
         raise EvidenceFetchError("Only CC0-1.0 or explicit public-domain onboarding is allowed.")
     folded_license = license_text.casefold()
+    if _license_conflict(folded_license, normalized_license):
+        raise EvidenceFetchError("The retained license page contains conflicting or restrictive rights language.")
     declared = _license_declared(folded_license, normalized_license)
     if not declared:
         raise EvidenceFetchError("The retained license page does not declare the selected permissive license.")
     canonical_license_url = canonical_url_string(license_url, allow_query=False)
-    source_declares_license = _license_declared(source_text.casefold(), normalized_license)
-    if not source_declares_license and canonical_license_url not in source_links:
-        raise EvidenceFetchError(
-            "The retained source page neither declares the selected license nor links the exact license evidence page."
-        )
     canonical_direct = canonical_url_string(direct_download_url, allow_query=True)
     if canonical_direct not in source_links:
         raise EvidenceFetchError("The creator source page does not contain the exact submitted direct download link.")
+    link_block_indices = {index for index, block in enumerate(source_blocks) if canonical_direct in block.links}
+    minimal_link_blocks = {
+        index for index in link_block_indices if not link_block_indices.intersection(source_blocks[index].descendants)
+    }
+    if len(minimal_link_blocks) > 1:
+        raise EvidenceFetchError(
+            "The submitted direct download link appears in multiple distinct source-page blocks; "
+            "the source-pack binding is ambiguous."
+        )
+    # Ancestor containers must not compose provenance from one sibling card
+    # with license/zero-cost/download evidence from another. Any strict
+    # descendant that is a self-contained unit element and supplies required
+    # evidence disqualifies the enclosing block; plain wrappers (div/p/...)
+    # inside a single card carry no unit boundary and still bind normally.
+    evidence_unit_indices = {
+        index
+        for index, block in enumerate(source_blocks)
+        if block.tag in _UNIT_HTML_ELEMENTS
+        and _supplies_pack_evidence(
+            block,
+            direct_url=canonical_direct,
+            license_page_url=canonical_license_url,
+            title=normalized_title,
+            creator=normalized_creator,
+            license_id=normalized_license,
+        )
+    }
+    matching_blocks = [
+        block
+        for block in source_blocks
+        if canonical_direct in block.links
+        and _contains_bound_phrase(block.text, normalized_title)
+        and _contains_bound_phrase(block.text, normalized_creator)
+    ]
+    unit_bound_blocks = [
+        block for block in matching_blocks if not evidence_unit_indices.intersection(block.descendants)
+    ]
+    if matching_blocks and not unit_bound_blocks:
+        raise EvidenceFetchError(
+            "The source page composes provenance, license, or zero-cost evidence across sibling "
+            "source-pack units instead of one unambiguous unit."
+        )
+    if not unit_bound_blocks:
+        raise EvidenceFetchError(
+            "The exact title, creator, license, zero-cost declaration, and download link are not bound to one source-pack block."
+        )
+    chosen = min(unit_bound_blocks, key=lambda block: (len(block.text), block.tag, block.text))
+    pack_text, pack_links = chosen.text, chosen.links
+    folded_pack = pack_text.casefold()
+    if _license_conflict(folded_pack, normalized_license):
+        raise EvidenceFetchError("The retained source-pack block contains conflicting or restrictive license language.")
+    if not _license_declared(folded_pack, normalized_license) and canonical_license_url not in pack_links:
+        raise EvidenceFetchError(
+            "The retained source-pack block neither declares the selected license nor links its exact evidence page."
+        )
+    if _paid_conflict(folded_pack) or not _zero_cost_declared(folded_pack):
+        raise EvidenceFetchError(
+            "The retained source-pack block does not provide conflict-free explicit zero-cost evidence."
+        )
     direct = canonical_https_url(canonical_direct, allow_query=True)
     host = (direct.hostname or "").casefold().rstrip(".")
     validate_public_hostname(host)
     license_excerpt = license_text[:4000].strip()
     if len(license_excerpt) < 2:
         raise EvidenceFetchError("The retained license evidence text is empty.")
+    source_pack_excerpt = pack_text[:4000].strip()
     identity_payload = "\n".join(
         (
             source_snapshot.content_sha256,
@@ -516,6 +596,9 @@ def verify_evidence_pages(
             normalized_license,
             url_identity(canonical_direct),
             license_excerpt,
+            source_pack_excerpt,
+            "zero_cost_verified",
+            "license_conflict_checked",
         )
     )
     return VerifiedPageEvidence(
@@ -524,6 +607,9 @@ def verify_evidence_pages(
         license_evidence_text=license_excerpt,
         direct_download_url=canonical_direct,
         direct_download_host=host,
+        source_pack_evidence_text=source_pack_excerpt,
+        zero_cost_verified=True,
+        license_conflict_checked=True,
         verification_identity=hashlib.sha256(identity_payload.encode("utf-8")).hexdigest(),
     )
 
@@ -540,7 +626,7 @@ def verify_automation_terms(
 ) -> AutomationTermsEvidence:
     """Classify retained source-bound terms without treating silence as permission."""
 
-    source_text, source_links, source_segments, source_link_labels = _parse_page(
+    source_text, source_links, source_segments, source_link_labels, _source_blocks = _parse_page(
         source_bytes,
         source_mime_type,
         source_url,
@@ -572,7 +658,7 @@ def verify_automation_terms(
             raise EvidenceFetchError("The submitted automation terms page is not the detected governing terms link.")
         if terms_bytes is None or terms_snapshot is None:
             raise EvidenceFetchError("Automation terms evidence is incomplete.")
-        evidence_text, _terms_links, segments, _terms_link_labels = _parse_page(
+        evidence_text, _terms_links, segments, _terms_link_labels, _terms_blocks = _parse_page(
             terms_bytes,
             terms_snapshot.mime_type,
             canonical_terms,
@@ -641,7 +727,7 @@ def recover_direct_link(
 ) -> str:
     """Recover one exact creator-posted link from retained inert page bytes."""
 
-    _text, links, _segments, _link_labels = _parse_page(source_bytes, mime_type, source_url)
+    _text, links, _segments, _link_labels, _blocks = _parse_page(source_bytes, mime_type, source_url)
     matches = tuple(link for link in links if url_identity(link) == expected_url_sha256)
     if len(matches) != 1:
         raise EvidenceFetchError("Retained source evidence does not identify one exact direct download link.")
@@ -706,7 +792,13 @@ def _parse_page(
     payload: bytes,
     mime_type: str,
     base_url: str,
-) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[tuple[str, str], ...]]:
+) -> tuple[
+    str,
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[tuple[str, str], ...],
+    tuple[_PageBlock, ...],
+]:
     try:
         decoded = payload.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
@@ -720,7 +812,17 @@ def _parse_page(
             except ValueError:
                 continue
         segments = tuple(_normalize_text(line) for line in decoded.splitlines() if _normalize_text(line))
-        return text, tuple(sorted(links)), segments, tuple((link, "") for link in sorted(links))
+        blocks: list[_PageBlock] = []
+        for line in segments:
+            line_links = tuple(sorted(link for link in links if link in line))
+            blocks.append(_PageBlock("line", line, line_links, ()))
+        return (
+            text,
+            tuple(sorted(links)),
+            segments,
+            tuple((link, "") for link in sorted(links)),
+            tuple(blocks),
+        )
     if mime_type != "text/html":
         raise EvidenceFetchError("Evidence page MIME type is not supported.")
     parser = _InertHTMLParser(base_url)
@@ -734,7 +836,13 @@ def _parse_page(
     for link, label in parser.link_labels:
         if label:
             labels[link] = label
-    return parser.text, tuple(sorted(labels)), segments, tuple(sorted(labels.items()))
+    return (
+        parser.text,
+        tuple(sorted(labels)),
+        segments,
+        tuple(sorted(labels.items())),
+        tuple(parser.linked_segments),
+    )
 
 
 def _governing_terms_links(link_labels: tuple[tuple[str, str], ...]) -> frozenset[str]:
@@ -826,9 +934,81 @@ def _normalize_text(value: str) -> str:
 
 
 def _license_declared(folded_text: str, license_id: str) -> bool:
+    if _license_conflict(folded_text, license_id):
+        return False
     if license_id == "cc0-1.0":
         return "cc0" in folded_text and ("1.0" in folded_text or "public domain" in folded_text)
     return "public domain" in folded_text or "public-domain" in folded_text
+
+
+def _license_conflict(folded_text: str, license_id: str) -> bool:
+    patterns = (
+        r"\ball rights reserved\b",
+        r"\bpersonal use only\b",
+        r"\bnon[- ]commercial(?: use)?(?: only)?\b",
+        r"\bno[- ]derivatives?\b",
+        r"\bno (?:copying|redistribution|adaptation|modification)\b",
+        r"\b(?:copying|redistribution|adaptation|modification) (?:is|are) (?:not permitted|prohibited|forbidden)\b",
+    )
+    if any(re.search(pattern, folded_text) is not None for pattern in patterns):
+        return True
+    if license_id == "cc0-1.0":
+        return re.search(r"\b(?:not|isn't|is not)\s+(?:licensed\s+(?:as|under)\s+)?cc0\b", folded_text) is not None
+    return re.search(r"\b(?:not|isn't|is not)\s+(?:in\s+the\s+)?public[- ]domain\b", folded_text) is not None
+
+
+def _zero_cost_declared(folded_text: str) -> bool:
+    return any(
+        re.search(pattern, folded_text) is not None
+        for pattern in (
+            r"\bzero[- ]cost\b",
+            r"\bno[- ]cost\b",
+            r"\bfree (?:download|to download|asset|pack|dataset)\b",
+            r"\bprice\s*(?::|=|-)?\s*(?:0(?:\.00)?|[$€£]\s*0(?:\.00)?)\b",
+        )
+    )
+
+
+def _paid_conflict(folded_text: str) -> bool:
+    return any(
+        re.search(pattern, folded_text) is not None
+        for pattern in (
+            r"\bnot (?:free|zero[- ]cost)\b",
+            r"\b(?:purchase|required purchase|paid|subscription|trial)\b",
+            r"\b(?:buy|purchase) (?:now|this|the|pack|asset|dataset)\b",
+            r"(?:[$€£]\s*[1-9][0-9]*(?:\.[0-9]{1,2})?)",
+            r"\bprice\s*(?::|=|-)\s*[1-9][0-9]*(?:\.[0-9]{1,2})?\b",
+        )
+    )
+
+
+def _supplies_pack_evidence(
+    block: _PageBlock,
+    *,
+    direct_url: str,
+    license_page_url: str,
+    title: str,
+    creator: str,
+    license_id: str,
+) -> bool:
+    """Report whether one unit block carries any evidence the binding relies on."""
+
+    if direct_url in block.links or license_page_url in block.links:
+        return True
+    if _contains_bound_phrase(block.text, title) or _contains_bound_phrase(block.text, creator):
+        return True
+    folded = block.text.casefold()
+    if _zero_cost_declared(folded):
+        return True
+    if license_id == "cc0-1.0":
+        return "cc0" in folded
+    return "public domain" in folded or "public-domain" in folded
+
+
+def _contains_bound_phrase(text: str, value: str) -> bool:
+    folded_text = text.casefold()
+    folded_value = value.casefold()
+    return re.search(rf"(?<!\w){re.escape(folded_value)}(?!\w)", folded_text) is not None
 
 
 def _provenance_segment_matches(value: str, segments: tuple[str, ...], *, label: str) -> bool:

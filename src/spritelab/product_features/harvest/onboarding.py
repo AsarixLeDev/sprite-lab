@@ -464,7 +464,7 @@ class CatalogProbeService:
                 status = str(state["status"])
                 if status in ACTIVE_PROBE_STATUSES and not self._lease_is_live(run_dir, state, run_anchor):
                     status = "INTERRUPTED"
-                if status in {"READY", "PROMOTED"} and not self._terminal_commit_valid(run_dir, run_anchor):
+                if status in {"READY", "PROMOTED"} and not self._terminal_commit_valid(run_dir, run_anchor, state):
                     status = "INTERRUPTED"
                 result = self._read_optional_json(run_dir / "result.json", run_anchor)
                 promotion = self._read_optional_json(run_dir / "promotion_receipt.json", run_anchor)
@@ -541,7 +541,7 @@ class CatalogProbeService:
                         raise CatalogProbeError("invalid_catalog_promotion", "Catalog promotion evidence is invalid.")
                     self._notify_catalog_refreshed()
                     return receipt
-                if state["status"] != "READY" or not self._terminal_commit_valid(run_dir, run_anchor):
+                if state["status"] != "READY" or not self._terminal_commit_valid(run_dir, run_anchor, state):
                     raise CatalogProbeError(
                         "catalog_probe_not_promotable",
                         "Only an unchanged READY probe with a valid terminal commit can be promoted.",
@@ -612,6 +612,7 @@ class CatalogProbeService:
         cancellation: threading.Event,
     ) -> None:
         run_dir = self.output_root / probe_id
+        deadline = time.monotonic() + self.limits.max_duration_seconds
         heartbeat_stop: threading.Event | None = None
         heartbeat_failure: threading.Event | None = None
         heartbeat_thread: threading.Thread | None = None
@@ -620,13 +621,44 @@ class CatalogProbeService:
             with self._open_probe_anchor(probe_id) as opened_run_anchor:
                 run_anchor = opened_run_anchor.detached_duplicate()
                 state = self._read_state(run_dir, run_anchor)
+                lease_token = str(state["lease_token"])
                 heartbeat_stop, heartbeat_failure, heartbeat_thread = self._start_heartbeat(run_dir, state, run_anchor)
+
+                def cancelled() -> bool:
+                    if heartbeat_failure is not None and heartbeat_failure.is_set():
+                        raise CatalogProbeError(
+                            "catalog_probe_lease_failed",
+                            "Catalog probe worker lease renewal failed closed.",
+                        )
+                    if cancellation.is_set():
+                        return True
+                    if run_anchor is not None and run_anchor.lexists("cancellation_request.json"):
+                        return True
+                    if time.monotonic() >= deadline:
+                        raise CatalogProbeError(
+                            "catalog_probe_deadline_exceeded",
+                            "Catalog probe exceeded its whole-probe duration limit.",
+                        )
+                    return False
+
+                def remaining_seconds(stage_limit: float) -> float:
+                    if cancelled():
+                        raise CatalogProbeCancelled()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise CatalogProbeError(
+                            "catalog_probe_deadline_exceeded",
+                            "Catalog probe exceeded its whole-probe duration limit.",
+                        )
+                    return min(stage_limit, remaining)
+
                 self._guarded_transition(
                     run_dir,
                     run_anchor,
                     "RUNNING",
                     "robots",
                     "Checking pinned robots policy before each distinct request path.",
+                    abort_check=cancelled,
                 )
                 with ExitStack() as stack:
                     evidence_anchor = stack.enter_context(run_anchor.open_directory("evidence"))
@@ -634,18 +666,6 @@ class CatalogProbeService:
                     quarantine_anchor = stack.enter_context(run_anchor.open_directory("quarantine"))
                     snapshots: dict[str, RobotsSnapshot] = {}
                     decisions: dict[str, list[RobotsDecision]] = {}
-
-                    def cancelled() -> bool:
-                        if heartbeat_failure is not None and heartbeat_failure.is_set():
-                            raise CatalogProbeError(
-                                "catalog_probe_lease_failed",
-                                "Catalog probe worker lease renewal failed closed.",
-                            )
-                        if cancellation.is_set():
-                            return True
-                        if run_anchor is not None and run_anchor.lexists("cancellation_request.json"):
-                            return True
-                        return False
 
                     def authorize_url(url: str) -> None:
                         origin = url_origin(url)
@@ -660,7 +680,7 @@ class CatalogProbeService:
                                 progress=self._progress_callback(run_dir, run_anchor, cancellation, "robots"),
                                 resolver=self._resolver,
                                 transport=self._transport,
-                                timeout_seconds=min(30.0, self.limits.max_duration_seconds),
+                                timeout_seconds=remaining_seconds(30.0),
                                 downloader=self._downloader,
                             )
                             snapshots[origin] = snapshot
@@ -674,6 +694,7 @@ class CatalogProbeService:
                         "RUNNING",
                         "source_evidence",
                         "Fetching the bounded creator source page through pinned public DNS.",
+                        abort_check=cancelled,
                     )
                     source_snapshot = fetch_evidence_page(
                         request.source_page,
@@ -683,7 +704,7 @@ class CatalogProbeService:
                         progress=self._progress_callback(run_dir, run_anchor, cancellation, "source_evidence"),
                         resolver=self._resolver,
                         transport=self._transport,
-                        timeout_seconds=min(60.0, self.limits.max_duration_seconds),
+                        timeout_seconds=remaining_seconds(60.0),
                         downloader=self._downloader,
                     )
                     terms_snapshot: FetchSnapshot | None = None
@@ -696,6 +717,7 @@ class CatalogProbeService:
                             "RUNNING",
                             "automation_terms",
                             "Fetching source-bound automation terms through pinned public DNS.",
+                            abort_check=cancelled,
                         )
                         terms_snapshot = fetch_evidence_page(
                             request.terms_evidence_url,
@@ -705,7 +727,7 @@ class CatalogProbeService:
                             progress=self._progress_callback(run_dir, run_anchor, cancellation, "automation_terms"),
                             resolver=self._resolver,
                             transport=self._transport,
-                            timeout_seconds=min(60.0, self.limits.max_duration_seconds),
+                            timeout_seconds=remaining_seconds(60.0),
                             downloader=self._downloader,
                         )
                         terms_bytes = read_snapshot_bytes(
@@ -720,6 +742,7 @@ class CatalogProbeService:
                         "RUNNING",
                         "license_evidence",
                         "Fetching the bounded license page through pinned public DNS.",
+                        abort_check=cancelled,
                     )
                     license_snapshot = fetch_evidence_page(
                         request.license_evidence_url,
@@ -729,7 +752,7 @@ class CatalogProbeService:
                         progress=self._progress_callback(run_dir, run_anchor, cancellation, "license_evidence"),
                         resolver=self._resolver,
                         transport=self._transport,
-                        timeout_seconds=min(60.0, self.limits.max_duration_seconds),
+                        timeout_seconds=remaining_seconds(60.0),
                         downloader=self._downloader,
                     )
                     source_bytes = read_snapshot_bytes(
@@ -772,14 +795,16 @@ class CatalogProbeService:
                         "RUNNING",
                         "hash_probe",
                         "Downloading raw bytes into quarantine without opening, decoding, extracting, or importing.",
+                        abort_check=cancelled,
                     )
+                    raw_remaining = remaining_seconds(60.0)
                     raw_result = self._downloader(
                         verified.direct_download_url,
                         quarantine_anchor.directory / "raw_payload.bin",
                         allowed_hosts=(verified.direct_download_host,),
                         overwrite=False,
-                        timeout_seconds=min(60.0, self.limits.max_duration_seconds),
-                        max_duration_seconds=self.limits.max_duration_seconds,
+                        timeout_seconds=raw_remaining,
+                        max_duration_seconds=raw_remaining,
                         allowed_content_types=self.limits.allowed_response_mime_types,
                         max_bytes=self.limits.max_response_bytes,
                         expected_sha256=None,
@@ -817,6 +842,12 @@ class CatalogProbeService:
                         "terms_policy_blocked": False,
                         "tos_inference_performed": False,
                         "creator_posted_direct_link_verified": True,
+                        "same_pack_evidence_verified": True,
+                        "zero_cost_evidence_verified": verified.zero_cost_verified,
+                        "license_conflict_checked": verified.license_conflict_checked,
+                        "source_pack_evidence_sha256": hashlib.sha256(
+                            verified.source_pack_evidence_text.encode("utf-8")
+                        ).hexdigest(),
                         "direct_download_url_public": public_url(verified.direct_download_url),
                         "direct_download_url_sha256": url_identity(verified.direct_download_url),
                         "raw_response": {
@@ -870,9 +901,36 @@ class CatalogProbeService:
                         "paths_exposed": False,
                     }
                     result["result_identity"] = _identity(result)
+                    if cancelled():
+                        raise CatalogProbeCancelled()
                     with self._mutation_guard():
+                        # The mutation-lock wait can outlast cancellation or the
+                        # whole-probe deadline; recheck before terminal publication.
+                        if cancelled():
+                            raise CatalogProbeCancelled()
+                        committed_state = self._read_state(run_dir, run_anchor)
+                        if (
+                            committed_state.get("lease_token") != lease_token
+                            or committed_state["status"] not in ACTIVE_PROBE_STATUSES
+                        ):
+                            raise CatalogProbeError(
+                                "invalid_catalog_probe_lease",
+                                "Catalog probe ownership changed before its terminal commit.",
+                            )
+                        if committed_state["status"] == "CANCELLING":
+                            raise CatalogProbeCancelled()
                         self._write_exclusive_json(run_dir / "probe_receipt.json", receipt, run_anchor)
                         self._write_exclusive_json(run_dir / "result.json", result, run_anchor)
+                        ready_state = self._transition(
+                            run_dir,
+                            run_anchor,
+                            "READY",
+                            "ready_for_promotion",
+                            "Probe completed in quarantine with zero extraction, decoding, candidates, or import.",
+                            ended=True,
+                        )
+                        # READY becomes visible only through this terminal commit
+                        # binding the request, receipt, result, and final state.
                         terminal = {
                             "schema_version": PROBE_TERMINAL_COMMIT_SCHEMA,
                             "probe_id": probe_id,
@@ -881,19 +939,12 @@ class CatalogProbeService:
                             "request_identity": _identity(self._read_request(run_dir, run_anchor)),
                             "receipt_identity": _identity(receipt),
                             "result_identity": _identity(result),
+                            "state_identity": _identity(ready_state),
                             "raw_response_sha256": raw_receipt.response_sha256,
                             "paths_exposed": False,
                         }
                         terminal["terminal_commit_identity"] = _identity(terminal)
                         self._write_exclusive_json(run_dir / "terminal_commit.json", terminal, run_anchor)
-                        self._transition(
-                            run_dir,
-                            run_anchor,
-                            "READY",
-                            "ready_for_promotion",
-                            "Probe completed in quarantine with zero extraction, decoding, candidates, or import.",
-                            ended=True,
-                        )
         except (CatalogProbeCancelled, DownloadCancelled):
             if run_anchor is not None:
                 self._safe_terminal_transition(
@@ -1034,6 +1085,19 @@ class CatalogProbeService:
                 license_id=str(request["license_id"]),
                 direct_download_url=direct,
             )
+            if (
+                verified.verification_identity != receipt.get("verification_identity")
+                or verified.verification_identity != result.get("verification_identity")
+                or receipt.get("same_pack_evidence_verified") is not True
+                or receipt.get("zero_cost_evidence_verified") is not True
+                or receipt.get("license_conflict_checked") is not True
+                or receipt.get("source_pack_evidence_sha256")
+                != hashlib.sha256(verified.source_pack_evidence_text.encode("utf-8")).hexdigest()
+            ):
+                raise CatalogProbeError(
+                    "catalog_probe_evidence_changed",
+                    "Retained source-pack, license, or zero-cost verification evidence changed.",
+                )
             automation_terms = verify_automation_terms(
                 source_url=str(request["source_page"]),
                 source_bytes=source_bytes,
@@ -1143,7 +1207,7 @@ class CatalogProbeService:
         if (
             not isinstance(evidence, BackendCapabilityEvidence)
             or request.get("backend_capability_evidence_identity") != evidence.identity
-            or evidence.to_dict().get("schema_version") != "spritelab.harvest.backend-capability-evidence.v3"
+            or evidence.to_dict().get("schema_version") != "spritelab.harvest.backend-capability-evidence.v4"
         ):
             raise CatalogProbeError(
                 "catalog_capability_evidence_changed",
@@ -1152,7 +1216,7 @@ class CatalogProbeService:
         capabilities = evidence.capabilities.to_dict()
         gates = capabilities.get("enforced_gates")
         if (
-            capabilities.get("schema_version") != "spritelab.harvest.backend-capabilities.v3"
+            capabilities.get("schema_version") != "spritelab.harvest.backend-capabilities.v4"
             or not isinstance(gates, Mapping)
             or not gates
             or any(value is not True for value in gates.values())
@@ -1205,12 +1269,22 @@ class CatalogProbeService:
         if receipt.get("verifier_code_identity_sha256") != catalog_evidence_verifier_code_identity():
             raise CatalogProbeError("catalog_probe_stale", "Catalog evidence verifier code changed after the probe.")
 
-    def _terminal_commit_valid(self, run_dir: Path, run_anchor: AnchoredDirectory) -> bool:
+    def _terminal_commit_valid(
+        self,
+        run_dir: Path,
+        run_anchor: AnchoredDirectory,
+        state: Mapping[str, Any],
+    ) -> bool:
         try:
             request = self._read_request(run_dir, run_anchor)
             receipt = self._read_json(run_dir / "probe_receipt.json", run_anchor)
             result = self._read_json(run_dir / "result.json", run_anchor)
             terminal = self._read_json(run_dir / "terminal_commit.json", run_anchor)
+            # The commit binds the READY state it published; after promotion
+            # the promotion receipt carries the follow-on binding instead.
+            state_bound = str(state.get("status", "")) != "READY" or terminal.get("state_identity") == _identity(
+                dict(state)
+            )
             return (
                 terminal.get("schema_version") == PROBE_TERMINAL_COMMIT_SCHEMA
                 and terminal.get("probe_id") == run_dir.name
@@ -1218,6 +1292,8 @@ class CatalogProbeService:
                 and terminal.get("request_identity") == _identity(request)
                 and terminal.get("receipt_identity") == _identity(receipt)
                 and terminal.get("result_identity") == _identity(result)
+                and SHA256_PATTERN.fullmatch(str(terminal.get("state_identity", ""))) is not None
+                and state_bound
                 and terminal.get("raw_response_sha256") == result.get("raw_response_sha256")
                 and terminal.get("terminal_commit_identity")
                 == _identity({key: value for key, value in terminal.items() if key != "terminal_commit_identity"})
@@ -1242,6 +1318,10 @@ class CatalogProbeService:
                 return
             observation.update({"current": current, "at": now})
             with self._mutation_guard():
+                # Cancellation may have landed during the lock wait; recheck
+                # local and durable evidence before publishing progress.
+                if cancellation.is_set() or run_anchor.lexists("cancellation_request.json"):
+                    raise CatalogProbeCancelled()
                 state = self._read_state(run_dir, run_anchor)
                 if state["status"] not in ACTIVE_PROBE_STATUSES:
                     raise CatalogProbeCancelled()
@@ -1365,8 +1445,13 @@ class CatalogProbeService:
         current: int = 0,
         total: int | None = None,
         ended: bool = False,
+        abort_check: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         with self._mutation_guard():
+            # Cancellation or the deadline may have arrived during the lock
+            # wait; recheck before publishing this state.
+            if abort_check is not None and abort_check():
+                raise CatalogProbeCancelled()
             return self._transition(
                 run_dir,
                 run_anchor,
@@ -1396,6 +1481,11 @@ class CatalogProbeService:
         if state["status"] in TERMINAL_PROBE_STATUSES and state["status"] != status:
             if not (state["status"] == "READY" and status == "PROMOTED"):
                 raise CatalogProbeError("invalid_catalog_probe_state", "Catalog probe terminal state is immutable.")
+        if state["status"] == "CANCELLING" and status in {"READY", "PROMOTED"}:
+            raise CatalogProbeError(
+                "invalid_catalog_probe_state",
+                "A cancelling catalog probe can never commit a ready or promoted state.",
+            )
         count = int(state.get("event_count", 0)) + 1
         if count > _MAX_EVENTS:
             raise CatalogProbeError("catalog_probe_event_limit", "Catalog probe event cap was reached.")
@@ -1555,8 +1645,11 @@ class CatalogProbeService:
                 try:
                     with output_anchor.open_directory_immovable(name) as run_anchor:
                         request = self._read_request(self.output_root / name, run_anchor)
-                except (CatalogProbeError, OSError, UnsafeFilesystemOperation):
-                    continue
+                except (CatalogProbeError, OSError, UnsafeFilesystemOperation) as exc:
+                    raise CatalogProbeError(
+                        "unsafe_catalog_probe_evidence",
+                        "A catalog probe could not be safely checked for idempotent reuse.",
+                    ) from exc
                 if request.get("idempotency_key") == key:
                     return name, str(request.get("request_fingerprint", ""))
         return None
@@ -1571,6 +1664,8 @@ class CatalogProbeService:
                 try:
                     metadata = output_anchor.lstat(name)
                     if not stat.S_ISDIR(metadata.st_mode) or _link_or_reparse(metadata):
+                        if PROBE_ID_PATTERN.fullmatch(name) or name.startswith("harvest-"):
+                            return name
                         continue
                     with output_anchor.open_directory_immovable(name) as run_anchor:
                         if PROBE_ID_PATTERN.fullmatch(name):
@@ -1579,7 +1674,7 @@ class CatalogProbeService:
                                 self.output_root,
                                 run_anchor=run_anchor,
                             )
-                            if record is not None and record.get("status") in ACTIVE_PROBE_STATUSES:
+                            if record is None or record.get("status") in ACTIVE_PROBE_STATUSES:
                                 return name
                             continue
                         if not name.startswith("harvest-"):
@@ -1599,6 +1694,8 @@ class CatalogProbeService:
                         if _generic_lease_live(state, lease):
                             return name
                 except (OSError, ValueError, HarvestStorageError, UnsafeFilesystemOperation):
+                    if PROBE_ID_PATTERN.fullmatch(name) or name.startswith("harvest-"):
+                        return name
                     continue
         return None
 
@@ -1689,6 +1786,10 @@ def scan_probe_inventory_record(
                 live = False
             if not live:
                 status = "INTERRUPTED"
+        if status in {"READY", "PROMOTED"} and not run_anchor.lexists("terminal_commit.json"):
+            # A ready/promoted state without its terminal commit is not
+            # terminal success evidence.
+            status = "INTERRUPTED"
         result = (
             _read_inventory_json(run_dir / "result.json", output_root, run_anchor)
             if run_anchor.lexists("result.json")

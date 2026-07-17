@@ -12,8 +12,8 @@ import unicodedata
 import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import contextmanager
-from dataclasses import dataclass
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -52,12 +52,18 @@ from spritelab.product_features.harvest.trusted_backend import (
     BackendFactory,
     CertifiedBackendCapabilities,
     DatasetImportCallback,
+    DatasetImportCancelled,
+    DatasetImportDeadlineExceeded,
     DatasetImportRequest,
+    DatasetImportResult,
     HarvestLimits,
+    conditioned_dataset_import_callback_binding,
+    hardened_backend_code_identity,
     validate_callback_identity,
 )
 from spritelab.utils.safe_fs import (
     AnchoredDirectory,
+    OwnedFileIdentity,
     UnsafeFilesystemOperation,
     open_anchored_directory,
     require_confined_path,
@@ -68,12 +74,80 @@ HARVEST_REQUEST_SCHEMA = "spritelab.harvest.request.v2"
 HARVEST_AUTHORIZATION_SCHEMA = "spritelab.harvest.authorization-receipt.v2"
 HARVEST_STATE_SCHEMA = "spritelab.harvest.job-state.v2"
 HARVEST_EVENT_SCHEMA = "spritelab.harvest.job-event.v2"
-HARVEST_ACQUISITION_RECEIPT_SCHEMA = "spritelab.harvest.acquisition-receipt.v1"
+HARVEST_ACQUISITION_RECEIPT_SCHEMA = "spritelab.harvest.acquisition-receipt.v2"
 HARVEST_HANDOFF_SCHEMA = "spritelab.harvest.dataset-handoff.v2"
 HARVEST_IMPORT_RECEIPT_SCHEMA = "spritelab.harvest.dataset-import-receipt.v1"
+HARVEST_IMPORT_REQUEST_SCHEMA = "spritelab.harvest.dataset-import-request.v2"
+HARVEST_IMPORT_STATE_SCHEMA = "spritelab.harvest.dataset-import-state.v1"
+HARVEST_IMPORT_CANCELLATION_SCHEMA = "spritelab.harvest.dataset-import-cancellation.v1"
+HARVEST_IMPORT_TERMINAL_COMMIT_SCHEMA = "spritelab.harvest.dataset-import-terminal-commit.v1"
 HARVEST_CANCELLATION_SCHEMA = "spritelab.harvest.cancellation-request.v1"
 HARVEST_TERMINAL_COMMIT_SCHEMA = "spritelab.harvest.terminal-commit.v1"
 HARVEST_LEASE_SCHEMA = "spritelab.harvest.worker-lease.v1"
+
+_IMPORT_REQUEST_KEYS = frozenset(
+    {
+        "schema_version",
+        "run_id",
+        "callback_id",
+        "callback_code_identity_sha256",
+        "callback_runtime_identity_sha256",
+        "handoff_identity",
+        "artifact_manifest_identity",
+        "request_identity",
+        "idempotency_key",
+        "created_at",
+        "paths_exposed",
+    }
+)
+_IMPORT_STATE_KEYS = frozenset(
+    {
+        "schema_version",
+        "run_id",
+        "request_identity",
+        "attempt",
+        "status",
+        "started_at",
+        "updated_at",
+        "deadline_at",
+        "error_code",
+        "paths_exposed",
+    }
+)
+_IMPORT_RECEIPT_KEYS = frozenset(
+    {
+        "schema_version",
+        "run_id",
+        "request_identity",
+        "idempotency_key",
+        "callback_id",
+        "callback_code_identity_sha256",
+        "callback_runtime_identity_sha256",
+        "dataset_reference",
+        "accepted_count",
+        "quarantined_count",
+        "artifact_manifest_identity",
+        "paths_exposed",
+        "created_at",
+    }
+)
+_IMPORT_CANCELLATION_KEYS = frozenset(
+    {"schema_version", "run_id", "attempt", "explicit_action", "requested_at", "paths_exposed"}
+)
+_IMPORT_TERMINAL_COMMIT_KEYS = frozenset(
+    {
+        "schema_version",
+        "run_id",
+        "request_identity",
+        "attempt",
+        "status",
+        "receipt_identity",
+        "state_identity",
+        "created_at",
+        "paths_exposed",
+        "terminal_commit_identity",
+    }
+)
 
 RUN_ID_PATTERN = re.compile(r"^harvest-[a-z0-9][a-z0-9-]{5,79}$")
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
@@ -243,10 +317,12 @@ class HarvestService:
         limits: HarvestLimits | None = None,
         run_id_factory: Any | None = None,
         dataset_import_callback: DatasetImportCallback | None = None,
+        dataset_import_callback_factory: Callable[[], DatasetImportCallback] | None = None,
         probe_resolver: Any | None = None,
         probe_transport: Any | None = None,
         probe_downloader: Any | None = None,
         probe_run_id_factory: Any | None = None,
+        allow_unverified_test_backend: bool = False,
     ) -> None:
         self.project_root = Path(project_root).absolute()
         try:
@@ -263,16 +339,34 @@ class HarvestService:
             raise ValueError("Harvest backend factory and certified capabilities must be configured together.")
         if backend_capability_evidence is not None and backend_capabilities != backend_capability_evidence.capabilities:
             raise ValueError("Harvest backend capability evidence does not match configured capabilities.")
+        if type(allow_unverified_test_backend) is not bool:
+            raise ValueError("Harvest test-backend authorization must be an exact boolean.")
+        if (
+            backend_factory is not None
+            and not allow_unverified_test_backend
+            and (backend_capability_evidence is None or live_configuration_loader is None)
+        ):
+            raise ValueError("Production Harvest backends require current independently reloaded capability evidence.")
+        if backend_capability_evidence is not None and not allow_unverified_test_backend:
+            _require_current_backend_evidence(backend_capability_evidence, backend_capabilities)
+        if dataset_import_callback is not None and dataset_import_callback_factory is not None:
+            raise ValueError("Dataset import callback and factory are mutually exclusive.")
         if dataset_import_callback is not None:
             _validate_callback_capability_binding(dataset_import_callback, backend_capabilities)
+            if backend_capabilities is not None and not allow_unverified_test_backend:
+                _validate_production_dataset_callback(dataset_import_callback, self.project_root)
+        if dataset_import_callback_factory is not None and not callable(dataset_import_callback_factory):
+            raise ValueError("Dataset import callback factory must be callable.")
         self._sources = {source.source_id: source for source in catalog}
         self._backend_factory = backend_factory
         self._backend_capabilities = backend_capabilities
         self._backend_capability_evidence = backend_capability_evidence
         self._live_configuration_loader = live_configuration_loader
+        self._allow_unverified_test_backend = allow_unverified_test_backend
         self.limits = limits or HarvestLimits()
         self._run_id_factory = run_id_factory or _default_run_id
         self._dataset_import_callback = dataset_import_callback
+        self._dataset_import_callback_factory = dataset_import_callback_factory
         self._lock = threading.RLock()
         self._workers: dict[str, threading.Thread] = {}
         self._cancellations: dict[str, threading.Event] = {}
@@ -281,6 +375,7 @@ class HarvestService:
         self._lease_stops: dict[str, threading.Event] = {}
         self._lease_failures: dict[str, threading.Event] = {}
         self._lease_threads: dict[str, threading.Thread] = {}
+        self._import_cancellations: dict[str, threading.Event] = {}
         self._instance_id = uuid.uuid4().hex
         probe_options: dict[str, Any] = {}
         if probe_downloader is not None:
@@ -299,14 +394,56 @@ class HarvestService:
     def acquisition_configured(self) -> bool:
         return bool(self._sources) and self._backend_factory is not None and self._backend_capabilities is not None
 
+    @property
+    def dataset_import_available(self) -> bool:
+        return self._dataset_import_callback is not None or self._dataset_import_callback_factory is not None
+
+    def _dataset_import_callback_for_action(self) -> DatasetImportCallback:
+        """Resolve and attest the callback only at the explicit import boundary."""
+
+        callback = self._dataset_import_callback
+        if callback is None and self._dataset_import_callback_factory is not None:
+            try:
+                callback = self._dataset_import_callback_factory()
+            except Exception as exc:
+                raise HarvestError(
+                    "dataset_import_identity_changed",
+                    "The trusted Dataset import callback could not be attested for this action.",
+                ) from exc
+        if callback is None:
+            raise HarvestError(
+                "dataset_import_unavailable",
+                "No trusted Dataset import callback is configured for Harvest.",
+            )
+        try:
+            _validate_callback_capability_binding(callback, self._backend_capabilities)
+            if self._backend_capabilities is not None and not self._allow_unverified_test_backend:
+                _validate_production_dataset_callback(callback, self.project_root)
+        except ValueError as exc:
+            raise HarvestError(
+                "dataset_import_identity_changed",
+                "The Dataset import callback no longer matches the certified code and runtime binding.",
+            ) from exc
+        return callback
+
     def _backend_evidence_record(self) -> dict[str, Any]:
         if self._backend_capabilities is None:
             raise HarvestError("harvest_backend_unavailable", "Certified Harvest backend is unavailable.")
         if self._backend_capability_evidence is not None:
+            if not self._allow_unverified_test_backend:
+                _require_current_backend_evidence(
+                    self._backend_capability_evidence,
+                    self._backend_capabilities,
+                )
             evidence = self._backend_capability_evidence.to_dict()
             return {**evidence, "evidence_identity": self._backend_capability_evidence.identity}
+        if not self._allow_unverified_test_backend:
+            raise HarvestError(
+                "harvest_backend_evidence_required",
+                "Current independent Harvest backend evidence is required.",
+            )
         fallback = {
-            "schema_version": "spritelab.harvest.injected-backend-evidence.v1",
+            "schema_version": "spritelab.harvest.explicit-test-backend-evidence.v1",
             "backend_capability_identity": self._backend_capabilities.identity,
             "auditor_id": None,
             "audited_at": None,
@@ -316,7 +453,7 @@ class HarvestService:
             "audit_report_identity": None,
             "certificate_identity": None,
             "implementation_identity_sha256": self._backend_capabilities.code_identity_sha256,
-            "origin": "injected_external_configuration",
+            "origin": "explicit_test_configuration",
         }
         return {**fallback, "evidence_identity": _json_identity(fallback)}
 
@@ -332,6 +469,11 @@ class HarvestService:
                 "Harvest source, license, or automation-terms evidence is stale or invalid.",
             ) from exc
         if self._live_configuration_loader is None:
+            if not self._allow_unverified_test_backend:
+                raise HarvestError(
+                    "harvest_live_configuration_invalid",
+                    "Current independent Harvest capability evidence cannot be reloaded.",
+                )
             return source
         try:
             live_sources, live_evidence = self._live_configuration_loader()
@@ -341,6 +483,14 @@ class HarvestService:
                 "Repository Harvest catalog or capability evidence is no longer current.",
             ) from exc
         live = {item.source_id: item for item in live_sources}
+        if live_evidence is not None and not self._allow_unverified_test_backend:
+            try:
+                _require_current_backend_evidence(live_evidence, self._backend_capabilities)
+            except ValueError as exc:
+                raise HarvestError(
+                    "harvest_live_configuration_invalid",
+                    "Current independent Harvest capability evidence is invalid or expired.",
+                ) from exc
         current_source = live.get(source_id)
         if current_source is not None:
             try:
@@ -510,17 +660,16 @@ class HarvestService:
                             legacy_record: dict[str, Any] | None = None
                             with output_anchor.open_directory_immovable(name) as child_anchor:
                                 if RUN_ID_PATTERN.fullmatch(name):
-                                    try:
-                                        managed_record = self._managed_inventory_record(child)
-                                    except HarvestError:
-                                        pass
+                                    managed_record = self._managed_inventory_record(child, child_anchor)
                                 elif PROBE_ID_PATTERN.fullmatch(name):
                                     probe_record = scan_probe_inventory_record(
                                         child,
                                         self.output_root,
                                         run_anchor=child_anchor,
                                     )
-                                if managed_record is None and probe_record is None:
+                                    if probe_record is None:
+                                        raise HarvestStorageError("invalid managed probe evidence")
+                                else:
                                     legacy_record = scan_legacy_run(
                                         child,
                                         directory_anchor=child_anchor,
@@ -629,47 +778,103 @@ class HarvestService:
             )
         with self._mutation_guard():
             run_dir = self._run_directory(run_id)
-            state = self._read_state(run_dir)
-            if state["status"] in TERMINAL_STATUSES:
-                return self.job(run_id)
-            worker = self._workers.get(run_id)
-            cancellation = self._cancellations.setdefault(run_id, threading.Event())
-            cancellation_path = run_dir / "cancellation_request.json"
-            if os.path.lexists(cancellation_path):
-                existing = self._read_json(cancellation_path)
-                if existing.get("schema_version") != HARVEST_CANCELLATION_SCHEMA or existing.get("run_id") != run_id:
-                    raise HarvestError("invalid_harvest_cancellation", "Harvest cancellation evidence is invalid.")
-            else:
-                self._write_exclusive_json(
-                    cancellation_path,
-                    {
-                        "schema_version": HARVEST_CANCELLATION_SCHEMA,
-                        "run_id": run_id,
-                        "requested_at": _utc_now(),
-                        "explicit_action": True,
-                        "paths_exposed": False,
-                    },
-                )
-            cancellation.set()
-            if state["status"] == "CANCELLING" and worker is not None and worker.is_alive():
-                return self.job(run_id)
-            lease_live = self._lease_is_live(run_dir, state)
-            if (worker is None or not worker.is_alive()) and not lease_live:
-                self._transition_locked(
-                    run_dir,
-                    "CANCELLED",
-                    stage="cancelled",
-                    message="Harvest job was cancelled and its durable evidence was retained.",
-                    ended=True,
-                )
-            else:
-                self._transition_locked(
-                    run_dir,
-                    "CANCELLING",
-                    stage="cancelling",
-                    message="Cancellation is waiting for the certified backend safety boundary.",
-                )
-            return self.job(run_id)
+            with open_anchored_directory(run_dir, self.output_root) as run_anchor:
+                state = self._read_state(run_dir, run_anchor=run_anchor)
+                if state["status"] in TERMINAL_STATUSES:
+                    import_summary = self._dataset_import_summary(run_dir, run_anchor)
+                    if import_summary["status"] in {"RUNNING", "CANCELLING"}:
+                        import_state = self._read_json(
+                            run_dir / "dataset_import_state.json",
+                            parent_anchor=run_anchor,
+                        )
+                        attempt = int(import_state["attempt"])
+                        cancellation_path = run_dir / f"dataset_import_cancellation_{attempt}.json"
+                        if run_anchor.lexists(cancellation_path.name):
+                            existing = self._read_json(cancellation_path, parent_anchor=run_anchor)
+                            if (
+                                set(existing) != _IMPORT_CANCELLATION_KEYS
+                                or existing.get("schema_version") != HARVEST_IMPORT_CANCELLATION_SCHEMA
+                                or existing.get("run_id") != run_id
+                                or existing.get("attempt") != attempt
+                                or existing.get("explicit_action") is not True
+                                or existing.get("paths_exposed") is not False
+                            ):
+                                raise HarvestError(
+                                    "invalid_harvest_import",
+                                    "Dataset import cancellation evidence is invalid.",
+                                )
+                        else:
+                            self._write_exclusive_json(
+                                cancellation_path,
+                                {
+                                    "schema_version": HARVEST_IMPORT_CANCELLATION_SCHEMA,
+                                    "run_id": run_id,
+                                    "attempt": attempt,
+                                    "explicit_action": True,
+                                    "requested_at": _utc_now(),
+                                    "paths_exposed": False,
+                                },
+                                parent_anchor=run_anchor,
+                            )
+                        local_import = self._import_cancellations.get(run_id)
+                        if local_import is not None:
+                            local_import.set()
+                        if import_state["status"] == "RUNNING":
+                            self._finish_dataset_import_state(
+                                run_dir,
+                                run_anchor,
+                                import_state,
+                                "CANCELLING",
+                                None,
+                            )
+                    return self._job_from_anchor(run_id, run_dir, run_anchor)
+                worker = self._workers.get(run_id)
+                cancellation = self._cancellations.setdefault(run_id, threading.Event())
+                cancellation_path = run_dir / "cancellation_request.json"
+                if run_anchor.lexists(cancellation_path.name):
+                    existing = self._read_json(cancellation_path, parent_anchor=run_anchor)
+                    if (
+                        existing.get("schema_version") != HARVEST_CANCELLATION_SCHEMA
+                        or existing.get("run_id") != run_id
+                    ):
+                        raise HarvestError(
+                            "invalid_harvest_cancellation",
+                            "Harvest cancellation evidence is invalid.",
+                        )
+                else:
+                    self._write_exclusive_json(
+                        cancellation_path,
+                        {
+                            "schema_version": HARVEST_CANCELLATION_SCHEMA,
+                            "run_id": run_id,
+                            "requested_at": _utc_now(),
+                            "explicit_action": True,
+                            "paths_exposed": False,
+                        },
+                        parent_anchor=run_anchor,
+                    )
+                cancellation.set()
+                if state["status"] == "CANCELLING" and worker is not None and worker.is_alive():
+                    return self._job_from_anchor(run_id, run_dir, run_anchor)
+                lease_live = self._lease_is_live(run_dir, state, run_anchor=run_anchor)
+                if (worker is None or not worker.is_alive()) and not lease_live:
+                    self._transition_locked(
+                        run_dir,
+                        "CANCELLED",
+                        stage="cancelled",
+                        message="Harvest job was cancelled and its durable evidence was retained.",
+                        ended=True,
+                        run_anchor=run_anchor,
+                    )
+                else:
+                    self._transition_locked(
+                        run_dir,
+                        "CANCELLING",
+                        stage="cancelling",
+                        message="Cancellation is waiting for the certified backend safety boundary.",
+                        run_anchor=run_anchor,
+                    )
+                return self._job_from_anchor(run_id, run_dir, run_anchor)
 
     def _new_lease(self, run_id: str, token: str, *, sequence: int) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
@@ -686,9 +891,15 @@ class HarvestService:
             "paths_exposed": False,
         }
 
-    def _lease_is_live(self, run_dir: Path, state: Mapping[str, Any]) -> bool:
+    def _lease_is_live(
+        self,
+        run_dir: Path,
+        state: Mapping[str, Any],
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> bool:
         try:
-            lease = self._read_json(run_dir / "worker_lease.json")
+            lease = self._read_json(run_dir / "worker_lease.json", parent_anchor=run_anchor)
             expires_at = _parse_utc_timestamp(str(lease.get("expires_at", "")))
         except (HarvestError, OSError, ValueError):
             return False
@@ -826,6 +1037,78 @@ class HarvestService:
         if self._cancellation_requested(run_dir, local, run_anchor=run_anchor):
             raise AcquisitionCancelled()
 
+    def _raise_if_operation_aborted(
+        self,
+        run_dir: Path,
+        local: threading.Event,
+        deadline_monotonic: float,
+        *,
+        run_anchor: AnchoredDirectory,
+    ) -> None:
+        self._raise_if_cancelled(run_dir, local, run_anchor=run_anchor)
+        if time.monotonic() >= deadline_monotonic:
+            raise HarvestError(
+                "harvest_duration_exceeded",
+                "Harvest exceeded the whole-operation duration limit.",
+            )
+
+    def _construct_backend_with_control(
+        self,
+        run_dir: Path,
+        local: threading.Event,
+        deadline_monotonic: float,
+        *,
+        run_anchor: AnchoredDirectory,
+    ) -> Any:
+        """Keep backend construction inside the run deadline/cancel boundary."""
+
+        factory = self._backend_factory
+        if factory is None:
+            raise HarvestError("harvest_backend_unavailable", "Certified Harvest backend is unavailable.")
+        ready = threading.Event()
+        outcome: list[tuple[bool, Any]] = []
+
+        def construct() -> None:
+            try:
+                outcome.append((True, factory()))
+            except BaseException as exc:  # captured and sanitized in the owning worker
+                outcome.append((False, exc))
+            finally:
+                ready.set()
+
+        threading.Thread(
+            target=construct,
+            name=f"spritelab-{run_dir.name}-backend-construction",
+            daemon=True,
+        ).start()
+        while not ready.is_set():
+            self._raise_if_operation_aborted(
+                run_dir,
+                local,
+                deadline_monotonic,
+                run_anchor=run_anchor,
+            )
+            ready.wait(timeout=min(_DURABLE_CANCELLATION_POLL_SECONDS, max(0.0, deadline_monotonic - time.monotonic())))
+        self._raise_if_operation_aborted(
+            run_dir,
+            local,
+            deadline_monotonic,
+            run_anchor=run_anchor,
+        )
+        if len(outcome) != 1 or outcome[0][0] is not True:
+            error = outcome[0][1] if outcome else None
+            raise HarvestError(
+                "harvest_backend_construction_failed",
+                "Certified Harvest backend construction failed closed.",
+            ) from error
+        backend = outcome[0][1]
+        if not callable(getattr(backend, "acquire", None)):
+            raise HarvestError(
+                "harvest_backend_construction_failed",
+                "Certified Harvest backend construction returned no acquisition contract.",
+            )
+        return backend
+
     @staticmethod
     def _ensure_lease_healthy(failed: threading.Event | None) -> None:
         if failed is not None and failed.is_set():
@@ -857,61 +1140,86 @@ class HarvestService:
     def job(self, run_id: str) -> dict[str, Any]:
         with self._lock:
             run_dir = self._run_directory(run_id)
-            state = dict(self._read_state(run_dir))
-            request = self._read_request(run_dir)
-            status = self._effective_status(state, run_id)
-            complete_commit_valid = status != "COMPLETE" or self._complete_commit_valid(run_dir, state)
-            if status == "COMPLETE" and not complete_commit_valid:
-                status = "INTERRUPTED"
-            if status == "INTERRUPTED":
-                state["stage"] = "interrupted"
-                state["message"] = "The owning process stopped before this Harvest job durably committed."
-            receipt = self._read_json(run_dir / "authorization_receipt.json")
-            if receipt.get("schema_version") != HARVEST_AUTHORIZATION_SCHEMA or receipt.get("run_id") != run_id:
-                raise HarvestError("invalid_harvest_authorization", "Harvest authorization evidence is invalid.")
-            return {
-                "schema_version": "spritelab.harvest.job.v2",
-                "run_id": run_id,
-                "source_id": request["source_id"],
-                "retry_of": request.get("retry_of"),
-                "status": status,
-                "stage": state.get("stage"),
-                "current": state.get("current", 0),
-                "total": state.get("total"),
-                "message": state.get("message", ""),
-                "created_at": state.get("created_at"),
-                "started_at": state.get("started_at"),
-                "updated_at": state.get("updated_at"),
-                "ended_at": state.get("ended_at"),
-                "handoff_ready": bool(state.get("handoff_ready", False)) and complete_commit_valid,
-                "usable_count": int(state.get("usable_count", 0)),
-                "quarantined_count": int(state.get("quarantined_count", 0)),
-                "taxonomy_counts": dict(state.get("taxonomy_counts", {})),
-                "limits": receipt.get("limits"),
-                "authorization": {
-                    "zero_cost": receipt.get("authorizations", {}).get("zero_cost") is True,
-                    "permissive_license": receipt.get("authorizations", {}).get("permissive_license") is True,
-                    "existing_inventory_reviewed": receipt.get("authorizations", {}).get("existing_inventory_reviewed")
-                    is True,
-                    "reuse_evidence": receipt.get("reuse_evidence"),
-                },
-                "provenance": receipt.get("source"),
-                "backend_capabilities": receipt.get("backend_capabilities"),
-                "events": self._read_events(run_dir),
-                "dataset_import_available": self._dataset_import_callback is not None,
-                "paths_exposed": False,
-            }
+            with open_anchored_directory(run_dir, self.output_root) as run_anchor:
+                return self._job_from_anchor(run_id, run_dir, run_anchor)
+
+    def _job_from_anchor(
+        self,
+        run_id: str,
+        run_dir: Path,
+        run_anchor: AnchoredDirectory,
+    ) -> dict[str, Any]:
+        state = dict(self._read_state(run_dir, run_anchor=run_anchor))
+        request = self._read_request(run_dir, run_anchor=run_anchor)
+        status = self._effective_status(state, run_id, run_dir=run_dir, run_anchor=run_anchor)
+        complete_commit_valid = status != "COMPLETE" or self._complete_commit_valid(
+            run_dir,
+            state,
+            run_anchor=run_anchor,
+        )
+        if status == "COMPLETE" and not complete_commit_valid:
+            status = "INTERRUPTED"
+        if status == "INTERRUPTED":
+            state["stage"] = "interrupted"
+            state["message"] = "The owning process stopped before this Harvest job durably committed."
+        receipt = self._read_json(run_dir / "authorization_receipt.json", parent_anchor=run_anchor)
+        if receipt.get("schema_version") != HARVEST_AUTHORIZATION_SCHEMA or receipt.get("run_id") != run_id:
+            raise HarvestError("invalid_harvest_authorization", "Harvest authorization evidence is invalid.")
+        import_summary = self._dataset_import_summary(run_dir, run_anchor)
+        return {
+            "schema_version": "spritelab.harvest.job.v3",
+            "run_id": run_id,
+            "source_id": request["source_id"],
+            "retry_of": request.get("retry_of"),
+            "status": status,
+            "stage": state.get("stage"),
+            "current": state.get("current", 0),
+            "total": state.get("total"),
+            "message": state.get("message", ""),
+            "created_at": state.get("created_at"),
+            "started_at": state.get("started_at"),
+            "updated_at": state.get("updated_at"),
+            "ended_at": state.get("ended_at"),
+            "handoff_ready": bool(state.get("handoff_ready", False)) and complete_commit_valid,
+            "usable_count": int(state.get("usable_count", 0)),
+            "quarantined_count": int(state.get("quarantined_count", 0)),
+            "taxonomy_counts": dict(state.get("taxonomy_counts", {})),
+            "limits": receipt.get("limits"),
+            "authorization": {
+                "zero_cost": receipt.get("authorizations", {}).get("zero_cost") is True,
+                "permissive_license": receipt.get("authorizations", {}).get("permissive_license") is True,
+                "existing_inventory_reviewed": receipt.get("authorizations", {}).get("existing_inventory_reviewed")
+                is True,
+                "reuse_evidence": receipt.get("reuse_evidence"),
+            },
+            "provenance": receipt.get("source"),
+            "backend_capabilities": receipt.get("backend_capabilities"),
+            "events": self._read_events(run_dir, run_anchor=run_anchor),
+            "dataset_import_available": self.dataset_import_available,
+            "dataset_import": import_summary,
+            "paths_exposed": False,
+        }
 
     def handoff(self, run_id: str) -> dict[str, Any]:
-        job = self.job(run_id)
+        with self._lock:
+            run_dir = self._run_directory(run_id)
+            with open_anchored_directory(run_dir, self.output_root) as run_anchor:
+                return self._handoff_from_anchor(run_id, run_dir, run_anchor)
+
+    def _handoff_from_anchor(
+        self,
+        run_id: str,
+        run_dir: Path,
+        run_anchor: AnchoredDirectory,
+    ) -> dict[str, Any]:
+        job = self._job_from_anchor(run_id, run_dir, run_anchor)
         if job["status"] != "COMPLETE" or not job["handoff_ready"]:
             raise HarvestError(
                 "harvest_handoff_not_ready",
                 "Dataset handoff is available only after certified Harvest completion.",
             )
         source = self._validate_live_configuration(str(job["source_id"]))
-        run_dir = self._run_directory(run_id)
-        request = self._read_request(run_dir)
+        request = self._read_request(run_dir, run_anchor=run_anchor)
         backend_evidence = self._backend_evidence_record()
         if (
             request.get("source_catalog_identity") != source.catalog_identity
@@ -929,8 +1237,8 @@ class HarvestService:
                 "catalog_evidence_changed",
                 "Current source, backend, or limit identities no longer match the authorized Harvest request.",
             )
-        manifest = self._rehash_manifest(run_dir)
-        payload = self._read_json(run_dir / "handoff.json")
+        manifest = self._rehash_manifest(run_dir, run_anchor=run_anchor)
+        payload = self._read_json(run_dir / "handoff.json", parent_anchor=run_anchor)
         if (
             payload.get("schema_version") != HARVEST_HANDOFF_SCHEMA
             or payload.get("run_id") != run_id
@@ -939,36 +1247,46 @@ class HarvestService:
             or payload.get("backend_capability_evidence_identity") != backend_evidence["evidence_identity"]
         ):
             raise HarvestError("invalid_harvest_handoff", "Harvest handoff identity is invalid.")
-        return {**payload, "dataset_import_available": self._dataset_import_callback is not None}
+        return {
+            **payload,
+            "dataset_import_available": self.dataset_import_available,
+            "dataset_import": self._dataset_import_summary(run_dir, run_anchor),
+        }
 
     def evidence(self, run_id: str) -> dict[str, Any]:
         """Return privacy-safe durable authorization, provenance, and limit evidence."""
 
-        run_dir = self._run_directory(run_id)
-        job = self.job(run_id)
-        authorization = self._read_json(run_dir / "authorization_receipt.json")
-        acquisition = (
-            self._read_json(run_dir / "acquisition_receipt.json")
-            if os.path.lexists(run_dir / "acquisition_receipt.json")
-            else None
-        )
-        manifest = None
-        if os.path.lexists(run_dir / "artifact_manifest.json"):
-            manifest = (
-                self._rehash_manifest(run_dir)
-                if job["status"] == "COMPLETE"
-                else self._read_json(run_dir / "artifact_manifest.json")
-            )
-        return {
-            "schema_version": "spritelab.harvest.durable-evidence.v1",
-            "run_id": run_id,
-            "status": job["status"],
-            "job": job,
-            "authorization_receipt": authorization,
-            "acquisition_receipt": acquisition,
-            "artifact_manifest": manifest,
-            "paths_exposed": False,
-        }
+        with self._lock:
+            run_dir = self._run_directory(run_id)
+            with open_anchored_directory(run_dir, self.output_root) as run_anchor:
+                job = self._job_from_anchor(run_id, run_dir, run_anchor)
+                authorization = self._read_json(
+                    run_dir / "authorization_receipt.json",
+                    parent_anchor=run_anchor,
+                )
+                acquisition = (
+                    self._read_json(run_dir / "acquisition_receipt.json", parent_anchor=run_anchor)
+                    if run_anchor.lexists("acquisition_receipt.json")
+                    else None
+                )
+                manifest = None
+                if run_anchor.lexists("artifact_manifest.json"):
+                    manifest = (
+                        self._rehash_manifest(run_dir, run_anchor=run_anchor)
+                        if job["status"] == "COMPLETE"
+                        else self._read_json(run_dir / "artifact_manifest.json", parent_anchor=run_anchor)
+                    )
+                return {
+                    "schema_version": "spritelab.harvest.durable-evidence.v2",
+                    "run_id": run_id,
+                    "status": job["status"],
+                    "job": job,
+                    "authorization_receipt": authorization,
+                    "acquisition_receipt": acquisition,
+                    "artifact_manifest": manifest,
+                    "dataset_import": self._dataset_import_summary(run_dir, run_anchor),
+                    "paths_exposed": False,
+                }
 
     def import_to_dataset(
         self,
@@ -977,85 +1295,647 @@ class HarvestService:
         explicit_action: bool,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        operation_deadline = time.monotonic() + self.limits.max_duration_seconds
         if explicit_action is not True:
             raise HarvestError(
                 "explicit_action_required", "Dataset import requires an explicit action.", status_code=422
             )
         _validate_idempotency_key(idempotency_key)
-        callback = self._dataset_import_callback
-        if callback is None:
-            raise HarvestError(
-                "dataset_import_unavailable",
-                "No trusted Dataset import callback is configured for Harvest.",
-            )
-        try:
-            _validate_callback_capability_binding(callback, self._backend_capabilities)
-        except ValueError as exc:
-            raise HarvestError(
-                "dataset_import_identity_changed",
-                "The Dataset import callback no longer matches the certified code and runtime binding.",
-            ) from exc
-        handoff = self.handoff(run_id)
+        callback = self._dataset_import_callback_for_action()
         run_dir = self._run_directory(run_id)
-        manifest = self._rehash_manifest(run_dir)
-        request_payload = {
-            "schema_version": "spritelab.harvest.dataset-import-request.v1",
-            "run_id": run_id,
-            "idempotency_key": idempotency_key,
-            "callback_id": callback.callback_id,
-            "callback_code_identity_sha256": callback.code_identity_sha256,
-            "callback_runtime_identity_sha256": callback.runtime_identity_sha256,
-            "handoff_identity": _json_identity(handoff),
-            "artifact_manifest_identity": _json_identity(manifest),
-            "created_at": _utc_now(),
-        }
-        request_path = run_dir / "dataset_import_request.json"
-        receipt_path = run_dir / "dataset_import_receipt.json"
-        with self._mutation_guard():
-            if os.path.lexists(request_path):
-                existing = self._read_json(request_path)
-                comparable = dict(existing)
-                comparable.pop("created_at", None)
-                expected = dict(request_payload)
-                expected.pop("created_at", None)
-                if comparable != expected:
-                    raise HarvestError(
-                        "idempotency_conflict",
-                        "Dataset import idempotency key is bound to different identities.",
+        with open_anchored_directory(run_dir, self.output_root) as run_anchor:
+            self._raise_if_import_aborted(run_dir, operation_deadline, run_anchor=run_anchor)
+            self._handoff_from_anchor(run_id, run_dir, run_anchor)
+            handoff_document = self._read_json(run_dir / "handoff.json", parent_anchor=run_anchor)
+            manifest = self._rehash_manifest(run_dir, run_anchor=run_anchor)
+            stable_request = {
+                "run_id": run_id,
+                "callback_id": callback.callback_id,
+                "callback_code_identity_sha256": callback.code_identity_sha256,
+                "callback_runtime_identity_sha256": callback.runtime_identity_sha256,
+                "handoff_identity": _json_identity(handoff_document),
+                "artifact_manifest_identity": _json_identity(manifest),
+            }
+            request_identity = _json_identity(stable_request)
+            request_path = run_dir / "dataset_import_request.json"
+            receipt_path = run_dir / "dataset_import_receipt.json"
+            state_path = run_dir / "dataset_import_state.json"
+            with self._mutation_guard():
+                # The mutation-lock wait itself can outlast the whole-operation
+                # deadline; recheck before any durable publication.
+                self._raise_if_import_aborted(run_dir, operation_deadline, run_anchor=run_anchor)
+                if run_anchor.lexists(request_path.name):
+                    request_payload = self._read_json(request_path, parent_anchor=run_anchor)
+                    self._validate_dataset_import_request(request_payload, run_id)
+                    if request_payload.get("request_identity") != request_identity or any(
+                        request_payload.get(key) != value for key, value in stable_request.items()
+                    ):
+                        raise HarvestError(
+                            "idempotency_conflict",
+                            "The durable Dataset import request is bound to different identities.",
+                        )
+                    effective_key = str(request_payload.get("idempotency_key", ""))
+                    _validate_idempotency_key(effective_key)
+                else:
+                    effective_key = idempotency_key
+                    request_payload = {
+                        "schema_version": HARVEST_IMPORT_REQUEST_SCHEMA,
+                        **stable_request,
+                        "request_identity": request_identity,
+                        "idempotency_key": effective_key,
+                        "created_at": _utc_now(),
+                        "paths_exposed": False,
+                    }
+                    self._write_exclusive_json(request_path, request_payload, parent_anchor=run_anchor)
+                if run_anchor.lexists(receipt_path.name):
+                    receipt_payload = self._validated_dataset_import_receipt(
+                        self._read_json(receipt_path, parent_anchor=run_anchor),
+                        run_id,
+                        request_identity,
                     )
-                if os.path.lexists(receipt_path):
-                    return self._read_json(receipt_path)
-            else:
-                self._write_exclusive_json(request_path, request_payload)
-        try:
-            result = callback.import_harvest(
-                DatasetImportRequest(run_id, run_dir / "artifacts", handoff, manifest),
-                idempotency_key=idempotency_key,
+                    if not self._dataset_import_commit_valid(run_dir, run_anchor, request_identity):
+                        self._recover_dataset_import_commit(run_dir, run_anchor, run_id, request_identity)
+                    return receipt_payload
+                previous_state = (
+                    self._read_json(state_path, parent_anchor=run_anchor)
+                    if run_anchor.lexists(state_path.name)
+                    else None
+                )
+                if previous_state is not None:
+                    self._validate_dataset_import_state(previous_state, run_id, request_identity)
+                    previous_status = str(previous_state["status"])
+                    previous_deadline = _parse_utc_timestamp(str(previous_state["deadline_at"]))
+                    if previous_status in {"RUNNING", "CANCELLING"} and previous_deadline > datetime.now(timezone.utc):
+                        raise HarvestError(
+                            "dataset_import_in_progress",
+                            "This Harvest run already has an active Dataset import.",
+                            status_code=409,
+                        )
+                    attempt = int(previous_state["attempt"]) + 1
+                else:
+                    attempt = 1
+                now = datetime.now(timezone.utc)
+                deadline_at = now + timedelta(seconds=max(0.0, operation_deadline - time.monotonic()))
+                import_state = {
+                    "schema_version": HARVEST_IMPORT_STATE_SCHEMA,
+                    "run_id": run_id,
+                    "request_identity": request_identity,
+                    "attempt": attempt,
+                    "status": "RUNNING",
+                    "started_at": now.isoformat().replace("+00:00", "Z"),
+                    "updated_at": now.isoformat().replace("+00:00", "Z"),
+                    "deadline_at": deadline_at.isoformat().replace("+00:00", "Z"),
+                    "error_code": None,
+                    "paths_exposed": False,
+                }
+                self._raise_if_import_aborted(run_dir, operation_deadline, run_anchor=run_anchor)
+                self._write_atomic_json(state_path, import_state, parent_anchor=run_anchor)
+                cancellation = threading.Event()
+                self._import_cancellations[run_id] = cancellation
+            try:
+                result = callback.import_harvest(
+                    DatasetImportRequest(run_id, run_dir / "artifacts", handoff_document, manifest),
+                    idempotency_key=effective_key,
+                    deadline_monotonic=operation_deadline,
+                    cancel_requested=lambda: self._dataset_import_cancel_requested(
+                        run_dir,
+                        attempt,
+                        cancellation,
+                        run_anchor,
+                    ),
+                )
+                if not isinstance(result, DatasetImportResult):
+                    raise HarvestError(
+                        "dataset_import_failed",
+                        "The Dataset import callback returned no valid result contract.",
+                    )
+                self._raise_if_import_aborted(
+                    run_dir,
+                    operation_deadline,
+                    run_anchor=run_anchor,
+                    attempt=attempt,
+                    local=cancellation,
+                )
+            except (AcquisitionCancelled, DatasetImportCancelled) as exc:
+                self._finalize_dataset_import_state(
+                    run_dir,
+                    run_anchor,
+                    request_identity=request_identity,
+                    attempt=attempt,
+                    status="CANCELLED",
+                    error_code="dataset_import_cancelled",
+                )
+                raise HarvestError(
+                    "dataset_import_cancelled",
+                    "Dataset import was cancelled before Harvest receipt publication.",
+                ) from exc
+            except DatasetImportDeadlineExceeded as exc:
+                self._finalize_dataset_import_state(
+                    run_dir,
+                    run_anchor,
+                    request_identity=request_identity,
+                    attempt=attempt,
+                    status="FAILED",
+                    error_code="dataset_import_duration_exceeded",
+                )
+                raise HarvestError(
+                    "dataset_import_duration_exceeded",
+                    "Dataset import exceeded the whole-operation duration limit.",
+                ) from exc
+            except HarvestError as exc:
+                self._finalize_dataset_import_state(
+                    run_dir,
+                    run_anchor,
+                    request_identity=request_identity,
+                    attempt=attempt,
+                    status="FAILED",
+                    error_code=exc.code,
+                )
+                raise
+            except Exception as exc:
+                self._finalize_dataset_import_state(
+                    run_dir,
+                    run_anchor,
+                    request_identity=request_identity,
+                    attempt=attempt,
+                    status="FAILED",
+                    error_code="dataset_import_failed",
+                )
+                raise HarvestError(
+                    "dataset_import_failed",
+                    "The Dataset import callback failed without exposing private details.",
+                ) from exc
+            finally:
+                with self._lock:
+                    # Pop only this attempt's event; a newer attempt may have
+                    # already installed its own local cancellation channel.
+                    if self._import_cancellations.get(run_id) is cancellation:
+                        self._import_cancellations.pop(run_id, None)
+            receipt = {
+                "schema_version": HARVEST_IMPORT_RECEIPT_SCHEMA,
+                "run_id": run_id,
+                "request_identity": request_identity,
+                "idempotency_key": effective_key,
+                "callback_id": callback.callback_id,
+                "callback_code_identity_sha256": callback.code_identity_sha256,
+                "callback_runtime_identity_sha256": callback.runtime_identity_sha256,
+                "dataset_reference": result.dataset_reference,
+                "accepted_count": result.accepted_count,
+                "quarantined_count": result.quarantined_count,
+                "artifact_manifest_identity": _json_identity(manifest),
+                "paths_exposed": False,
+                "created_at": _utc_now(),
+            }
+            try:
+                with self._mutation_guard():
+                    # The mutation-lock wait itself can outlast cancellation or
+                    # the whole-operation deadline; recheck before publication.
+                    self._raise_if_import_aborted(
+                        run_dir,
+                        operation_deadline,
+                        run_anchor=run_anchor,
+                        attempt=attempt,
+                        local=cancellation,
+                    )
+                    current_state = self._read_json(state_path, parent_anchor=run_anchor)
+                    self._validate_dataset_import_state(current_state, run_id, request_identity)
+                    if current_state.get("attempt") != attempt:
+                        raise HarvestError(
+                            "dataset_import_superseded",
+                            "A newer Dataset import attempt superseded this one before publication.",
+                        )
+                    if str(current_state.get("status")) == "CANCELLING":
+                        raise AcquisitionCancelled()
+                    if str(current_state.get("status")) != "RUNNING":
+                        raise HarvestError(
+                            "dataset_import_superseded",
+                            "This Dataset import attempt was finalized elsewhere before publication.",
+                        )
+                    if run_anchor.lexists(receipt_path.name):
+                        if self._dataset_import_commit_valid(run_dir, run_anchor, request_identity):
+                            return self._validated_dataset_import_receipt(
+                                self._read_json(receipt_path, parent_anchor=run_anchor),
+                                run_id,
+                                request_identity,
+                            )
+                        raise HarvestError(
+                            "invalid_harvest_import",
+                            "Dataset import receipt evidence is invalid.",
+                        )
+                    self._write_exclusive_json(receipt_path, receipt, parent_anchor=run_anchor)
+                    # COMPLETE becomes visible only through this terminal commit
+                    # binding the receipt and final state identities together.
+                    self._commit_dataset_import_terminal(run_dir, run_anchor, current_state, receipt)
+            except AcquisitionCancelled as exc:
+                self._finalize_dataset_import_state(
+                    run_dir,
+                    run_anchor,
+                    request_identity=request_identity,
+                    attempt=attempt,
+                    status="CANCELLED",
+                    error_code="dataset_import_cancelled",
+                )
+                raise HarvestError(
+                    "dataset_import_cancelled",
+                    "Dataset import was cancelled before Harvest receipt publication.",
+                ) from exc
+            except HarvestError as exc:
+                self._finalize_dataset_import_state(
+                    run_dir,
+                    run_anchor,
+                    request_identity=request_identity,
+                    attempt=attempt,
+                    status="FAILED",
+                    error_code=exc.code,
+                )
+                raise
+            return receipt
+
+    def _dataset_import_summary(
+        self,
+        run_dir: Path,
+        run_anchor: AnchoredDirectory,
+    ) -> dict[str, Any]:
+        if not run_anchor.lexists("dataset_import_request.json"):
+            return {"status": "NOT_STARTED", "completed": False, "paths_exposed": False}
+        request = self._read_json(run_dir / "dataset_import_request.json", parent_anchor=run_anchor)
+        self._validate_dataset_import_request(request, run_dir.name)
+        request_identity = str(request.get("request_identity", ""))
+        state: dict[str, Any] | None = None
+        if run_anchor.lexists("dataset_import_state.json"):
+            state = self._read_json(run_dir / "dataset_import_state.json", parent_anchor=run_anchor)
+            self._validate_dataset_import_state(state, run_dir.name, request_identity)
+        if run_anchor.lexists("dataset_import_receipt.json"):
+            receipt = self._validated_dataset_import_receipt(
+                self._read_json(run_dir / "dataset_import_receipt.json", parent_anchor=run_anchor),
+                run_dir.name,
+                request_identity,
             )
-        except Exception as exc:
-            raise HarvestError(
-                "dataset_import_failed",
-                "The Dataset import callback failed without exposing private details.",
-            ) from exc
-        receipt = {
-            "schema_version": HARVEST_IMPORT_RECEIPT_SCHEMA,
-            "run_id": run_id,
-            "idempotency_key": idempotency_key,
-            "callback_id": callback.callback_id,
-            "callback_code_identity_sha256": callback.code_identity_sha256,
-            "callback_runtime_identity_sha256": callback.runtime_identity_sha256,
-            "dataset_reference": result.dataset_reference,
-            "accepted_count": result.accepted_count,
-            "quarantined_count": result.quarantined_count,
-            "artifact_manifest_identity": _json_identity(manifest),
+            if self._dataset_import_commit_valid(run_dir, run_anchor, request_identity):
+                return {
+                    "status": "COMPLETE",
+                    "completed": True,
+                    "dataset_reference": receipt["dataset_reference"],
+                    "accepted_count": receipt["accepted_count"],
+                    "quarantined_count": receipt["quarantined_count"],
+                    "request_identity": request_identity,
+                    "paths_exposed": False,
+                }
+            # A receipt alone never implies completion: without the bound
+            # terminal commit the import is interrupted, recoverable evidence.
+            return {
+                "status": "INTERRUPTED",
+                "completed": False,
+                "attempt": state["attempt"] if state is not None else None,
+                "error_code": "dataset_import_commit_incomplete",
+                "request_identity": request_identity,
+                "paths_exposed": False,
+            }
+        if state is None:
+            return {
+                "status": "REQUESTED",
+                "completed": False,
+                "request_identity": request_identity,
+                "paths_exposed": False,
+            }
+        status = str(state["status"])
+        if status == "COMPLETE":
+            # A COMPLETE state without its receipt and terminal commit is not
+            # terminal success evidence.
+            status = "INTERRUPTED"
+        elif status in {"RUNNING", "CANCELLING"} and _parse_utc_timestamp(str(state["deadline_at"])) <= datetime.now(
+            timezone.utc
+        ):
+            status = "INTERRUPTED"
+        return {
+            "status": status,
+            "completed": False,
+            "attempt": state["attempt"],
+            "error_code": state.get("error_code"),
+            "request_identity": request_identity,
             "paths_exposed": False,
-            "created_at": _utc_now(),
         }
-        with self._mutation_guard():
-            if os.path.lexists(receipt_path):
-                return self._read_json(receipt_path)
-            self._write_exclusive_json(receipt_path, receipt)
-        return receipt
+
+    @staticmethod
+    def _validate_dataset_import_request(
+        request: Mapping[str, Any],
+        run_id: str,
+    ) -> None:
+        stable = {
+            "run_id": request.get("run_id"),
+            "callback_id": request.get("callback_id"),
+            "callback_code_identity_sha256": request.get("callback_code_identity_sha256"),
+            "callback_runtime_identity_sha256": request.get("callback_runtime_identity_sha256"),
+            "handoff_identity": request.get("handoff_identity"),
+            "artifact_manifest_identity": request.get("artifact_manifest_identity"),
+        }
+        if (
+            set(request) != _IMPORT_REQUEST_KEYS
+            or request.get("schema_version") != HARVEST_IMPORT_REQUEST_SCHEMA
+            or request.get("run_id") != run_id
+            or SOURCE_ID_PATTERN.fullmatch(str(request.get("callback_id", ""))) is None
+            or any(
+                SHA256_PATTERN.fullmatch(str(request.get(key, ""))) is None
+                for key in (
+                    "callback_code_identity_sha256",
+                    "callback_runtime_identity_sha256",
+                    "handoff_identity",
+                    "artifact_manifest_identity",
+                    "request_identity",
+                )
+            )
+            or request.get("request_identity") != _json_identity(stable)
+            or IDEMPOTENCY_KEY_PATTERN.fullmatch(str(request.get("idempotency_key", ""))) is None
+            or request.get("paths_exposed") is not False
+        ):
+            raise HarvestError("invalid_harvest_import", "Dataset import request evidence is invalid.")
+        try:
+            _parse_utc_timestamp(str(request.get("created_at", "")))
+        except ValueError as exc:
+            raise HarvestError("invalid_harvest_import", "Dataset import request evidence is invalid.") from exc
+
+    @staticmethod
+    def _validated_dataset_import_receipt(
+        receipt: Mapping[str, Any],
+        run_id: str,
+        request_identity: str,
+    ) -> dict[str, Any]:
+        if (
+            set(receipt) != _IMPORT_RECEIPT_KEYS
+            or receipt.get("schema_version") != HARVEST_IMPORT_RECEIPT_SCHEMA
+            or receipt.get("run_id") != run_id
+            or receipt.get("request_identity") != request_identity
+            or SHA256_PATTERN.fullmatch(str(receipt.get("request_identity", ""))) is None
+            or IDEMPOTENCY_KEY_PATTERN.fullmatch(str(receipt.get("idempotency_key", ""))) is None
+            or SOURCE_ID_PATTERN.fullmatch(str(receipt.get("callback_id", ""))) is None
+            or SHA256_PATTERN.fullmatch(str(receipt.get("callback_code_identity_sha256", ""))) is None
+            or SHA256_PATTERN.fullmatch(str(receipt.get("callback_runtime_identity_sha256", ""))) is None
+            or SHA256_PATTERN.fullmatch(str(receipt.get("artifact_manifest_identity", ""))) is None
+            or type(receipt.get("accepted_count")) is not int
+            or type(receipt.get("quarantined_count")) is not int
+            or receipt.get("paths_exposed") is not False
+        ):
+            raise HarvestError("invalid_harvest_import", "Dataset import receipt evidence is invalid.")
+        try:
+            DatasetImportResult(
+                str(receipt.get("dataset_reference", "")),
+                receipt.get("accepted_count"),
+                receipt.get("quarantined_count"),
+            )
+            _parse_utc_timestamp(str(receipt.get("created_at", "")))
+        except (TypeError, ValueError) as exc:
+            raise HarvestError("invalid_harvest_import", "Dataset import receipt evidence is invalid.") from exc
+        return dict(receipt)
+
+    @staticmethod
+    def _validate_dataset_import_state(
+        state: Mapping[str, Any],
+        run_id: str,
+        request_identity: str,
+    ) -> None:
+        if (
+            set(state) != _IMPORT_STATE_KEYS
+            or state.get("schema_version") != HARVEST_IMPORT_STATE_SCHEMA
+            or state.get("run_id") != run_id
+            or state.get("request_identity") != request_identity
+            or type(state.get("attempt")) is not int
+            or state["attempt"] <= 0
+            or state.get("status") not in {"RUNNING", "CANCELLING", "FAILED", "CANCELLED", "COMPLETE"}
+            or (
+                state.get("error_code") is not None
+                and (
+                    not isinstance(state.get("error_code"), str)
+                    or STAGE_PATTERN.fullmatch(str(state.get("error_code"))) is None
+                )
+            )
+            or state.get("paths_exposed") is not False
+        ):
+            raise HarvestError("invalid_harvest_import", "Dataset import state evidence is invalid.")
+        try:
+            started = _parse_utc_timestamp(str(state.get("started_at", "")))
+            updated = _parse_utc_timestamp(str(state.get("updated_at", "")))
+            deadline = _parse_utc_timestamp(str(state.get("deadline_at", "")))
+        except ValueError as exc:
+            raise HarvestError("invalid_harvest_import", "Dataset import state evidence is invalid.") from exc
+        if updated < started or deadline < started:
+            raise HarvestError("invalid_harvest_import", "Dataset import state timestamps are invalid.")
+
+    def _finish_dataset_import_state(
+        self,
+        run_dir: Path,
+        run_anchor: AnchoredDirectory,
+        state: Mapping[str, Any],
+        status: str,
+        error_code: str | None,
+    ) -> None:
+        updated = {
+            **dict(state),
+            "status": status,
+            "updated_at": _utc_now(),
+            "error_code": error_code,
+        }
+        self._write_atomic_json(
+            run_dir / "dataset_import_state.json",
+            updated,
+            parent_anchor=run_anchor,
+        )
+
+    def _finalize_dataset_import_state(
+        self,
+        run_dir: Path,
+        run_anchor: AnchoredDirectory,
+        *,
+        request_identity: str,
+        attempt: int,
+        status: str,
+        error_code: str | None,
+    ) -> bool:
+        """Terminal compare-and-set: a stale attempt never modifies a newer one.
+
+        The write happens only when the durable state still carries this
+        attempt's request identity, attempt number, and a finalizable status.
+        """
+
+        try:
+            with self._mutation_guard():
+                current = self._read_json(
+                    run_dir / "dataset_import_state.json",
+                    parent_anchor=run_anchor,
+                )
+                self._validate_dataset_import_state(current, run_dir.name, request_identity)
+                if (
+                    current.get("request_identity") != request_identity
+                    or current.get("attempt") != attempt
+                    or str(current.get("status")) not in {"RUNNING", "CANCELLING"}
+                ):
+                    return False
+                self._finish_dataset_import_state(
+                    run_dir,
+                    run_anchor,
+                    current,
+                    status,
+                    error_code,
+                )
+                return True
+        except HarvestError:
+            # Finalization is best-effort evidence for this attempt only; the
+            # triggering error keeps propagating to the caller unchanged.
+            return False
+
+    def _commit_dataset_import_terminal(
+        self,
+        run_dir: Path,
+        run_anchor: AnchoredDirectory,
+        state: Mapping[str, Any],
+        receipt: Mapping[str, Any],
+    ) -> None:
+        """Publish COMPLETE state and the terminal commit binding it to the receipt."""
+
+        completed = {
+            **dict(state),
+            "status": "COMPLETE",
+            "updated_at": _utc_now(),
+            "error_code": None,
+        }
+        self._write_atomic_json(
+            run_dir / "dataset_import_state.json",
+            completed,
+            parent_anchor=run_anchor,
+        )
+        commit = {
+            "schema_version": HARVEST_IMPORT_TERMINAL_COMMIT_SCHEMA,
+            "run_id": run_dir.name,
+            "request_identity": completed["request_identity"],
+            "attempt": completed["attempt"],
+            "status": "COMPLETE",
+            "receipt_identity": _json_identity(dict(receipt)),
+            "state_identity": _json_identity(completed),
+            "created_at": completed["updated_at"],
+            "paths_exposed": False,
+        }
+        commit["terminal_commit_identity"] = _json_identity(commit)
+        self._write_exclusive_json(
+            run_dir / "dataset_import_terminal_commit.json",
+            commit,
+            parent_anchor=run_anchor,
+        )
+
+    def _dataset_import_commit_valid(
+        self,
+        run_dir: Path,
+        run_anchor: AnchoredDirectory,
+        request_identity: str,
+    ) -> bool:
+        try:
+            commit = self._read_json(
+                run_dir / "dataset_import_terminal_commit.json",
+                parent_anchor=run_anchor,
+            )
+            receipt = self._read_json(run_dir / "dataset_import_receipt.json", parent_anchor=run_anchor)
+            state = self._read_json(run_dir / "dataset_import_state.json", parent_anchor=run_anchor)
+            self._validate_dataset_import_state(state, run_dir.name, request_identity)
+        except (HarvestError, OSError):
+            return False
+        recorded_identity = commit.get("terminal_commit_identity")
+        identity_payload = {key: value for key, value in commit.items() if key != "terminal_commit_identity"}
+        return (
+            set(commit) == _IMPORT_TERMINAL_COMMIT_KEYS
+            and commit.get("schema_version") == HARVEST_IMPORT_TERMINAL_COMMIT_SCHEMA
+            and commit.get("run_id") == run_dir.name
+            and commit.get("request_identity") == request_identity
+            and commit.get("status") == "COMPLETE"
+            and commit.get("paths_exposed") is False
+            and type(commit.get("attempt")) is int
+            and commit.get("attempt") == state.get("attempt")
+            and state.get("status") == "COMPLETE"
+            and SHA256_PATTERN.fullmatch(str(recorded_identity or "")) is not None
+            and recorded_identity == _json_identity(identity_payload)
+            and commit.get("receipt_identity") == _json_identity(receipt)
+            and commit.get("state_identity") == _json_identity(state)
+        )
+
+    def _recover_dataset_import_commit(
+        self,
+        run_dir: Path,
+        run_anchor: AnchoredDirectory,
+        run_id: str,
+        request_identity: str,
+    ) -> None:
+        """Idempotently rebind a durable receipt to COMPLETE state and commit.
+
+        Runs under the mutation guard after abort rechecks. A receipt is only
+        ever published after a successful callback result for this request
+        identity, so recovery re-finalizes the interrupted terminal sequence
+        without re-invoking the callback.
+        """
+
+        if run_anchor.lexists("dataset_import_terminal_commit.json"):
+            raise HarvestError(
+                "invalid_harvest_import",
+                "Dataset import terminal commit evidence is invalid.",
+            )
+        state = self._read_json(run_dir / "dataset_import_state.json", parent_anchor=run_anchor)
+        self._validate_dataset_import_state(state, run_id, request_identity)
+        receipt = self._read_json(run_dir / "dataset_import_receipt.json", parent_anchor=run_anchor)
+        self._commit_dataset_import_terminal(run_dir, run_anchor, state, receipt)
+
+    def _dataset_import_cancel_requested(
+        self,
+        run_dir: Path,
+        attempt: int,
+        local: threading.Event,
+        run_anchor: AnchoredDirectory,
+    ) -> bool:
+        if local.is_set():
+            return True
+        cancellation_name = f"dataset_import_cancellation_{attempt}.json"
+        if not run_anchor.lexists(cancellation_name):
+            return False
+        cancellation = self._read_json(
+            run_dir / cancellation_name,
+            parent_anchor=run_anchor,
+        )
+        if (
+            set(cancellation) != _IMPORT_CANCELLATION_KEYS
+            or cancellation.get("schema_version") != HARVEST_IMPORT_CANCELLATION_SCHEMA
+            or cancellation.get("run_id") != run_dir.name
+            or cancellation.get("attempt") != attempt
+            or cancellation.get("explicit_action") is not True
+            or cancellation.get("paths_exposed") is not False
+        ):
+            raise HarvestError("invalid_harvest_import", "Dataset import cancellation evidence is invalid.")
+        try:
+            _parse_utc_timestamp(str(cancellation.get("requested_at", "")))
+        except ValueError as exc:
+            raise HarvestError("invalid_harvest_import", "Dataset import cancellation evidence is invalid.") from exc
+        local.set()
+        return True
+
+    def _raise_if_import_aborted(
+        self,
+        run_dir: Path,
+        deadline_monotonic: float,
+        *,
+        run_anchor: AnchoredDirectory,
+        attempt: int | None = None,
+        local: threading.Event | None = None,
+    ) -> None:
+        if (
+            attempt is not None
+            and local is not None
+            and self._dataset_import_cancel_requested(
+                run_dir,
+                attempt,
+                local,
+                run_anchor,
+            )
+        ):
+            raise AcquisitionCancelled()
+        if time.monotonic() >= deadline_monotonic:
+            raise HarvestError(
+                "dataset_import_duration_exceeded",
+                "Dataset import exceeded the whole-operation duration limit.",
+            )
 
     def _start(
         self,
@@ -1121,96 +2001,109 @@ class HarvestService:
                     "harvest_single_flight_conflict",
                     f"Managed Harvest run {conflict!r} is already active; wait for it to finish.",
                 )
-            run_id, run_dir = self._create_run_directory()
-            created_at = _utc_now()
-            request = {
-                "schema_version": HARVEST_REQUEST_SCHEMA,
-                "run_id": run_id,
-                "source_id": source_id,
-                "retry_of": retry_of,
-                "idempotency_key": idempotency_key,
-                "request_fingerprint": fingerprint,
-                "source_catalog_identity": source.catalog_identity,
-                "backend_capability_identity": self._backend_capabilities.identity,
-                "backend_capability_evidence_identity": backend_evidence["evidence_identity"],
-                "backend_capability_certificate_identity": backend_evidence["certificate_identity"],
-                "backend_capability_audit_report_sha256": backend_evidence["audit_report_sha256"],
-                "backend_capability_audit_report_identity": backend_evidence["audit_report_identity"],
-                "backend_capability_issued_at": backend_evidence["issued_at"],
-                "backend_capability_expires_at": backend_evidence["expires_at"],
-                "limits_identity": self.limits.identity,
-                "reuse_evidence_identity": reuse.identity,
-                "created_at": created_at,
-                "browser_paths_accepted": False,
-            }
-            receipt = {
-                "schema_version": HARVEST_AUTHORIZATION_SCHEMA,
-                "run_id": run_id,
-                "source": source.to_public_dict(),
-                "backend_capabilities": {
-                    **self._backend_capabilities.to_dict(),
-                    "capability_identity": self._backend_capabilities.identity,
-                },
-                "backend_capability_evidence": backend_evidence,
-                "limits": {**self.limits.to_dict(), "limits_identity": self.limits.identity},
-                "reuse_evidence": {**reuse.to_dict(), "reuse_evidence_identity": reuse.identity},
-                "authorizations": {
-                    "explicit_action": True,
-                    "zero_cost": True,
-                    "permissive_license": True,
-                    "existing_inventory_reviewed": True,
-                },
-                "inventory_before_action": {
-                    "run_count": current_inventory["run_count"],
-                    "legacy_run_count": current_inventory["legacy_run_count"],
-                    "known_usable_items": current_inventory["known_usable_items"],
-                    "unsafe_entries": current_inventory["unsafe_entries"],
-                    "inventory_identity": current_inventory["inventory_identity"],
-                },
-                "network_actions_before_receipt": 0,
-                "paths_exposed": False,
-                "created_at": created_at,
-            }
-            self._write_exclusive_json(run_dir / "authorization_receipt.json", receipt)
-            self._write_exclusive_json(run_dir / "request.json", request)
-            lease_token = uuid.uuid4().hex
-            lease = self._new_lease(run_id, lease_token, sequence=0)
-            self._write_exclusive_json(run_dir / "worker_lease.json", lease)
-            state = {
-                "schema_version": HARVEST_STATE_SCHEMA,
-                "run_id": run_id,
-                "source_id": source_id,
-                "status": "QUEUED",
-                "stage": "queued",
-                "current": 0,
-                "total": None,
-                "message": "Harvest job queued after certified authorization evidence was recorded.",
-                "created_at": created_at,
-                "started_at": None,
-                "updated_at": created_at,
-                "ended_at": None,
-                "handoff_ready": False,
-                "usable_count": 0,
-                "quarantined_count": 0,
-                "taxonomy_counts": {},
-                "event_count": 1,
-                "owner_pid": os.getpid(),
-                "owner_instance_id": self._instance_id,
-                "lease_token": lease_token,
-            }
-            self._write_state(run_dir, state)
-            self._append_event(run_dir, state)
-            cancellation = threading.Event()
-            worker = threading.Thread(
-                target=self._run_worker,
-                args=(run_id, source, cancellation),
-                name=f"spritelab-{run_id}",
-                daemon=True,
-            )
-            self._cancellations[run_id] = cancellation
-            self._workers[run_id] = worker
-            worker.start()
-            return self.job(run_id), True
+            anchor_stack = ExitStack()
+            worker_started = False
+            try:
+                output_anchor = anchor_stack.enter_context(open_anchored_directory(self.output_root, self.project_root))
+                run_id, run_dir, run_anchor = self._create_run_directory(output_anchor, anchor_stack)
+                created_at = _utc_now()
+                request = {
+                    "schema_version": HARVEST_REQUEST_SCHEMA,
+                    "run_id": run_id,
+                    "source_id": source_id,
+                    "retry_of": retry_of,
+                    "idempotency_key": idempotency_key,
+                    "request_fingerprint": fingerprint,
+                    "source_catalog_identity": source.catalog_identity,
+                    "backend_capability_identity": self._backend_capabilities.identity,
+                    "backend_capability_evidence_identity": backend_evidence["evidence_identity"],
+                    "backend_capability_certificate_identity": backend_evidence["certificate_identity"],
+                    "backend_capability_audit_report_sha256": backend_evidence["audit_report_sha256"],
+                    "backend_capability_audit_report_identity": backend_evidence["audit_report_identity"],
+                    "backend_capability_issued_at": backend_evidence["issued_at"],
+                    "backend_capability_expires_at": backend_evidence["expires_at"],
+                    "limits_identity": self.limits.identity,
+                    "reuse_evidence_identity": reuse.identity,
+                    "created_at": created_at,
+                    "browser_paths_accepted": False,
+                }
+                receipt = {
+                    "schema_version": HARVEST_AUTHORIZATION_SCHEMA,
+                    "run_id": run_id,
+                    "source": source.to_public_dict(),
+                    "backend_capabilities": {
+                        **self._backend_capabilities.to_dict(),
+                        "capability_identity": self._backend_capabilities.identity,
+                    },
+                    "backend_capability_evidence": backend_evidence,
+                    "limits": {**self.limits.to_dict(), "limits_identity": self.limits.identity},
+                    "reuse_evidence": {**reuse.to_dict(), "reuse_evidence_identity": reuse.identity},
+                    "authorizations": {
+                        "explicit_action": True,
+                        "zero_cost": True,
+                        "permissive_license": True,
+                        "existing_inventory_reviewed": True,
+                    },
+                    "inventory_before_action": {
+                        "run_count": current_inventory["run_count"],
+                        "legacy_run_count": current_inventory["legacy_run_count"],
+                        "known_usable_items": current_inventory["known_usable_items"],
+                        "unsafe_entries": current_inventory["unsafe_entries"],
+                        "inventory_identity": current_inventory["inventory_identity"],
+                    },
+                    "network_actions_before_receipt": 0,
+                    "paths_exposed": False,
+                    "created_at": created_at,
+                }
+                self._write_exclusive_json(
+                    run_dir / "authorization_receipt.json",
+                    receipt,
+                    parent_anchor=run_anchor,
+                )
+                self._write_exclusive_json(run_dir / "request.json", request, parent_anchor=run_anchor)
+                lease_token = uuid.uuid4().hex
+                lease = self._new_lease(run_id, lease_token, sequence=0)
+                self._write_exclusive_json(run_dir / "worker_lease.json", lease, parent_anchor=run_anchor)
+                state = {
+                    "schema_version": HARVEST_STATE_SCHEMA,
+                    "run_id": run_id,
+                    "source_id": source_id,
+                    "status": "QUEUED",
+                    "stage": "queued",
+                    "current": 0,
+                    "total": None,
+                    "message": "Harvest job queued after certified authorization evidence was recorded.",
+                    "created_at": created_at,
+                    "started_at": None,
+                    "updated_at": created_at,
+                    "ended_at": None,
+                    "handoff_ready": False,
+                    "usable_count": 0,
+                    "quarantined_count": 0,
+                    "taxonomy_counts": {},
+                    "event_count": 1,
+                    "owner_pid": os.getpid(),
+                    "owner_instance_id": self._instance_id,
+                    "lease_token": lease_token,
+                }
+                self._write_state(run_dir, state, run_anchor=run_anchor)
+                self._append_event(run_dir, state, run_anchor=run_anchor)
+                cancellation = threading.Event()
+                worker = threading.Thread(
+                    target=self._run_worker,
+                    args=(run_id, source, cancellation, run_anchor, anchor_stack),
+                    name=f"spritelab-{run_id}",
+                    daemon=True,
+                )
+                self._cancellations[run_id] = cancellation
+                self._workers[run_id] = worker
+                queued_job = self._job_from_anchor(run_id, run_dir, run_anchor)
+                worker.start()
+                worker_started = True
+                return queued_job, True
+            finally:
+                if not worker_started:
+                    anchor_stack.close()
 
     def _authorize(
         self,
@@ -1267,130 +2160,203 @@ class HarvestService:
             ) from exc
         return source
 
-    def _run_worker(self, run_id: str, source: HarvestSource, cancellation: threading.Event) -> None:
+    def _run_worker(
+        self,
+        run_id: str,
+        source: HarvestSource,
+        cancellation: threading.Event,
+        transaction_anchor: AnchoredDirectory,
+        anchor_stack: ExitStack,
+    ) -> None:
+        operation_started = time.monotonic()
+        operation_deadline = operation_started + self.limits.max_duration_seconds
         lease_stop: threading.Event | None = None
         lease_failure: threading.Event | None = None
         lease_thread: threading.Thread | None = None
-        transaction_anchor: AnchoredDirectory | None = None
-        run_dir: Path | None = None
+        run_dir: Path | None = transaction_anchor.directory
         try:
-            run_dir = self._run_directory(run_id)
+            if run_dir.name != run_id or run_dir.parent != self.output_root:
+                raise HarvestError("invalid_harvest_run", "Harvest worker anchor does not match its run identity.")
+            transaction_anchor.verify()
             artifacts = require_confined_path(run_dir / "artifacts", run_dir)
             if self._backend_factory is None:
                 raise HarvestError("harvest_backend_unavailable", "Certified Harvest backend is unavailable.")
-            backend = self._backend_factory()
-            with open_anchored_directory(run_dir, self.output_root) as run_anchor:
-                transaction_anchor = run_anchor.detached_duplicate()
-                initial_state = self._read_state(run_dir, run_anchor=transaction_anchor)
-                lease_stop, lease_failure, lease_thread = self._start_lease_heartbeat(
+            initial_state = self._read_state(run_dir, run_anchor=transaction_anchor)
+            lease_stop, lease_failure, lease_thread = self._start_lease_heartbeat(
+                run_dir,
+                initial_state,
+                run_anchor=transaction_anchor,
+            )
+            self._raise_if_operation_aborted(
+                run_dir,
+                cancellation,
+                operation_deadline,
+                run_anchor=transaction_anchor,
+            )
+            self._transition(
+                run_dir,
+                "RUNNING",
+                stage="verifying_backend",
+                message="Harvest is revalidating the certified backend inside the whole-run deadline.",
+                started=True,
+                run_anchor=transaction_anchor,
+            )
+            backend = self._construct_backend_with_control(
+                run_dir,
+                cancellation,
+                operation_deadline,
+                run_anchor=transaction_anchor,
+            )
+            self._raise_if_operation_aborted(
+                run_dir,
+                cancellation,
+                operation_deadline,
+                run_anchor=transaction_anchor,
+            )
+            self._transition(
+                run_dir,
+                "RUNNING",
+                stage="acquiring",
+                message="Certified acquisition is enforcing network and resource limits.",
+                run_anchor=transaction_anchor,
+            )
+            transaction_anchor.mkdir(artifacts.name)
+            acquisition_started = time.monotonic()
+            remaining = operation_deadline - acquisition_started
+            if remaining <= 0:
+                raise HarvestError("harvest_duration_exceeded", "Harvest exceeded the whole-run duration limit.")
+            operation_limits = replace(self.limits, max_duration_seconds=remaining)
+            backend_arguments: dict[str, Any] = {
+                "cancel_requested": lambda: self._lease_checked_cancellation(
                     run_dir,
-                    initial_state,
-                    run_anchor=transaction_anchor,
-                )
-                self._raise_if_cancelled(run_dir, cancellation, run_anchor=transaction_anchor)
-                self._transition(
+                    cancellation,
+                    lease_failure,
+                    transaction_anchor,
+                ),
+                "progress": lambda stage, current, total: self._lease_checked_progress(
                     run_dir,
-                    "RUNNING",
-                    stage="acquiring",
-                    message="Certified acquisition is enforcing network and resource limits.",
-                    started=True,
-                    run_anchor=transaction_anchor,
-                )
-                transaction_anchor.mkdir(artifacts.name)
-                started = time.monotonic()
-                acquisition_deadline = started + self.limits.max_duration_seconds
-                backend_arguments: dict[str, Any] = {
-                    "cancel_requested": lambda: self._lease_checked_cancellation(
-                        run_dir,
-                        cancellation,
-                        lease_failure,
-                        transaction_anchor,
-                    ),
-                    "progress": lambda stage, current, total: self._lease_checked_progress(
-                        run_dir,
-                        cancellation,
-                        lease_failure,
-                        stage,
-                        current,
-                        total,
-                        transaction_anchor,
-                    ),
-                }
-                if getattr(backend, "requires_destination_parent_anchor", False) is True:
-                    backend_arguments["destination_parent_anchor"] = transaction_anchor
-                result = backend.acquire(
-                    source,
+                    cancellation,
+                    lease_failure,
+                    stage,
+                    current,
+                    total,
+                    transaction_anchor,
+                ),
+            }
+            if getattr(backend, "requires_destination_parent_anchor", False) is True:
+                backend_arguments["destination_parent_anchor"] = transaction_anchor
+            result = backend.acquire(
+                source,
+                artifacts,
+                operation_limits,
+                **backend_arguments,
+            )
+            self._ensure_lease_healthy(lease_failure)
+            self._raise_if_operation_aborted(
+                run_dir,
+                cancellation,
+                operation_deadline,
+                run_anchor=transaction_anchor,
+            )
+            actual_elapsed = time.monotonic() - operation_started
+            acquisition_receipt = self._validate_acquisition_result(source, result, actual_elapsed)
+            with transaction_anchor.open_directory_immovable(artifacts.name) as artifacts_anchor:
+                manifest = scan_artifacts(
                     artifacts,
                     self.limits,
-                    **backend_arguments,
-                )
-                self._ensure_lease_healthy(lease_failure)
-                actual_elapsed = time.monotonic() - started
-                self._raise_if_cancelled(run_dir, cancellation, run_anchor=transaction_anchor)
-                acquisition_receipt = self._validate_acquisition_result(source, result, actual_elapsed)
-                with transaction_anchor.open_directory(artifacts.name) as artifacts_anchor:
-                    manifest = scan_artifacts(
-                        artifacts,
-                        self.limits,
-                        expected_files=result.receipt.files,
-                        artifacts_anchor=artifacts_anchor,
-                        cancel_requested=lambda: self._lease_checked_cancellation(
-                            run_dir,
-                            cancellation,
-                            lease_failure,
-                            transaction_anchor,
-                        ),
-                        deadline_monotonic=acquisition_deadline,
-                    )
-                self._ensure_lease_healthy(lease_failure)
-                if time.monotonic() > acquisition_deadline:
-                    raise HarvestError(
-                        "harvest_duration_exceeded",
-                        "Harvest exceeded the certified duration limit.",
-                    )
-                acquisition_receipt["artifact_manifest_identity"] = _json_identity(manifest)
-                acquisition_receipt["acquisition_receipt_identity"] = _json_identity(acquisition_receipt)
-                self._write_exclusive_json(
-                    run_dir / "acquisition_receipt.json",
-                    acquisition_receipt,
-                    parent_anchor=transaction_anchor,
-                )
-                self._write_exclusive_json(
-                    run_dir / "artifact_manifest.json",
-                    manifest,
-                    parent_anchor=transaction_anchor,
-                )
-                self._raise_if_cancelled(run_dir, cancellation, run_anchor=transaction_anchor)
-                self._validate_live_configuration(source.source_id)
-                handoff = self._build_handoff(run_id, source, acquisition_receipt, manifest)
-                # Cancellation and handoff publication share the cross-process
-                # mutation lock. This closes both pre- and post-publication races.
-                with self._mutation_guard():
-                    self._raise_if_cancelled(run_dir, cancellation, run_anchor=transaction_anchor)
-                    live_source = self._validate_live_configuration(source.source_id)
-                    if live_source.catalog_identity != source.catalog_identity:
-                        raise HarvestError(
-                            "harvest_live_configuration_changed",
-                            "Harvest configuration changed before handoff publication.",
-                        )
-                    self._write_exclusive_json(
-                        run_dir / "handoff.json",
-                        handoff,
-                        parent_anchor=transaction_anchor,
-                    )
-                    self._raise_if_cancelled(run_dir, cancellation, run_anchor=transaction_anchor)
-                    self._transition_locked(
+                    expected_files=result.receipt.files,
+                    artifacts_anchor=artifacts_anchor,
+                    cancel_requested=lambda: self._lease_checked_cancellation(
                         run_dir,
-                        "COMPLETE",
-                        stage="complete",
-                        current=manifest["artifact_count"],
-                        total=manifest["artifact_count"],
-                        message="Harvest completed with verified provenance and a rehashable Dataset handoff.",
-                        ended=True,
-                        handoff_ready=True,
-                        manifest=manifest,
-                        run_anchor=transaction_anchor,
+                        cancellation,
+                        lease_failure,
+                        transaction_anchor,
+                    ),
+                    deadline_monotonic=operation_deadline,
+                )
+            self._ensure_lease_healthy(lease_failure)
+            self._raise_if_operation_aborted(
+                run_dir,
+                cancellation,
+                operation_deadline,
+                run_anchor=transaction_anchor,
+            )
+            acquisition_receipt["artifact_manifest_identity"] = _json_identity(manifest)
+            acquisition_receipt["acquisition_receipt_identity"] = _json_identity(acquisition_receipt)
+            self._write_exclusive_json(
+                run_dir / "acquisition_receipt.json",
+                acquisition_receipt,
+                parent_anchor=transaction_anchor,
+            )
+            self._write_exclusive_json(
+                run_dir / "artifact_manifest.json",
+                manifest,
+                parent_anchor=transaction_anchor,
+            )
+            self._raise_if_operation_aborted(
+                run_dir,
+                cancellation,
+                operation_deadline,
+                run_anchor=transaction_anchor,
+            )
+            self._validate_live_configuration(source.source_id)
+            self._raise_if_operation_aborted(
+                run_dir,
+                cancellation,
+                operation_deadline,
+                run_anchor=transaction_anchor,
+            )
+            handoff = self._build_handoff(run_id, source, acquisition_receipt, manifest)
+            self._raise_if_operation_aborted(
+                run_dir,
+                cancellation,
+                operation_deadline,
+                run_anchor=transaction_anchor,
+            )
+            # Cancellation, deadline, and handoff publication share the
+            # cross-process mutation lock at the final commit boundary.
+            with self._mutation_guard():
+                self._raise_if_operation_aborted(
+                    run_dir,
+                    cancellation,
+                    operation_deadline,
+                    run_anchor=transaction_anchor,
+                )
+                live_source = self._validate_live_configuration(source.source_id)
+                self._raise_if_operation_aborted(
+                    run_dir,
+                    cancellation,
+                    operation_deadline,
+                    run_anchor=transaction_anchor,
+                )
+                if live_source.catalog_identity != source.catalog_identity:
+                    raise HarvestError(
+                        "harvest_live_configuration_changed",
+                        "Harvest configuration changed before handoff publication.",
                     )
+                self._write_exclusive_json(
+                    run_dir / "handoff.json",
+                    handoff,
+                    parent_anchor=transaction_anchor,
+                )
+                self._raise_if_operation_aborted(
+                    run_dir,
+                    cancellation,
+                    operation_deadline,
+                    run_anchor=transaction_anchor,
+                )
+                self._transition_locked(
+                    run_dir,
+                    "COMPLETE",
+                    stage="complete",
+                    current=manifest["artifact_count"],
+                    total=manifest["artifact_count"],
+                    message="Harvest completed with verified provenance and a rehashable Dataset handoff.",
+                    ended=True,
+                    handoff_ready=True,
+                    manifest=manifest,
+                    run_anchor=transaction_anchor,
+                )
         except Exception:
             try:
                 cancelled = (
@@ -1433,11 +2399,10 @@ class HarvestService:
                     )
             except Exception:
                 pass
-            if transaction_anchor is not None:
-                try:
-                    transaction_anchor.__exit__(None, None, None)
-                except Exception:
-                    pass
+            try:
+                anchor_stack.close()
+            except Exception:
+                pass
             with self._lock:
                 self._progress_observations.pop(run_id, None)
                 self._last_cancellation_probe.pop(run_id, None)
@@ -1520,6 +2485,82 @@ class HarvestService:
                     "Harvest archive snapshot residue evidence is invalid.",
                 )
             snapshot_residue = residue
+        direct_image_derivation: dict[str, Any] | None = None
+        response_kind = "archive"
+        if (
+            receipt.response_mime_type in {"image/gif", "image/png", "image/webp"}
+            and receipt.direct_image_derivation is None
+        ):
+            raise HarvestError(
+                "invalid_backend_receipt",
+                "Harvest image responses require exact direct-image derivation evidence.",
+            )
+        if receipt.direct_image_derivation is not None:
+            direct = dict(receipt.direct_image_derivation)
+            expected_source_format = {
+                "image/gif": "GIF",
+                "image/png": "PNG",
+                "image/webp": "WEBP",
+            }.get(receipt.response_mime_type)
+            expected_direct_keys = {
+                "schema_version",
+                "kind",
+                "source_format",
+                "source_mime_type",
+                "raw_byte_count",
+                "raw_sha256",
+                "frame_count",
+                "width",
+                "height",
+                "decoded_rgba_sha256",
+                "output_relative_path",
+                "output_mime_type",
+                "output_byte_count",
+                "output_sha256",
+                "recipe_identity",
+                "derived",
+                "source_bytes_modified",
+            }
+            matching_files = [
+                item for item in receipt.files if item.relative_path == direct.get("output_relative_path")
+            ]
+            if (
+                set(direct) != expected_direct_keys
+                or direct.get("schema_version") != "spritelab.harvest.direct-image-derivation.v1"
+                or direct.get("kind") != "direct_static_image"
+                or direct.get("source_format") != expected_source_format
+                or direct.get("source_mime_type") != receipt.response_mime_type
+                or direct.get("raw_byte_count") != receipt.response_bytes
+                or direct.get("raw_sha256") != receipt.actual_response_sha256
+                or direct.get("frame_count") != 1
+                or type(direct.get("width")) is not int
+                or type(direct.get("height")) is not int
+                or direct["width"] <= 0
+                or direct["height"] <= 0
+                or direct["width"] * direct["height"] > 16_777_216
+                or SHA256_PATTERN.fullmatch(str(direct.get("decoded_rgba_sha256", ""))) is None
+                or direct.get("output_relative_path") != "direct-image.png"
+                or direct.get("output_mime_type") != "image/png"
+                or type(direct.get("output_byte_count")) is not int
+                or not 0 < direct["output_byte_count"] <= self.limits.max_file_bytes
+                or SHA256_PATTERN.fullmatch(str(direct.get("output_sha256", ""))) is None
+                or len(matching_files) != 1
+                or matching_files[0].mime_type != "image/png"
+                or matching_files[0].byte_count != direct.get("output_byte_count")
+                or matching_files[0].sha256 != direct.get("output_sha256")
+                or direct.get("recipe_identity") != "spritelab.harvest.direct-static-image-to-png.v1"
+                or direct.get("derived") is not (receipt.response_mime_type != "image/png")
+                or direct.get("source_bytes_modified") is not False
+                or receipt.archive_members != 0
+                or receipt.archive_uncompressed_bytes != 0
+                or snapshot_residue is not None
+            ):
+                raise HarvestError(
+                    "invalid_backend_receipt",
+                    "Harvest direct-image derivation evidence is invalid.",
+                )
+            direct_image_derivation = direct
+            response_kind = "direct_static_image"
         backend_evidence = self._backend_evidence_record()
         return {
             "schema_version": HARVEST_ACQUISITION_RECEIPT_SCHEMA,
@@ -1546,6 +2587,8 @@ class HarvestService:
             "archive_members": receipt.archive_members,
             "archive_uncompressed_bytes": receipt.archive_uncompressed_bytes,
             "snapshot_residue": snapshot_residue,
+            "response_kind": response_kind,
+            "direct_image_derivation": direct_image_derivation,
             "reported_file_count": len(receipt.files),
             "private_url_components_exposed": False,
             "created_at": _utc_now(),
@@ -1636,6 +2679,8 @@ class HarvestService:
             "backend_capability_evidence_identity": backend_evidence["evidence_identity"],
             "limits_identity": self.limits.identity,
             "acquisition_receipt_identity": acquisition_receipt["acquisition_receipt_identity"],
+            "acquisition_kind": acquisition_receipt["response_kind"],
+            "direct_image_derivation": acquisition_receipt.get("direct_image_derivation"),
             "artifact_manifest_identity": _json_identity(manifest),
             "artifact_set_identity": manifest["artifact_set_identity"],
             "artifact_count": manifest["artifact_count"],
@@ -1651,8 +2696,16 @@ class HarvestService:
             "created_at": _utc_now(),
         }
 
-    def _rehash_manifest(self, run_dir: Path) -> dict[str, Any]:
-        stored = self._read_json(run_dir / "artifact_manifest.json")
+    def _rehash_manifest(
+        self,
+        run_dir: Path,
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> dict[str, Any]:
+        if run_anchor is None:
+            with open_anchored_directory(run_dir, self.output_root) as anchored:
+                return self._rehash_manifest(run_dir, run_anchor=anchored)
+        stored = self._read_json(run_dir / "artifact_manifest.json", parent_anchor=run_anchor)
         files = stored.get("files")
         if not isinstance(files, list):
             raise HarvestError("invalid_artifact_manifest", "Harvest artifact manifest is invalid.")
@@ -1669,7 +2722,13 @@ class HarvestService:
                 )
                 for item in files
             )
-            current = scan_artifacts(run_dir / "artifacts", self.limits, expected_files=expected)
+            with run_anchor.open_directory_immovable("artifacts") as artifacts_anchor:
+                current = scan_artifacts(
+                    run_dir / "artifacts",
+                    self.limits,
+                    expected_files=expected,
+                    artifacts_anchor=artifacts_anchor,
+                )
         except (KeyError, TypeError, ValueError, HarvestStorageError, OSError) as exc:
             raise HarvestError(
                 "harvest_artifact_verification_failed",
@@ -1783,11 +2842,17 @@ class HarvestService:
                 parent_anchor=run_anchor,
             )
 
-    def _complete_commit_valid(self, run_dir: Path, state: Mapping[str, Any]) -> bool:
+    def _complete_commit_valid(
+        self,
+        run_dir: Path,
+        state: Mapping[str, Any],
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> bool:
         try:
-            commit = self._read_json(run_dir / "terminal_commit.json")
-            handoff = self._read_json(run_dir / "handoff.json")
-            events = self._read_events(run_dir)
+            commit = self._read_json(run_dir / "terminal_commit.json", parent_anchor=run_anchor)
+            handoff = self._read_json(run_dir / "handoff.json", parent_anchor=run_anchor)
+            events = self._read_events(run_dir, run_anchor=run_anchor)
         except (HarvestError, OSError):
             return False
         if not events:
@@ -1806,11 +2871,19 @@ class HarvestService:
             and commit.get("handoff_identity") == _json_identity(handoff)
         )
 
-    def _managed_inventory_record(self, run_dir: Path) -> dict[str, Any]:
-        state = self._read_state(run_dir)
-        request = self._read_request(run_dir)
-        status = self._effective_status(state, run_dir.name)
-        complete_commit_valid = status != "COMPLETE" or self._complete_commit_valid(run_dir, state)
+    def _managed_inventory_record(
+        self,
+        run_dir: Path,
+        run_anchor: AnchoredDirectory,
+    ) -> dict[str, Any]:
+        state = self._read_state(run_dir, run_anchor=run_anchor)
+        request = self._read_request(run_dir, run_anchor=run_anchor)
+        status = self._effective_status(state, run_dir.name, run_dir=run_dir, run_anchor=run_anchor)
+        complete_commit_valid = status != "COMPLETE" or self._complete_commit_valid(
+            run_dir,
+            state,
+            run_anchor=run_anchor,
+        )
         if status == "COMPLETE" and not complete_commit_valid:
             status = "INTERRUPTED"
         return {
@@ -1825,30 +2898,53 @@ class HarvestService:
             "quarantined_count": int(state.get("quarantined_count", 0)),
         }
 
-    def _effective_status(self, state: Mapping[str, Any], run_id: str) -> str:
+    def _effective_status(
+        self,
+        state: Mapping[str, Any],
+        run_id: str,
+        *,
+        run_dir: Path | None = None,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> str:
         status = str(state["status"])
         if status not in ACTIVE_STATUSES:
             return status
         worker = self._workers.get(run_id)
         if worker is not None and worker.is_alive():
             return status
-        if self._lease_is_live(self._run_directory(run_id), state):
+        target = run_dir if run_dir is not None else self._run_directory(run_id)
+        if self._lease_is_live(target, state, run_anchor=run_anchor):
             return status
         return "INTERRUPTED"
 
     def _active_source_run(self, source_id: str) -> str | None:
         if not self.output_root.exists():
             return None
-        for child in sorted(self.output_root.iterdir(), key=lambda value: value.name):
-            if RUN_ID_PATTERN.fullmatch(child.name) is None or _is_link_or_reparse(child):
-                continue
-            try:
-                request = self._read_request(child)
-                state = self._read_state(child)
-            except (HarvestError, OSError):
-                continue
-            if request["source_id"] == source_id and self._effective_status(state, child.name) in ACTIVE_STATUSES:
-                return child.name
+        with open_anchored_directory(self.output_root, self.project_root) as output_anchor:
+            for name in output_anchor.names():
+                if RUN_ID_PATTERN.fullmatch(name) is None:
+                    continue
+                child = self.output_root / name
+                try:
+                    metadata = output_anchor.lstat(name)
+                    if not stat.S_ISDIR(metadata.st_mode) or _metadata_is_link_or_reparse(metadata):
+                        raise HarvestStorageError("unsafe managed run entry")
+                    with output_anchor.open_directory_immovable(name) as child_anchor:
+                        request = self._read_request(child, run_anchor=child_anchor)
+                        state = self._read_state(child, run_anchor=child_anchor)
+                        status = self._effective_status(
+                            state,
+                            name,
+                            run_dir=child,
+                            run_anchor=child_anchor,
+                        )
+                        if request["source_id"] == source_id and status in ACTIVE_STATUSES:
+                            return name
+                except (HarvestError, OSError, HarvestStorageError, UnsafeFilesystemOperation):
+                    # A syntactically managed run whose state cannot be bound
+                    # is conservatively treated as active.  Ignoring it could
+                    # violate the source and project single-flight gates.
+                    return name
         return None
 
     def _active_managed_run(self) -> str | None:
@@ -1861,12 +2957,22 @@ class HarvestService:
                 try:
                     metadata = output_anchor.lstat(name)
                     if not stat.S_ISDIR(metadata.st_mode) or _metadata_is_link_or_reparse(metadata):
+                        if RUN_ID_PATTERN.fullmatch(name) or PROBE_ID_PATTERN.fullmatch(name):
+                            raise HarvestStorageError("unsafe managed run entry")
                         continue
                     child = self.output_root / name
                     with output_anchor.open_directory_immovable(name) as child_anchor:
                         if RUN_ID_PATTERN.fullmatch(name):
-                            state = self._read_state(child)
-                            if self._effective_status(state, name) in ACTIVE_STATUSES:
+                            state = self._read_state(child, run_anchor=child_anchor)
+                            if (
+                                self._effective_status(
+                                    state,
+                                    name,
+                                    run_dir=child,
+                                    run_anchor=child_anchor,
+                                )
+                                in ACTIVE_STATUSES
+                            ):
                                 return name
                         elif PROBE_ID_PATTERN.fullmatch(name):
                             record = scan_probe_inventory_record(
@@ -1874,16 +2980,32 @@ class HarvestService:
                                 self.output_root,
                                 run_anchor=child_anchor,
                             )
-                            if record is not None and record.get("status") in ACTIVE_PROBE_STATUSES:
+                            if record is None or record.get("status") in ACTIVE_PROBE_STATUSES:
                                 return name
                 except (OSError, HarvestError, HarvestStorageError, UnsafeFilesystemOperation):
+                    if RUN_ID_PATTERN.fullmatch(name) or PROBE_ID_PATTERN.fullmatch(name):
+                        return name
                     continue
         return None
 
     def _create_output_root(self) -> None:
         try:
-            self.output_root.mkdir(parents=False, exist_ok=True)
-            self._validate_output_root()
+            with open_anchored_directory(self.project_root, self.project_root) as project_anchor:
+                if not project_anchor.lexists(self.output_root.name):
+                    observed_identity = project_anchor.mkdir(self.output_root.name, exist_ok=False)
+                else:
+                    observed_identity = OwnedFileIdentity.from_stat(project_anchor.lstat(self.output_root.name))
+                metadata = project_anchor.lstat(self.output_root.name)
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or _metadata_is_link_or_reparse(metadata)
+                    or not observed_identity.matches(metadata)
+                ):
+                    raise HarvestError("unsafe_harvest_root", "The managed Harvest root is unsafe.")
+                with project_anchor.open_directory_immovable(self.output_root.name) as output_anchor:
+                    if not observed_identity.matches(output_anchor.directory_metadata()):
+                        raise HarvestError("unsafe_harvest_root", "The managed Harvest root changed while anchoring.")
+                    output_anchor.verify()
         except (OSError, HarvestError, UnsafeFilesystemOperation) as exc:
             raise HarvestError(
                 "unsafe_harvest_root",
@@ -1905,31 +3027,51 @@ class HarvestService:
             except HarvestStorageError as exc:
                 raise HarvestError("harvest_mutation_conflict", str(exc)) from exc
 
-    def _create_run_directory(self) -> tuple[str, Path]:
+    def _create_run_directory(
+        self,
+        output_anchor: AnchoredDirectory,
+        anchor_stack: ExitStack,
+    ) -> tuple[str, Path, AnchoredDirectory]:
+        output_anchor.verify()
         for _attempt in range(32):
             run_id = self._run_id_factory()
             if RUN_ID_PATTERN.fullmatch(run_id) is None:
                 raise HarvestError("invalid_generated_run_id", "Harvest generated an unsafe run identifier.")
-            run_dir = require_confined_path(self.output_root / run_id, self.output_root)
+            run_dir = self.output_root / run_id
             try:
-                run_dir.mkdir(exist_ok=False)
+                created_identity = output_anchor.mkdir(run_id, exist_ok=False)
             except FileExistsError:
                 continue
-            return run_id, run_dir
+            run_anchor = anchor_stack.enter_context(output_anchor.open_directory_immovable(run_id))
+            if not created_identity.matches(run_anchor.directory_metadata()):
+                raise HarvestError(
+                    "unsafe_harvest_evidence",
+                    "Harvest run directory changed between creation and retained anchoring.",
+                )
+            return run_id, run_dir, run_anchor
         raise HarvestError("harvest_run_collision", "Harvest could not allocate a unique run.")
 
     def _find_idempotency_key(self, key: str) -> tuple[str, str] | None:
         if not self.output_root.exists():
             return None
-        for child in sorted(self.output_root.iterdir(), key=lambda value: value.name):
-            if RUN_ID_PATTERN.fullmatch(child.name) is None or _is_link_or_reparse(child):
-                continue
-            try:
-                request = self._read_request(child)
-            except (HarvestError, OSError):
-                continue
-            if request.get("idempotency_key") == key:
-                return child.name, str(request.get("request_fingerprint", ""))
+        with open_anchored_directory(self.output_root, self.project_root) as output_anchor:
+            for name in output_anchor.names():
+                if RUN_ID_PATTERN.fullmatch(name) is None:
+                    continue
+                child = self.output_root / name
+                try:
+                    metadata = output_anchor.lstat(name)
+                    if not stat.S_ISDIR(metadata.st_mode) or _metadata_is_link_or_reparse(metadata):
+                        raise HarvestStorageError("unsafe managed run entry")
+                    with output_anchor.open_directory_immovable(name) as child_anchor:
+                        request = self._read_request(child, run_anchor=child_anchor)
+                except (HarvestError, OSError, HarvestStorageError, UnsafeFilesystemOperation) as exc:
+                    raise HarvestError(
+                        "unsafe_harvest_evidence",
+                        "A managed Harvest run could not be safely checked for idempotent reuse.",
+                    ) from exc
+                if request.get("idempotency_key") == key:
+                    return name, str(request.get("request_fingerprint", ""))
         return None
 
     def _run_directory(self, run_id: str) -> Path:
@@ -1943,8 +3085,13 @@ class HarvestService:
             raise HarvestError("harvest_run_not_found", "Harvest run was not found.", status_code=404)
         return run_dir
 
-    def _read_request(self, run_dir: Path) -> dict[str, Any]:
-        payload = self._read_json(run_dir / "request.json")
+    def _read_request(
+        self,
+        run_dir: Path,
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> dict[str, Any]:
+        payload = self._read_json(run_dir / "request.json", parent_anchor=run_anchor)
         if (
             payload.get("schema_version") != HARVEST_REQUEST_SCHEMA
             or payload.get("run_id") != run_dir.name
@@ -2159,6 +3306,21 @@ def _validate_idempotency_key(value: str) -> None:
         )
 
 
+def _validate_production_dataset_callback(
+    callback: DatasetImportCallback,
+    project_root: Path,
+) -> None:
+    """Reject identity strings copied onto an injected callback object."""
+
+    from spritelab.product_features.conditioned_v5.intake import ConditionedDatasetImportAdapter
+
+    if type(callback) is not ConditionedDatasetImportAdapter:
+        raise ValueError("Production Dataset import requires the audited conditioned callback implementation.")
+    callback_root = getattr(callback, "project_root", None)
+    if not isinstance(callback_root, Path) or callback_root.absolute() != project_root:
+        raise ValueError("Production Dataset import callback is not bound to the trusted project root.")
+
+
 def _exact_int(value: Any) -> int:
     if type(value) is not int:
         raise TypeError("not exact int")
@@ -2178,6 +3340,35 @@ def _parse_utc_timestamp(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError("timestamp must include a timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def _require_current_backend_evidence(
+    evidence: BackendCapabilityEvidence,
+    capabilities: CertifiedBackendCapabilities | None,
+) -> None:
+    if capabilities is None or evidence.capabilities != capabilities:
+        raise ValueError("Harvest capability evidence does not match the configured backend.")
+    audited = _parse_utc_timestamp(evidence.audited_at)
+    issued = _parse_utc_timestamp(evidence.issued_at)
+    expires = _parse_utc_timestamp(evidence.expires_at)
+    now = datetime.now(timezone.utc)
+    if audited > issued or issued > now or expires <= now or expires <= issued:
+        raise ValueError("Harvest capability evidence is not currently valid.")
+    if (
+        SHA256_PATTERN.fullmatch(evidence.audit_report_sha256) is None
+        or SHA256_PATTERN.fullmatch(evidence.audit_report_identity) is None
+        or SHA256_PATTERN.fullmatch(evidence.certificate_identity) is None
+        or evidence.implementation_identity_sha256 != capabilities.code_identity_sha256
+    ):
+        raise ValueError("Harvest capability evidence identities are invalid.")
+    current_implementation_identity = hardened_backend_code_identity()
+    current_callback_binding = conditioned_dataset_import_callback_binding()
+    if (
+        capabilities.code_identity_sha256 != current_implementation_identity
+        or evidence.implementation_identity_sha256 != current_implementation_identity
+        or any(getattr(capabilities, key) != value for key, value in current_callback_binding.items())
+    ):
+        raise ValueError("Harvest capability evidence is not bound to current backend and callback code.")
 
 
 def _json_identity(value: Any) -> str:

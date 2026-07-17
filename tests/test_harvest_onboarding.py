@@ -8,12 +8,14 @@ import time
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
+import spritelab.product_features.harvest.onboarding as onboarding_module
 from spritelab.product_core import ProjectContext
 from spritelab.product_features.harvest import create_plugin
 from spritelab.product_features.harvest.catalog import (
@@ -125,6 +127,13 @@ def _capabilities() -> CertifiedBackendCapabilities:
         enforces_probe_no_decode_extract_import=True,
         enforces_deterministic_evidence_verification=True,
         enforces_transactional_catalog_promotion=True,
+        enforces_direct_static_image_derivation=True,
+        enforces_retained_anchored_state=True,
+        enforces_whole_operation_deadline=True,
+        enforces_durable_import_control=True,
+        enforces_same_pack_license_and_zero_cost=True,
+        enforces_technical_usability_and_pixel_uniqueness=True,
+        enforces_non_self_attested_production_bindings=True,
     )
 
 
@@ -147,11 +156,14 @@ def _source_html(*, automation: str = "", include_terms: bool = True, extra_term
     terms_link = f'<a href="{TERMS_URL}">Automation terms</a>' if include_terms else ""
     return (
         "<html><head><title>Verified Sprite Pack</title></head><body>"
+        "<article>"
         "<h1>Verified Sprite Pack</h1><p>by Example Artist</p>"
+        "<p>Free zero-cost download.</p>"
         f"<p>{automation}</p>"
         f'<a href="{LICENSE_URL}">CC0 license</a>'
         f"{terms_link}{extra_terms_link}"
         f'<a href="{DIRECT_URL}">Direct download</a>'
+        "</article>"
         "</body></html>"
     ).encode()
 
@@ -169,7 +181,12 @@ def _responses() -> list[FakeResponse]:
     ]
 
 
-def _service(project: Path, transport: FakeTransport) -> tuple[HarvestService, BackendCapabilityEvidence]:
+def _service(
+    project: Path,
+    transport: FakeTransport,
+    *,
+    limits: Any = None,
+) -> tuple[HarvestService, BackendCapabilityEvidence]:
     capabilities = _capabilities()
     evidence = _evidence(capabilities)
     return (
@@ -178,8 +195,10 @@ def _service(project: Path, transport: FakeTransport) -> tuple[HarvestService, B
             backend_factory=lambda: None,
             backend_capabilities=capabilities,
             backend_capability_evidence=evidence,
+            limits=limits,
             probe_resolver=lambda _host, _port: ("8.8.8.8",),
             probe_transport=transport,
+            allow_unverified_test_backend=True,
         ),
         evidence,
     )
@@ -286,6 +305,7 @@ def test_probe_is_quarantine_only_and_promotion_is_explicit_idempotent(tmp_path:
         sources=load_trusted_catalog(project),
         backend_factory=lambda: None,
         backend_capabilities=_capabilities(),
+        allow_unverified_test_backend=True,
     )
     assert reloaded.sources()["sources"][0]["evidence_binding"]["automation_terms"]["decision"] == "ALLOW"
 
@@ -313,6 +333,96 @@ def test_probe_is_quarantine_only_and_promotion_is_explicit_idempotent(tmp_path:
     catalog_path.write_text(json.dumps(tampered), encoding="utf-8")
     with pytest.raises(TrustedCatalogError):
         load_trusted_catalog(project)
+
+
+def test_probe_uses_one_monotonic_deadline_for_every_network_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    clock = [100.0]
+
+    class AdvancingTransport(FakeTransport):
+        def open(self, **kwargs: Any) -> FakeResponse:
+            response = super().open(**kwargs)
+            clock[0] += 1.0
+            return response
+
+    monkeypatch.setattr(onboarding_module.time, "monotonic", lambda: clock[0])
+    transport = AdvancingTransport(_responses())
+    service, evidence = _service(
+        project,
+        transport,
+        limits=onboarding_module.HarvestLimits(max_duration_seconds=10.0),
+    )
+
+    started, _created = service.start_probe(_payload(service, evidence, key="probe-deadline-success"))
+    completed = _wait(service, started["probe_id"], {"READY", "FAILED"})
+    timeouts = [float(call["timeout_seconds"]) for call in transport.calls]
+
+    assert completed["status"] == "READY"
+    assert timeouts == pytest.approx([10.0, 9.0, 8.0, 7.0, 6.0, 5.0])
+    assert all(left > right > 0 for left, right in pairwise(timeouts))
+
+
+def test_probe_whole_deadline_fails_with_durable_terminal_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    clock = [200.0]
+
+    class AdvancingTransport(FakeTransport):
+        def open(self, **kwargs: Any) -> FakeResponse:
+            response = super().open(**kwargs)
+            clock[0] += 1.0
+            return response
+
+    monkeypatch.setattr(onboarding_module.time, "monotonic", lambda: clock[0])
+    transport = AdvancingTransport(_responses())
+    service, evidence = _service(
+        project,
+        transport,
+        limits=onboarding_module.HarvestLimits(max_duration_seconds=4.5),
+    )
+
+    started, _created = service.start_probe(_payload(service, evidence, key="probe-deadline-failure"))
+    failed = _wait(service, started["probe_id"], {"FAILED"})
+    durable = service.probe_evidence(started["probe_id"])
+
+    assert failed["status"] == "FAILED"
+    assert failed["ended_at"] is not None
+    assert failed["events"][-1]["status"] == "FAILED"
+    assert failed["events"][-1]["stage"] == "failed"
+    assert durable["receipt"] is None
+    assert durable["result"] is None
+    assert len(transport.calls) < len(_responses())
+
+
+def test_probe_cancellation_records_durable_terminal_evidence(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    entered = threading.Event()
+    release = threading.Event()
+    responses = _responses()
+    transport = FakeTransport([BlockingResponse(ROBOTS_ALLOW, entered, release), *responses[1:]])
+    service, evidence = _service(project, transport)
+
+    started, _created = service.start_probe(_payload(service, evidence, key="probe-cancel-terminal"))
+    assert entered.wait(3)
+    cancelling = service.cancel_probe(started["probe_id"], explicit_action=True)
+    assert cancelling["status"] == "CANCELLING"
+    release.set()
+    cancelled = _wait(service, started["probe_id"], {"CANCELLED"})
+    durable = service.probe_evidence(started["probe_id"])
+
+    assert cancelled["ended_at"] is not None
+    assert cancelled["events"][-1]["status"] == "CANCELLED"
+    assert cancelled["events"][-1]["stage"] == "cancelled"
+    assert durable["receipt"] is None
+    assert durable["result"] is None
 
 
 def test_legacy_v1_catalog_fails_closed_instead_of_implying_terms_approval(tmp_path: Path) -> None:
@@ -387,6 +497,159 @@ def test_provenance_license_and_automation_terms_are_source_bound_and_inert() ->
     )
     assert blocked_result.decision == "BLOCK"
     assert blocked_result.limited_evidence is False
+
+
+def test_evidence_verification_binds_zero_cost_and_license_to_one_pack_block() -> None:
+    source = _source_html()
+    license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
+
+    verified = verify_evidence_pages(
+        source_url=SOURCE_URL,
+        source_snapshot=_snapshot(SOURCE_URL, source),
+        source_bytes=source,
+        license_url=LICENSE_URL,
+        license_snapshot=_snapshot(LICENSE_URL, license_page),
+        license_bytes=license_page,
+        title="Verified Sprite Pack",
+        creator="Example Artist",
+        license_id="cc0-1.0",
+        direct_download_url=DIRECT_URL,
+    )
+
+    assert verified.zero_cost_verified is True
+    assert verified.license_conflict_checked is True
+    assert "Verified Sprite Pack" in verified.source_pack_evidence_text
+    assert DIRECT_URL not in verified.source_pack_evidence_text
+
+
+def test_evidence_verification_accepts_nested_wrappers_within_one_card() -> None:
+    source = (
+        "<html><body><article>"
+        "<div><header><h1>Verified Sprite Pack</h1><p>by Example Artist</p></header></div>"
+        f'<div><p>Free zero-cost download.</p><a href="{LICENSE_URL}">CC0 license</a>'
+        f'<a href="{DIRECT_URL}">Direct download</a></div>'
+        "</article></body></html>"
+    ).encode()
+    license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
+
+    verified = verify_evidence_pages(
+        source_url=SOURCE_URL,
+        source_snapshot=_snapshot(SOURCE_URL, source),
+        source_bytes=source,
+        license_url=LICENSE_URL,
+        license_snapshot=_snapshot(LICENSE_URL, license_page),
+        license_bytes=license_page,
+        title="Verified Sprite Pack",
+        creator="Example Artist",
+        license_id="cc0-1.0",
+        direct_download_url=DIRECT_URL,
+    )
+
+    assert verified.zero_cost_verified is True
+    assert "Verified Sprite Pack" in verified.source_pack_evidence_text
+    assert "Free zero-cost download." in verified.source_pack_evidence_text
+
+
+@pytest.mark.parametrize(
+    ("source", "license_page", "message"),
+    [
+        (
+            _source_html().replace(b"CC0 license", b"CC0 1.0 - all rights reserved"),
+            b"<p>CC0 1.0 public domain dedication</p>",
+            "source-pack block contains conflicting",
+        ),
+        (
+            _source_html().replace(b"CC0 license", b"not CC0 1.0"),
+            b"<p>CC0 1.0 public domain dedication</p>",
+            "source-pack block contains conflicting",
+        ),
+        (
+            _source_html().replace(b"Free zero-cost download.", b"Free zero-cost download. Price: $5"),
+            b"<p>CC0 1.0 public domain dedication</p>",
+            "conflict-free explicit zero-cost",
+        ),
+        (
+            (
+                f"<html><body><article><h1>Verified Sprite Pack</h1><p>by Example Artist</p>"
+                "<p>Free zero-cost download.</p></article><article>"
+                f'<a href="{LICENSE_URL}">CC0 1.0</a><a href="{DIRECT_URL}">Direct download</a>'
+                "</article></body></html>"
+            ).encode(),
+            b"<p>CC0 1.0 public domain dedication</p>",
+            "bound to one source-pack block",
+        ),
+        (
+            _source_html(),
+            b"<p>CC0 1.0 public domain dedication. All rights reserved.</p>",
+            "license page contains conflicting",
+        ),
+        (
+            (
+                "<html><body><div>"
+                "<article><h1>Verified Sprite Pack</h1><p>by Example Artist</p>"
+                "<p>Free zero-cost download.</p></article>"
+                f'<article><h2>Other Pack</h2><p>by Other Artist</p><a href="{LICENSE_URL}">CC0 1.0</a>'
+                f'<a href="{DIRECT_URL}">Direct download</a></article>'
+                "</div></body></html>"
+            ).encode(),
+            b"<p>CC0 1.0 public domain dedication</p>",
+            "composes provenance",
+        ),
+        (
+            (
+                "<html><body><div>"
+                "<div><article><h1>Verified Sprite Pack</h1><p>by Example Artist</p></article></div>"
+                f'<div><p>Free zero-cost download.</p><a href="{LICENSE_URL}">CC0 1.0</a>'
+                f'<a href="{DIRECT_URL}">Direct download</a></div>'
+                "</div></body></html>"
+            ).encode(),
+            b"<p>CC0 1.0 public domain dedication</p>",
+            "composes provenance",
+        ),
+        (
+            (
+                "<html><body>"
+                "<article><h1>Verified Sprite Pack</h1><p>by Example Artist</p>"
+                f'<p>Free zero-cost download.</p><a href="{LICENSE_URL}">CC0 license</a>'
+                f'<a href="{DIRECT_URL}">Direct download</a></article>'
+                f'<article><h2>Mirror</h2><a href="{DIRECT_URL}">Mirror download</a></article>'
+                "</body></html>"
+            ).encode(),
+            b"<p>CC0 1.0 public domain dedication</p>",
+            "multiple distinct source-page blocks",
+        ),
+        (
+            (
+                "<html><body><div>"
+                "<article><h1>Verified Sprite Pack</h1><p>by Example Artist</p>"
+                f'<p>Free zero-cost download.</p><a href="{LICENSE_URL}">CC0 license</a></article>'
+                f'<article><h2>Other Pack</h2><a href="{LICENSE_URL}">CC0 license</a>'
+                f'<a href="{DIRECT_URL}">Direct download</a></article>'
+                "</div></body></html>"
+            ).encode(),
+            b"<p>CC0 1.0 public domain dedication</p>",
+            "composes provenance",
+        ),
+    ],
+)
+def test_evidence_verification_rejects_ambiguous_paid_or_conflicting_pack_evidence(
+    source: bytes,
+    license_page: bytes,
+    message: str,
+) -> None:
+    with pytest.raises(EvidenceFetchError, match=message):
+        verify_evidence_pages(
+            source_url=SOURCE_URL,
+            source_snapshot=_snapshot(SOURCE_URL, source),
+            source_bytes=source,
+            license_url=LICENSE_URL,
+            license_snapshot=_snapshot(LICENSE_URL, license_page),
+            license_bytes=license_page,
+            title="Verified Sprite Pack",
+            creator="Example Artist",
+            license_id="cc0-1.0",
+            direct_download_url=DIRECT_URL,
+        )
 
 
 @pytest.mark.parametrize(
@@ -649,6 +912,17 @@ def test_project_wide_single_flight_survives_two_service_instances(tmp_path: Pat
     assert _wait(first, started["probe_id"], {"READY", "FAILED"})["status"] == "READY"
 
 
+@pytest.mark.parametrize("name", ["harvest-corrupt1", f"probe-{'b' * 32}"])
+def test_probe_single_flight_fails_closed_for_corrupt_managed_names(tmp_path: Path, name: str) -> None:
+    project = tmp_path / "project"
+    entry = project / "harvest_runs" / name
+    entry.mkdir(parents=True)
+    (entry / "sources.jsonl").write_text('{"source_id":"plausible-legacy"}\n', encoding="utf-8")
+    service, _evidence_record = _service(project, FakeTransport([]))
+
+    assert service._probe_service._active_single_flight() == name
+
+
 def test_promotion_rejects_linked_terms_page_drift(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -689,6 +963,7 @@ def test_catalog_onboarding_ui_is_visible_and_rejects_browser_paths(tmp_path: Pa
         backend_capability_evidence=evidence,
         probe_resolver=lambda _host, _port: ("8.8.8.8",),
         probe_transport=FakeTransport([]),
+        allow_unverified_test_backend=True,
     )
     app = create_app(ProjectContext(project), plugins=(plugin,))
     client = TestClient(app)
@@ -702,6 +977,11 @@ def test_catalog_onboarding_ui_is_visible_and_rejects_browser_paths(tmp_path: Pa
     assert "authorize_catalog_promotion" in javascript
     assert "Automation terms decision" in javascript
     assert "no prohibition observed; not affirmative permission" in javascript
+    assert "spritelab.harvest.pending-idempotency.v1:" in javascript
+    assert "window.sessionStorage.setItem(storageKey, value)" in javascript
+    assert "window.sessionStorage.removeItem(storageKey)" in javascript
+    assert "if (error.definitive) clearIdempotency(scope)" in javascript
+    assert "sessionStorage.setItem(storageKey, JSON.stringify" not in javascript
     assert ".innerHTML" not in javascript
 
     denied = client.post(
@@ -711,3 +991,129 @@ def test_catalog_onboarding_ui_is_visible_and_rejects_browser_paths(tmp_path: Pa
     )
     assert denied.status_code == 422
     assert denied.json()["error_code"] == "browser_path_not_allowed"
+
+
+def test_probe_cancellation_during_terminal_commit_prevents_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Durable cancellation landing during the commit lock wait must win."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    transport = FakeTransport(_responses())
+    capabilities = _capabilities()
+    evidence = _evidence(capabilities)
+    probe_id = "probe-" + "c" * 32
+    service = HarvestService(
+        project,
+        backend_factory=lambda: None,
+        backend_capabilities=capabilities,
+        backend_capability_evidence=evidence,
+        probe_resolver=lambda _host, _port: ("8.8.8.8",),
+        probe_transport=transport,
+        probe_run_id_factory=lambda: probe_id,
+        allow_unverified_test_backend=True,
+    )
+    armed = threading.Event()
+    real_identity = onboarding_module.catalog_evidence_verifier_code_identity
+
+    def arming_identity() -> str:
+        # The worker computes this exactly once while assembling its receipt,
+        # after the last network action and before the terminal-commit lock.
+        armed.set()
+        return real_identity()
+
+    real_lock = onboarding_module.RepositoryMutationLock
+
+    class InjectingLock(real_lock):  # type: ignore[misc,valid-type]
+        def __enter__(self) -> Any:
+            if armed.is_set() and threading.current_thread().name == f"spritelab-{probe_id}":
+                armed.clear()
+                (project / "harvest_runs" / probe_id / "cancellation_request.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": onboarding_module.PROBE_CANCELLATION_SCHEMA,
+                            "probe_id": probe_id,
+                            "requested_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                            "explicit_action": True,
+                            "paths_exposed": False,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    encoding="utf-8",
+                )
+            return super().__enter__()
+
+    monkeypatch.setattr(onboarding_module, "catalog_evidence_verifier_code_identity", arming_identity)
+    monkeypatch.setattr(onboarding_module, "RepositoryMutationLock", InjectingLock)
+
+    started, created = service.start_probe(_payload(service, evidence, key="probe-commit-cancel-01"))
+    assert created is True
+    final = _wait(service, started["probe_id"], {"CANCELLED", "FAILED", "READY", "INTERRUPTED"})
+
+    assert final["status"] == "CANCELLED"
+    assert all(event["status"] != "READY" for event in final["events"])
+    run = project / "harvest_runs" / probe_id
+    assert not (run / "probe_receipt.json").exists()
+    assert not (run / "result.json").exists()
+    assert not (run / "terminal_commit.json").exists()
+
+
+def test_probe_ready_without_terminal_commit_is_interrupted_and_retry_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash between READY publication and the commit never exposes READY."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    transport = FakeTransport(_responses() + _responses())
+    service, evidence = _service(project, transport)
+    probe_service = service._probe_service
+    real_write = probe_service._write_exclusive_json
+
+    def failing_commit(path: Path, payload: Any, parent_anchor: Any) -> None:
+        if path.name == "terminal_commit.json":
+            raise onboarding_module.CatalogProbeError(
+                "injected_commit_failure",
+                "terminal commit publication failed",
+            )
+        return real_write(path, payload, parent_anchor)
+
+    monkeypatch.setattr(probe_service, "_write_exclusive_json", failing_commit)
+    started, _created = service.start_probe(_payload(service, evidence, key="probe-crash-commit-01"))
+    interrupted = _wait(service, started["probe_id"], {"INTERRUPTED", "FAILED", "READY"})
+
+    assert interrupted["status"] == "INTERRUPTED"
+    assert interrupted["promotion_ready"] is False
+    run = project / "harvest_runs" / started["probe_id"]
+    assert (run / "probe_receipt.json").exists()
+    assert (run / "result.json").exists()
+    assert not (run / "terminal_commit.json").exists()
+    with pytest.raises(HarvestError) as refused:
+        service.promote_probe(
+            started["probe_id"],
+            explicit_action=True,
+            authorize_catalog_promotion=True,
+        )
+    assert refused.value.code == "catalog_probe_not_promotable"
+    inventory = service.inventory()
+    record = next(item for item in inventory["probe_runs"] if item["probe_id"] == started["probe_id"])
+    assert record["status"] == "INTERRUPTED"
+    assert record["promotion_ready"] is False
+
+    # With the fault removed, an explicit retry recovers to a fully committed
+    # READY probe while the interrupted evidence stays immutable.
+    monkeypatch.setattr(probe_service, "_write_exclusive_json", real_write)
+    retried, retry_created = service.retry_probe(
+        started["probe_id"],
+        _payload(service, evidence, key="probe-crash-commit-02"),
+    )
+    assert retry_created is True
+    ready = _wait(service, retried["probe_id"], {"READY", "FAILED"})
+    assert ready["status"] == "READY"
+    assert ready["retry_of"] == started["probe_id"]
+    assert (project / "harvest_runs" / retried["probe_id"] / "terminal_commit.json").exists()
+    assert not (run / "terminal_commit.json").exists()
