@@ -11,10 +11,10 @@ import time
 import unicodedata
 import uuid
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,11 +28,23 @@ from spritelab.product_features.harvest.catalog import (
     url_identity,
     validate_download_url,
 )
+from spritelab.product_features.harvest.certification import BackendCapabilityEvidence
+from spritelab.product_features.harvest.onboarding import (
+    ACTIVE_PROBE_STATUSES,
+    PROBE_ID_PATTERN,
+    CatalogProbeError,
+    CatalogProbeService,
+    scan_probe_inventory_record,
+)
 from spritelab.product_features.harvest.storage import (
     HarvestStorageError,
     RepositoryMutationLock,
+    append_stable_single_link_bytes,
+    read_stable_single_link_bytes,
     scan_artifacts,
     scan_legacy_run,
+    write_atomic_stable_bytes,
+    write_exclusive_stable_bytes,
 )
 from spritelab.product_features.harvest.trusted_backend import (
     AcquiredFile,
@@ -44,9 +56,14 @@ from spritelab.product_features.harvest.trusted_backend import (
     HarvestLimits,
     validate_callback_identity,
 )
-from spritelab.utils.safe_fs import UnsafeFilesystemOperation, atomic_write_text, require_confined_path
+from spritelab.utils.safe_fs import (
+    AnchoredDirectory,
+    UnsafeFilesystemOperation,
+    open_anchored_directory,
+    require_confined_path,
+)
 
-HARVEST_INVENTORY_SCHEMA = "spritelab.harvest.inventory.v2"
+HARVEST_INVENTORY_SCHEMA = "spritelab.harvest.inventory.v3"
 HARVEST_REQUEST_SCHEMA = "spritelab.harvest.request.v2"
 HARVEST_AUTHORIZATION_SCHEMA = "spritelab.harvest.authorization-receipt.v2"
 HARVEST_STATE_SCHEMA = "spritelab.harvest.job-state.v2"
@@ -54,6 +71,9 @@ HARVEST_EVENT_SCHEMA = "spritelab.harvest.job-event.v2"
 HARVEST_ACQUISITION_RECEIPT_SCHEMA = "spritelab.harvest.acquisition-receipt.v1"
 HARVEST_HANDOFF_SCHEMA = "spritelab.harvest.dataset-handoff.v2"
 HARVEST_IMPORT_RECEIPT_SCHEMA = "spritelab.harvest.dataset-import-receipt.v1"
+HARVEST_CANCELLATION_SCHEMA = "spritelab.harvest.cancellation-request.v1"
+HARVEST_TERMINAL_COMMIT_SCHEMA = "spritelab.harvest.terminal-commit.v1"
+HARVEST_LEASE_SCHEMA = "spritelab.harvest.worker-lease.v1"
 
 RUN_ID_PATTERN = re.compile(r"^harvest-[a-z0-9][a-z0-9-]{5,79}$")
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
@@ -64,6 +84,23 @@ TERMINAL_STATUSES = frozenset({"COMPLETE", "FAILED", "CANCELLED"})
 RETRYABLE_STATUSES = frozenset({"FAILED", "CANCELLED", "INTERRUPTED"})
 _MAX_METADATA_BYTES = 8 * 1024 * 1024
 _REPARSE_FLAG = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_MAX_PROGRESS_EVENTS_PER_STAGE = 200
+_DURABLE_CANCELLATION_POLL_SECONDS = 0.05
+_LEASE_DURATION_SECONDS = 2.0
+_LEASE_HEARTBEAT_SECONDS = 0.25
+_LEGAL_TRANSITIONS = {
+    "QUEUED": frozenset({"QUEUED", "RUNNING", "CANCELLING", "CANCELLED", "FAILED"}),
+    "RUNNING": frozenset({"RUNNING", "CANCELLING", "CANCELLED", "COMPLETE", "FAILED"}),
+    "CANCELLING": frozenset({"CANCELLING", "CANCELLED", "FAILED"}),
+    "COMPLETE": frozenset({"COMPLETE"}),
+    "FAILED": frozenset({"FAILED"}),
+    "CANCELLED": frozenset({"CANCELLED"}),
+}
+
+LiveConfigurationLoader = Callable[
+    [],
+    tuple[tuple[HarvestSource, ...], BackendCapabilityEvidence | None],
+]
 
 
 class HarvestError(RuntimeError):
@@ -201,9 +238,15 @@ class HarvestService:
         sources: Iterable[HarvestSource] = (),
         backend_factory: BackendFactory | None = None,
         backend_capabilities: CertifiedBackendCapabilities | None = None,
+        backend_capability_evidence: BackendCapabilityEvidence | None = None,
+        live_configuration_loader: LiveConfigurationLoader | None = None,
         limits: HarvestLimits | None = None,
         run_id_factory: Any | None = None,
         dataset_import_callback: DatasetImportCallback | None = None,
+        probe_resolver: Any | None = None,
+        probe_transport: Any | None = None,
+        probe_downloader: Any | None = None,
+        probe_run_id_factory: Any | None = None,
     ) -> None:
         self.project_root = Path(project_root).absolute()
         try:
@@ -218,22 +261,111 @@ class HarvestService:
             raise ValueError("Harvest source identifiers must be unique.")
         if (backend_factory is None) != (backend_capabilities is None):
             raise ValueError("Harvest backend factory and certified capabilities must be configured together.")
+        if backend_capability_evidence is not None and backend_capabilities != backend_capability_evidence.capabilities:
+            raise ValueError("Harvest backend capability evidence does not match configured capabilities.")
         if dataset_import_callback is not None:
-            validate_callback_identity(dataset_import_callback)
+            _validate_callback_capability_binding(dataset_import_callback, backend_capabilities)
         self._sources = {source.source_id: source for source in catalog}
         self._backend_factory = backend_factory
         self._backend_capabilities = backend_capabilities
+        self._backend_capability_evidence = backend_capability_evidence
+        self._live_configuration_loader = live_configuration_loader
         self.limits = limits or HarvestLimits()
         self._run_id_factory = run_id_factory or _default_run_id
         self._dataset_import_callback = dataset_import_callback
         self._lock = threading.RLock()
         self._workers: dict[str, threading.Thread] = {}
         self._cancellations: dict[str, threading.Event] = {}
+        self._progress_observations: dict[str, tuple[str, int, int | None, int, int]] = {}
+        self._last_cancellation_probe: dict[str, tuple[float, bool]] = {}
+        self._lease_stops: dict[str, threading.Event] = {}
+        self._lease_failures: dict[str, threading.Event] = {}
+        self._lease_threads: dict[str, threading.Thread] = {}
         self._instance_id = uuid.uuid4().hex
+        probe_options: dict[str, Any] = {}
+        if probe_downloader is not None:
+            probe_options["downloader"] = probe_downloader
+        self._probe_service = CatalogProbeService(
+            self.project_root,
+            limits=self.limits,
+            resolver=probe_resolver,
+            transport=probe_transport,
+            run_id_factory=probe_run_id_factory,
+            catalog_refreshed=self._refresh_catalog_sources,
+            **probe_options,
+        )
 
     @property
     def acquisition_configured(self) -> bool:
         return bool(self._sources) and self._backend_factory is not None and self._backend_capabilities is not None
+
+    def _backend_evidence_record(self) -> dict[str, Any]:
+        if self._backend_capabilities is None:
+            raise HarvestError("harvest_backend_unavailable", "Certified Harvest backend is unavailable.")
+        if self._backend_capability_evidence is not None:
+            evidence = self._backend_capability_evidence.to_dict()
+            return {**evidence, "evidence_identity": self._backend_capability_evidence.identity}
+        fallback = {
+            "schema_version": "spritelab.harvest.injected-backend-evidence.v1",
+            "backend_capability_identity": self._backend_capabilities.identity,
+            "auditor_id": None,
+            "audited_at": None,
+            "issued_at": None,
+            "expires_at": None,
+            "audit_report_sha256": None,
+            "audit_report_identity": None,
+            "certificate_identity": None,
+            "implementation_identity_sha256": self._backend_capabilities.code_identity_sha256,
+            "origin": "injected_external_configuration",
+        }
+        return {**fallback, "evidence_identity": _json_identity(fallback)}
+
+    def _validate_live_configuration(self, source_id: str) -> HarvestSource:
+        source = self._sources.get(source_id)
+        if source is None or self._backend_capabilities is None:
+            raise HarvestError("harvest_backend_unavailable", "Certified Harvest configuration is unavailable.")
+        try:
+            source.evidence_binding.validate(source.source_page, source.license_evidence_url)
+        except ValueError as exc:
+            raise HarvestError(
+                "catalog_evidence_stale",
+                "Harvest source, license, or automation-terms evidence is stale or invalid.",
+            ) from exc
+        if self._live_configuration_loader is None:
+            return source
+        try:
+            live_sources, live_evidence = self._live_configuration_loader()
+        except Exception as exc:
+            raise HarvestError(
+                "harvest_live_configuration_invalid",
+                "Repository Harvest catalog or capability evidence is no longer current.",
+            ) from exc
+        live = {item.source_id: item for item in live_sources}
+        current_source = live.get(source_id)
+        if current_source is not None:
+            try:
+                current_source.evidence_binding.validate(
+                    current_source.source_page,
+                    current_source.license_evidence_url,
+                )
+            except ValueError as exc:
+                raise HarvestError(
+                    "catalog_evidence_stale",
+                    "Live Harvest source, license, or automation-terms evidence is stale or invalid.",
+                ) from exc
+        if (
+            current_source is None
+            or current_source.catalog_identity != source.catalog_identity
+            or live_evidence is None
+            or self._backend_capability_evidence is None
+            or live_evidence.identity != self._backend_capability_evidence.identity
+            or live_evidence.capabilities.identity != self._backend_capabilities.identity
+        ):
+            raise HarvestError(
+                "harvest_live_configuration_changed",
+                "Repository Harvest catalog or independent capability evidence changed.",
+            )
+        return current_source
 
     def sources(self) -> dict[str, Any]:
         return {
@@ -242,77 +374,195 @@ class HarvestService:
             "license_policy": sorted(INITIAL_LICENSE_POLICY),
             "backend_configured": self.acquisition_configured,
             "backend_capabilities": self._backend_capabilities.to_dict() if self._backend_capabilities else None,
+            "backend_capability_evidence": (
+                self._backend_evidence_record() if self._backend_capabilities is not None else None
+            ),
             "limits": self.limits.to_dict(),
             "network_actions": 0,
             "browser_paths_accepted": False,
         }
+
+    def _refresh_catalog_sources(self, sources: tuple[HarvestSource, ...]) -> None:
+        with self._lock:
+            self._sources = {source.source_id: source for source in sources}
+
+    def _current_probe_capability_evidence(self) -> BackendCapabilityEvidence:
+        evidence = self._backend_capability_evidence
+        if self._live_configuration_loader is not None:
+            try:
+                live_sources, evidence = self._live_configuration_loader()
+            except Exception as exc:
+                raise HarvestError(
+                    "catalog_probe_capability_evidence_required",
+                    "Current independent Harvest capability evidence could not be loaded.",
+                ) from exc
+            if evidence is not None:
+                self._refresh_catalog_sources(live_sources)
+        if (
+            evidence is None
+            or self._backend_capabilities is None
+            or evidence.capabilities.identity != self._backend_capabilities.identity
+        ):
+            raise HarvestError(
+                "catalog_probe_capability_evidence_required",
+                "Current independent capability evidence is required before catalog onboarding.",
+            )
+        return evidence
+
+    def start_probe(self, payload: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+        with self._lock:
+            evidence = self._current_probe_capability_evidence()
+            try:
+                return self._probe_service.start(
+                    payload,
+                    capability_evidence=evidence,
+                    current_inventory_identity=lambda: str(self.inventory()["inventory_identity"]),
+                )
+            except CatalogProbeError as exc:
+                raise HarvestError(exc.code, str(exc), status_code=exc.status_code) from exc
+
+    def retry_probe(self, probe_id: str, payload: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+        with self._lock:
+            evidence = self._current_probe_capability_evidence()
+            try:
+                return self._probe_service.retry(
+                    probe_id,
+                    payload,
+                    capability_evidence=evidence,
+                    current_inventory_identity=lambda: str(self.inventory()["inventory_identity"]),
+                )
+            except CatalogProbeError as exc:
+                raise HarvestError(exc.code, str(exc), status_code=exc.status_code) from exc
+
+    def probe(self, probe_id: str) -> dict[str, Any]:
+        try:
+            return self._probe_service.status(probe_id)
+        except CatalogProbeError as exc:
+            raise HarvestError(exc.code, str(exc), status_code=exc.status_code) from exc
+
+    def probe_evidence(self, probe_id: str) -> dict[str, Any]:
+        try:
+            return self._probe_service.evidence(probe_id)
+        except CatalogProbeError as exc:
+            raise HarvestError(exc.code, str(exc), status_code=exc.status_code) from exc
+
+    def cancel_probe(self, probe_id: str, *, explicit_action: bool) -> dict[str, Any]:
+        try:
+            return self._probe_service.cancel(probe_id, explicit_action=explicit_action)
+        except CatalogProbeError as exc:
+            raise HarvestError(exc.code, str(exc), status_code=exc.status_code) from exc
+
+    def promote_probe(
+        self,
+        probe_id: str,
+        *,
+        explicit_action: bool,
+        authorize_catalog_promotion: bool,
+    ) -> dict[str, Any]:
+        evidence = self._current_probe_capability_evidence()
+        try:
+            return self._probe_service.promote(
+                probe_id,
+                explicit_action=explicit_action,
+                authorize_catalog_promotion=authorize_catalog_promotion,
+                capability_evidence=evidence,
+            )
+        except CatalogProbeError as exc:
+            raise HarvestError(exc.code, str(exc), status_code=exc.status_code) from exc
 
     def inventory(self) -> dict[str, Any]:
         """Index immediate managed and legacy runs without mutation or network."""
 
         with self._lock:
             managed: list[dict[str, Any]] = []
+            probes: list[dict[str, Any]] = []
             legacy: list[dict[str, Any]] = []
             unsafe_entries = 0
             collision_keys: set[str] = set()
             if os.path.lexists(self.output_root):
                 self._validate_output_root()
-                for child in sorted(self.output_root.iterdir(), key=lambda value: value.name):
-                    if child.name == ".harvest.lock":
-                        continue
-                    if len(managed) + len(legacy) + unsafe_entries >= self.limits.max_files:
-                        raise HarvestError(
-                            "harvest_inventory_limit",
-                            "Immediate Harvest inventory exceeds the configured entry limit.",
-                        )
-                    collision = unicodedata.normalize("NFC", child.name).casefold()
-                    if collision in collision_keys:
-                        unsafe_entries += 1
-                        continue
-                    collision_keys.add(collision)
-                    try:
-                        metadata = child.lstat()
-                        if (
-                            not stat.S_ISDIR(metadata.st_mode)
-                            or _metadata_is_link_or_reparse(metadata)
-                            or child.is_mount()
-                        ):
-                            raise HarvestStorageError("unsafe immediate child")
-                        require_confined_path(child, self.output_root)
-                        if RUN_ID_PATTERN.fullmatch(child.name):
-                            try:
-                                managed.append(self._managed_inventory_record(child))
-                                continue
-                            except HarvestError:
-                                pass
-                        legacy_record = scan_legacy_run(child)
-                        if legacy_record is None:
-                            raise HarvestStorageError("unrecognized immediate child")
-                        legacy.append(legacy_record)
-                    except (OSError, HarvestError, HarvestStorageError, UnsafeFilesystemOperation):
-                        unsafe_entries += 1
+                with open_anchored_directory(self.output_root, self.project_root) as output_anchor:
+                    root_device = output_anchor.directory_metadata().st_dev
+                    for name in output_anchor.names():
+                        if name == ".harvest.lock":
+                            continue
+                        if len(managed) + len(probes) + len(legacy) + unsafe_entries >= self.limits.max_files:
+                            raise HarvestError(
+                                "harvest_inventory_limit",
+                                "Immediate Harvest inventory exceeds the configured entry limit.",
+                            )
+                        collision = unicodedata.normalize("NFC", name).casefold()
+                        if collision in collision_keys:
+                            unsafe_entries += 1
+                            continue
+                        collision_keys.add(collision)
+                        try:
+                            metadata = output_anchor.lstat(name)
+                            if (
+                                not stat.S_ISDIR(metadata.st_mode)
+                                or _metadata_is_link_or_reparse(metadata)
+                                or metadata.st_dev != root_device
+                            ):
+                                raise HarvestStorageError("unsafe immediate child")
+                            child = self.output_root / name
+                            managed_record: dict[str, Any] | None = None
+                            probe_record: dict[str, Any] | None = None
+                            legacy_record: dict[str, Any] | None = None
+                            with output_anchor.open_directory_immovable(name) as child_anchor:
+                                if RUN_ID_PATTERN.fullmatch(name):
+                                    try:
+                                        managed_record = self._managed_inventory_record(child)
+                                    except HarvestError:
+                                        pass
+                                elif PROBE_ID_PATTERN.fullmatch(name):
+                                    probe_record = scan_probe_inventory_record(
+                                        child,
+                                        self.output_root,
+                                        run_anchor=child_anchor,
+                                    )
+                                if managed_record is None and probe_record is None:
+                                    legacy_record = scan_legacy_run(
+                                        child,
+                                        directory_anchor=child_anchor,
+                                    )
+                                    if legacy_record is None:
+                                        raise HarvestStorageError("unrecognized immediate child")
+                            if managed_record is not None:
+                                managed.append(managed_record)
+                            elif probe_record is not None:
+                                probes.append(probe_record)
+                            elif legacy_record is not None:
+                                legacy.append(legacy_record)
+                        except (OSError, HarvestError, HarvestStorageError, UnsafeFilesystemOperation):
+                            unsafe_entries += 1
             managed.sort(key=lambda value: value["run_id"])
+            probes.sort(key=lambda value: value["probe_id"])
             legacy.sort(key=lambda value: value["legacy_id"])
             status_counts = dict(sorted(Counter(item["status"] for item in managed).items()))
+            probe_status_counts = dict(sorted(Counter(item["status"] for item in probes).items()))
             known_usable = sum(
                 int(item.get("usable_count", 0)) for item in managed if item["status"] == "COMPLETE"
             ) + sum(int(item.get("imported_records", 0)) for item in legacy)
             identity_payload = {
                 "managed_runs": managed,
+                "probe_runs": probes,
                 "legacy_runs": legacy,
                 "unsafe_entries": unsafe_entries,
             }
             return {
                 "schema_version": HARVEST_INVENTORY_SCHEMA,
                 "run_count": len(managed),
+                "probe_run_count": len(probes),
                 "legacy_run_count": len(legacy),
                 "status_counts": status_counts,
+                "probe_status_counts": probe_status_counts,
                 "unsafe_entries": unsafe_entries,
                 "known_usable_items": known_usable,
                 "legacy_candidate_records": sum(item["candidate_records"] for item in legacy),
                 "legacy_imported_records": sum(item["imported_records"] for item in legacy),
                 "inventory_identity": _json_identity(identity_payload),
                 "runs": managed,
+                "probe_runs": probes,
                 "legacy_runs": legacy,
                 "scope": "immediate_repository_local_harvest_runs",
                 "legacy_entries_read_only": True,
@@ -384,10 +634,27 @@ class HarvestService:
                 return self.job(run_id)
             worker = self._workers.get(run_id)
             cancellation = self._cancellations.setdefault(run_id, threading.Event())
+            cancellation_path = run_dir / "cancellation_request.json"
+            if os.path.lexists(cancellation_path):
+                existing = self._read_json(cancellation_path)
+                if existing.get("schema_version") != HARVEST_CANCELLATION_SCHEMA or existing.get("run_id") != run_id:
+                    raise HarvestError("invalid_harvest_cancellation", "Harvest cancellation evidence is invalid.")
+            else:
+                self._write_exclusive_json(
+                    cancellation_path,
+                    {
+                        "schema_version": HARVEST_CANCELLATION_SCHEMA,
+                        "run_id": run_id,
+                        "requested_at": _utc_now(),
+                        "explicit_action": True,
+                        "paths_exposed": False,
+                    },
+                )
             cancellation.set()
             if state["status"] == "CANCELLING" and worker is not None and worker.is_alive():
                 return self.job(run_id)
-            if worker is None or not worker.is_alive():
+            lease_live = self._lease_is_live(run_dir, state)
+            if (worker is None or not worker.is_alive()) and not lease_live:
                 self._transition_locked(
                     run_dir,
                     "CANCELLED",
@@ -404,15 +671,201 @@ class HarvestService:
                 )
             return self.job(run_id)
 
+    def _new_lease(self, run_id: str, token: str, *, sequence: int) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        return {
+            "schema_version": HARVEST_LEASE_SCHEMA,
+            "run_id": run_id,
+            "owner_pid": os.getpid(),
+            "owner_instance_id": self._instance_id,
+            "lease_token": token,
+            "heartbeat_sequence": sequence,
+            "heartbeat_at": now.isoformat().replace("+00:00", "Z"),
+            "expires_at": (now + timedelta(seconds=_LEASE_DURATION_SECONDS)).isoformat().replace("+00:00", "Z"),
+            "released_at": None,
+            "paths_exposed": False,
+        }
+
+    def _lease_is_live(self, run_dir: Path, state: Mapping[str, Any]) -> bool:
+        try:
+            lease = self._read_json(run_dir / "worker_lease.json")
+            expires_at = _parse_utc_timestamp(str(lease.get("expires_at", "")))
+        except (HarvestError, OSError, ValueError):
+            return False
+        return (
+            lease.get("schema_version") == HARVEST_LEASE_SCHEMA
+            and lease.get("run_id") == run_dir.name
+            and lease.get("lease_token") == state.get("lease_token")
+            and lease.get("owner_instance_id") == state.get("owner_instance_id")
+            and lease.get("owner_pid") == state.get("owner_pid")
+            and lease.get("released_at") is None
+            and expires_at > datetime.now(timezone.utc)
+        )
+
+    def _start_lease_heartbeat(
+        self,
+        run_dir: Path,
+        state: Mapping[str, Any],
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> tuple[threading.Event, threading.Event, threading.Thread]:
+        token = str(state.get("lease_token", ""))
+        if not token or state.get("owner_instance_id") != self._instance_id:
+            raise HarvestError("invalid_harvest_lease", "Harvest worker lease ownership is invalid.")
+        stop = threading.Event()
+        failed = threading.Event()
+
+        def heartbeat() -> None:
+            sequence = 0
+            while not stop.wait(_LEASE_HEARTBEAT_SECONDS):
+                sequence += 1
+                try:
+                    with self._mutation_guard():
+                        current_state = self._read_state(run_dir, run_anchor=run_anchor)
+                        if current_state.get("status") in TERMINAL_STATUSES:
+                            return
+                        if current_state.get("lease_token") != token:
+                            raise HarvestError("invalid_harvest_lease", "Harvest worker lease token changed.")
+                        current = self._read_json(
+                            run_dir / "worker_lease.json",
+                            parent_anchor=run_anchor,
+                        )
+                        if (
+                            current.get("schema_version") != HARVEST_LEASE_SCHEMA
+                            or current.get("lease_token") != token
+                            or current.get("owner_instance_id") != self._instance_id
+                        ):
+                            raise HarvestError("invalid_harvest_lease", "Harvest worker lease evidence changed.")
+                        self._write_atomic_json(
+                            run_dir / "worker_lease.json",
+                            self._new_lease(run_dir.name, token, sequence=sequence),
+                            parent_anchor=run_anchor,
+                        )
+                except Exception:
+                    failed.set()
+                    return
+
+        thread = threading.Thread(
+            target=heartbeat,
+            name=f"spritelab-{run_dir.name}-lease",
+            daemon=True,
+        )
+        with self._lock:
+            self._lease_stops[run_dir.name] = stop
+            self._lease_failures[run_dir.name] = failed
+            self._lease_threads[run_dir.name] = thread
+        thread.start()
+        return stop, failed, thread
+
+    def _release_lease(
+        self,
+        run_dir: Path,
+        state: Mapping[str, Any],
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> None:
+        token = str(state.get("lease_token", ""))
+        try:
+            with self._mutation_guard():
+                current = self._read_json(run_dir / "worker_lease.json", parent_anchor=run_anchor)
+                if current.get("lease_token") != token or current.get("owner_instance_id") != self._instance_id:
+                    return
+                now = _utc_now()
+                current.update({"expires_at": now, "released_at": now})
+                self._write_atomic_json(
+                    run_dir / "worker_lease.json",
+                    current,
+                    parent_anchor=run_anchor,
+                )
+        except Exception:
+            return
+
+    def _cancellation_requested(
+        self,
+        run_dir: Path,
+        local: threading.Event,
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> bool:
+        """Poll durable cancellation evidence at a hard responsive cadence."""
+
+        if local.is_set():
+            return True
+        now = time.monotonic()
+        with self._lock:
+            cached = self._last_cancellation_probe.get(run_dir.name)
+            if cached is not None and now - cached[0] < _DURABLE_CANCELLATION_POLL_SECONDS:
+                return cached[1]
+        state = self._read_state(run_dir, run_anchor=run_anchor)
+        cancellation_path = run_dir / "cancellation_request.json"
+        durable = False
+        cancellation_exists = (
+            run_anchor.lexists(cancellation_path.name) if run_anchor is not None else os.path.lexists(cancellation_path)
+        )
+        if cancellation_exists:
+            request = self._read_json(cancellation_path, parent_anchor=run_anchor)
+            if (
+                request.get("schema_version") != HARVEST_CANCELLATION_SCHEMA
+                or request.get("run_id") != run_dir.name
+                or request.get("explicit_action") is not True
+            ):
+                raise HarvestError("invalid_harvest_cancellation", "Harvest cancellation evidence is invalid.")
+            durable = True
+        result = durable or state["status"] in {"CANCELLING", "CANCELLED"}
+        with self._lock:
+            self._last_cancellation_probe[run_dir.name] = (now, result)
+        return result
+
+    def _raise_if_cancelled(
+        self,
+        run_dir: Path,
+        local: threading.Event,
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> None:
+        if self._cancellation_requested(run_dir, local, run_anchor=run_anchor):
+            raise AcquisitionCancelled()
+
+    @staticmethod
+    def _ensure_lease_healthy(failed: threading.Event | None) -> None:
+        if failed is not None and failed.is_set():
+            raise HarvestError("harvest_worker_lease_failed", "Harvest worker lease renewal failed closed.")
+
+    def _lease_checked_cancellation(
+        self,
+        run_dir: Path,
+        local: threading.Event,
+        lease_failure: threading.Event | None,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> bool:
+        self._ensure_lease_healthy(lease_failure)
+        return self._cancellation_requested(run_dir, local, run_anchor=run_anchor)
+
+    def _lease_checked_progress(
+        self,
+        run_dir: Path,
+        local: threading.Event,
+        lease_failure: threading.Event | None,
+        stage: str,
+        current: int,
+        total: int | None,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> None:
+        self._ensure_lease_healthy(lease_failure)
+        self._progress(run_dir, local, stage, current, total, run_anchor=run_anchor)
+
     def job(self, run_id: str) -> dict[str, Any]:
         with self._lock:
             run_dir = self._run_directory(run_id)
             state = dict(self._read_state(run_dir))
             request = self._read_request(run_dir)
             status = self._effective_status(state, run_id)
+            complete_commit_valid = status != "COMPLETE" or self._complete_commit_valid(run_dir, state)
+            if status == "COMPLETE" and not complete_commit_valid:
+                status = "INTERRUPTED"
             if status == "INTERRUPTED":
                 state["stage"] = "interrupted"
-                state["message"] = "The owning process stopped before this Harvest job finished."
+                state["message"] = "The owning process stopped before this Harvest job durably committed."
             receipt = self._read_json(run_dir / "authorization_receipt.json")
             if receipt.get("schema_version") != HARVEST_AUTHORIZATION_SCHEMA or receipt.get("run_id") != run_id:
                 raise HarvestError("invalid_harvest_authorization", "Harvest authorization evidence is invalid.")
@@ -430,7 +883,7 @@ class HarvestService:
                 "started_at": state.get("started_at"),
                 "updated_at": state.get("updated_at"),
                 "ended_at": state.get("ended_at"),
-                "handoff_ready": bool(state.get("handoff_ready", False)),
+                "handoff_ready": bool(state.get("handoff_ready", False)) and complete_commit_valid,
                 "usable_count": int(state.get("usable_count", 0)),
                 "quarantined_count": int(state.get("quarantined_count", 0)),
                 "taxonomy_counts": dict(state.get("taxonomy_counts", {})),
@@ -456,26 +909,21 @@ class HarvestService:
                 "harvest_handoff_not_ready",
                 "Dataset handoff is available only after certified Harvest completion.",
             )
-        source = self._sources.get(str(job["source_id"]))
-        if source is None:
-            raise HarvestError(
-                "catalog_evidence_unavailable",
-                "The exact source catalog evidence required by this handoff is unavailable.",
-            )
-        try:
-            source.evidence_binding.validate(source.source_page, source.license_evidence_url)
-        except ValueError as exc:
-            raise HarvestError(
-                "catalog_evidence_stale",
-                "Source/license evidence is stale or changed; refresh the signed catalog before handoff.",
-            ) from exc
+        source = self._validate_live_configuration(str(job["source_id"]))
         run_dir = self._run_directory(run_id)
         request = self._read_request(run_dir)
+        backend_evidence = self._backend_evidence_record()
         if (
             request.get("source_catalog_identity") != source.catalog_identity
             or request.get("limits_identity") != self.limits.identity
             or self._backend_capabilities is None
             or request.get("backend_capability_identity") != self._backend_capabilities.identity
+            or request.get("backend_capability_evidence_identity") != backend_evidence["evidence_identity"]
+            or request.get("backend_capability_certificate_identity") != backend_evidence["certificate_identity"]
+            or request.get("backend_capability_audit_report_sha256") != backend_evidence["audit_report_sha256"]
+            or request.get("backend_capability_audit_report_identity") != backend_evidence["audit_report_identity"]
+            or request.get("backend_capability_issued_at") != backend_evidence["issued_at"]
+            or request.get("backend_capability_expires_at") != backend_evidence["expires_at"]
         ):
             raise HarvestError(
                 "catalog_evidence_changed",
@@ -488,6 +936,7 @@ class HarvestService:
             or payload.get("run_id") != run_id
             or payload.get("artifact_manifest_identity") != _json_identity(manifest)
             or payload.get("artifact_set_identity") != manifest["artifact_set_identity"]
+            or payload.get("backend_capability_evidence_identity") != backend_evidence["evidence_identity"]
         ):
             raise HarvestError("invalid_harvest_handoff", "Harvest handoff identity is invalid.")
         return {**payload, "dataset_import_available": self._dataset_import_callback is not None}
@@ -539,6 +988,13 @@ class HarvestService:
                 "dataset_import_unavailable",
                 "No trusted Dataset import callback is configured for Harvest.",
             )
+        try:
+            _validate_callback_capability_binding(callback, self._backend_capabilities)
+        except ValueError as exc:
+            raise HarvestError(
+                "dataset_import_identity_changed",
+                "The Dataset import callback no longer matches the certified code and runtime binding.",
+            ) from exc
         handoff = self.handoff(run_id)
         run_dir = self._run_directory(run_id)
         manifest = self._rehash_manifest(run_dir)
@@ -548,6 +1004,7 @@ class HarvestService:
             "idempotency_key": idempotency_key,
             "callback_id": callback.callback_id,
             "callback_code_identity_sha256": callback.code_identity_sha256,
+            "callback_runtime_identity_sha256": callback.runtime_identity_sha256,
             "handoff_identity": _json_identity(handoff),
             "artifact_manifest_identity": _json_identity(manifest),
             "created_at": _utc_now(),
@@ -586,6 +1043,7 @@ class HarvestService:
             "idempotency_key": idempotency_key,
             "callback_id": callback.callback_id,
             "callback_code_identity_sha256": callback.code_identity_sha256,
+            "callback_runtime_identity_sha256": callback.runtime_identity_sha256,
             "dataset_reference": result.dataset_reference,
             "accepted_count": result.accepted_count,
             "quarantined_count": result.quarantined_count,
@@ -626,6 +1084,7 @@ class HarvestService:
             {
                 "source_catalog_identity": source.catalog_identity,
                 "backend_capability_identity": self._backend_capabilities.identity,
+                "backend_capability_evidence_identity": self._backend_evidence_record()["evidence_identity"],
                 "limits_identity": self.limits.identity,
                 "reuse_evidence_identity": reuse.identity,
                 "retry_of": retry_of,
@@ -635,6 +1094,13 @@ class HarvestService:
         self.inventory()
         self._create_output_root()
         with self._mutation_guard():
+            locked_source = self._validate_live_configuration(source_id)
+            if locked_source.catalog_identity != source.catalog_identity:
+                raise HarvestError(
+                    "harvest_live_configuration_changed",
+                    "Harvest source evidence changed during authorization.",
+                )
+            backend_evidence = self._backend_evidence_record()
             existing = self._find_idempotency_key(idempotency_key)
             if existing is not None:
                 existing_run, existing_fingerprint = existing
@@ -649,11 +1115,11 @@ class HarvestService:
                 return existing_job, False
             current_inventory = self.inventory()
             reuse.validate(current_inventory)
-            conflict = self._active_source_run(source_id)
+            conflict = self._active_managed_run()
             if conflict is not None:
                 raise HarvestError(
-                    "harvest_source_active_conflict",
-                    f"Source {source_id!r} already has active managed run {conflict!r}.",
+                    "harvest_single_flight_conflict",
+                    f"Managed Harvest run {conflict!r} is already active; wait for it to finish.",
                 )
             run_id, run_dir = self._create_run_directory()
             created_at = _utc_now()
@@ -666,6 +1132,12 @@ class HarvestService:
                 "request_fingerprint": fingerprint,
                 "source_catalog_identity": source.catalog_identity,
                 "backend_capability_identity": self._backend_capabilities.identity,
+                "backend_capability_evidence_identity": backend_evidence["evidence_identity"],
+                "backend_capability_certificate_identity": backend_evidence["certificate_identity"],
+                "backend_capability_audit_report_sha256": backend_evidence["audit_report_sha256"],
+                "backend_capability_audit_report_identity": backend_evidence["audit_report_identity"],
+                "backend_capability_issued_at": backend_evidence["issued_at"],
+                "backend_capability_expires_at": backend_evidence["expires_at"],
                 "limits_identity": self.limits.identity,
                 "reuse_evidence_identity": reuse.identity,
                 "created_at": created_at,
@@ -679,6 +1151,7 @@ class HarvestService:
                     **self._backend_capabilities.to_dict(),
                     "capability_identity": self._backend_capabilities.identity,
                 },
+                "backend_capability_evidence": backend_evidence,
                 "limits": {**self.limits.to_dict(), "limits_identity": self.limits.identity},
                 "reuse_evidence": {**reuse.to_dict(), "reuse_evidence_identity": reuse.identity},
                 "authorizations": {
@@ -700,6 +1173,9 @@ class HarvestService:
             }
             self._write_exclusive_json(run_dir / "authorization_receipt.json", receipt)
             self._write_exclusive_json(run_dir / "request.json", request)
+            lease_token = uuid.uuid4().hex
+            lease = self._new_lease(run_id, lease_token, sequence=0)
+            self._write_exclusive_json(run_dir / "worker_lease.json", lease)
             state = {
                 "schema_version": HARVEST_STATE_SCHEMA,
                 "run_id": run_id,
@@ -720,6 +1196,7 @@ class HarvestService:
                 "event_count": 1,
                 "owner_pid": os.getpid(),
                 "owner_instance_id": self._instance_id,
+                "lease_token": lease_token,
             }
             self._write_state(run_dir, state)
             self._append_event(run_dir, state)
@@ -758,6 +1235,7 @@ class HarvestService:
                 "harvest_backend_unavailable",
                 "No separately certified Harvest backend is configured.",
             )
+        source = self._validate_live_configuration(source_id)
         if authorize_zero_cost is not True or source.zero_cost is not True:
             raise HarvestError(
                 "zero_cost_authorization_required",
@@ -790,74 +1268,182 @@ class HarvestService:
         return source
 
     def _run_worker(self, run_id: str, source: HarvestSource, cancellation: threading.Event) -> None:
+        lease_stop: threading.Event | None = None
+        lease_failure: threading.Event | None = None
+        lease_thread: threading.Thread | None = None
+        transaction_anchor: AnchoredDirectory | None = None
+        run_dir: Path | None = None
         try:
             run_dir = self._run_directory(run_id)
-            if cancellation.is_set():
-                raise AcquisitionCancelled()
-            self._transition(
-                run_dir,
-                "RUNNING",
-                stage="acquiring",
-                message="Certified acquisition is enforcing network and resource limits.",
-                started=True,
-            )
             artifacts = require_confined_path(run_dir / "artifacts", run_dir)
-            artifacts.mkdir(exist_ok=False)
             if self._backend_factory is None:
                 raise HarvestError("harvest_backend_unavailable", "Certified Harvest backend is unavailable.")
             backend = self._backend_factory()
-            started = time.monotonic()
-            result = backend.acquire(
-                source,
-                artifacts,
-                self.limits,
-                cancel_requested=cancellation.is_set,
-                progress=lambda stage, current, total: self._progress(run_dir, cancellation, stage, current, total),
-            )
-            actual_elapsed = time.monotonic() - started
-            if cancellation.is_set():
-                raise AcquisitionCancelled()
-            acquisition_receipt = self._validate_acquisition_result(source, result, actual_elapsed)
-            manifest = scan_artifacts(artifacts, self.limits, expected_files=result.receipt.files)
-            acquisition_receipt["artifact_manifest_identity"] = _json_identity(manifest)
-            acquisition_receipt["acquisition_receipt_identity"] = _json_identity(acquisition_receipt)
-            self._write_exclusive_json(run_dir / "acquisition_receipt.json", acquisition_receipt)
-            self._write_exclusive_json(run_dir / "artifact_manifest.json", manifest)
-            if cancellation.is_set():
-                raise AcquisitionCancelled()
-            handoff = self._build_handoff(run_id, source, acquisition_receipt, manifest)
-            # Cancellation and handoff publication share the cross-process
-            # mutation lock. This closes both pre- and post-publication races.
-            with self._mutation_guard():
-                if cancellation.is_set():
-                    raise AcquisitionCancelled()
-                self._write_exclusive_json(run_dir / "handoff.json", handoff)
-                if cancellation.is_set():
-                    raise AcquisitionCancelled()
-                self._transition_locked(
+            with open_anchored_directory(run_dir, self.output_root) as run_anchor:
+                transaction_anchor = run_anchor.detached_duplicate()
+                initial_state = self._read_state(run_dir, run_anchor=transaction_anchor)
+                lease_stop, lease_failure, lease_thread = self._start_lease_heartbeat(
                     run_dir,
-                    "COMPLETE",
-                    stage="complete",
-                    current=manifest["artifact_count"],
-                    total=manifest["artifact_count"],
-                    message="Harvest completed with verified provenance and a rehashable Dataset handoff.",
-                    ended=True,
-                    handoff_ready=True,
-                    manifest=manifest,
+                    initial_state,
+                    run_anchor=transaction_anchor,
                 )
+                self._raise_if_cancelled(run_dir, cancellation, run_anchor=transaction_anchor)
+                self._transition(
+                    run_dir,
+                    "RUNNING",
+                    stage="acquiring",
+                    message="Certified acquisition is enforcing network and resource limits.",
+                    started=True,
+                    run_anchor=transaction_anchor,
+                )
+                transaction_anchor.mkdir(artifacts.name)
+                started = time.monotonic()
+                acquisition_deadline = started + self.limits.max_duration_seconds
+                backend_arguments: dict[str, Any] = {
+                    "cancel_requested": lambda: self._lease_checked_cancellation(
+                        run_dir,
+                        cancellation,
+                        lease_failure,
+                        transaction_anchor,
+                    ),
+                    "progress": lambda stage, current, total: self._lease_checked_progress(
+                        run_dir,
+                        cancellation,
+                        lease_failure,
+                        stage,
+                        current,
+                        total,
+                        transaction_anchor,
+                    ),
+                }
+                if getattr(backend, "requires_destination_parent_anchor", False) is True:
+                    backend_arguments["destination_parent_anchor"] = transaction_anchor
+                result = backend.acquire(
+                    source,
+                    artifacts,
+                    self.limits,
+                    **backend_arguments,
+                )
+                self._ensure_lease_healthy(lease_failure)
+                actual_elapsed = time.monotonic() - started
+                self._raise_if_cancelled(run_dir, cancellation, run_anchor=transaction_anchor)
+                acquisition_receipt = self._validate_acquisition_result(source, result, actual_elapsed)
+                with transaction_anchor.open_directory(artifacts.name) as artifacts_anchor:
+                    manifest = scan_artifacts(
+                        artifacts,
+                        self.limits,
+                        expected_files=result.receipt.files,
+                        artifacts_anchor=artifacts_anchor,
+                        cancel_requested=lambda: self._lease_checked_cancellation(
+                            run_dir,
+                            cancellation,
+                            lease_failure,
+                            transaction_anchor,
+                        ),
+                        deadline_monotonic=acquisition_deadline,
+                    )
+                self._ensure_lease_healthy(lease_failure)
+                if time.monotonic() > acquisition_deadline:
+                    raise HarvestError(
+                        "harvest_duration_exceeded",
+                        "Harvest exceeded the certified duration limit.",
+                    )
+                acquisition_receipt["artifact_manifest_identity"] = _json_identity(manifest)
+                acquisition_receipt["acquisition_receipt_identity"] = _json_identity(acquisition_receipt)
+                self._write_exclusive_json(
+                    run_dir / "acquisition_receipt.json",
+                    acquisition_receipt,
+                    parent_anchor=transaction_anchor,
+                )
+                self._write_exclusive_json(
+                    run_dir / "artifact_manifest.json",
+                    manifest,
+                    parent_anchor=transaction_anchor,
+                )
+                self._raise_if_cancelled(run_dir, cancellation, run_anchor=transaction_anchor)
+                self._validate_live_configuration(source.source_id)
+                handoff = self._build_handoff(run_id, source, acquisition_receipt, manifest)
+                # Cancellation and handoff publication share the cross-process
+                # mutation lock. This closes both pre- and post-publication races.
+                with self._mutation_guard():
+                    self._raise_if_cancelled(run_dir, cancellation, run_anchor=transaction_anchor)
+                    live_source = self._validate_live_configuration(source.source_id)
+                    if live_source.catalog_identity != source.catalog_identity:
+                        raise HarvestError(
+                            "harvest_live_configuration_changed",
+                            "Harvest configuration changed before handoff publication.",
+                        )
+                    self._write_exclusive_json(
+                        run_dir / "handoff.json",
+                        handoff,
+                        parent_anchor=transaction_anchor,
+                    )
+                    self._raise_if_cancelled(run_dir, cancellation, run_anchor=transaction_anchor)
+                    self._transition_locked(
+                        run_dir,
+                        "COMPLETE",
+                        stage="complete",
+                        current=manifest["artifact_count"],
+                        total=manifest["artifact_count"],
+                        message="Harvest completed with verified provenance and a rehashable Dataset handoff.",
+                        ended=True,
+                        handoff_ready=True,
+                        manifest=manifest,
+                        run_anchor=transaction_anchor,
+                    )
         except Exception:
-            status = "CANCELLED" if cancellation.is_set() else "FAILED"
-            stage = "cancelled" if cancellation.is_set() else "failed"
+            try:
+                cancelled = (
+                    self._cancellation_requested(run_dir, cancellation, run_anchor=transaction_anchor)
+                    if run_dir is not None and transaction_anchor is not None
+                    else cancellation.is_set()
+                )
+            except Exception:
+                cancelled = cancellation.is_set()
+            status = "CANCELLED" if cancelled else "FAILED"
+            stage = "cancelled" if cancelled else "failed"
             message = (
                 "Harvest was cancelled; immutable receipts and artifacts were retained."
-                if cancellation.is_set()
+                if cancelled
                 else "Harvest failed closed. Private backend details were not recorded."
             )
             try:
-                run_dir = self._run_directory(run_id)
-                self._transition(run_dir, status, stage=stage, message=message, ended=True)
+                if run_dir is not None and transaction_anchor is not None:
+                    self._transition(
+                        run_dir,
+                        status,
+                        stage=stage,
+                        message=message,
+                        ended=True,
+                        run_anchor=transaction_anchor,
+                    )
             except Exception:
                 pass
+        finally:
+            if lease_stop is not None:
+                lease_stop.set()
+            if lease_thread is not None:
+                lease_thread.join(timeout=2)
+            try:
+                if run_dir is not None and transaction_anchor is not None:
+                    self._release_lease(
+                        run_dir,
+                        self._read_state(run_dir, run_anchor=transaction_anchor),
+                        run_anchor=transaction_anchor,
+                    )
+            except Exception:
+                pass
+            if transaction_anchor is not None:
+                try:
+                    transaction_anchor.__exit__(None, None, None)
+                except Exception:
+                    pass
+            with self._lock:
+                self._progress_observations.pop(run_id, None)
+                self._last_cancellation_probe.pop(run_id, None)
+                self._lease_stops.pop(run_id, None)
+                self._lease_failures.pop(run_id, None)
+                self._lease_threads.pop(run_id, None)
 
     def _validate_acquisition_result(
         self,
@@ -915,6 +1501,26 @@ class HarvestService:
             raise HarvestError("harvest_archive_limit", "Harvest archive expansion evidence exceeded its limits.")
         if len(receipt.files) > self.limits.max_files:
             raise HarvestError("harvest_file_limit", "Harvest file receipt exceeded its count limit.")
+        snapshot_residue: dict[str, Any] | None = None
+        if receipt.snapshot_residue is not None:
+            residue = dict(receipt.snapshot_residue)
+            if (
+                set(residue) != {"kind", "relative_path", "byte_count", "sha256", "mode"}
+                or residue.get("kind") != "retained_archive_snapshot_evidence"
+                or not isinstance(residue.get("relative_path"), str)
+                or not residue["relative_path"].startswith("downloads/.spritelab-archive-snapshot-evidence-")
+                or Path(residue["relative_path"]).is_absolute()
+                or ".." in Path(residue["relative_path"]).parts
+                or residue.get("byte_count") != receipt.response_bytes
+                or residue.get("sha256") != receipt.actual_response_sha256
+                or residue.get("mode") != "0400"
+            ):
+                raise HarvestError(
+                    "invalid_backend_receipt",
+                    "Harvest archive snapshot residue evidence is invalid.",
+                )
+            snapshot_residue = residue
+        backend_evidence = self._backend_evidence_record()
         return {
             "schema_version": HARVEST_ACQUISITION_RECEIPT_SCHEMA,
             "source_id": source.source_id,
@@ -924,6 +1530,8 @@ class HarvestService:
                 **self._backend_capabilities.to_dict(),
                 "capability_identity": self._backend_capabilities.identity,
             },
+            "backend_capability_evidence": backend_evidence,
+            "backend_capability_evidence_identity": backend_evidence["evidence_identity"],
             "limits": {**self.limits.to_dict(), "limits_identity": self.limits.identity},
             "final_url": redirect_evidence[-1]["url"],
             "final_url_sha256": redirect_evidence[-1]["url_sha256"],
@@ -937,6 +1545,7 @@ class HarvestService:
             "observed_elapsed_within_limit": True,
             "archive_members": receipt.archive_members,
             "archive_uncompressed_bytes": receipt.archive_uncompressed_bytes,
+            "snapshot_residue": snapshot_residue,
             "reported_file_count": len(receipt.files),
             "private_url_components_exposed": False,
             "created_at": _utc_now(),
@@ -949,14 +1558,46 @@ class HarvestService:
         stage: str,
         current: int,
         total: int | None,
+        *,
+        run_anchor: AnchoredDirectory | None = None,
     ) -> None:
-        if cancellation.is_set():
-            raise AcquisitionCancelled()
+        self._raise_if_cancelled(run_dir, cancellation, run_anchor=run_anchor)
         safe_stage = stage if STAGE_PATTERN.fullmatch(stage or "") else "acquiring"
         if type(current) is not int or current < 0:
             raise HarvestError("invalid_backend_progress", "Harvest backend progress was invalid.")
         if total is not None and (type(total) is not int or total < current):
             raise HarvestError("invalid_backend_progress", "Harvest backend progress was invalid.")
+        with self._lock:
+            previous = self._progress_observations.get(run_dir.name)
+            if previous is not None and previous[0] == safe_stage and current < previous[1]:
+                raise HarvestError("invalid_backend_progress", "Harvest backend progress moved backwards.")
+            step = max(1, ((total or 0) + _MAX_PROGRESS_EVENTS_PER_STAGE - 1) // _MAX_PROGRESS_EVENTS_PER_STAGE)
+            emitted = previous[4] if previous is not None and previous[0] == safe_stage else 0
+            last_emitted = previous[3] if previous is not None and previous[0] == safe_stage else -step
+            final = total is not None and current == total
+            record = (
+                previous is None or previous[0] != safe_stage or current == 0 or final or current - last_emitted >= step
+            )
+            if (final and emitted >= _MAX_PROGRESS_EVENTS_PER_STAGE) or (
+                not final and emitted >= _MAX_PROGRESS_EVENTS_PER_STAGE - 1
+            ):
+                record = False
+            if not record:
+                self._progress_observations[run_dir.name] = (
+                    safe_stage,
+                    current,
+                    total,
+                    last_emitted,
+                    emitted,
+                )
+                return
+            self._progress_observations[run_dir.name] = (
+                safe_stage,
+                current,
+                total,
+                current,
+                emitted + 1,
+            )
         self._transition(
             run_dir,
             "RUNNING",
@@ -964,6 +1605,7 @@ class HarvestService:
             current=current,
             total=total,
             message="Certified acquisition is running within enforced limits.",
+            run_anchor=run_anchor,
         )
 
     def _build_handoff(
@@ -974,6 +1616,7 @@ class HarvestService:
         manifest: Mapping[str, Any],
     ) -> dict[str, Any]:
         source_snapshot = source.to_public_dict()
+        backend_evidence = self._backend_evidence_record()
         provenance_identity = _json_identity(
             {
                 "source": source_snapshot,
@@ -989,6 +1632,8 @@ class HarvestService:
             "provenance_identity": provenance_identity,
             "source_evidence_binding_identity": source.evidence_binding.identity,
             "backend_capability_identity": self._backend_capabilities.identity,
+            "backend_capability_evidence": backend_evidence,
+            "backend_capability_evidence_identity": backend_evidence["evidence_identity"],
             "limits_identity": self.limits.identity,
             "acquisition_receipt_identity": acquisition_receipt["acquisition_receipt_identity"],
             "artifact_manifest_identity": _json_identity(manifest),
@@ -1050,6 +1695,7 @@ class HarvestService:
         ended: bool = False,
         handoff_ready: bool | None = None,
         manifest: Mapping[str, Any] | None = None,
+        run_anchor: AnchoredDirectory | None = None,
     ) -> None:
         with self._mutation_guard():
             self._transition_locked(
@@ -1063,6 +1709,7 @@ class HarvestService:
                 ended=ended,
                 handoff_ready=handoff_ready,
                 manifest=manifest,
+                run_anchor=run_anchor,
             )
 
     def _transition_locked(
@@ -1078,8 +1725,17 @@ class HarvestService:
         ended: bool = False,
         handoff_ready: bool | None = None,
         manifest: Mapping[str, Any] | None = None,
+        run_anchor: AnchoredDirectory | None = None,
     ) -> None:
-        state = self._read_state(run_dir)
+        state = self._read_state(run_dir, run_anchor=run_anchor)
+        previous_status = str(state["status"])
+        if status not in _LEGAL_TRANSITIONS.get(previous_status, frozenset()):
+            raise HarvestError(
+                "illegal_harvest_transition",
+                f"Harvest state cannot transition from {previous_status} to {status}.",
+            )
+        if previous_status == "CANCELLING" and status == "COMPLETE":
+            raise HarvestError("illegal_harvest_transition", "Cancelling Harvest cannot complete.")
         now = _utc_now()
         state.update({"status": status, "stage": stage, "message": message, "updated_at": now})
         if current is not None:
@@ -1102,21 +1758,69 @@ class HarvestService:
             raise HarvestError("harvest_event_limit", "Harvest progress event limit was reached.")
         if append_event:
             state["event_count"] = event_count + 1
-        self._write_state(run_dir, state)
+        self._write_state(run_dir, state, run_anchor=run_anchor)
+        event: Mapping[str, Any] | None = None
         if append_event:
-            self._append_event(run_dir, state)
+            event = self._append_event(run_dir, state, run_anchor=run_anchor)
+        if status == "COMPLETE":
+            if event is None:
+                raise HarvestError("harvest_terminal_commit_failed", "Harvest completion has no terminal event.")
+            handoff = self._read_json(run_dir / "handoff.json", parent_anchor=run_anchor)
+            terminal_commit = {
+                "schema_version": HARVEST_TERMINAL_COMMIT_SCHEMA,
+                "run_id": run_dir.name,
+                "status": "COMPLETE",
+                "state_identity": _json_identity(state),
+                "terminal_event_identity": _json_identity(event),
+                "handoff_identity": _json_identity(handoff),
+                "created_at": now,
+                "paths_exposed": False,
+            }
+            terminal_commit["terminal_commit_identity"] = _json_identity(terminal_commit)
+            self._write_exclusive_json(
+                run_dir / "terminal_commit.json",
+                terminal_commit,
+                parent_anchor=run_anchor,
+            )
+
+    def _complete_commit_valid(self, run_dir: Path, state: Mapping[str, Any]) -> bool:
+        try:
+            commit = self._read_json(run_dir / "terminal_commit.json")
+            handoff = self._read_json(run_dir / "handoff.json")
+            events = self._read_events(run_dir)
+        except (HarvestError, OSError):
+            return False
+        if not events:
+            return False
+        recorded_identity = commit.get("terminal_commit_identity")
+        identity_payload = {key: value for key, value in commit.items() if key != "terminal_commit_identity"}
+        return (
+            commit.get("schema_version") == HARVEST_TERMINAL_COMMIT_SCHEMA
+            and commit.get("run_id") == run_dir.name
+            and commit.get("status") == "COMPLETE"
+            and SHA256_PATTERN.fullmatch(str(recorded_identity or "")) is not None
+            and recorded_identity == _json_identity(identity_payload)
+            and commit.get("state_identity") == _json_identity(state)
+            and commit.get("terminal_event_identity") == _json_identity(events[-1])
+            and events[-1].get("status") == "COMPLETE"
+            and commit.get("handoff_identity") == _json_identity(handoff)
+        )
 
     def _managed_inventory_record(self, run_dir: Path) -> dict[str, Any]:
         state = self._read_state(run_dir)
         request = self._read_request(run_dir)
+        status = self._effective_status(state, run_dir.name)
+        complete_commit_valid = status != "COMPLETE" or self._complete_commit_valid(run_dir, state)
+        if status == "COMPLETE" and not complete_commit_valid:
+            status = "INTERRUPTED"
         return {
             "run_id": run_dir.name,
             "kind": "managed",
             "source_id": request["source_id"],
-            "status": self._effective_status(state, run_dir.name),
+            "status": status,
             "created_at": state.get("created_at"),
             "updated_at": state.get("updated_at"),
-            "handoff_ready": bool(state.get("handoff_ready", False)),
+            "handoff_ready": bool(state.get("handoff_ready", False)) and complete_commit_valid,
             "usable_count": int(state.get("usable_count", 0)),
             "quarantined_count": int(state.get("quarantined_count", 0)),
         }
@@ -1128,11 +1832,7 @@ class HarvestService:
         worker = self._workers.get(run_id)
         if worker is not None and worker.is_alive():
             return status
-        owner_pid = state.get("owner_pid")
-        owner_instance = state.get("owner_instance_id")
-        if owner_instance == self._instance_id:
-            return "INTERRUPTED"
-        if type(owner_pid) is int and _pid_alive(owner_pid):
+        if self._lease_is_live(self._run_directory(run_id), state):
             return status
         return "INTERRUPTED"
 
@@ -1149,6 +1849,35 @@ class HarvestService:
                 continue
             if request["source_id"] == source_id and self._effective_status(state, child.name) in ACTIVE_STATUSES:
                 return child.name
+        return None
+
+    def _active_managed_run(self) -> str | None:
+        """Return any live ordinary acquisition or catalog probe."""
+
+        if not self.output_root.exists():
+            return None
+        with open_anchored_directory(self.output_root, self.project_root) as output_anchor:
+            for name in output_anchor.names():
+                try:
+                    metadata = output_anchor.lstat(name)
+                    if not stat.S_ISDIR(metadata.st_mode) or _metadata_is_link_or_reparse(metadata):
+                        continue
+                    child = self.output_root / name
+                    with output_anchor.open_directory_immovable(name) as child_anchor:
+                        if RUN_ID_PATTERN.fullmatch(name):
+                            state = self._read_state(child)
+                            if self._effective_status(state, name) in ACTIVE_STATUSES:
+                                return name
+                        elif PROBE_ID_PATTERN.fullmatch(name):
+                            record = scan_probe_inventory_record(
+                                child,
+                                self.output_root,
+                                run_anchor=child_anchor,
+                            )
+                            if record is not None and record.get("status") in ACTIVE_PROBE_STATUSES:
+                                return name
+                except (OSError, HarvestError, HarvestStorageError, UnsafeFilesystemOperation):
+                    continue
         return None
 
     def _create_output_root(self) -> None:
@@ -1171,7 +1900,7 @@ class HarvestService:
     def _mutation_guard(self) -> Any:
         with self._lock:
             try:
-                with RepositoryMutationLock(self.output_root):
+                with RepositoryMutationLock(self.project_root):
                     yield
             except HarvestStorageError as exc:
                 raise HarvestError("harvest_mutation_conflict", str(exc)) from exc
@@ -1221,12 +1950,18 @@ class HarvestService:
             or payload.get("run_id") != run_dir.name
             or SOURCE_ID_PATTERN.fullmatch(str(payload.get("source_id", ""))) is None
             or SHA256_PATTERN.fullmatch(str(payload.get("request_fingerprint", ""))) is None
+            or SHA256_PATTERN.fullmatch(str(payload.get("backend_capability_evidence_identity", ""))) is None
         ):
             raise HarvestError("invalid_harvest_request", "Harvest request evidence is invalid.")
         return payload
 
-    def _read_state(self, run_dir: Path) -> dict[str, Any]:
-        payload = self._read_json(run_dir / "state.json")
+    def _read_state(
+        self,
+        run_dir: Path,
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> dict[str, Any]:
+        payload = self._read_json(run_dir / "state.json", parent_anchor=run_anchor)
         if (
             payload.get("schema_version") != HARVEST_STATE_SCHEMA
             or payload.get("run_id") != run_dir.name
@@ -1235,44 +1970,53 @@ class HarvestService:
             raise HarvestError("invalid_harvest_state", "Harvest state evidence is invalid.")
         return payload
 
-    def _read_json(self, path: Path) -> dict[str, Any]:
+    def _read_json(
+        self,
+        path: Path,
+        *,
+        parent_anchor: AnchoredDirectory | None = None,
+    ) -> dict[str, Any]:
         try:
-            require_confined_path(path, self.output_root)
-            metadata = path.lstat()
-        except (FileNotFoundError, UnsafeFilesystemOperation) as exc:
+            payload_bytes = read_stable_single_link_bytes(
+                path,
+                self.output_root,
+                max_bytes=_MAX_METADATA_BYTES,
+                parent_anchor=parent_anchor,
+            )
+        except FileNotFoundError as exc:
             raise HarvestError("missing_harvest_evidence", "Harvest durable evidence is incomplete.") from exc
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or _metadata_is_link_or_reparse(metadata)
-            or metadata.st_nlink != 1
-            or metadata.st_size > _MAX_METADATA_BYTES
-        ):
-            raise HarvestError("unsafe_harvest_evidence", "Harvest durable evidence is unsafe.")
+        except (HarvestStorageError, UnsafeFilesystemOperation) as exc:
+            raise HarvestError("unsafe_harvest_evidence", "Harvest durable evidence is unsafe.") from exc
         try:
-            payload = strict_json_loads(path.read_bytes())
+            payload = strict_json_loads(payload_bytes)
         except (OSError, ValueError) as exc:
             raise HarvestError("invalid_harvest_evidence", "Harvest durable evidence is invalid.") from exc
         if not isinstance(payload, Mapping):
             raise HarvestError("invalid_harvest_evidence", "Harvest durable evidence is invalid.")
         return dict(payload)
 
-    def _read_events(self, run_dir: Path) -> list[dict[str, Any]]:
+    def _read_events(
+        self,
+        run_dir: Path,
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> list[dict[str, Any]]:
         path = run_dir / "events.jsonl"
+        maximum = self.limits.max_events * self.limits.max_event_bytes
         try:
-            metadata = path.lstat()
+            content = read_stable_single_link_bytes(
+                path,
+                self.output_root,
+                max_bytes=maximum,
+                parent_anchor=run_anchor,
+            )
         except FileNotFoundError:
             return []
-        maximum = self.limits.max_events * self.limits.max_event_bytes
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or _metadata_is_link_or_reparse(metadata)
-            or metadata.st_nlink != 1
-            or metadata.st_size > maximum
-        ):
+        except (HarvestStorageError, UnsafeFilesystemOperation):
             return []
         events: list[dict[str, Any]] = []
         try:
-            for line in path.read_text(encoding="utf-8").splitlines()[-200:]:
+            for line in content.decode("utf-8").splitlines()[-200:]:
                 payload = strict_json_loads(line)
                 if isinstance(payload, Mapping) and payload.get("schema_version") == HARVEST_EVENT_SCHEMA:
                     events.append(dict(payload))
@@ -1280,23 +2024,85 @@ class HarvestService:
             return []
         return events
 
-    def _write_state(self, run_dir: Path, state: Mapping[str, Any]) -> None:
-        target = require_confined_path(run_dir / "state.json", run_dir)
-        atomic_write_text(target, strict_json_dumps(dict(state), sort_keys=True, separators=(",", ":")))
+    def _write_state(
+        self,
+        run_dir: Path,
+        state: Mapping[str, Any],
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> None:
+        target = run_dir / "state.json"
+        if run_anchor is None:
+            target = require_confined_path(target, run_dir)
+        content = strict_json_dumps(dict(state), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        deadline = time.monotonic() + 2.0
+        while True:
+            try:
+                write_atomic_stable_bytes(
+                    target,
+                    self.output_root,
+                    content,
+                    max_bytes=_MAX_METADATA_BYTES,
+                    parent_anchor=run_anchor,
+                )
+                break
+            except PermissionError:
+                if os.name != "nt" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.002)
 
-    def _write_exclusive_json(self, path: Path, payload: Mapping[str, Any]) -> None:
+    def _write_atomic_json(
+        self,
+        path: Path,
+        payload: Mapping[str, Any],
+        *,
+        parent_anchor: AnchoredDirectory | None = None,
+    ) -> None:
         try:
-            require_confined_path(path, self.output_root)
-        except UnsafeFilesystemOperation as exc:
-            raise HarvestError("unsafe_harvest_evidence", "Harvest durable evidence is unsafe.") from exc
-        content = strict_json_dumps(dict(payload), sort_keys=True, separators=(",", ":"))
-        with path.open("x", encoding="utf-8", newline="\n") as handle:
-            handle.write(content)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+            if parent_anchor is None:
+                require_confined_path(path, self.output_root)
+            content = (strict_json_dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            write_atomic_stable_bytes(
+                path,
+                self.output_root,
+                content,
+                max_bytes=_MAX_METADATA_BYTES,
+                parent_anchor=parent_anchor,
+            )
+        except (OSError, HarvestStorageError, UnsafeFilesystemOperation) as exc:
+            raise HarvestError("unsafe_harvest_evidence", "Harvest durable evidence publication failed.") from exc
 
-    def _append_event(self, run_dir: Path, state: Mapping[str, Any]) -> None:
+    def _write_exclusive_json(
+        self,
+        path: Path,
+        payload: Mapping[str, Any],
+        *,
+        parent_anchor: AnchoredDirectory | None = None,
+    ) -> None:
+        if parent_anchor is None:
+            try:
+                require_confined_path(path, self.output_root)
+            except UnsafeFilesystemOperation as exc:
+                raise HarvestError("unsafe_harvest_evidence", "Harvest durable evidence is unsafe.") from exc
+        content = strict_json_dumps(dict(payload), sort_keys=True, separators=(",", ":"))
+        try:
+            write_exclusive_stable_bytes(
+                path,
+                self.output_root,
+                (content + "\n").encode("utf-8"),
+                max_bytes=_MAX_METADATA_BYTES,
+                parent_anchor=parent_anchor,
+            )
+        except HarvestStorageError as exc:
+            raise HarvestError("unsafe_harvest_evidence", "Harvest durable evidence is unsafe.") from exc
+
+    def _append_event(
+        self,
+        run_dir: Path,
+        state: Mapping[str, Any],
+        *,
+        run_anchor: AnchoredDirectory | None = None,
+    ) -> dict[str, Any]:
         event = {
             "schema_version": HARVEST_EVENT_SCHEMA,
             "sequence": state["event_count"],
@@ -1309,25 +2115,39 @@ class HarvestService:
             "message": state.get("message", ""),
             "paths_exposed": False,
         }
-        line = strict_json_dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
-        if len(line.encode("utf-8")) > self.limits.max_event_bytes:
+        line = (strict_json_dumps(event, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(line) > self.limits.max_event_bytes:
             raise HarvestError("harvest_event_too_large", "Harvest event exceeded its byte limit.")
-        path = require_confined_path(run_dir / "events.jsonl", run_dir)
-        mode = "x"
-        if os.path.lexists(path):
-            metadata = path.lstat()
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or _metadata_is_link_or_reparse(metadata)
-                or metadata.st_nlink != 1
-                or metadata.st_size + len(line.encode("utf-8")) > self.limits.max_events * self.limits.max_event_bytes
-            ):
-                raise HarvestError("unsafe_harvest_evidence", "Harvest event stream is unsafe or capped.")
-            mode = "a"
-        with path.open(mode, encoding="utf-8", newline="\n") as handle:
-            handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
+        path = run_dir / "events.jsonl"
+        if run_anchor is None:
+            path = require_confined_path(path, run_dir)
+        try:
+            append_stable_single_link_bytes(
+                path,
+                run_dir,
+                line,
+                max_bytes=self.limits.max_event_bytes,
+                max_total_bytes=self.limits.max_events * self.limits.max_event_bytes,
+                parent_anchor=run_anchor,
+            )
+        except HarvestStorageError as exc:
+            raise HarvestError("unsafe_harvest_evidence", "Harvest event stream is unsafe or capped.") from exc
+        return event
+
+
+def _validate_callback_capability_binding(
+    callback: DatasetImportCallback,
+    capabilities: CertifiedBackendCapabilities | None,
+) -> None:
+    validate_callback_identity(callback)
+    if capabilities is None:
+        return
+    if (
+        callback.callback_id != capabilities.dataset_import_callback_id
+        or callback.code_identity_sha256 != capabilities.dataset_import_callback_code_identity_sha256
+        or callback.runtime_identity_sha256 != capabilities.dataset_import_callback_runtime_identity_sha256
+    ):
+        raise ValueError("Dataset import callback does not match the certified code and runtime binding.")
 
 
 def _validate_idempotency_key(value: str) -> None:
@@ -1351,6 +2171,13 @@ def _default_run_id() -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_utc_timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc)
 
 
 def _json_identity(value: Any) -> str:

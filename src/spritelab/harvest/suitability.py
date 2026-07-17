@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import warnings
@@ -115,6 +116,7 @@ class SuitabilityInput:
     image_path: Path
     resize_history: tuple[str, ...] = ()
     source_run: str = ""
+    image_bytes: bytes | None = None
 
 
 @dataclass
@@ -189,19 +191,26 @@ def audit_sprite(item: SuitabilityInput, config: SuitabilityConfig) -> Suitabili
         "resize_policy": "native_32_required" if config.profile.target_width == 32 else "preserve_source_resolution",
     }
     path = Path(item.image_path)
-    if not path.is_file():
-        return _terminal_result(item.sprite_id, config, "FILE_MISSING", metrics)
-    try:
-        metrics["file_size_bytes"] = path.stat().st_size
-    except OSError:
-        return _terminal_result(item.sprite_id, config, "FILE_UNREADABLE", metrics)
+    if item.image_bytes is None:
+        if not path.is_file():
+            return _terminal_result(item.sprite_id, config, "FILE_MISSING", metrics)
+        try:
+            metrics["file_size_bytes"] = path.stat().st_size
+        except OSError:
+            return _terminal_result(item.sprite_id, config, "FILE_UNREADABLE", metrics)
+        image_source: Path | io.BytesIO = path
+    else:
+        if not isinstance(item.image_bytes, bytes):
+            return _terminal_result(item.sprite_id, config, "FILE_UNREADABLE", metrics)
+        metrics["file_size_bytes"] = len(item.image_bytes)
+        image_source = io.BytesIO(item.image_bytes)
     if metrics["file_size_bytes"] == 0:
         return _terminal_result(item.sprite_id, config, "FILE_EMPTY", metrics)
 
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            with Image.open(path) as opened:
+            with Image.open(image_source) as opened:
                 opened.load()
                 original_mode = opened.mode
                 original_format = opened.format or ""

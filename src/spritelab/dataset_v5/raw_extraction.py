@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import stat
 import tempfile
 import zipfile
@@ -25,7 +26,7 @@ from spritelab.dataset_v5.identity import (
     make_record_id,
 )
 from spritelab.dataset_v5.raw_inventory import RawSourceRecord, file_sha256
-from spritelab.utils.safe_fs import remove_confined_tree
+from spritelab.utils.safe_fs import AnchoredDirectory, OwnedFileIdentity, remove_confined_tree
 
 RAW_EXTRACTION_SCHEMA_VERSION = "sprite_lab_raw_extraction_v1"
 RAW_BLOB_SCHEMA_VERSION = "sprite_lab_canonical_rgba_blob_v1"
@@ -150,7 +151,12 @@ def list_source_image_members(source: RawSourceRecord) -> tuple[str, ...]:
     return (name,)
 
 
-def build_raw_extraction(specs: Iterable[RawExtractionSpec], output_root: str | Path) -> dict[str, Any]:
+def build_raw_extraction(
+    specs: Iterable[RawExtractionSpec],
+    output_root: str | Path,
+    *,
+    publish_direct_fresh: bool = False,
+) -> dict[str, Any]:
     """Create a fresh content-addressed extraction artifact transactionally."""
 
     destination = Path(output_root)
@@ -161,10 +167,47 @@ def build_raw_extraction(specs: Iterable[RawExtractionSpec], output_root: str | 
         raise RawExtractionError("cannot build an empty raw extraction")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if publish_direct_fresh:
+        with AnchoredDirectory(destination.parent, destination.parent) as parent_anchor:
+            owned = parent_anchor.mkdir(destination.name, exist_ok=False)
+            try:
+                with AnchoredDirectory(destination, destination) as destination_anchor:
+                    if not owned.matches(destination_anchor.directory_metadata()):
+                        raise RawExtractionError("fresh raw extraction directory changed while it was being opened")
+                    records, blobs_by_id = _materialize_raw_extraction(materialized, destination, destination_anchor)
+                    result = _raw_build_result(destination, records, blobs_by_id)
+            except Exception as exc:
+                residue = parent_anchor.quarantine_if_owned(
+                    destination.name,
+                    owned,
+                    prefix=".raw-extraction-failed-",
+                )
+                if residue is None:
+                    raise RawExtractionError("fresh raw extraction identity changed during rollback") from exc
+                raise
+        return result
+
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}.staging-", dir=destination.parent))
     try:
-        blobs = staging / "blobs"
-        blobs.mkdir()
+        with AnchoredDirectory(staging, staging) as staging_anchor:
+            records, blobs_by_id = _materialize_raw_extraction(materialized, staging, staging_anchor)
+        staging.replace(destination)
+    except Exception:
+        remove_confined_tree(staging, destination.parent, missing_ok=True)
+        raise
+    return _raw_build_result(destination, records, blobs_by_id)
+
+
+def _materialize_raw_extraction(
+    materialized: tuple[RawExtractionSpec, ...],
+    staging: Path,
+    staging_anchor: AnchoredDirectory,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    owned_blobs = staging_anchor.mkdir("blobs", exist_ok=False)
+    blobs = staging / "blobs"
+    with AnchoredDirectory(blobs, blobs) as blobs_anchor:
+        if not owned_blobs.matches(blobs_anchor.directory_metadata()):
+            raise RawExtractionError("raw extraction blob directory changed while it was being opened")
         records: list[dict[str, Any]] = []
         blobs_by_id: dict[str, dict[str, Any]] = {}
         record_ids: set[str] = set()
@@ -201,10 +244,14 @@ def build_raw_extraction(specs: Iterable[RawExtractionSpec], output_root: str | 
                 "schema_version": RAW_BUILD_SCHEMA_VERSION,
             },
         )
-        staging.replace(destination)
-    except Exception:
-        remove_confined_tree(staging, destination.parent, missing_ok=True)
-        raise
+    return records, blobs_by_id
+
+
+def _raw_build_result(
+    destination: Path,
+    records: list[dict[str, Any]],
+    blobs_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
     return {
         "artifact_hashes": directory_file_hashes(destination),
         "blob_count": len(blobs_by_id),
@@ -473,9 +520,21 @@ def _spec_sort_key(spec: RawExtractionSpec) -> tuple[str, str, bytes]:
 
 
 def _write_new_bytes(path: Path, value: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("xb") as handle:
-        handle.write(value)
+    with AnchoredDirectory(path.parent, path.parent) as parent_anchor:
+        descriptor = parent_anchor.open_file(
+            path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0)),
+        )
+        identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(value)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if not identity.matches(parent_anchor.lstat(path.name)) or os.fstat(descriptor).st_nlink != 1:
+                raise RawExtractionError("raw extraction output changed while it was being written")
+        finally:
+            os.close(descriptor)
 
 
 def _write_new_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
@@ -488,6 +547,4 @@ def _write_new_json(path: Path, value: Any) -> None:
 
 
 def _write_new_text(path: Path, value: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("x", encoding="utf-8", newline="\n") as handle:
-        handle.write(value)
+    _write_new_bytes(path, value.encode("utf-8"))

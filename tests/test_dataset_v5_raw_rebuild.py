@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import warnings
 import zipfile
 from pathlib import Path
@@ -11,6 +12,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+import spritelab.dataset_v5.raw_extraction as raw_extraction_module
 from spritelab.dataset_v5.identity import RecordBinding, canonical_rgba_bytes, decoded_rgba_sha256, make_record_id
 from spritelab.dataset_v5.raw_extraction import (
     ExtractionTransform,
@@ -291,7 +293,48 @@ def test_direct_image_extraction_requires_explicit_whole_image_operation(tmp_pat
     assert extracted["archive_member_path"] == "direct.png"
     assert extracted["transformation"]["operation"] == "decode_rgba_whole_image"
 
+    fresh_result = build_raw_extraction(
+        (spec,),
+        tmp_path / "direct_fresh_build",
+        publish_direct_fresh=True,
+    )
+    assert fresh_result["record_count"] == 1
+    assert json.loads((tmp_path / "direct_fresh_build" / "extraction_manifest.jsonl").read_text()) == extracted
+
     with pytest.raises(ValueError, match="forbidden"):
         ExtractionTransform(crop_coordinates=None, padding=None, interpolation_policy="nearest")
     with pytest.raises(ValueError, match="transparent black"):
         TransparentPadding(left=1, top=0, right=0, bottom=0, fill_rgba=(255, 255, 255, 0))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows fresh-output handles block directory renames")
+def test_direct_fresh_raw_extraction_blocks_dynamic_directory_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _png_bytes(_rgba_fixture())
+    row = _source_row("direct.png", hashlib.sha256(payload).hexdigest(), source_type="direct_file_url")
+    _write_source_manifest(tmp_path, row, payload)
+    source = discover_raw_sources(tmp_path)[0]
+    spec = RawExtractionSpec(source=source, archive_member_path=None, transform=ExtractionTransform.whole_image())
+    destination = tmp_path / "fresh"
+    outside = tmp_path / "outside-sentinel.bin"
+    outside.write_bytes(b"unchanged")
+    original_write = raw_extraction_module._write_new_bytes
+    blocked = False
+
+    def inject_swap(path: Path, value: bytes) -> None:
+        nonlocal blocked
+        if path.parent.name == "blobs" and not blocked:
+            moved = tmp_path / "moved-fresh"
+            with pytest.raises(OSError):
+                os.replace(destination, moved)
+            blocked = True
+        original_write(path, value)
+
+    monkeypatch.setattr(raw_extraction_module, "_write_new_bytes", inject_swap)
+    result = build_raw_extraction((spec,), destination, publish_direct_fresh=True)
+
+    assert result["record_count"] == 1
+    assert blocked is True
+    assert outside.read_bytes() == b"unchanged"

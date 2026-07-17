@@ -49,6 +49,18 @@ def test_empty_file_and_fully_transparent_are_rejected(tmp_path: Path) -> None:
     assert "FULLY_TRANSPARENT" in result.reason_codes
 
 
+def test_in_memory_png_audit_matches_the_file_backend(tmp_path: Path) -> None:
+    path = _good(tmp_path / "sprite.png")
+    payload = path.read_bytes()
+    file_result = _audit(path)
+    memory_result = audit_sprite(
+        SuitabilityInput("sprite", Path("sprite.png"), image_bytes=payload),
+        load_config(),
+    )
+
+    assert memory_result.to_dict() == file_result.to_dict()
+
+
 def test_baked_checkerboard_is_hard_rejected(tmp_path: Path) -> None:
     array = np.zeros((32, 32, 4), dtype=np.uint8)
     for y in range(32):

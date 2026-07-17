@@ -37,20 +37,22 @@ intentional.
 - `require_confined_path(path, root)` checks lexical and resolved containment,
   refuses the root itself, and rejects existing descendant links and Windows
   reparse points.
-- `remove_confined_tree(path, root)` additionally rejects mount points and is
-  the only general recursive-removal primitive outside specialized transaction
-  code.
+- `remove_confined_tree(path, root)` is a compatibility retirement primitive,
+  not recursive deletion: it rejects mounts/links, moves the exact owned child
+  through a held parent to an unpredictable `.spritelab-retired-tree-*`
+  residue, and retains every byte for explicit later cleanup review.
 - `atomic_write_bytes` and `atomic_write_text` create unpredictable exclusive
   sibling files, flush them, and replace the destination entry atomically. They
   do not write through a predictable `.tmp` hard link.
 
 Dataset Maker exports are built completely in a unique staging directory. An
 overwrite moves the previous export to a unique confined backup, publishes the
-staging tree, restores the previous export if publication fails, and removes
-only the verified backup after success.
+staging tree, restores the previous export if publication fails, and retires
+only the verified backup to recovery residue after success.
 
 Dataset-v5 builders use fresh staging directories and refuse existing output
-roots. Failure cleanup is confined to the staging directory's parent. Product
+roots. Failure retirement is confined to the staging directory's parent and
+retains a hidden recovery residue. Product
 dataset intake confines its fixed `raw_extraction` candidate, previous, and
 published directories to the managed output root. The product sidecar has a
 stricter transaction-specific implementation that also guards lexical targets,
@@ -99,9 +101,10 @@ For any new delete, overwrite, rollback, extraction, or remote-cleanup code:
    rg -n --glob '*.py' 'shutil\.rmtree|\.unlink\(|\.rmdir\(' src
    ```
 
-Specialized code may unlink a unique temporary file or remove an already
-validated empty directory. Recursive removal belongs in `safe_fs` or in the
-sidecar's stricter transaction machinery.
+Specialized code may retire a unique temporary file or remove an already
+validated empty directory through an exact handle. New certified flows do not
+perform recursive path deletion; unresolved cleanup remains explicit recovery
+evidence for a separately authorized cleanup task.
 
 ## Verification
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 from spritelab.product_core import (
     ProductBlocker,
@@ -23,7 +23,9 @@ from spritelab.product_features.harvest.catalog import (
 )
 from spritelab.product_features.harvest.certification import (
     BackendCapabilityCertificateError,
+    BackendCapabilityEvidence,
     load_backend_capability_certificate,
+    load_backend_capability_evidence,
 )
 from spritelab.product_features.harvest.service import HarvestError, HarvestService
 from spritelab.product_features.harvest.trusted_backend import (
@@ -36,6 +38,7 @@ from spritelab.product_features.harvest.trusted_backend import (
 from spritelab.product_features.harvest.web import create_harvest_router
 
 PLUGIN_ID = "harvest.acquisition"
+DatasetImportCallbackFactory = Callable[[ProjectContext], DatasetImportCallback]
 
 
 def register_harvest_cli(registry: ProductCliRegistry) -> None:
@@ -49,9 +52,14 @@ def create_plugin(
     sources: Iterable[HarvestSource] | None = None,
     backend_factory: BackendFactory | None = None,
     backend_capabilities: CertifiedBackendCapabilities | None = None,
+    backend_capability_evidence: BackendCapabilityEvidence | None = None,
     limits: HarvestLimits | None = None,
     dataset_import_callback: DatasetImportCallback | None = None,
+    dataset_import_callback_factory: DatasetImportCallbackFactory | None = None,
     load_repository_capabilities: bool = False,
+    probe_resolver: object | None = None,
+    probe_transport: object | None = None,
+    probe_downloader: object | None = None,
 ) -> ProductPlugin:
     """Create an injectable plugin without probing or constructing its backend.
 
@@ -61,8 +69,20 @@ def create_plugin(
     """
 
     injected_catalog = None if sources is None else tuple(sources)
-    if load_repository_capabilities and (backend_factory is not None or backend_capabilities is not None):
+    if load_repository_capabilities and (
+        backend_factory is not None or backend_capabilities is not None or backend_capability_evidence is not None
+    ):
         raise ValueError("Repository capability loading cannot be combined with injected backend configuration.")
+    if dataset_import_callback is not None and dataset_import_callback_factory is not None:
+        raise ValueError("Dataset import callback and context-bound factory are mutually exclusive.")
+
+    def repository_configuration(
+        context: ProjectContext,
+    ) -> tuple[tuple[HarvestSource, ...], BackendCapabilityEvidence | None]:
+        return (
+            load_trusted_catalog(context.project_root),
+            load_backend_capability_evidence(context.project_root),
+        )
 
     def service_with_configuration(
         context: ProjectContext,
@@ -82,9 +102,11 @@ def create_plugin(
             catalog = injected_catalog
         active_factory = backend_factory
         active_capabilities = backend_capabilities
+        active_evidence: BackendCapabilityEvidence | None = backend_capability_evidence
         if load_repository_capabilities and configuration_error is None:
             try:
-                active_capabilities = load_backend_capability_certificate(context.project_root)
+                active_evidence = load_backend_capability_evidence(context.project_root)
+                active_capabilities = active_evidence.capabilities if active_evidence is not None else None
             except BackendCapabilityCertificateError as exc:
                 active_capabilities = None
                 configuration_error = exc
@@ -97,13 +119,26 @@ def create_plugin(
                 active_factory = repository_backend_factory
             else:
                 active_capabilities = None
+                active_evidence = None
+        active_callback = (
+            dataset_import_callback_factory(context)
+            if dataset_import_callback_factory is not None
+            else dataset_import_callback
+        )
         harvest_service = HarvestService(
             context.project_root,
             sources=catalog,
             backend_factory=active_factory,
             backend_capabilities=active_capabilities,
+            backend_capability_evidence=active_evidence,
+            live_configuration_loader=(
+                (lambda: repository_configuration(context)) if load_repository_capabilities else None
+            ),
             limits=limits,
-            dataset_import_callback=dataset_import_callback,
+            dataset_import_callback=active_callback,
+            probe_resolver=probe_resolver,
+            probe_transport=probe_transport,
+            probe_downloader=probe_downloader,
         )
         return harvest_service, configuration_error, active_capabilities
 
@@ -214,6 +249,7 @@ __all__ = [
     "BackendCapabilityCertificateError",
     "CatalogEvidenceBinding",
     "CertifiedBackendCapabilities",
+    "DatasetImportCallbackFactory",
     "HarvestLimits",
     "HarvestService",
     "HarvestSource",
@@ -221,6 +257,7 @@ __all__ = [
     "build_plugin",
     "create_plugin",
     "load_backend_capability_certificate",
+    "load_backend_capability_evidence",
     "load_trusted_catalog",
     "register_harvest_cli",
 ]

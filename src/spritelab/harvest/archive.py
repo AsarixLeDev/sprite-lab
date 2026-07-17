@@ -6,18 +6,19 @@ import hashlib
 import os
 import stat
 import tarfile
-import tempfile
 import time
 import unicodedata
 import uuid
+import warnings
 import zipfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
-from spritelab.utils.safe_fs import remove_confined_tree, require_confined_path
+from spritelab.utils.safe_fs import AnchoredDirectory, OwnedFileIdentity, UnsafeFilesystemOperation
 
 APPLEDOUBLE_MAGIC = b"\x00\x05\x16\x07"
 APPLESINGLE_MAGIC = b"\x00\x05\x16\x00"
@@ -46,6 +47,10 @@ class ArchiveCancelled(RuntimeError):
     """Raised when bounded extraction is cancelled or exceeds its deadline."""
 
 
+class ArchiveRecoveryResidueWarning(RuntimeWarning):
+    """A verified archive committed while an exact previous tree was retained."""
+
+
 @dataclass(frozen=True)
 class _Limits:
     max_archive_bytes: int
@@ -66,8 +71,273 @@ class _ValidatedMember:
     resource_fork: bool
 
 
+class ArchiveSnapshot(AbstractContextManager["ArchiveSnapshot"]):
+    """One private immutable byte snapshot bound to a stable source descriptor."""
+
+    def __init__(
+        self,
+        source_path: Path,
+        handle: BinaryIO,
+        *,
+        source_anchor: AnchoredDirectory,
+        source_descriptor: int,
+        source_metadata: os.stat_result,
+        snapshot_metadata: os.stat_result,
+        snapshot_residue_path: Path | None,
+        cancel_requested: Callable[[], bool] | None,
+        deadline_monotonic: float | None,
+        byte_count: int,
+        sha256: str,
+    ) -> None:
+        self.source_path = source_path
+        self._handle = handle
+        self._source_anchor: AnchoredDirectory | None = source_anchor
+        self._source_descriptor = source_descriptor
+        self._source_metadata = source_metadata
+        self._snapshot_metadata = snapshot_metadata
+        self.snapshot_residue_path = snapshot_residue_path
+        self._cancel_requested = cancel_requested
+        self._deadline_monotonic = deadline_monotonic
+        self.byte_count = byte_count
+        self.sha256 = sha256
+
+    @classmethod
+    def open(
+        cls,
+        archive_path: str | Path,
+        *,
+        max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES,
+        expected_sha256: str | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+        deadline_monotonic: float | None = None,
+        source_anchor: AnchoredDirectory | None = None,
+    ) -> ArchiveSnapshot:
+        """Copy one verified source descriptor into a private temporary file."""
+
+        if source_anchor is None:
+            source_path = _validated_archive_path(archive_path)
+            with AnchoredDirectory(source_path.parent, source_path.parent) as trusted_parent:
+                return cls.open(
+                    source_path,
+                    max_archive_bytes=max_archive_bytes,
+                    expected_sha256=expected_sha256,
+                    cancel_requested=cancel_requested,
+                    deadline_monotonic=deadline_monotonic,
+                    source_anchor=trusted_parent,
+                )
+        source_anchor.verify()
+        source_path = Path(os.path.abspath(os.path.expanduser(os.fspath(archive_path))))
+        if source_path.parent != source_anchor.directory or Path(source_path.name).name != source_path.name:
+            raise ArchiveSecurityError("archive source does not belong to the supplied anchored parent")
+        before = source_anchor.lstat(source_path.name)
+        _require_same_regular_file(before, before, "archive source is unsafe")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = source_anchor.open_file(source_path.name, flags)
+        retained_source_anchor: AnchoredDirectory | None = source_anchor.detached_duplicate()
+        snapshot: BinaryIO | None = None
+        snapshot_name: str | None = None
+        snapshot_identity: OwnedFileIdentity | None = None
+        snapshot_residue_path: Path | None = None
+        failure: BaseException | None = None
+        try:
+            opened = os.fstat(descriptor)
+            _require_same_regular_file(before, opened, "archive changed while opening")
+            try:
+                snapshot_descriptor = source_anchor.open_anonymous_file()
+            except (OSError, UnsafeFilesystemOperation):
+                snapshot_name = f".spritelab-archive-snapshot-{uuid.uuid4().hex}.tmp"
+                snapshot_descriptor = source_anchor.open_file(
+                    snapshot_name,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                )
+            snapshot_identity = OwnedFileIdentity.from_stat(os.fstat(snapshot_descriptor))
+            snapshot = os.fdopen(snapshot_descriptor, "w+b")
+            digest = hashlib.sha256()
+            total = 0
+            with os.fdopen(descriptor, "rb", closefd=False) as source:
+                while True:
+                    _check_archive_abort(cancel_requested, deadline_monotonic)
+                    chunk = source.read(_COPY_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_archive_bytes:
+                        raise ArchiveSecurityError(f"archive exceeds the {max_archive_bytes}-byte input limit")
+                    snapshot.write(chunk)
+                    digest.update(chunk)
+            snapshot.flush()
+            os.fsync(snapshot.fileno())
+            source_after = os.fstat(descriptor)
+            path_after = source_anchor.lstat(source_path.name)
+            _require_same_regular_file(before, source_after, "archive changed while snapshotting")
+            _require_same_regular_file(before, path_after, "archive path changed while snapshotting")
+            if total != before.st_size:
+                raise ArchiveSecurityError("archive size changed while snapshotting")
+            actual_digest = digest.hexdigest()
+            expected_digest = _normalized_sha256(expected_sha256)
+            if expected_digest is not None and actual_digest != expected_digest:
+                raise ArchiveSecurityError(f"archive SHA256 mismatch: expected {expected_digest}, got {actual_digest}")
+            if snapshot_name is not None and os.name != "nt":
+                os.fchmod(snapshot.fileno(), 0o400)
+                if stat.S_IMODE(os.fstat(snapshot.fileno()).st_mode) != 0o400:
+                    raise ArchiveSecurityError("archive snapshot evidence could not be made read-only")
+                evidence_name = f".spritelab-archive-snapshot-evidence-{actual_digest}-{uuid.uuid4().hex}.bin"
+                source_anchor.rename(snapshot_name, evidence_name, replace=False)
+                snapshot_name = evidence_name
+                snapshot_residue_path = source_anchor.directory / evidence_name
+            snapshot.seek(0)
+            writable_snapshot_metadata = os.fstat(snapshot.fileno())
+            if snapshot_name is None:
+                snapshot_read_descriptor = _reopen_anonymous_snapshot_read_only(snapshot.fileno())
+            else:
+                snapshot_read_descriptor = source_anchor.open_file(
+                    snapshot_name,
+                    os.O_RDONLY | getattr(os, "O_BINARY", 0),
+                )
+            snapshot_metadata = os.fstat(snapshot_read_descriptor)
+            if (
+                snapshot_identity is None
+                or not snapshot_identity.matches(snapshot_metadata)
+                or snapshot_metadata.st_size != writable_snapshot_metadata.st_size
+            ):
+                os.close(snapshot_read_descriptor)
+                raise ArchiveSecurityError("archive snapshot changed while reopening read-only")
+            snapshot.close()
+            snapshot = os.fdopen(snapshot_read_descriptor, "rb")
+            if not stat.S_ISREG(snapshot_metadata.st_mode) or snapshot_metadata.st_size != total:
+                raise ArchiveSecurityError("archive snapshot is not a stable regular file")
+            if snapshot_name is not None and os.name == "nt":
+                if not source_anchor.unlink_if_owned(snapshot_name, snapshot_identity, missing_ok=False):
+                    raise ArchiveSecurityError("archive snapshot temporary path changed before retirement")
+                snapshot_name = None
+            elif snapshot_residue_path is not None:
+                snapshot_name = None
+            if retained_source_anchor is None:
+                raise ArchiveSecurityError("archive source parent anchor was lost during snapshotting")
+            result = cls(
+                source_path,
+                snapshot,
+                source_anchor=retained_source_anchor,
+                source_descriptor=descriptor,
+                source_metadata=before,
+                snapshot_metadata=snapshot_metadata,
+                snapshot_residue_path=snapshot_residue_path,
+                cancel_requested=cancel_requested,
+                deadline_monotonic=deadline_monotonic,
+                byte_count=total,
+                sha256=actual_digest,
+            )
+            descriptor = -1
+            retained_source_anchor = None
+            return result
+        except BaseException as exc:
+            failure = exc
+            if snapshot is not None:
+                snapshot.close()
+            if snapshot_name is not None and snapshot_identity is not None:
+                source_anchor.quarantine_if_owned(
+                    snapshot_name,
+                    snapshot_identity,
+                    prefix=".spritelab-archive-snapshot-failed-",
+                )
+            raise
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if retained_source_anchor is not None:
+                retained_source_anchor.__exit__(
+                    type(failure) if failure is not None else None,
+                    failure,
+                    failure.__traceback__ if failure is not None else None,
+                )
+
+    @property
+    def suffixes(self) -> str:
+        return "".join(self.source_path.suffixes).lower()
+
+    def rewind(self) -> BinaryIO:
+        self._assert_snapshot_unchanged()
+        self._handle.seek(0)
+        return self._handle
+
+    def verify_final(self) -> None:
+        """Rehash the same private snapshot and validate the source path entry."""
+
+        self._assert_snapshot_unchanged()
+        digest = hashlib.sha256()
+        self._handle.seek(0)
+        _check_archive_abort(self._cancel_requested, self._deadline_monotonic)
+        while chunk := self._handle.read(_COPY_CHUNK_BYTES):
+            _check_archive_abort(self._cancel_requested, self._deadline_monotonic)
+            digest.update(chunk)
+        if digest.hexdigest() != self.sha256:
+            raise ArchiveSecurityError("archive snapshot changed while it was in use")
+        self._assert_snapshot_unchanged()
+        source_before = os.fstat(self._source_descriptor)
+        _require_same_regular_file(
+            self._source_metadata,
+            source_before,
+            "archive raw source descriptor changed while snapshot was in use",
+        )
+        source_digest = hashlib.sha256()
+        os.lseek(self._source_descriptor, 0, os.SEEK_SET)
+        _check_archive_abort(self._cancel_requested, self._deadline_monotonic)
+        while chunk := os.read(self._source_descriptor, _COPY_CHUNK_BYTES):
+            _check_archive_abort(self._cancel_requested, self._deadline_monotonic)
+            source_digest.update(chunk)
+        source_after = os.fstat(self._source_descriptor)
+        _require_same_regular_file(
+            self._source_metadata,
+            source_after,
+            "archive raw source descriptor changed while being reverified",
+        )
+        if source_digest.hexdigest() != self.sha256:
+            raise ArchiveSecurityError("archive raw source bytes changed while snapshot was in use")
+        _check_archive_abort(self._cancel_requested, self._deadline_monotonic)
+        source_anchor = self._source_anchor
+        if source_anchor is None:
+            raise ArchiveSecurityError("archive source parent anchor is no longer available")
+        try:
+            path_after = source_anchor.lstat(self.source_path.name)
+        except FileNotFoundError as exc:
+            raise ArchiveSecurityError("archive source path disappeared while snapshot was in use") from exc
+        _require_same_regular_file(
+            self._source_metadata,
+            path_after,
+            "archive source path changed while snapshot was in use",
+        )
+
+    def _assert_snapshot_unchanged(self) -> None:
+        current = os.fstat(self._handle.fileno())
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_dev != self._snapshot_metadata.st_dev
+            or current.st_ino != self._snapshot_metadata.st_ino
+            or current.st_size != self._snapshot_metadata.st_size
+            or current.st_mtime_ns != self._snapshot_metadata.st_mtime_ns
+        ):
+            raise ArchiveSecurityError("archive snapshot descriptor changed while in use")
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        del exc_type, exc_value, traceback
+        self.close()
+
+    def close(self) -> None:
+        try:
+            self._handle.close()
+        finally:
+            try:
+                if self._source_descriptor >= 0:
+                    os.close(self._source_descriptor)
+                    self._source_descriptor = -1
+            finally:
+                if self._source_anchor is not None:
+                    self._source_anchor.__exit__(None, None, None)
+                    self._source_anchor = None
+
+
 def extract_archive(
-    archive_path: str | Path,
+    archive_path: str | Path | ArchiveSnapshot,
     output_dir: str | Path,
     *,
     overwrite: bool = False,
@@ -82,6 +352,7 @@ def extract_archive(
     cancel_requested: Callable[[], bool] | None = None,
     progress: Callable[[int, int], None] | None = None,
     deadline_monotonic: float | None = None,
+    destination_parent_anchor: AnchoredDirectory | None = None,
 ) -> Path:
     """Validate and extract an archive into a staged tree, then publish it.
 
@@ -98,87 +369,106 @@ def extract_archive(
         max_total_bytes=max_total_bytes,
         max_compression_ratio=max_compression_ratio,
     )
-    archive_path = _validated_archive_path(archive_path)
-    suffixes = "".join(archive_path.suffixes).lower()
-    is_zip = archive_path.suffix.lower() == ".zip"
-    is_tar = suffixes.endswith((".tar", ".tar.gz", ".tgz"))
-    if not is_zip and not is_tar:
-        raise ValueError(f"unsupported archive type: {archive_path.name}")
-    if archive_path.stat().st_size > limits.max_archive_bytes:
-        raise ArchiveSecurityError(f"archive exceeds the {limits.max_archive_bytes}-byte input limit")
-    expected_digest = _normalized_sha256(expected_sha256)
-    initial_digest = _compute_sha256(
-        archive_path,
-        max_bytes=limits.max_archive_bytes,
-        cancel_requested=cancel_requested,
-        deadline_monotonic=deadline_monotonic,
-    )
-    if expected_digest is not None and initial_digest != expected_digest:
-        raise ArchiveSecurityError(f"archive SHA256 mismatch: expected {expected_digest}, got {initial_digest}")
-    requested_output_dir = Path(output_dir)
-    output_dir = _prepare_destination_path(output_dir)
-    _preflight_destination(output_dir, overwrite=overwrite)
-    _reject_source_output_overlap(archive_path, output_dir)
-
-    staging: Path | None = Path(
-        tempfile.mkdtemp(
-            prefix=f".{output_dir.name}.extract-",
-            dir=output_dir.parent,
-        )
-    )
-    staging = require_confined_path(staging, output_dir.parent)
-    try:
-        if is_zip:
-            _extract_zip(
-                archive_path,
-                staging,
-                include_member_globs,
-                exclude_member_globs,
-                limits,
-                cancel_requested,
-                progress,
-                deadline_monotonic,
-            )
-        else:
-            _extract_tar(
-                archive_path,
-                staging,
-                include_member_globs,
-                exclude_member_globs,
-                limits,
-                cancel_requested,
-                progress,
-                deadline_monotonic,
-            )
-        final_digest = _compute_sha256(
+    owns_snapshot = not isinstance(archive_path, ArchiveSnapshot)
+    snapshot = (
+        ArchiveSnapshot.open(
             archive_path,
-            max_bytes=limits.max_archive_bytes,
+            max_archive_bytes=limits.max_archive_bytes,
+            expected_sha256=expected_sha256,
             cancel_requested=cancel_requested,
             deadline_monotonic=deadline_monotonic,
         )
-        if final_digest != initial_digest:
-            raise ArchiveSecurityError("archive changed while it was being extracted")
-        _publish_staged_tree(staging, output_dir, overwrite=overwrite)
-        staging = None
+        if owns_snapshot
+        else archive_path
+    )
+    if snapshot.byte_count > limits.max_archive_bytes:
+        if owns_snapshot:
+            snapshot.close()
+        raise ArchiveSecurityError(f"archive exceeds the {limits.max_archive_bytes}-byte input limit")
+    expected_digest = _normalized_sha256(expected_sha256)
+    if expected_digest is not None and snapshot.sha256 != expected_digest:
+        if owns_snapshot:
+            snapshot.close()
+        raise ArchiveSecurityError(f"archive SHA256 mismatch: expected {expected_digest}, got {snapshot.sha256}")
+    suffixes = snapshot.suffixes
+    is_zip = snapshot.source_path.suffix.lower() == ".zip"
+    is_tar = suffixes.endswith((".tar", ".tar.gz", ".tgz"))
+    if not is_zip and not is_tar:
+        if owns_snapshot:
+            snapshot.close()
+        raise ValueError(f"unsupported archive type: {snapshot.source_path.name}")
+    requested_output_dir = Path(output_dir)
+    try:
+        parent_context = (
+            _anchored_destination_parent(output_dir)
+            if destination_parent_anchor is None
+            else _supplied_destination_parent(output_dir, destination_parent_anchor)
+        )
+        with parent_context as (output_dir, output_parent):
+            _preflight_destination(output_parent, output_dir.name, overwrite=overwrite)
+            _reject_source_output_overlap(snapshot.source_path, output_dir)
+            staging_name, _staging_identity = output_parent.mkdir_unique(f".{output_dir.name}.extract-")
+            try:
+                with output_parent.open_directory(staging_name) as staging:
+                    if is_zip:
+                        _extract_zip(
+                            snapshot,
+                            staging,
+                            include_member_globs,
+                            exclude_member_globs,
+                            limits,
+                            cancel_requested,
+                            progress,
+                            deadline_monotonic,
+                        )
+                    else:
+                        _extract_tar(
+                            snapshot,
+                            staging,
+                            include_member_globs,
+                            exclude_member_globs,
+                            limits,
+                            cancel_requested,
+                            progress,
+                            deadline_monotonic,
+                        )
+                    _check_archive_abort(cancel_requested, deadline_monotonic)
+                    snapshot.verify_final()
+                _publish_staged_tree(
+                    output_parent,
+                    staging_name,
+                    output_dir.name,
+                    overwrite=overwrite,
+                )
+                staging_name = ""
+            finally:
+                if staging_name:
+                    _quarantine_failed_staging(output_parent, staging_name, output_dir.name)
+    except UnsafeFilesystemOperation as exc:
+        raise ArchiveSecurityError("destination crosses a linked or non-directory ancestor") from exc
     finally:
-        if staging is not None:
-            remove_confined_tree(staging, output_dir.parent, missing_ok=True)
+        if owns_snapshot:
+            snapshot.close()
     return requested_output_dir
 
 
-def _validated_archive_path(path: str | Path) -> Path:
-    archive_path = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
-    if not os.path.lexists(archive_path):
-        raise FileNotFoundError(f"archive not found: {archive_path}")
-    metadata = archive_path.lstat()
-    if _is_link_or_reparse(metadata):
-        raise ArchiveSecurityError(f"archive path may not be a link or reparse point: {archive_path}")
-    if not stat.S_ISREG(metadata.st_mode):
-        raise ArchiveSecurityError(f"archive path must be a regular file: {archive_path}")
-    return archive_path
+@contextmanager
+def _supplied_destination_parent(
+    path: str | Path,
+    parent: AnchoredDirectory,
+) -> Iterator[tuple[Path, AnchoredDirectory]]:
+    output_dir = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    parent.verify()
+    if output_dir.parent != parent.directory or Path(output_dir.name).name != output_dir.name:
+        raise ArchiveSecurityError("archive destination does not belong to the supplied anchored parent")
+    yield output_dir, parent
+    parent.verify()
 
 
-def _prepare_destination_path(path: str | Path) -> Path:
+@contextmanager
+def _anchored_destination_parent(
+    path: str | Path,
+) -> Iterator[tuple[Path, AnchoredDirectory]]:
     raw_path = os.fspath(path)
     if not raw_path.strip() or raw_path.strip() in {".", ".."}:
         raise ArchiveSecurityError("archive destination must be a specific non-root path")
@@ -189,45 +479,54 @@ def _prepare_destination_path(path: str | Path) -> Path:
         if parent == existing_ancestor:
             raise ArchiveSecurityError(f"could not find an existing ancestor for destination: {output_dir}")
         existing_ancestor = parent
-    metadata = existing_ancestor.lstat()
-    if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
-        raise ArchiveSecurityError(f"destination crosses a linked or non-directory ancestor: {existing_ancestor}")
-    output_dir = require_confined_path(output_dir, existing_ancestor)
-    _create_destination_parents(output_dir.parent, existing_ancestor)
-    return require_confined_path(output_dir, existing_ancestor)
+    with ExitStack() as stack:
+        anchor = stack.enter_context(AnchoredDirectory(existing_ancestor, existing_ancestor))
+        for part in output_dir.parent.relative_to(existing_ancestor).parts:
+            if not anchor.lexists(part):
+                anchor.mkdir(part)
+            anchor = stack.enter_context(anchor.open_directory(part))
+        yield output_dir, anchor
 
 
-def _create_destination_parents(parent: Path, root: Path) -> None:
-    current = root
-    for part in parent.relative_to(root).parts:
-        current = current / part
+def _validated_archive_path(path: str | Path) -> Path:
+    archive_path = Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    if not os.path.lexists(archive_path):
+        raise FileNotFoundError(f"archive not found: {archive_path}")
+    metadata = archive_path.lstat()
+    if _is_link_or_reparse(metadata):
+        raise ArchiveSecurityError(f"archive path may not be a link or reparse point: {archive_path}")
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise ArchiveSecurityError(f"archive path must be a single-link regular file: {archive_path}")
+    return archive_path
+
+
+def _require_same_regular_file(before: os.stat_result, after: os.stat_result, message: str) -> None:
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or _is_link_or_reparse(after)
+        or after.st_nlink != 1
+        or after.st_dev != before.st_dev
+        or after.st_ino != before.st_ino
+        or after.st_size != before.st_size
+        or after.st_mtime_ns != before.st_mtime_ns
+    ):
+        raise ArchiveSecurityError(message)
+
+
+def _reopen_anonymous_snapshot_read_only(descriptor: int) -> int:
+    if os.name == "posix":
+        proc_descriptor = Path(f"/proc/self/fd/{descriptor}")
         try:
-            current.mkdir()
-        except FileExistsError:
-            pass
-        metadata = current.lstat()
-        if _is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode) or current.is_mount():
-            raise ArchiveSecurityError(f"destination crosses an unsafe directory seam: {current}")
-        require_confined_path(current, root)
-
-
-def _compute_sha256(
-    path: Path,
-    *,
-    max_bytes: int,
-    cancel_requested: Callable[[], bool] | None = None,
-    deadline_monotonic: float | None = None,
-) -> str:
-    digest = hashlib.sha256()
-    total = 0
-    with path.open("rb") as handle:
-        while chunk := handle.read(_COPY_CHUNK_BYTES):
-            _check_archive_abort(cancel_requested, deadline_monotonic)
-            total += len(chunk)
-            if total > max_bytes:
-                raise ArchiveSecurityError(f"archive exceeds the {max_bytes}-byte input limit")
-            digest.update(chunk)
-    return digest.hexdigest()
+            reopened = os.open(proc_descriptor, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        except OSError as exc:
+            raise ArchiveSecurityError("anonymous archive snapshot could not be reopened read-only") from exc
+        before = os.fstat(descriptor)
+        after = os.fstat(reopened)
+        if before.st_dev != after.st_dev or before.st_ino != after.st_ino:
+            os.close(reopened)
+            raise ArchiveSecurityError("anonymous archive snapshot changed while reopening read-only")
+        return reopened
+    raise ArchiveSecurityError("anonymous archive snapshots are unsupported on this platform")
 
 
 def _normalized_sha256(value: str | None) -> str | None:
@@ -239,21 +538,24 @@ def _normalized_sha256(value: str | None) -> str | None:
     return normalized
 
 
-def _preflight_destination(output_dir: Path, *, overwrite: bool) -> None:
-    if not os.path.lexists(output_dir):
+def _preflight_destination(
+    parent: AnchoredDirectory,
+    output_name: str,
+    *,
+    overwrite: bool,
+) -> None:
+    if not parent.lexists(output_name):
         return
-    require_confined_path(output_dir, output_dir.parent)
-    metadata = output_dir.lstat()
+    metadata = parent.lstat(output_name)
     if _is_link_or_reparse(metadata):
-        raise ArchiveSecurityError(f"destination may not be a link or reparse point: {output_dir}")
-    if output_dir.is_mount():
-        raise ArchiveSecurityError(f"destination may not be a mount point: {output_dir}")
+        raise ArchiveSecurityError("destination may not be a link or reparse point")
     if not stat.S_ISDIR(metadata.st_mode):
-        raise FileExistsError(f"output path exists and is not a directory: {output_dir}")
-    if any(output_dir.iterdir()) and not overwrite:
-        raise FileExistsError(f"output directory already exists and is not empty: {output_dir}")
-    if overwrite:
-        _assert_tree_has_no_link_seams(output_dir)
+        raise FileExistsError(f"output path exists and is not a directory: {parent.directory / output_name}")
+    with parent.open_directory(output_name) as output:
+        if output.names() and not overwrite:
+            raise FileExistsError(f"output directory already exists and is not empty: {parent.directory / output_name}")
+        if overwrite:
+            _assert_anchored_tree_has_no_link_seams(output)
 
 
 def _reject_source_output_overlap(archive_path: Path, output_dir: Path) -> None:
@@ -281,7 +583,7 @@ def normalize_member_name(name: str) -> str:
 
 
 def archive_member_summary(
-    archive_path: str | Path,
+    archive_path: str | Path | ArchiveSnapshot,
     *,
     include_member_globs: Sequence[str] = (),
     exclude_member_globs: Sequence[str] = (),
@@ -296,9 +598,6 @@ def archive_member_summary(
     """Describe deterministic ZIP member selection after full validation."""
 
     _check_archive_abort(cancel_requested, deadline_monotonic)
-    archive_path = _validated_archive_path(archive_path)
-    if archive_path.suffix.lower() != ".zip":
-        return {}
     limits = _validated_limits(
         max_archive_bytes=max_archive_bytes,
         max_members=max_members,
@@ -306,16 +605,34 @@ def archive_member_summary(
         max_total_bytes=max_total_bytes,
         max_compression_ratio=max_compression_ratio,
     )
-    if archive_path.stat().st_size > limits.max_archive_bytes:
-        raise ArchiveSecurityError(f"archive exceeds the {limits.max_archive_bytes}-byte input limit")
-    with zipfile.ZipFile(archive_path) as archive:
-        members = _validated_zip_members(
-            archive.infolist(),
-            include_member_globs,
-            exclude_member_globs,
-            limits,
+    owns_snapshot = not isinstance(archive_path, ArchiveSnapshot)
+    snapshot = (
+        ArchiveSnapshot.open(
+            archive_path,
+            max_archive_bytes=limits.max_archive_bytes,
+            cancel_requested=cancel_requested,
+            deadline_monotonic=deadline_monotonic,
         )
-    _check_archive_abort(cancel_requested, deadline_monotonic)
+        if owns_snapshot
+        else archive_path
+    )
+    try:
+        if snapshot.source_path.suffix.lower() != ".zip":
+            return {}
+        if snapshot.byte_count > limits.max_archive_bytes:
+            raise ArchiveSecurityError(f"archive exceeds the {limits.max_archive_bytes}-byte input limit")
+        with zipfile.ZipFile(snapshot.rewind()) as archive:
+            members = _validated_zip_members(
+                archive.infolist(),
+                include_member_globs,
+                exclude_member_globs,
+                limits,
+            )
+        _check_archive_abort(cancel_requested, deadline_monotonic)
+        snapshot.verify_final()
+    finally:
+        if owns_snapshot:
+            snapshot.close()
     files = [member for member in members if not member.is_dir]
     resource_forks = [member for member in files if member.resource_fork]
     eligible_files = [member for member in files if not member.resource_fork]
@@ -379,8 +696,8 @@ def is_appledouble_record(member_path: str, payload_prefix: bytes = b"") -> bool
 
 
 def _extract_zip(
-    archive_path: Path,
-    staging: Path,
+    snapshot: ArchiveSnapshot,
+    staging: AnchoredDirectory,
     includes: Sequence[str],
     excludes: Sequence[str],
     limits: _Limits,
@@ -388,7 +705,7 @@ def _extract_zip(
     progress: Callable[[int, int], None] | None,
     deadline_monotonic: float | None,
 ) -> None:
-    with zipfile.ZipFile(archive_path) as archive:
+    with zipfile.ZipFile(snapshot.rewind()) as archive:
         members = _validated_zip_members(archive.infolist(), includes, excludes, limits)
         selected_images = [
             member.name
@@ -402,9 +719,7 @@ def _extract_zip(
             _check_archive_abort(cancel_requested, deadline_monotonic)
             if member.is_dir or member.resource_fork or not member.selected:
                 continue
-            target = _staging_target(staging, member.name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member.raw, "r") as source, target.open("xb") as sink:
+            with archive.open(member.raw, "r") as source, _open_staging_sink(staging, member.name) as sink:
                 copied = _copy_member(
                     source,
                     sink,
@@ -420,8 +735,8 @@ def _extract_zip(
 
 
 def _extract_tar(
-    archive_path: Path,
-    staging: Path,
+    snapshot: ArchiveSnapshot,
+    staging: AnchoredDirectory,
     includes: Sequence[str],
     excludes: Sequence[str],
     limits: _Limits,
@@ -429,7 +744,7 @@ def _extract_tar(
     progress: Callable[[int, int], None] | None,
     deadline_monotonic: float | None,
 ) -> None:
-    with tarfile.open(archive_path, mode="r:*") as archive:
+    with tarfile.open(fileobj=snapshot.rewind(), mode="r:*") as archive:
         infos: list[tarfile.TarInfo] = []
         for info in archive:
             _check_archive_abort(cancel_requested, deadline_monotonic)
@@ -441,7 +756,7 @@ def _extract_tar(
             includes,
             excludes,
             limits,
-            compressed_size=archive_path.stat().st_size,
+            compressed_size=snapshot.byte_count,
         )
         selected_images = [
             member.name
@@ -458,9 +773,7 @@ def _extract_tar(
             source = archive.extractfile(member.raw)
             if source is None:
                 raise ArchiveSecurityError(f"could not read archive member {member.name!r}")
-            target = _staging_target(staging, member.name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with source, target.open("xb") as sink:
+            with source, _open_staging_sink(staging, member.name) as sink:
                 copied = _copy_member(
                     source,
                     sink,
@@ -651,43 +964,158 @@ def _check_archive_abort(
         raise ArchiveCancelled("archive extraction exceeded its deadline")
 
 
-def _staging_target(staging: Path, member_name: str) -> Path:
-    target = staging.joinpath(*PurePosixPath(member_name).parts)
-    return require_confined_path(target, staging)
+@contextmanager
+def _open_staging_sink(staging: AnchoredDirectory, member_name: str) -> Iterator[BinaryIO]:
+    parts = PurePosixPath(member_name).parts
+    if not parts:
+        raise ArchiveSecurityError("archive member has no extraction path")
+    with ExitStack() as stack:
+        parent = staging
+        for part in parts[:-1]:
+            if not parent.lexists(part):
+                parent.mkdir(part)
+            parent = stack.enter_context(parent.open_directory(part))
+        name = parts[-1]
+        if parent.lexists(name):
+            raise ArchiveSecurityError(f"archive member destination already exists: {member_name!r}")
+        descriptor = parent.open_file(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+        )
+        identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
+        handle = os.fdopen(descriptor, "wb")
+        try:
+            yield handle
+        finally:
+            handle.close()
+        if not identity.matches(parent.lstat(name)):
+            raise ArchiveSecurityError(f"archive member path changed during extraction: {member_name!r}")
 
 
-def _publish_staged_tree(staging: Path, output_dir: Path, *, overwrite: bool) -> None:
-    _preflight_destination(output_dir, overwrite=overwrite)
-    if not os.path.lexists(output_dir):
-        os.replace(staging, output_dir)
+def _publish_staged_tree(
+    parent: AnchoredDirectory,
+    staging_name: str,
+    output_name: str,
+    *,
+    overwrite: bool,
+) -> None:
+    _preflight_destination(parent, output_name, overwrite=overwrite)
+    staging_before = parent.lstat(staging_name)
+    if not stat.S_ISDIR(staging_before.st_mode) or _is_link_or_reparse(staging_before):
+        raise ArchiveSecurityError("archive staging is unsafe")
+    owned_staging = OwnedFileIdentity.from_stat(staging_before)
+    if not parent.lexists(output_name):
+        try:
+            parent.rename(staging_name, output_name, replace=False)
+            _verify_published_directory(parent, output_name, staging_before)
+        except BaseException:
+            if _anchored_entry_matches(parent, output_name, owned_staging):
+                parent.quarantine_if_owned(
+                    output_name,
+                    owned_staging,
+                    prefix=f".{output_name}.rollback-",
+                )
+            raise
         return
 
-    backup = require_confined_path(
-        output_dir.parent / f".{output_dir.name}.backup-{uuid.uuid4().hex}",
-        output_dir.parent,
+    old_before = parent.lstat(output_name)
+    if not stat.S_ISDIR(old_before.st_mode) or _is_link_or_reparse(old_before):
+        raise ArchiveSecurityError("archive overwrite destination is unsafe")
+    owned_old = OwnedFileIdentity.from_stat(old_before)
+    backup_name = parent.quarantine_if_owned(
+        output_name,
+        owned_old,
+        prefix=f".{output_name}.backup-",
     )
-    os.replace(output_dir, backup)
+    if backup_name is None:
+        raise ArchiveSecurityError("archive overwrite destination changed before backup")
     try:
-        os.replace(staging, output_dir)
+        parent.rename(staging_name, output_name, replace=False)
+        _verify_published_directory(parent, output_name, staging_before)
     except BaseException:
-        os.replace(backup, output_dir)
+        if _anchored_entry_matches(parent, output_name, owned_staging):
+            parent.quarantine_if_owned(
+                output_name,
+                owned_staging,
+                prefix=f".{output_name}.rollback-",
+            )
+        if not parent.lexists(output_name) and _anchored_entry_matches(parent, backup_name, owned_old):
+            parent.rename(backup_name, output_name, replace=False)
+            restored = parent.lstat(output_name)
+            if not owned_old.matches(restored):
+                raise ArchiveSecurityError("archive rollback did not restore the exact previous destination") from None
         raise
-    try:
-        remove_confined_tree(backup, output_dir.parent)
-    except BaseException:
-        os.replace(output_dir, staging)
-        os.replace(backup, output_dir)
-        raise
+    _emit_recovery_residue_warning(
+        "Verified archive committed; the exact previous destination was retained as a recovery residue."
+    )
 
 
-def _assert_tree_has_no_link_seams(root: Path) -> None:
-    for current_root, directory_names, file_names in os.walk(root, topdown=True, followlinks=False):
-        current = Path(current_root)
-        for name in [*directory_names, *file_names]:
-            candidate = current / name
-            metadata = candidate.lstat()
-            if _is_link_or_reparse(metadata) or (stat.S_ISDIR(metadata.st_mode) and candidate.is_mount()):
-                raise ArchiveSecurityError(f"destination tree contains a link or reparse point: {candidate}")
+def _emit_recovery_residue_warning(message: str) -> None:
+    try:
+        warnings.warn(message, ArchiveRecoveryResidueWarning, stacklevel=3)
+    except Exception:
+        # Warning delivery is advisory and occurs after the durable commit.
+        # A warnings-as-errors policy or custom showwarning hook must not turn
+        # the committed publication into a reported transactional failure.
+        return
+
+
+def _verify_published_directory(
+    parent: AnchoredDirectory,
+    output_name: str,
+    staging_before: os.stat_result,
+) -> None:
+    published = parent.lstat(output_name)
+    if (
+        not stat.S_ISDIR(published.st_mode)
+        or _is_link_or_reparse(published)
+        or published.st_dev != staging_before.st_dev
+        or published.st_ino != staging_before.st_ino
+    ):
+        raise ArchiveSecurityError("archive staging identity changed during publication")
+    parent.verify()
+
+
+def _anchored_entry_matches(
+    parent: AnchoredDirectory,
+    name: str,
+    identity: OwnedFileIdentity,
+) -> bool:
+    try:
+        return identity.matches(parent.lstat(name))
+    except FileNotFoundError:
+        return False
+
+
+def _quarantine_failed_staging(
+    parent: AnchoredDirectory,
+    staging_name: str,
+    output_name: str,
+) -> None:
+    try:
+        metadata = parent.lstat(staging_name)
+        identity = OwnedFileIdentity.from_stat(metadata)
+        parent.quarantine_if_owned(
+            staging_name,
+            identity,
+            prefix=f".{output_name}.failed-",
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        # Failure cleanup must never widen into deletion or obscure the primary
+        # extraction error. An unproven staging path is deliberately retained.
+        return
+
+
+def _assert_anchored_tree_has_no_link_seams(root: AnchoredDirectory) -> None:
+    for name in root.names():
+        metadata = root.lstat(name)
+        if _is_link_or_reparse(metadata):
+            raise ArchiveSecurityError(f"destination tree contains a link or reparse point: {name}")
+        if stat.S_ISDIR(metadata.st_mode):
+            with root.open_directory(name) as child:
+                _assert_anchored_tree_has_no_link_seams(child)
+        elif not stat.S_ISREG(metadata.st_mode):
+            raise ArchiveSecurityError(f"destination tree contains a special entry: {name}")
 
 
 def _is_link_or_reparse(metadata: os.stat_result) -> bool:
@@ -761,7 +1189,9 @@ __all__ = [
     "DEFAULT_MAX_MEMBER_BYTES",
     "DEFAULT_MAX_TOTAL_BYTES",
     "ArchiveCancelled",
+    "ArchiveRecoveryResidueWarning",
     "ArchiveSecurityError",
+    "ArchiveSnapshot",
     "appledouble_detection_basis",
     "archive_member_summary",
     "extract_archive",

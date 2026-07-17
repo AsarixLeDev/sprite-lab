@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import time
+import zipfile
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,9 +13,14 @@ from typing import Any
 
 import pytest
 
+import spritelab.harvest.archive as archive_module
+import spritelab.harvest.download as download_module
+import spritelab.product_features.harvest.catalog_writer as catalog_writer_module
+import spritelab.product_features.harvest.trusted_backend as trusted_backend_module
 from _harvest_testdata import make_zip_of_pngs
-from spritelab.harvest.archive import ArchiveCancelled, extract_archive
+from spritelab.harvest.archive import ArchiveCancelled, ArchiveSnapshot, archive_member_summary, extract_archive
 from spritelab.harvest.download import (
+    DownloadCancelled,
     DownloadReceipt,
     DownloadSecurityError,
     ReceiptDownloadResult,
@@ -24,12 +32,23 @@ from spritelab.product_features.harvest import build_plugin
 from spritelab.product_features.harvest.catalog import (
     TRUSTED_CATALOG_RELATIVE_PATH,
     TRUSTED_CATALOG_SCHEMA,
+    CatalogAutomationTermsBinding,
     CatalogEvidenceBinding,
     HarvestSource,
     TrustedCatalogError,
+    automation_terms_decision_identity,
     load_trusted_catalog,
     trusted_catalog_identity,
+    trusted_catalog_source_record,
     url_identity,
+)
+from spritelab.product_features.harvest.catalog_verifier import (
+    CATALOG_EVIDENCE_VERIFIER_ID,
+    catalog_evidence_verifier_code_identity,
+)
+from spritelab.product_features.harvest.catalog_writer import (
+    CatalogPromotionError,
+    publish_trusted_catalog_source,
 )
 from spritelab.product_features.harvest.certification import (
     BACKEND_AUDIT_REPORT_RELATIVE_PATH,
@@ -38,14 +57,19 @@ from spritelab.product_features.harvest.certification import (
     BACKEND_CAPABILITY_CERTIFICATE_SCHEMA,
     BackendCapabilityCertificateError,
     load_backend_capability_certificate,
+    load_backend_capability_evidence,
 )
+from spritelab.product_features.harvest.service import HarvestError, HarvestService
 from spritelab.product_features.harvest.trusted_backend import (
     CertifiedBackendCapabilities,
     HardenedArchiveAcquisitionBackend,
     HarvestLimits,
+    conditioned_dataset_import_callback_binding,
     hardened_backend_code_identity,
     hardened_backend_module_hashes,
+    hardened_backend_runtime_dependencies,
 )
+from spritelab.utils.safe_fs import AnchoredDirectory, UnsafeFilesystemOperation
 
 SOURCE_PAGE = "https://catalog.example.test/source"
 LICENSE_PAGE = "https://catalog.example.test/license"
@@ -99,19 +123,43 @@ def _identity(value: Any) -> str:
 
 def _binding() -> CatalogEvidenceBinding:
     now = datetime.now(timezone.utc)
+    verified_at = (now - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    expires_at = (now + timedelta(days=7)).isoformat().replace("+00:00", "Z")
+    source_hash = hashlib.sha256(b"source page").hexdigest()
+    terms = CatalogAutomationTermsBinding(
+        mode="source_page_no_governing_terms_link",
+        decision="NO_PROHIBITION_OBSERVED",
+        evidence_url=SOURCE_PAGE,
+        evidence_request_url_sha256=url_identity(SOURCE_PAGE),
+        evidence_final_url=SOURCE_PAGE,
+        evidence_http_status=200,
+        evidence_content_sha256=source_hash,
+        matched_declaration=None,
+        limited_evidence=True,
+        decision_identity_sha256=automation_terms_decision_identity(
+            mode="source_page_no_governing_terms_link",
+            evidence_url=SOURCE_PAGE,
+            content_sha256=source_hash,
+            matched_declaration=None,
+            decision="NO_PROHIBITION_OBSERVED",
+        ),
+        verified_at=verified_at,
+        expires_at=expires_at,
+    )
     provisional = CatalogEvidenceBinding(
-        verifier_id="audit.fixture",
-        verifier_code_identity_sha256="a" * 64,
-        verified_at=(now - timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
-        expires_at=(now + timedelta(days=7)).isoformat().replace("+00:00", "Z"),
+        verifier_id=CATALOG_EVIDENCE_VERIFIER_ID,
+        verifier_code_identity_sha256=catalog_evidence_verifier_code_identity(),
+        verified_at=verified_at,
+        expires_at=expires_at,
         source_request_url_sha256=url_identity(SOURCE_PAGE),
         source_final_url=SOURCE_PAGE,
         source_http_status=200,
-        source_content_sha256=hashlib.sha256(b"source page").hexdigest(),
+        source_content_sha256=source_hash,
         license_request_url_sha256=url_identity(LICENSE_PAGE),
         license_final_url=LICENSE_PAGE,
         license_http_status=200,
         license_content_sha256=hashlib.sha256(b"license page").hexdigest(),
+        automation_terms=terms,
         attestation_identity_sha256="0" * 64,
     )
     return replace(provisional, attestation_identity_sha256=provisional.expected_attestation_identity)
@@ -142,6 +190,7 @@ def _capabilities() -> CertifiedBackendCapabilities:
         downloader_id="audit.downloader",
         downloader_version="1.0",
         code_identity_sha256=hardened_backend_code_identity(),
+        **conditioned_dataset_import_callback_binding(),
         enforces_http_success=True,
         enforces_https_direct_url=True,
         resolves_and_blocks_private_networks=True,
@@ -153,42 +202,16 @@ def _capabilities() -> CertifiedBackendCapabilities:
         enforces_depth_and_name_policy=True,
         enforces_archive_limits=True,
         enforces_duration_and_cancellation=True,
+        enforces_bounded_evidence_fetch=True,
+        enforces_quarantine_hash_probe=True,
+        enforces_probe_no_decode_extract_import=True,
+        enforces_deterministic_evidence_verification=True,
+        enforces_transactional_catalog_promotion=True,
     )
 
 
 def _source_record(source: HarvestSource) -> dict[str, Any]:
-    binding = source.evidence_binding
-    return {
-        "source_id": source.source_id,
-        "title": source.title,
-        "creator": source.creator,
-        "source_page": source.source_page,
-        "license_id": source.license_id,
-        "license_evidence_url": source.license_evidence_url,
-        "license_evidence_text": source.license_evidence_text,
-        "attribution_text": source.attribution_text,
-        "acquisition_reference": source.acquisition_reference,
-        "allowed_download_hosts": list(source.allowed_download_hosts),
-        "expected_response_sha256": source.expected_response_sha256,
-        "evidence_binding": {
-            "verifier_id": binding.verifier_id,
-            "verifier_code_identity_sha256": binding.verifier_code_identity_sha256,
-            "verified_at": binding.verified_at,
-            "expires_at": binding.expires_at,
-            "source_request_url_sha256": binding.source_request_url_sha256,
-            "source_final_url": binding.source_final_url,
-            "source_http_status": binding.source_http_status,
-            "source_content_sha256": binding.source_content_sha256,
-            "license_request_url_sha256": binding.license_request_url_sha256,
-            "license_final_url": binding.license_final_url,
-            "license_http_status": binding.license_http_status,
-            "license_content_sha256": binding.license_content_sha256,
-            "attestation_identity_sha256": binding.attestation_identity_sha256,
-        },
-        "zero_cost": True,
-        "permissive": True,
-        "taxonomy_hints": list(source.taxonomy_hints),
-    }
+    return trusted_catalog_source_record(source)
 
 
 def _write_catalog(project: Path, source: HarvestSource) -> Path:
@@ -203,6 +226,35 @@ def _write_catalog(project: Path, source: HarvestSource) -> Path:
     return path
 
 
+def test_catalog_promotion_reopens_target_and_preserves_injected_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    first = _source(b"first")
+    catalog_path = _write_catalog(project, first)
+    foreign_bytes = catalog_path.read_bytes() + b"\n"
+    second = replace(_source(b"second"), source_id="open.second")
+    real_read = catalog_writer_module._read_bound_catalog
+    raced = False
+
+    def swap_before_final_comparison(anchor: AnchoredDirectory, name: str) -> tuple[bytes, os.stat_result]:
+        nonlocal raced
+        if not raced:
+            raced = True
+            anchor.atomic_write_bytes(name, foreign_bytes)
+        return real_read(anchor, name)
+
+    monkeypatch.setattr(catalog_writer_module, "_read_bound_catalog", swap_before_final_comparison)
+    with pytest.raises(CatalogPromotionError, match="changed"):
+        publish_trusted_catalog_source(project, project, second)
+
+    assert raced is True
+    assert catalog_path.read_bytes() == foreign_bytes
+    assert load_trusted_catalog(project)[0].catalog_identity == first.catalog_identity
+
+
 def _write_capability_evidence(project: Path, capabilities: CertifiedBackendCapabilities) -> None:
     modules = hardened_backend_module_hashes()
     issued = datetime.now(timezone.utc) - timedelta(minutes=5)
@@ -213,6 +265,7 @@ def _write_capability_evidence(project: Path, capabilities: CertifiedBackendCapa
         "audited_at": (issued - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
         "implementation_identity_sha256": hardened_backend_code_identity(),
         "module_sha256": modules,
+        "runtime_dependencies": hardened_backend_runtime_dependencies(),
     }
     report["report_identity"] = _identity(report)
     report_bytes = strict_json_dumps(report, sort_keys=True).encode("utf-8")
@@ -227,12 +280,18 @@ def _write_capability_evidence(project: Path, capabilities: CertifiedBackendCapa
         "audit_report_relative_path": BACKEND_AUDIT_REPORT_RELATIVE_PATH.as_posix(),
         "audit_report_sha256": hashlib.sha256(report_bytes).hexdigest(),
         "module_sha256": modules,
+        "runtime_dependencies": hardened_backend_runtime_dependencies(),
         "capabilities": {
             "backend_id": capabilities.backend_id,
             "backend_version": capabilities.backend_version,
             "downloader_id": capabilities.downloader_id,
             "downloader_version": capabilities.downloader_version,
             "code_identity_sha256": capabilities.code_identity_sha256,
+            "dataset_import_callback_id": capabilities.dataset_import_callback_id,
+            "dataset_import_callback_code_identity_sha256": (capabilities.dataset_import_callback_code_identity_sha256),
+            "dataset_import_callback_runtime_identity_sha256": (
+                capabilities.dataset_import_callback_runtime_identity_sha256
+            ),
             "enforces_http_success": True,
             "enforces_https_direct_url": True,
             "resolves_and_blocks_private_networks": True,
@@ -244,6 +303,11 @@ def _write_capability_evidence(project: Path, capabilities: CertifiedBackendCapa
             "enforces_depth_and_name_policy": True,
             "enforces_archive_limits": True,
             "enforces_duration_and_cancellation": True,
+            "enforces_bounded_evidence_fetch": True,
+            "enforces_quarantine_hash_probe": True,
+            "enforces_probe_no_decode_extract_import": True,
+            "enforces_deterministic_evidence_verification": True,
+            "enforces_transactional_catalog_promotion": True,
         },
     }
     certificate["certificate_identity"] = _identity(certificate)
@@ -336,6 +400,226 @@ def test_receipt_downloader_manual_redirects_and_probe_only_html_allowlist(tmp_p
         )
 
 
+def test_receipt_downloader_bounds_hanging_resolver_by_duration(tmp_path: Path) -> None:
+    release = threading.Event()
+
+    def hanging_resolver(_host: str, _port: int) -> tuple[str, ...]:
+        release.wait(5)
+        return ("8.8.8.8",)
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(DownloadSecurityError, match="duration"):
+            download_file_with_receipt(
+                DOWNLOAD_URL,
+                tmp_path / "never.zip",
+                allowed_hosts=("downloads.example.test",),
+                max_duration_seconds=0.1,
+                resolver=hanging_resolver,
+                transport=FakeTransport([]),
+            )
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 1.0
+    assert not (tmp_path / "never.zip").exists()
+
+
+def test_receipt_downloader_observes_cancellation_during_connection_open(tmp_path: Path) -> None:
+    release = threading.Event()
+    cancelled = threading.Event()
+    response = FakeResponse(b"body")
+
+    class BlockingTransport:
+        def open(self, **_kwargs: Any) -> FakeResponse:
+            release.wait(5)
+            return response
+
+    timer = threading.Timer(0.1, cancelled.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(DownloadCancelled, match="cancelled"):
+            download_file_with_receipt(
+                DOWNLOAD_URL,
+                tmp_path / "cancelled-open.zip",
+                allowed_hosts=("downloads.example.test",),
+                max_duration_seconds=5,
+                cancel_requested=cancelled.is_set,
+                resolver=lambda _host, _port: ("8.8.8.8",),
+                transport=BlockingTransport(),
+            )
+    finally:
+        release.set()
+        timer.join()
+
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline and not response.closed:
+        time.sleep(0.01)
+    assert time.monotonic() - started < 1.0
+    assert response.closed is True
+    assert not (tmp_path / "cancelled-open.zip").exists()
+
+
+def test_receipt_downloader_observes_cancellation_during_blocking_read(tmp_path: Path) -> None:
+    release = threading.Event()
+    cancelled = threading.Event()
+
+    class BlockingResponse(FakeResponse):
+        def read(self, size: int = -1) -> bytes:
+            release.wait(5)
+            return super().read(size)
+
+    timer = threading.Timer(0.1, cancelled.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(DownloadCancelled, match="cancelled"):
+            download_file_with_receipt(
+                DOWNLOAD_URL,
+                tmp_path / "cancelled.zip",
+                allowed_hosts=("downloads.example.test",),
+                max_duration_seconds=5,
+                cancel_requested=cancelled.is_set,
+                resolver=lambda _host, _port: ("8.8.8.8",),
+                transport=FakeTransport([BlockingResponse(b"body")]),
+            )
+    finally:
+        release.set()
+        timer.join()
+
+    assert time.monotonic() - started < 1.0
+    assert not (tmp_path / "cancelled.zip").exists()
+    assert not list(tmp_path.glob(".cancelled.zip.*.part"))
+
+
+def test_receipt_downloader_hard_deadline_stops_slow_drip(tmp_path: Path) -> None:
+    class SlowDripResponse(FakeResponse):
+        def read(self, size: int = -1) -> bytes:
+            time.sleep(0.04)
+            return super().read(1 if size != 0 else size)
+
+    started = time.monotonic()
+    with pytest.raises(DownloadSecurityError, match="duration"):
+        download_file_with_receipt(
+            DOWNLOAD_URL,
+            tmp_path / "slow.zip",
+            allowed_hosts=("downloads.example.test",),
+            max_duration_seconds=0.12,
+            resolver=lambda _host, _port: ("8.8.8.8",),
+            transport=FakeTransport([SlowDripResponse(b"slow-drip")]),
+        )
+
+    assert time.monotonic() - started < 1.0
+    assert not (tmp_path / "slow.zip").exists()
+    assert not list(tmp_path.glob(".slow.zip.*.part"))
+
+
+def test_receipt_downloader_uses_one_reader_worker_for_many_chunks(tmp_path: Path, monkeypatch: Any) -> None:
+    body = b"x" * (2 * 1024 * 1024)
+    started_workers: list[str] = []
+    real_start = threading.Thread.start
+
+    def track_start(thread: threading.Thread) -> None:
+        started_workers.append(thread.name)
+        real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", track_start)
+    result = download_file_with_receipt(
+        DOWNLOAD_URL,
+        tmp_path / "many-chunks.zip",
+        allowed_hosts=("downloads.example.test",),
+        allowed_content_types=("application/zip",),
+        resolver=lambda _host, _port: ("8.8.8.8",),
+        transport=FakeTransport([FakeResponse(body)]),
+    )
+
+    assert result.receipt.response_bytes == len(body)
+    assert started_workers.count("spritelab-download-response-reader") == 1
+
+
+def test_repeated_resolver_timeouts_have_a_hard_worker_cap(tmp_path: Path) -> None:
+    release = threading.Event()
+
+    def hanging_resolver(_host: str, _port: int) -> tuple[str, ...]:
+        release.wait(5)
+        return ("8.8.8.8",)
+
+    try:
+        for index in range(download_module._BOUNDED_WORKER_CAPACITY + 3):
+            with pytest.raises(DownloadSecurityError):
+                download_file_with_receipt(
+                    DOWNLOAD_URL,
+                    tmp_path / f"timeout-{index}.zip",
+                    allowed_hosts=("downloads.example.test",),
+                    max_duration_seconds=0.05,
+                    resolver=hanging_resolver,
+                    transport=FakeTransport([]),
+                )
+        active = [
+            thread
+            for thread in threading.enumerate()
+            if thread.name == "spritelab-download-hostname resolution" and thread.is_alive()
+        ]
+        assert len(active) <= download_module._BOUNDED_WORKER_CAPACITY
+    finally:
+        release.set()
+
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline and any(
+        thread.name == "spritelab-download-hostname resolution" and thread.is_alive()
+        for thread in threading.enumerate()
+    ):
+        time.sleep(0.01)
+    assert not any(
+        thread.name == "spritelab-download-hostname resolution" and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def test_receipt_download_holds_trusted_parent_before_network_aba(tmp_path: Path) -> None:
+    parent = tmp_path / "trusted-parent"
+    moved = tmp_path / "trusted-parent-held"
+    outside = tmp_path / "outside"
+    parent.mkdir()
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel.write_bytes(b"preserve")
+    swapped = False
+
+    def swapping_resolver(_host: str, _port: int) -> tuple[str, ...]:
+        nonlocal swapped
+        try:
+            os.replace(parent, moved)
+        except OSError:
+            pytest.skip("the platform held the trusted download parent against rename")
+        try:
+            os.symlink(outside, parent, target_is_directory=True)
+        except OSError:
+            os.replace(moved, parent)
+            pytest.skip("directory symbolic links are unavailable in this test session")
+        swapped = True
+        return ("8.8.8.8",)
+
+    try:
+        with pytest.raises((DownloadSecurityError, UnsafeFilesystemOperation)):
+            download_file_with_receipt(
+                DOWNLOAD_URL,
+                parent / "response.zip",
+                allowed_hosts=("downloads.example.test",),
+                allowed_content_types=("application/zip",),
+                resolver=swapping_resolver,
+                transport=FakeTransport([FakeResponse(b"archive")]),
+            )
+    finally:
+        if swapped:
+            os.unlink(parent)
+            os.replace(moved, parent)
+
+    assert sentinel.read_bytes() == b"preserve"
+    assert not (outside / "response.zip").exists()
+
+
 def test_hardened_backend_keeps_raw_archive_outside_artifacts_and_refuses_reuse(tmp_path: Path) -> None:
     archive = make_zip_of_pngs(tmp_path / "fixture.zip", ["nested/sprite.png"])
     archive_bytes = archive.read_bytes()
@@ -390,6 +674,36 @@ def test_archive_extraction_cancellation_leaves_destination_unpublished(tmp_path
     assert not output.exists()
 
 
+def test_archive_snapshot_defeats_path_aba_between_summary_and_extraction(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    archive = make_zip_of_pngs(tmp_path / "pack.zip", ["sprite.png"])
+    original_png = (tmp_path / "pack_staging" / "sprite.png").read_bytes()
+    attacker_archive = tmp_path / "attacker.zip"
+    with zipfile.ZipFile(attacker_archive, "w") as handle:
+        handle.writestr("sprite.png", b"\x89PNG\r\n\x1a\nattacker")
+    parked_original = tmp_path / "parked-original.zip"
+    real_extract_zip = archive_module._extract_zip
+
+    def aba_extract(*args: Any, **kwargs: Any) -> None:
+        archive.replace(parked_original)
+        attacker_archive.replace(archive)
+        try:
+            real_extract_zip(*args, **kwargs)
+        finally:
+            archive.replace(attacker_archive)
+            parked_original.replace(archive)
+
+    monkeypatch.setattr(archive_module, "_extract_zip", aba_extract)
+    with ArchiveSnapshot.open(archive) as snapshot:
+        assert archive_member_summary(snapshot, include_member_globs=("*.png",))["selected_image_members"] == [
+            "sprite.png"
+        ]
+        extract_archive(snapshot, tmp_path / "out", include_member_globs=("*.png",))
+    assert (tmp_path / "out" / "sprite.png").read_bytes() == original_png
+
+
 def test_trusted_catalog_loader_is_passive_strict_and_single_link(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -408,6 +722,60 @@ def test_trusted_catalog_loader_is_passive_strict_and_single_link(tmp_path: Path
     os.link(catalog_path, other)
     with pytest.raises(TrustedCatalogError, match="single-link"):
         load_trusted_catalog(project)
+
+
+@pytest.mark.parametrize("evidence_kind", ["catalog", "certificate"])
+def test_passive_evidence_loaders_refuse_parent_rename_symlink_aba(
+    tmp_path: Path,
+    monkeypatch: Any,
+    evidence_kind: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = _source(b"archive")
+    _write_catalog(project, source)
+    if evidence_kind == "certificate":
+        _write_capability_evidence(project, _capabilities())
+    evidence_parent = project / "artifacts" / "harvest"
+    moved_parent = project / "artifacts" / "harvest-held"
+    outside = tmp_path / "outside-evidence"
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel.write_bytes(b"foreign evidence must remain untouched")
+    real_open = AnchoredDirectory.open_file
+    swapped = False
+
+    def swap_before_relative_open(
+        anchor: AnchoredDirectory,
+        name: str,
+        flags: int,
+        mode: int = 0o600,
+    ) -> int:
+        nonlocal swapped
+        if not swapped and anchor.directory == evidence_parent:
+            os.replace(evidence_parent, moved_parent)
+            try:
+                os.symlink(outside, evidence_parent, target_is_directory=True)
+            except OSError:
+                os.replace(moved_parent, evidence_parent)
+                pytest.skip("directory symbolic links are unavailable in this test session")
+            swapped = True
+        return real_open(anchor, name, flags, mode)
+
+    monkeypatch.setattr(AnchoredDirectory, "open_file", swap_before_relative_open)
+    try:
+        if evidence_kind == "catalog":
+            with pytest.raises(TrustedCatalogError, match="unsafe"):
+                load_trusted_catalog(project)
+        else:
+            with pytest.raises(BackendCapabilityCertificateError, match="unsafe"):
+                load_backend_capability_evidence(project)
+    finally:
+        if swapped:
+            os.unlink(evidence_parent)
+            os.replace(moved_parent, evidence_parent)
+
+    assert sentinel.read_bytes() == b"foreign evidence must remain untouched"
 
 
 def test_independent_certificate_activates_default_plugin_without_network(tmp_path: Path, monkeypatch: Any) -> None:
@@ -434,3 +802,92 @@ def test_independent_certificate_activates_default_plugin_without_network(tmp_pa
     certificate_path.write_text(json.dumps(certificate), encoding="utf-8")
     with pytest.raises(BackendCapabilityCertificateError, match="changed after the PASS audit"):
         load_backend_capability_certificate(project)
+
+
+@pytest.mark.parametrize("distribution", ["numpy", "PyYAML"])
+def test_independent_certificate_rejects_conditioned_runtime_dependency_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    distribution: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    capabilities = _capabilities()
+    _write_capability_evidence(project, capabilities)
+    original_version = trusted_backend_module.importlib.metadata.version
+
+    def drifted_version(name: str) -> str:
+        version = original_version(name)
+        return f"{version}+drift" if name.casefold() == distribution.casefold() else version
+
+    monkeypatch.setattr(trusted_backend_module.importlib.metadata, "version", drifted_version)
+    with pytest.raises(BackendCapabilityCertificateError, match="runtime dependencies changed"):
+        load_backend_capability_certificate(project)
+
+
+def test_independent_certificate_rejects_conditioned_callback_runtime_identity_drift(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    capabilities = _capabilities()
+    _write_capability_evidence(project, capabilities)
+    certificate_path = project / BACKEND_CAPABILITIES_RELATIVE_PATH
+    certificate = json.loads(certificate_path.read_text(encoding="utf-8"))
+    certificate["capabilities"]["dataset_import_callback_runtime_identity_sha256"] = "0" * 64
+    certificate["certificate_identity"] = _identity(
+        {key: value for key, value in certificate.items() if key != "certificate_identity"}
+    )
+    certificate_path.write_text(strict_json_dumps(certificate, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(BackendCapabilityCertificateError, match="Dataset import callback runtime"):
+        load_backend_capability_certificate(project)
+
+
+def test_start_reloads_catalog_and_certificate_and_rejects_drift(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = _source(b"archive")
+    catalog_path = _write_catalog(project, source)
+    capabilities = _capabilities()
+    _write_capability_evidence(project, capabilities)
+    evidence = load_backend_capability_evidence(project)
+    assert evidence is not None
+    assert evidence.to_dict()["audit_report_sha256"]
+
+    def live_configuration() -> tuple[tuple[HarvestSource, ...], Any]:
+        return load_trusted_catalog(project), load_backend_capability_evidence(project)
+
+    service = HarvestService(
+        project,
+        sources=(source,),
+        backend_factory=lambda: pytest.fail("stale configuration must fail before backend construction"),
+        backend_capabilities=capabilities,
+        backend_capability_evidence=evidence,
+        live_configuration_loader=live_configuration,
+    )
+    changed = replace(source, title="Changed open sprite pack")
+    payload = {
+        "schema_version": TRUSTED_CATALOG_SCHEMA,
+        "sources": [_source_record(changed)],
+        "catalog_identity": trusted_catalog_identity((changed,)),
+    }
+    catalog_path.write_text(strict_json_dumps(payload, sort_keys=True), encoding="utf-8")
+    inventory = service.inventory()
+    with pytest.raises(HarvestError, match="changed") as error:
+        service.start(
+            source.source_id,
+            idempotency_key="live-drift-0001",
+            explicit_action=True,
+            authorize_zero_cost=True,
+            authorize_permissive_license=True,
+            authorize_existing_inventory_reviewed=True,
+            reuse_evidence={
+                "decision": "reuse_exhausted",
+                "evidence_code": "no_reusable_items",
+                "inventory_identity": inventory["inventory_identity"],
+                "assessed_usable_items": 0,
+                "required_usable_items": 1,
+                "deficit_items": 1,
+            },
+        )
+    assert error.value.code == "harvest_live_configuration_changed"
+    assert not (project / "harvest_runs").exists()

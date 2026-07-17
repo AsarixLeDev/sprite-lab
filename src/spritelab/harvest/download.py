@@ -6,22 +6,31 @@ import hashlib
 import http.client
 import ipaddress
 import os
+import queue
 import socket
 import ssl
 import stat
-import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+import uuid
+import warnings
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from spritelab.utils.safe_fs import require_confined_path
+from spritelab.utils.safe_fs import AnchoredDirectory, OwnedFileIdentity, require_confined_path
 
 DEFAULT_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+HARVEST_USER_AGENT = "spritelab-harvest/0.1"
 _COPY_CHUNK_BYTES = 1 << 20
+_NETWORK_READ_CHUNK_BYTES = 64 * 1024
+_CANCEL_POLL_SECONDS = 0.05
+_BOUNDED_WORKER_CAPACITY = 4
+_BOUNDED_WORKERS = threading.BoundedSemaphore(_BOUNDED_WORKER_CAPACITY)
 
 
 class DownloadSecurityError(ValueError):
@@ -30,6 +39,10 @@ class DownloadSecurityError(ValueError):
 
 class DownloadCancelled(DownloadSecurityError):
     """Raised when a bounded download observes an explicit cancellation."""
+
+
+class DownloadRecoveryResidueWarning(RuntimeWarning):
+    """A verified download committed while an exact old backup was retained."""
 
 
 @dataclass(frozen=True)
@@ -87,6 +100,7 @@ def download_file_with_receipt(
     timeout_seconds: float = 60.0,
     max_duration_seconds: float | None = None,
     allowed_content_types: Sequence[str] = (),
+    accepted_http_statuses: Sequence[int] = (),
     max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
     expected_sha256: str | None = None,
     max_redirects: int = 5,
@@ -96,6 +110,7 @@ def download_file_with_receipt(
     progress: DownloadProgress | None = None,
     resolver: HostResolver | None = None,
     transport: PinnedHTTPTransport | None = None,
+    destination_anchor: AnchoredDirectory | None = None,
 ) -> ReceiptDownloadResult:
     """Download with manual redirects and one pinned DNS answer per hop.
 
@@ -114,6 +129,11 @@ def download_file_with_receipt(
         raise ValueError("max_bytes must be positive")
     if type(max_redirects) is not int or max_redirects < 0:
         raise ValueError("max_redirects must be a non-negative integer")
+    accepted_statuses = tuple(accepted_http_statuses)
+    if any(type(value) is not int or not 100 <= value <= 599 for value in accepted_statuses):
+        raise ValueError("accepted_http_statuses must contain exact HTTP status integers")
+    if len(set(accepted_statuses)) != len(accepted_statuses):
+        raise ValueError("accepted_http_statuses must be unique")
     normalized_hosts = tuple(host.casefold().rstrip(".") for host in allowed_hosts)
     if not normalized_hosts or len(set(normalized_hosts)) != len(normalized_hosts):
         raise ValueError("allowed_hosts must contain unique exact hostnames")
@@ -122,6 +142,34 @@ def download_file_with_receipt(
     safe_output_path = _prepare_download_path(output_path, create_parent=False)
     if os.path.lexists(safe_output_path) and not overwrite:
         raise FileExistsError(f"output file already exists: {safe_output_path}")
+    if destination_anchor is None:
+        safe_output_path = _prepare_download_path(safe_output_path, create_parent=True)
+        with AnchoredDirectory(safe_output_path.parent, safe_output_path.parent) as trusted_parent:
+            result = download_file_with_receipt(
+                url,
+                safe_output_path,
+                allowed_hosts=allowed_hosts,
+                overwrite=overwrite,
+                timeout_seconds=timeout_seconds,
+                max_duration_seconds=max_duration_seconds,
+                allowed_content_types=allowed_content_types,
+                accepted_http_statuses=accepted_http_statuses,
+                max_bytes=max_bytes,
+                expected_sha256=expected_sha256,
+                max_redirects=max_redirects,
+                require_https=require_https,
+                allow_private_hosts=allow_private_hosts,
+                cancel_requested=cancel_requested,
+                progress=progress,
+                resolver=resolver,
+                transport=transport,
+                destination_anchor=trusted_parent,
+            )
+        return ReceiptDownloadResult(path=requested_output_path, receipt=result.receipt)
+    destination_anchor.verify()
+    if safe_output_path.parent != destination_anchor.directory:
+        raise DownloadSecurityError("download destination does not belong to the supplied anchored parent")
+    parent = destination_anchor
 
     started = time.monotonic()
     deadline = started + duration_limit
@@ -137,7 +185,14 @@ def download_file_with_receipt(
             normalized_hosts,
             require_https=require_https,
         )
-        addresses = tuple(resolve(host, port))
+        addresses = tuple(
+            _bounded_call(
+                lambda host=host, port=port: tuple(resolve(host, port)),
+                cancel_requested=cancel_requested,
+                deadline=deadline,
+                label="hostname resolution",
+            )
+        )
         selected_ip = _select_pinned_address(
             host,
             addresses,
@@ -145,12 +200,20 @@ def download_file_with_receipt(
         )
         _check_download_abort(cancel_requested, deadline)
         remaining = max(0.001, min(timeout_seconds, deadline - time.monotonic()))
-        response = pinned_transport.open(
-            url=current_url,
-            pinned_ip=selected_ip,
-            server_hostname=host,
-            port=port,
-            timeout_seconds=remaining,
+        response = _bounded_call(
+            lambda current_url=current_url, selected_ip=selected_ip, host=host, port=port, remaining=remaining: (
+                pinned_transport.open(
+                    url=current_url,
+                    pinned_ip=selected_ip,
+                    server_hostname=host,
+                    port=port,
+                    timeout_seconds=remaining,
+                )
+            ),
+            cancel_requested=cancel_requested,
+            deadline=deadline,
+            label="connection open",
+            late_result_cleanup=lambda late_response: late_response.close(),
         )
         try:
             _verify_peer_address(response.peer_ip, selected_ip)
@@ -164,7 +227,7 @@ def download_file_with_receipt(
                 redirect_chain.append(current_url)
                 current_url = urllib.parse.urljoin(current_url, locations[0].strip())
                 continue
-            if not 200 <= status < 300:
+            if not 200 <= status < 300 and status not in accepted_statuses:
                 raise DownloadSecurityError(f"download returned HTTP status {status}")
 
             content_types = _header_values(response.headers, "Content-Type")
@@ -185,44 +248,57 @@ def download_file_with_receipt(
                     f"download declares {declared_length} bytes, exceeding the {max_bytes}-byte limit"
                 )
 
-            safe_output_path = _prepare_download_path(safe_output_path, create_parent=True)
-            if os.path.lexists(safe_output_path) and not overwrite:
+            parent.verify()
+            if parent.lexists(safe_output_path.name) and not overwrite:
                 raise FileExistsError(f"output file already exists: {safe_output_path}")
-            descriptor, part_name = tempfile.mkstemp(
-                prefix=f".{safe_output_path.name}.",
-                suffix=".part",
-                dir=safe_output_path.parent,
-            )
-            part_path = Path(part_name)
-            digest = hashlib.sha256()
-            received = 0
-            with os.fdopen(descriptor, "wb") as handle:
-                while True:
+            with nullcontext(parent) as parent:
+                descriptor, part_name, part_identity = _create_owned_partial(parent, safe_output_path.name)
+                part_path = parent.directory / part_name
+                try:
+                    digest = hashlib.sha256()
+                    received = 0
+                    handle = os.fdopen(descriptor, "wb")
+                    descriptor = -1
+                    with handle:
+                        for chunk in _bounded_response_chunks(
+                            response,
+                            cancel_requested=cancel_requested,
+                            deadline=deadline,
+                        ):
+                            if received + len(chunk) > max_bytes:
+                                raise DownloadSecurityError(f"download exceeded the {max_bytes}-byte limit")
+                            handle.write(chunk)
+                            digest.update(chunk)
+                            received += len(chunk)
+                            if progress is not None:
+                                progress(received, declared_length)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    if declared_length is not None and received != declared_length:
+                        raise DownloadSecurityError(
+                            f"download length mismatch: expected {declared_length} bytes, received {received}"
+                        )
+                    actual_digest = digest.hexdigest()
+                    if expected_digest is not None and actual_digest != expected_digest:
+                        raise DownloadSecurityError(
+                            f"download SHA256 mismatch: expected {expected_digest}, got {actual_digest}"
+                        )
                     _check_download_abort(cancel_requested, deadline)
-                    chunk = response.read(_COPY_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    if received + len(chunk) > max_bytes:
-                        raise DownloadSecurityError(f"download exceeded the {max_bytes}-byte limit")
-                    handle.write(chunk)
-                    digest.update(chunk)
-                    received += len(chunk)
-                    if progress is not None:
-                        progress(received, declared_length)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if declared_length is not None and received != declared_length:
-                raise DownloadSecurityError(
-                    f"download length mismatch: expected {declared_length} bytes, received {received}"
-                )
-            actual_digest = digest.hexdigest()
-            if expected_digest is not None and actual_digest != expected_digest:
-                raise DownloadSecurityError(
-                    f"download SHA256 mismatch: expected {expected_digest}, got {actual_digest}"
-                )
-            _check_download_abort(cancel_requested, deadline)
-            _publish_download(part_path, safe_output_path, overwrite=overwrite)
-            part_path = None
+                    _publish_download(
+                        parent,
+                        part_name,
+                        safe_output_path.name,
+                        overwrite=overwrite,
+                        expected_sha256=actual_digest,
+                        expected_size=received,
+                    )
+                    part_path = None
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                    if part_path is not None:
+                        parent.unlink_if_owned(part_name, part_identity)
+                        part_path = None
             elapsed = time.monotonic() - started
             return ReceiptDownloadResult(
                 path=requested_output_path,
@@ -238,8 +314,6 @@ def download_file_with_receipt(
             )
         finally:
             response.close()
-            if part_path is not None:
-                part_path.unlink(missing_ok=True)
 
 
 def compute_sha256(
@@ -283,7 +357,7 @@ def download_file(
 
     Both the initial URL and every redirect must resolve only to globally
     routable addresses unless ``allow_private_hosts`` is explicitly enabled.
-    ``overwrite=False`` uses an atomic exclusive hard-link publication so a
+    ``overwrite=False`` uses an atomic exclusive publication so a
     concurrently-created destination is never replaced.
     """
 
@@ -333,50 +407,61 @@ def download_file(
                     f"download declares {declared_length} bytes, exceeding the {max_bytes}-byte limit"
                 )
             progress = _make_progress(declared_length, final_url)
-            descriptor, part_name = tempfile.mkstemp(
-                prefix=f".{output_path.name}.",
-                suffix=".part",
-                dir=output_path.parent,
-            )
-            part_path = Path(part_name)
-            digest = hashlib.sha256()
-            received = 0
-            try:
-                with os.fdopen(descriptor, "wb") as handle:
-                    while True:
-                        chunk = response.read(_COPY_CHUNK_BYTES)
-                        if not chunk:
-                            break
-                        if received + len(chunk) > max_bytes:
-                            raise DownloadSecurityError(f"download exceeded the {max_bytes}-byte limit")
-                        handle.write(chunk)
-                        digest.update(chunk)
-                        received += len(chunk)
+            with AnchoredDirectory(output_path.parent, output_path.parent) as parent:
+                descriptor, part_name, part_identity = _create_owned_partial(parent, output_path.name)
+                part_path = parent.directory / part_name
+                try:
+                    try:
+                        digest = hashlib.sha256()
+                        received = 0
+                        handle = os.fdopen(descriptor, "wb")
+                        descriptor = -1
+                        with handle:
+                            while True:
+                                chunk = response.read(_COPY_CHUNK_BYTES)
+                                if not chunk:
+                                    break
+                                if received + len(chunk) > max_bytes:
+                                    raise DownloadSecurityError(f"download exceeded the {max_bytes}-byte limit")
+                                handle.write(chunk)
+                                digest.update(chunk)
+                                received += len(chunk)
+                                if progress is not None:
+                                    progress.update(len(chunk))
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                    finally:
                         if progress is not None:
-                            progress.update(len(chunk))
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            finally:
-                if progress is not None:
-                    progress.close()
+                            progress.close()
 
-            if declared_length is not None and received != declared_length:
-                raise DownloadSecurityError(
-                    f"download length mismatch: expected {declared_length} bytes, received {received}"
-                )
-            actual_digest = digest.hexdigest()
-            if expected_digest is not None and actual_digest != expected_digest:
-                raise DownloadSecurityError(
-                    f"download SHA256 mismatch: expected {expected_digest}, got {actual_digest}"
-                )
+                    if declared_length is not None and received != declared_length:
+                        raise DownloadSecurityError(
+                            f"download length mismatch: expected {declared_length} bytes, received {received}"
+                        )
+                    actual_digest = digest.hexdigest()
+                    if expected_digest is not None and actual_digest != expected_digest:
+                        raise DownloadSecurityError(
+                            f"download SHA256 mismatch: expected {expected_digest}, got {actual_digest}"
+                        )
 
-        assert part_path is not None
-        _publish_download(part_path, output_path, overwrite=overwrite)
-        part_path = None
+                    _publish_download(
+                        parent,
+                        part_name,
+                        output_path.name,
+                        overwrite=overwrite,
+                        expected_sha256=actual_digest,
+                        expected_size=received,
+                    )
+                    part_path = None
+                finally:
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                    if part_path is not None:
+                        parent.unlink_if_owned(part_name, part_identity)
+                        part_path = None
         return requested_output_path
     finally:
-        if part_path is not None:
-            part_path.unlink(missing_ok=True)
+        part_path = None
 
 
 def _open_url(
@@ -453,7 +538,7 @@ class _StdlibPinnedTransport:
                 headers={
                     "Accept": "*/*",
                     "Connection": "close",
-                    "User-Agent": "spritelab-harvest/0.1",
+                    "User-Agent": HARVEST_USER_AGENT,
                 },
             )
             response = connection.getresponse()
@@ -548,6 +633,146 @@ def _check_download_abort(cancel_requested: CancelProbe | None, deadline: float)
         raise DownloadCancelled("download was cancelled")
     if time.monotonic() > deadline:
         raise DownloadSecurityError("download exceeded its duration limit")
+
+
+def _bounded_call(
+    call: Callable[[], Any],
+    *,
+    cancel_requested: CancelProbe | None,
+    deadline: float,
+    label: str,
+    late_result_cleanup: Callable[[Any], None] | None = None,
+) -> Any:
+    """Run one potentially blocking provider call behind deadline polling."""
+
+    if not _BOUNDED_WORKERS.acquire(blocking=False):
+        raise DownloadSecurityError(f"bounded worker capacity is exhausted during {label}")
+    finished = threading.Event()
+    abandoned = threading.Event()
+    outcome: list[tuple[bool, Any]] = []
+    state_lock = threading.Lock()
+
+    def invoke() -> None:
+        try:
+            try:
+                value = call()
+            except BaseException as exc:
+                succeeded = False
+                value = exc
+            else:
+                succeeded = True
+            cleanup_value: Any | None = None
+            with state_lock:
+                if abandoned.is_set():
+                    if succeeded:
+                        cleanup_value = value
+                else:
+                    outcome.append((succeeded, value))
+            if cleanup_value is not None and late_result_cleanup is not None:
+                try:
+                    late_result_cleanup(cleanup_value)
+                except BaseException:
+                    pass
+        finally:
+            finished.set()
+            _BOUNDED_WORKERS.release()
+
+    worker = threading.Thread(target=invoke, name=f"spritelab-download-{label}", daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        _BOUNDED_WORKERS.release()
+        raise
+    try:
+        while not finished.is_set():
+            _check_download_abort(cancel_requested, deadline)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DownloadSecurityError(f"download exceeded its duration limit during {label}")
+            finished.wait(min(_CANCEL_POLL_SECONDS, remaining))
+        _check_download_abort(cancel_requested, deadline)
+    except BaseException:
+        cleanup_value: Any | None = None
+        with state_lock:
+            abandoned.set()
+            if outcome and outcome[0][0]:
+                _succeeded, cleanup_value = outcome.pop()
+        if cleanup_value is not None and late_result_cleanup is not None:
+            try:
+                late_result_cleanup(cleanup_value)
+            except BaseException:
+                pass
+        raise
+    succeeded, value = outcome[0]
+    if not succeeded:
+        raise value
+    return value
+
+
+def _bounded_response_chunks(
+    response: PinnedHTTPResponse,
+    *,
+    cancel_requested: CancelProbe | None,
+    deadline: float,
+) -> Iterator[bytes]:
+    """Yield one response through a single bounded reader worker."""
+
+    if not _BOUNDED_WORKERS.acquire(blocking=False):
+        raise DownloadSecurityError("bounded worker capacity is exhausted during response read")
+    outcomes: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=2)
+    abandoned = threading.Event()
+
+    def publish(kind: str, value: Any) -> bool:
+        while not abandoned.is_set():
+            try:
+                outcomes.put((kind, value), timeout=_CANCEL_POLL_SECONDS)
+            except queue.Full:
+                continue
+            return True
+        return False
+
+    def read_response() -> None:
+        try:
+            while not abandoned.is_set():
+                chunk = response.read(_NETWORK_READ_CHUNK_BYTES)
+                if not chunk:
+                    publish("eof", None)
+                    return
+                if not publish("chunk", chunk):
+                    return
+        except BaseException as exc:
+            publish("error", exc)
+        finally:
+            _BOUNDED_WORKERS.release()
+
+    worker = threading.Thread(
+        target=read_response,
+        name="spritelab-download-response-reader",
+        daemon=True,
+    )
+    try:
+        worker.start()
+    except BaseException:
+        _BOUNDED_WORKERS.release()
+        raise
+    try:
+        while True:
+            _check_download_abort(cancel_requested, deadline)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DownloadSecurityError("download exceeded its duration limit during response read")
+            try:
+                kind, value = outcomes.get(timeout=min(_CANCEL_POLL_SECONDS, remaining))
+            except queue.Empty:
+                continue
+            if kind == "chunk":
+                yield value
+            elif kind == "eof":
+                return
+            else:
+                raise value
+    finally:
+        abandoned.set()
 
 
 def _prepare_download_path(path: str | Path, *, create_parent: bool) -> Path:
@@ -657,15 +882,263 @@ def _normalize_expected_sha256(value: str | None) -> str | None:
     return normalized
 
 
-def _publish_download(part_path: Path, output_path: Path, *, overwrite: bool) -> None:
-    if overwrite:
-        os.replace(part_path, output_path)
+def _publish_download(
+    parent: AnchoredDirectory,
+    part_name: str,
+    output_name: str,
+    *,
+    overwrite: bool,
+    expected_sha256: str,
+    expected_size: int,
+) -> None:
+    """Publish one verified temp inode with rollback before the commit point."""
+
+    before = parent.lstat(part_name)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or _is_link_or_reparse(before)
+        or before.st_nlink != 1
+        or before.st_size != expected_size
+    ):
+        raise DownloadSecurityError("download temporary file is unsafe")
+    owned_new = OwnedFileIdentity.from_stat(before)
+    descriptor = parent.open_file(part_name, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _require_same_download_inode(before, opened, expected_links=1)
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            while chunk := handle.read(_COPY_CHUNK_BYTES):
+                digest.update(chunk)
+        opened_after_hash = os.fstat(descriptor)
+        _require_same_download_inode(before, opened_after_hash, expected_links=1)
+        _require_same_download_inode(before, parent.lstat(part_name), expected_links=1)
+        if digest.hexdigest() != expected_sha256:
+            raise DownloadSecurityError("download temporary bytes changed before publication")
+    finally:
+        os.close(descriptor)
+
+    if not overwrite or not parent.lexists(output_name):
+        _publish_download_exclusive(
+            parent,
+            part_name,
+            output_name,
+            before,
+            owned_new,
+            expected_sha256=expected_sha256,
+        )
+        return
+    _publish_download_overwrite(
+        parent,
+        part_name,
+        output_name,
+        before,
+        owned_new,
+        expected_sha256=expected_sha256,
+    )
+
+
+def _publish_download_exclusive(
+    parent: AnchoredDirectory,
+    part_name: str,
+    output_name: str,
+    before: os.stat_result,
+    owned_new: OwnedFileIdentity,
+    *,
+    expected_sha256: str,
+) -> None:
+    published = False
+    try:
+        try:
+            parent.rename(part_name, output_name, replace=False)
+        except FileExistsError as exc:
+            raise FileExistsError(f"output file already exists: {parent.directory / output_name}") from exc
+        published = True
+        _verify_published_download(
+            parent,
+            output_name,
+            before,
+            expected_sha256=expected_sha256,
+            expected_links=1,
+        )
+    except BaseException:
+        if published:
+            parent.quarantine_if_owned(
+                output_name,
+                owned_new,
+                prefix=f".{output_name}.rollback-",
+            )
+        raise
+
+
+def _publish_download_overwrite(
+    parent: AnchoredDirectory,
+    part_name: str,
+    output_name: str,
+    before: os.stat_result,
+    owned_new: OwnedFileIdentity,
+    *,
+    expected_sha256: str,
+) -> None:
+    old_before = parent.lstat(output_name)
+    if _is_link_or_reparse(old_before) or not stat.S_ISREG(old_before.st_mode) or old_before.st_nlink < 1:
+        raise DownloadSecurityError("download overwrite destination is unsafe")
+    owned_old = OwnedFileIdentity.from_stat(old_before)
+    descriptor = parent.open_file(output_name, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    backup_name: str | None = None
+    try:
+        opened_old = os.fstat(descriptor)
+        _require_same_download_inode(old_before, opened_old, expected_links=old_before.st_nlink)
+        backup_name = _allocate_unique_link_name(parent, output_name, "backup")
+        parent.link(output_name, backup_name)
+        _require_same_download_inode(
+            old_before,
+            parent.lstat(output_name),
+            expected_links=old_before.st_nlink + 1,
+        )
+        _require_same_download_inode(
+            old_before,
+            parent.lstat(backup_name),
+            expected_links=old_before.st_nlink + 1,
+        )
+    except BaseException:
+        if backup_name is not None:
+            parent.unlink_if_owned(backup_name, owned_old)
+        raise
+    finally:
+        os.close(descriptor)
+
+    try:
+        parent.replace(part_name, output_name)
+        _verify_published_download(
+            parent,
+            output_name,
+            before,
+            expected_sha256=expected_sha256,
+            expected_links=1,
+        )
+    except BaseException:
+        if backup_name is None:
+            raise DownloadSecurityError("download overwrite backup evidence is unavailable") from None
+        if _entry_matches(parent, output_name, owned_new) and _entry_matches(parent, backup_name, owned_old):
+            rolled_back = parent.quarantine_if_owned(
+                output_name,
+                owned_new,
+                prefix=f".{output_name}.rollback-",
+            )
+            if rolled_back is not None and _entry_matches(parent, backup_name, owned_old):
+                parent.rename(backup_name, output_name, replace=False)
+                _require_same_download_inode(
+                    old_before,
+                    parent.lstat(output_name),
+                    expected_links=old_before.st_nlink,
+                )
+        elif _entry_matches(parent, output_name, owned_old):
+            parent.unlink_if_owned(backup_name, owned_old)
+        raise
+
+    if backup_name is None:
+        raise DownloadSecurityError("download overwrite backup evidence is unavailable")
+    if os.name != "nt":
+        _emit_download_recovery_warning(
+            "Verified download committed; the exact previous destination was retained as a recovery residue."
+        )
         return
     try:
-        os.link(part_path, output_path)
-    except FileExistsError as exc:
-        raise FileExistsError(f"output file already exists: {output_path}") from exc
-    part_path.unlink()
+        cleaned = parent.unlink_if_owned(backup_name, owned_old, missing_ok=False)
+    except OSError:
+        cleaned = False
+    if not cleaned:
+        _emit_download_recovery_warning(
+            "Verified download committed; the exact previous destination was retained as a recovery residue."
+        )
+
+
+def _emit_download_recovery_warning(message: str) -> None:
+    try:
+        warnings.warn(message, DownloadRecoveryResidueWarning, stacklevel=3)
+    except Exception:
+        # Advisory warning delivery follows the durable commit and must not
+        # make a successful publication appear to have failed.
+        return
+
+
+def _verify_published_download(
+    parent: AnchoredDirectory,
+    output_name: str,
+    before: os.stat_result,
+    *,
+    expected_sha256: str,
+    expected_links: int,
+) -> None:
+    descriptor = parent.open_file(output_name, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        opened = os.fstat(descriptor)
+        _require_same_download_inode(before, opened, expected_links=expected_links)
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            while chunk := handle.read(_COPY_CHUNK_BYTES):
+                digest.update(chunk)
+        opened_after = os.fstat(descriptor)
+        _require_same_download_inode(before, opened_after, expected_links=expected_links)
+    finally:
+        os.close(descriptor)
+    _require_same_download_inode(before, parent.lstat(output_name), expected_links=expected_links)
+    if digest.hexdigest() != expected_sha256:
+        raise DownloadSecurityError("published download bytes changed during publication")
+    parent.verify()
+
+
+def _entry_matches(parent: AnchoredDirectory, name: str, identity: OwnedFileIdentity) -> bool:
+    try:
+        return identity.matches(parent.lstat(name))
+    except FileNotFoundError:
+        return False
+
+
+def _allocate_unique_link_name(parent: AnchoredDirectory, output_name: str, purpose: str) -> str:
+    for _attempt in range(16):
+        candidate = f".{output_name}.{purpose}-{uuid.uuid4().hex}"
+        if not parent.lexists(candidate):
+            return candidate
+    raise DownloadSecurityError(f"could not allocate a unique download {purpose} name")
+
+
+def _create_owned_partial(
+    parent: AnchoredDirectory,
+    output_name: str,
+) -> tuple[int, str, OwnedFileIdentity]:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    for _attempt in range(16):
+        part_name = f".{output_name}.{uuid.uuid4().hex}.part"
+        try:
+            descriptor = parent.open_file(part_name, flags)
+        except FileExistsError:
+            continue
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or _is_link_or_reparse(metadata) or metadata.st_nlink != 1:
+            os.close(descriptor)
+            raise DownloadSecurityError("download temporary descriptor is unsafe")
+        return descriptor, part_name, OwnedFileIdentity.from_stat(metadata)
+    raise DownloadSecurityError("could not allocate a unique download temporary file")
+
+
+def _require_same_download_inode(
+    before: os.stat_result,
+    after: os.stat_result,
+    *,
+    expected_links: int,
+) -> None:
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or _is_link_or_reparse(after)
+        or after.st_dev != before.st_dev
+        or after.st_ino != before.st_ino
+        or after.st_size != before.st_size
+        or after.st_mtime_ns != before.st_mtime_ns
+        or after.st_nlink != expected_links
+    ):
+        raise DownloadSecurityError("download inode identity changed during publication")
 
 
 def _is_link_or_reparse(metadata: os.stat_result) -> bool:
@@ -686,8 +1159,10 @@ def _make_progress(total: int | None, url: str):
 
 __all__ = [
     "DEFAULT_MAX_DOWNLOAD_BYTES",
+    "HARVEST_USER_AGENT",
     "DownloadCancelled",
     "DownloadReceipt",
+    "DownloadRecoveryResidueWarning",
     "DownloadSecurityError",
     "PinnedHTTPResponse",
     "PinnedHTTPTransport",

@@ -33,7 +33,31 @@ _RETRY_KEYS = frozenset(
 )
 _CANCEL_KEYS = frozenset({"explicit_action"})
 _IMPORT_KEYS = frozenset({"explicit_action", "idempotency_key"})
-_PATH_KEY_FRAGMENTS = ("path", "directory", "folder", "output", "destination", "url", "uri")
+_PROBE_KEYS = frozenset(
+    {
+        "source_id",
+        "title",
+        "creator",
+        "source_page",
+        "license_id",
+        "license_evidence_url",
+        "terms_evidence_url",
+        "direct_download_url",
+        "attribution_text",
+        "taxonomy_hints",
+        "inventory_identity",
+        "backend_capability_evidence_identity",
+        "idempotency_key",
+        "explicit_action",
+        "authorize_network",
+        "authorize_hash_probe",
+        "authorize_zero_cost",
+        "authorize_permissive_license",
+    }
+)
+_PROBE_URL_KEYS = frozenset({"source_page", "license_evidence_url", "terms_evidence_url", "direct_download_url"})
+_PROMOTE_KEYS = frozenset({"explicit_action", "authorize_catalog_promotion"})
+_PATH_KEY_FRAGMENTS = ("path", "directory", "folder", "output", "destination", "uri", "argv", "command")
 
 
 def _resource_text(name: str) -> str:
@@ -181,6 +205,66 @@ def create_harvest_router(
         except ValueError:
             return _invalid_payload()
 
+    @router.post("/harvest/api/probes")
+    @product_api
+    def start_probe(payload: dict[str, Any]) -> Any:
+        rejected = _validate_payload(payload, _PROBE_KEYS, allowed_url_keys=_PROBE_URL_KEYS)
+        if rejected is not None:
+            return rejected
+        try:
+            probe, created = harvest.start_probe(payload)
+        except HarvestError as exc:
+            return _harvest_error(exc)
+        except ValueError:
+            return _invalid_payload()
+        return JSONResponse(status_code=202 if created else 200, content={"created": created, "probe": probe})
+
+    @router.get("/harvest/api/probes/{probe_id}")
+    @product_api
+    def probe_status(probe_id: str) -> Any:
+        return _call(lambda: harvest.probe(probe_id))
+
+    @router.get("/harvest/api/probes/{probe_id}/evidence")
+    @product_api
+    def probe_evidence(probe_id: str) -> Any:
+        return _call(lambda: harvest.probe_evidence(probe_id))
+
+    @router.post("/harvest/api/probes/{probe_id}/cancel")
+    @product_api
+    def cancel_probe(probe_id: str, payload: dict[str, Any]) -> Any:
+        rejected = _validate_payload(payload, _CANCEL_KEYS)
+        if rejected is not None:
+            return rejected
+        return _call(lambda: harvest.cancel_probe(probe_id, explicit_action=payload.get("explicit_action") is True))
+
+    @router.post("/harvest/api/probes/{probe_id}/retry")
+    @product_api
+    def retry_probe(probe_id: str, payload: dict[str, Any]) -> Any:
+        rejected = _validate_payload(payload, _PROBE_KEYS, allowed_url_keys=_PROBE_URL_KEYS)
+        if rejected is not None:
+            return rejected
+        try:
+            probe, created = harvest.retry_probe(probe_id, payload)
+        except HarvestError as exc:
+            return _harvest_error(exc)
+        except ValueError:
+            return _invalid_payload()
+        return JSONResponse(status_code=202 if created else 200, content={"created": created, "probe": probe})
+
+    @router.post("/harvest/api/probes/{probe_id}/promote")
+    @product_api
+    def promote_probe(probe_id: str, payload: dict[str, Any]) -> Any:
+        rejected = _validate_payload(payload, _PROMOTE_KEYS)
+        if rejected is not None:
+            return rejected
+        return _call(
+            lambda: harvest.promote_probe(
+                probe_id,
+                explicit_action=payload.get("explicit_action") is True,
+                authorize_catalog_promotion=payload.get("authorize_catalog_promotion") is True,
+            )
+        )
+
     return router
 
 
@@ -201,18 +285,28 @@ def _harvest_error(exc: HarvestError) -> Any:
     )
 
 
-def _validate_payload(payload: dict[str, Any], allowed: frozenset[str]) -> Any | None:
+def _validate_payload(
+    payload: dict[str, Any],
+    allowed: frozenset[str],
+    *,
+    allowed_url_keys: frozenset[str] = frozenset(),
+) -> Any | None:
     keys = set(payload)
     forbidden_path_key = next(
-        (key for key in keys if any(fragment in key.casefold() for fragment in _PATH_KEY_FRAGMENTS)),
+        (
+            key
+            for key in keys
+            if key not in allowed_url_keys
+            and ("url" in key.casefold() or any(fragment in key.casefold() for fragment in _PATH_KEY_FRAGMENTS))
+        ),
         None,
     )
     if forbidden_path_key is not None:
         return api_error(
             422,
             "browser_path_not_allowed",
-            "Harvest uses a managed repository-local output; browser-supplied paths and URLs are not accepted.",
-            next_action="Select a configured source without supplying a filesystem path or URL.",
+            "Harvest uses managed repository-local output; filesystem paths, commands, and unrecognized URLs are forbidden.",
+            next_action="Use only the explicit evidence URL fields shown by catalog onboarding.",
         )
     if keys - allowed:
         return _invalid_payload()

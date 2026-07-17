@@ -34,6 +34,32 @@
     </form>
   </section>
 
+  <section class="panel" aria-labelledby="harvest-onboard-title">
+    <div class="section-heading"><div><p class="eyebrow">Bounded source onboarding</p><h2 id="harvest-onboard-title">Verify a creator-posted source</h2></div><span class="harvest-network-note">Explicit network action</span></div>
+    <p>Probe only a public HTTPS creator page, its exact license and optional automation-terms link, and the exact direct link posted there. Robots must allow the paths and retained source terms must not prohibit automated downloading. Silence is recorded only as limited “no prohibition observed” evidence, never affirmative permission. Raw bytes remain quarantined; probing never opens, decodes, extracts, discovers, or imports them.</p>
+    <form id="harvest-probe-form" class="harvest-probe-form" novalidate>
+      <label>Source ID <input id="probe-source-id" autocomplete="off" pattern="[a-z][a-z0-9._-]+" required></label>
+      <label>Title <input id="probe-title" autocomplete="off" minlength="4" required></label>
+      <label>Creator <input id="probe-creator" autocomplete="off" minlength="3" required></label>
+      <label>Creator source page <input id="probe-source-page" type="url" inputmode="url" placeholder="https://example.org/source" required></label>
+      <label>License evidence URL <input id="probe-license-url" type="url" inputmode="url" placeholder="https://example.org/license" required></label>
+      <label>Automation terms URL <input id="probe-terms-url" type="url" inputmode="url" placeholder="Leave blank only when no governing Terms or ToS link exists"></label>
+      <label>Creator-posted direct URL <input id="probe-direct-url" type="url" inputmode="url" placeholder="https://downloads.example.org/pack.zip" required></label>
+      <label>License <select id="probe-license-id"><option value="cc0-1.0">CC0 1.0</option><option value="public-domain">Public domain</option></select></label>
+      <label>Attribution <input id="probe-attribution" autocomplete="off" required></label>
+      <label>Taxonomy hints <input id="probe-taxonomy" autocomplete="off" placeholder="item, character"></label>
+      <div class="harvest-probe-authorizations">
+        <label class="harvest-check"><input id="probe-network" type="checkbox" required> I explicitly authorize bounded public network requests, including robots and evidence pages.</label>
+        <label class="harvest-check"><input id="probe-hash" type="checkbox" required> I authorize one raw quarantine hash probe with no expected digest.</label>
+        <label class="harvest-check"><input id="probe-zero-cost" type="checkbox" required> I confirm this source is zero cost.</label>
+        <label class="harvest-check"><input id="probe-license-auth" type="checkbox" required> I authorize only the displayed CC0/public-domain policy.</label>
+      </div>
+      <button class="button primary" id="harvest-probe-start" type="submit">Start bounded source probe</button>
+    </form>
+    <p id="harvest-probe-summary" role="status" aria-live="polite">No probe selected.</p>
+    <div id="harvest-probes" class="harvest-runs"></div>
+  </section>
+
   <section class="panel" aria-labelledby="harvest-runs-title">
     <div class="section-heading"><div><p class="eyebrow">Durable polling</p><h2 id="harvest-runs-title">Managed jobs</h2></div><span id="harvest-poll-state">Idle</span></div>
     <div id="harvest-runs" class="harvest-runs"></div>

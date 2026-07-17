@@ -7,9 +7,11 @@
   const sourceSelect = $("#harvest-source");
   const summary = $("#harvest-summary");
   const runsNode = $("#harvest-runs");
+  const probesNode = $("#harvest-probes");
+  const probeSummary = $("#harvest-probe-summary");
   const detail = $("#harvest-detail");
   const inFlight = new Set();
-  let state = {inventory: {runs: [], legacy_runs: []}, catalog: {sources: []}};
+  let state = {inventory: {runs: [], probe_runs: [], legacy_runs: []}, catalog: {sources: []}};
   try { state = JSON.parse($("#harvest-initial-state")?.textContent || "{}"); } catch (_error) { /* safe defaults */ }
 
   const idempotency = (prefix) => `${prefix}-${crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36)}`;
@@ -65,6 +67,25 @@
       reuse_evidence: reuseEvidence(),
     };
   }
+  function probePayload(prefix) {
+    const taxonomy = $("#probe-taxonomy").value.split(",").map((value) => value.trim()).filter(Boolean);
+    return {
+      source_id: $("#probe-source-id").value.trim(), title: $("#probe-title").value.trim(),
+      creator: $("#probe-creator").value.trim(), source_page: $("#probe-source-page").value.trim(),
+      license_id: $("#probe-license-id").value,
+      license_evidence_url: $("#probe-license-url").value.trim(),
+      terms_evidence_url: $("#probe-terms-url").value.trim() || null,
+      direct_download_url: $("#probe-direct-url").value.trim(),
+      attribution_text: $("#probe-attribution").value.trim(), taxonomy_hints: taxonomy,
+      inventory_identity: state.inventory.inventory_identity,
+      backend_capability_evidence_identity: state.catalog.backend_capability_evidence?.evidence_identity || "",
+      idempotency_key: idempotency(prefix), explicit_action: true,
+      authorize_network: $("#probe-network").checked,
+      authorize_hash_probe: $("#probe-hash").checked,
+      authorize_zero_cost: $("#probe-zero-cost").checked,
+      authorize_permissive_license: $("#probe-license-auth").checked,
+    };
+  }
   function renderSources(catalog) {
     state.catalog = catalog;
     sourceSelect.replaceChildren();
@@ -73,6 +94,8 @@
       option.value = source.source_id; sourceSelect.append(option);
     }
     sourceSelect.disabled = !sourceSelect.options.length || !catalog.backend_configured;
+    const probeButton = $("#harvest-probe-start");
+    if (probeButton) probeButton.disabled = !catalog.backend_capability_evidence?.evidence_identity;
     $("#harvest-limits").textContent = JSON.stringify(catalog.limits || {}, null, 2);
     renderSourceEvidence();
   }
@@ -80,16 +103,22 @@
     const source = (state.catalog.sources || []).find((item) => item.source_id === sourceSelect.value);
     const node = $("#harvest-source-evidence"); node.replaceChildren();
     if (!source) { node.append(element("p", "No certified catalog source is configured.")); return; }
+    const terms = source.evidence_binding.automation_terms;
+    const termsScope = terms.limited_evidence
+      ? "Limited evidence: no prohibition observed; not affirmative permission"
+      : "Explicit declaration retained";
     for (const [label, value] of [
       ["Creator", source.creator], ["License", source.license.identifier],
       ["Attribution", source.license.attribution_text], ["Expected response SHA-256", source.expected_response_sha256],
+      ["Automation terms decision", terms.decision], ["Automation terms mode", terms.mode],
+      ["Automation terms scope", termsScope], ["Automation terms expire", terms.expires_at],
       ["Evidence expires", source.evidence_binding.expires_at], ["Catalog identity", source.catalog_identity],
     ]) { const row = element("p"); row.append(element("strong", `${label}: `), element("span", value)); node.append(row); }
   }
   function renderInventory(inventory, jobs = null) {
     state.inventory = inventory;
     $("#harvest-assessed").value = String(inventory.known_usable_items || 0);
-    summary.textContent = `${inventory.run_count} managed, ${inventory.legacy_run_count} legacy read-only; ${inventory.known_usable_items} known usable; ${inventory.unsafe_entries} unsafe ignored.`;
+    summary.textContent = `${inventory.run_count} acquisitions, ${inventory.probe_run_count || 0} source probes, ${inventory.legacy_run_count} legacy read-only; ${inventory.known_usable_items} known usable; ${inventory.unsafe_entries} unsafe ignored.`;
     const legacy = $("#harvest-legacy"); legacy.replaceChildren();
     for (const run of inventory.legacy_runs || []) {
       const card = element("article", undefined, "harvest-evidence");
@@ -97,6 +126,7 @@
       legacy.append(card);
     }
     renderRuns(jobs || inventory.runs || []);
+    renderProbes(inventory.probe_runs || []);
   }
   function action(label, callback, disabled = false) {
     const button = element("button", label, "button secondary"); button.type = "button"; button.disabled = disabled;
@@ -126,13 +156,60 @@
       card.append(heading, metrics, provenance, progress, operational, controls); runsNode.append(card);
     }
   }
+  function renderProbes(probes) {
+    if (!probesNode) return;
+    probesNode.replaceChildren();
+    for (const probe of probes) {
+      const card = element("article", undefined, "harvest-run harvest-probe-card");
+      const heading = element("div");
+      heading.append(element("strong", probe.title || probe.source_id), element("code", probe.probe_id), element("span", probe.status, "status-pill"));
+      const progress = document.createElement("progress");
+      progress.max = Math.max(probe.total || 1, 1); progress.value = Math.min(probe.current || 0, progress.max);
+      progress.setAttribute("aria-label", `${probe.stage || probe.status} probe progress`);
+      const status = element("p", probe.message || `${probe.stage || probe.status}`);
+      const controls = element("div", undefined, "harvest-actions");
+      const evidence = action("Probe evidence", async () => {
+        detail.textContent = JSON.stringify(await request(`/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/evidence`), null, 2);
+      }); evidence.dataset.run = probe.probe_id; controls.append(evidence);
+      if (["QUEUED", "RUNNING", "CANCELLING"].includes(probe.status)) {
+        const cancel = action("Cancel probe", async () => {
+          await request(`/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/cancel`, {method: "POST", body: JSON.stringify({explicit_action: true})}); await refresh();
+        }); cancel.dataset.run = probe.probe_id; controls.append(cancel);
+      }
+      if (["FAILED", "CANCELLED", "INTERRUPTED"].includes(probe.status)) {
+        const retry = action("Retry with form", async () => {
+          const form = $("#harvest-probe-form"); if (!form.reportValidity()) return;
+          await request(`/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/retry`, {method: "POST", body: JSON.stringify(probePayload("probe-retry"))}); await refresh();
+        }); retry.dataset.run = probe.probe_id; controls.append(retry);
+      }
+      if (probe.status === "READY") {
+        const promotion = element("label", undefined, "harvest-check harvest-promotion-check");
+        const checkbox = document.createElement("input"); checkbox.type = "checkbox";
+        promotion.append(checkbox, document.createTextNode(" I separately authorize trusted-catalog promotion."));
+        const promote = action("Promote trusted source", async () => {
+          if (!checkbox.checked) { probeSummary.textContent = "Check the separate catalog-promotion authorization first."; return; }
+          const receipt = await request(`/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/promote`, {method: "POST", body: JSON.stringify({explicit_action: true, authorize_catalog_promotion: true})});
+          detail.textContent = JSON.stringify(receipt, null, 2);
+          const [catalog] = await Promise.all([request("/harvest/api/sources"), refresh()]); renderSources(catalog);
+        }); promote.dataset.run = probe.probe_id;
+        controls.append(promotion, promote);
+      }
+      card.append(heading, status, progress, controls); probesNode.append(card);
+    }
+    if (!probes.length) probesNode.append(element("p", "No durable source probes yet."));
+  }
   async function refresh() {
     const inventory = await request("/harvest/api/inventory");
     const jobs = await Promise.all((inventory.runs || []).slice(0, 100).map(async (run) => {
       try { return await request(`/harvest/api/jobs/${encodeURIComponent(run.run_id)}`); } catch (_error) { return run; }
     }));
+    const probes = await Promise.all((inventory.probe_runs || []).slice(0, 100).map(async (probe) => {
+      try { return await request(`/harvest/api/probes/${encodeURIComponent(probe.probe_id)}`); } catch (_error) { return probe; }
+    }));
+    inventory.probe_runs = probes;
     renderInventory(inventory, jobs);
-    $("#harvest-poll-state").textContent = inventory.runs.some((run) => ["QUEUED", "RUNNING", "CANCELLING"].includes(run.status)) ? "Polling active jobs" : "No active jobs";
+    const active = [...(inventory.runs || []), ...(inventory.probe_runs || [])].some((run) => ["QUEUED", "RUNNING", "CANCELLING"].includes(run.status));
+    $("#harvest-poll-state").textContent = active ? "Polling active work" : "No active work";
   }
   $("#harvest-start-form").addEventListener("submit", (event) => {
     event.preventDefault(); const button = $("#harvest-start");
@@ -142,8 +219,16 @@
     }).catch((error) => { summary.textContent = error.message; });
   });
   $("#harvest-refresh").addEventListener("click", (event) => once("refresh", event.currentTarget, refresh).catch((error) => { summary.textContent = error.message; }));
+  $("#harvest-probe-form")?.addEventListener("submit", (event) => {
+    event.preventDefault(); const form = event.currentTarget; const button = $("#harvest-probe-start");
+    if (!form.reportValidity()) return;
+    once("probe-start", button, async () => {
+      const value = await request("/harvest/api/probes", {method: "POST", body: JSON.stringify(probePayload("probe-start"))});
+      probeSummary.textContent = `Probe ${value.probe.probe_id} recorded. Progress is durable and safe to reload.`; await refresh();
+    }).catch((error) => { probeSummary.textContent = error.message; });
+  });
   sourceSelect.addEventListener("change", renderSourceEvidence);
   renderSources(state.catalog || {sources: []}); renderInventory(state.inventory || {runs: [], legacy_runs: []});
   Promise.all([request("/harvest/api/sources"), request("/harvest/api/inventory")]).then(([catalog, inventory]) => { renderSources(catalog); renderInventory(inventory); }).catch((error) => { summary.textContent = error.message; });
-  window.setInterval(() => { if ((state.inventory.runs || []).some((run) => ["QUEUED", "RUNNING", "CANCELLING"].includes(run.status))) refresh().catch((error) => { summary.textContent = error.message; }); }, 1500);
+  window.setInterval(() => { if ([...(state.inventory.runs || []), ...(state.inventory.probe_runs || [])].some((run) => ["QUEUED", "RUNNING", "CANCELLING"].includes(run.status))) refresh().catch((error) => { summary.textContent = error.message; }); }, 1500);
 })();
