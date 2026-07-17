@@ -15,6 +15,8 @@ For hosted training, check the named service, limit, and estimate, then choose *
 
 If training is unavailable, choose **Show what to fix**. Sprite Lab protects the dataset and completed work while required safety checks are repaired.
 
+If preparation finds an accepted image that the training format does not support, the page shows the image and the exact encoding reason. Choose **Review the currently built dataset**, exclude that image, and then retry preparation.
+
 If a run is interrupted, choose **Check saved work**. Sprite Lab verifies that the saved work still fits the current project before showing **Continue run**.
 
 Next: [Evaluate and generate](evaluate_and_generate.md). Compare computer options in [Local and hosted compute](local_and_hosted_compute.md).

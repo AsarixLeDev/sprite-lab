@@ -52,10 +52,33 @@ PREPARATION_RECIPE_SOURCES = (
 class TrainingPreparationError(RuntimeError):
     """A controlled preparation failure safe to return through the web API."""
 
-    def __init__(self, code: str, public_message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        public_message: str,
+        *,
+        item_id: str | None = None,
+        reasons: tuple[str, ...] = (),
+        next_action: str | None = None,
+    ) -> None:
         super().__init__(public_message)
         self.code = code
         self.public_message = public_message
+        self.item_id = item_id
+        self.reasons = reasons
+        self.next_action = next_action
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """Return actionable failure details without local filesystem paths."""
+
+        value: dict[str, Any] = {"code": self.code, "message": self.public_message}
+        if self.item_id is not None:
+            value["item_id"] = self.item_id
+        if self.reasons:
+            value["reasons"] = list(self.reasons)
+        if self.next_action is not None:
+            value["next_action"] = self.next_action
+        return value
 
 
 def preparation_job_identities(context: ProjectContext) -> dict[str, str]:
@@ -210,7 +233,12 @@ def _build_publication(
             if sprite.errors or sprite.bundle is None:
                 raise TrainingPreparationError(
                     "canonical_encoding_failed",
-                    "An accepted image could not be encoded into the canonical 32 by 32 training format.",
+                    "An accepted image is not supported by training preparation.",
+                    item_id=_accepted_item_id(row),
+                    reasons=_public_import_reasons(sprite.errors, source),
+                    next_action=(
+                        "Remove this image from the currently built dataset, then retry baseline preparation."
+                    ),
                 )
             item_id = _accepted_item_id(row)
             public_source_name = f"{_digest}.png"
@@ -847,6 +875,62 @@ def _verify_source(path: Path, expected: str) -> str:
     return actual
 
 
+def load_accepted_source_image(context: ProjectContext, item_id: str) -> bytes:
+    """Load the current, hash-verified source bytes for one accepted item."""
+
+    dataset = _find_dataset_output(context)
+    if dataset is None:
+        raise TrainingPreparationError("active_dataset_missing", "No active accepted dataset is selected.")
+    row = next(
+        (
+            value
+            for value in _read_jsonl(dataset / "items.jsonl")
+            if value.get("current_disposition") == "accepted" and value.get("item_id") == item_id
+        ),
+        None,
+    )
+    if row is None:
+        raise TrainingPreparationError(
+            "accepted_item_unavailable",
+            "The accepted image is no longer part of the currently built dataset.",
+        )
+    source = Path(str(row.get("source_path") or "")).expanduser()
+    expected = str(row.get("byte_sha256") or "")
+    _verify_source(source, expected)
+    try:
+        content = source.read_bytes()
+    except OSError as exc:
+        raise TrainingPreparationError(
+            "accepted_source_unreadable",
+            "The accepted source image could not be read for identity verification.",
+        ) from exc
+    if hashlib.sha256(content).hexdigest() != expected:
+        raise TrainingPreparationError(
+            "accepted_source_changed",
+            "An accepted source image changed after review; preparation was refused.",
+        )
+    return content
+
+
+def _public_import_reasons(errors: tuple[str, ...], source: Path) -> tuple[str, ...]:
+    """Keep importer diagnostics useful while removing source path spellings."""
+
+    reasons: list[str] = []
+    replacements = {str(source), source.as_posix(), source.name}
+    try:
+        resolved = source.resolve()
+    except OSError:
+        resolved = source
+    replacements.update({str(resolved), resolved.as_posix()})
+    for error in errors:
+        reason = str(error).replace("\r", " ").replace("\n", " ").strip()
+        for spelling in sorted((value for value in replacements if value), key=len, reverse=True):
+            reason = reason.replace(spelling, "the accepted image")
+        if reason:
+            reasons.append(reason[:1_000])
+    return tuple(reasons) or ("The image could not be encoded into the canonical 32 by 32 training format.",)
+
+
 def _accepted_item_id(row: Mapping[str, Any]) -> str:
     value = row.get("item_id")
     if not isinstance(value, str) or not value.strip() or value != value.strip():
@@ -892,5 +976,6 @@ def _notify(progress: Progress | None, current: int, total: int, message: str) -
 
 __all__ = [
     "TrainingPreparationError",
+    "load_accepted_source_image",
     "prepare_active_dataset",
 ]

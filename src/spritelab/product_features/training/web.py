@@ -7,9 +7,10 @@ import threading
 from collections.abc import Callable, Mapping
 from importlib.resources import files
 from typing import Any
+from urllib.parse import quote
 
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 from spritelab.product_core import (
     ProductResult,
@@ -71,6 +72,29 @@ def create_router(
     def preparation_state() -> JSONResponse:
         return JSONResponse(_preparation_projection(preparation_jobs.load()))
 
+    @router.get("/training/api/preparation/error-image")
+    @product_api
+    def preparation_error_image(item_id: str) -> Response:
+        state = preparation_jobs.load()
+        error = state.get("error")
+        if (
+            state.get("status") != "failed"
+            or not isinstance(error, Mapping)
+            or error.get("code") != "canonical_encoding_failed"
+            or error.get("item_id") != item_id
+        ):
+            return api_error(404, "preparation_error_image_unavailable", "No current preparation error image exists.")
+        from spritelab.product_features.training.preparation import (
+            TrainingPreparationError,
+            load_accepted_source_image,
+        )
+
+        try:
+            content = load_accepted_source_image(context, item_id)
+        except TrainingPreparationError as exc:
+            return api_error(409, exc.code, exc.public_message, next_action="Rebuild or review the current dataset.")
+        return Response(content, media_type="image/png", headers={"Cache-Control": "no-store"})
+
     @router.post("/training/api/preparation")
     @product_api
     async def start_preparation(request: Request) -> JSONResponse:
@@ -119,7 +143,7 @@ def create_router(
                     job_id,
                     owner_token,
                     status="failed",
-                    error={"code": exc.code, "message": exc.public_message},
+                    error=exc.to_public_dict(),
                     message="Preparation stopped safely; no local paths were exposed.",
                 )
             except Exception:
@@ -418,7 +442,16 @@ async def _json_mapping(request: Any) -> dict[str, Any] | None:
 
 
 def _preparation_projection(state: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in state.items() if key not in {"worker_owner", "worker_pid"}}
+    projected = {key: value for key, value in state.items() if key not in {"worker_owner", "worker_pid"}}
+    error = projected.get("error")
+    if isinstance(error, Mapping) and error.get("code") == "canonical_encoding_failed":
+        item_id = error.get("item_id")
+        if isinstance(item_id, str) and item_id:
+            public_error = dict(error)
+            public_error["image_url"] = f"/training/api/preparation/error-image?item_id={quote(item_id, safe='')}"
+            public_error["review_url"] = "/dataset/review"
+            projected["error"] = public_error
+    return projected
 
 
 def _conditioned_contract(

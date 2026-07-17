@@ -71,6 +71,19 @@ def _publication(project: Path) -> Path:
     return publications[0]
 
 
+def _make_training_unsupported(context: ProjectContext, source: Path) -> bytes:
+    with Image.open(source) as opened:
+        image = opened.convert("RGBA")
+    image.putpixel((10, 10), (220, 80, 40, 128))
+    image.save(source)
+    content = source.read_bytes()
+    items = context.project_root / "datasets" / "active" / "items.jsonl"
+    item = json.loads(items.read_text(encoding="utf-8"))
+    item["byte_sha256"] = hashlib.sha256(content).hexdigest()
+    items.write_text(json.dumps(item, sort_keys=True) + "\n", encoding="utf-8")
+    return content
+
+
 def test_preparation_builds_immutable_nonproduction_baseline_without_config_activation(tmp_path: Path) -> None:
     context, _source = _project(tmp_path)
     config_before = context.config_path.read_bytes()  # type: ignore[union-attr]
@@ -140,6 +153,25 @@ def test_preparation_reverifies_source_hash_before_reuse(tmp_path: Path) -> None
 
     assert caught.value.code == "accepted_source_changed"
     assert source.name not in str(caught.value)
+
+
+def test_preparation_identifies_an_accepted_image_the_encoder_does_not_support(tmp_path: Path) -> None:
+    context, source = _project(tmp_path)
+    _make_training_unsupported(context, source)
+
+    with pytest.raises(TrainingPreparationError) as caught:
+        prepare_active_dataset(context, authorize_baseline=True)
+
+    error = caught.value
+    public = error.to_public_dict()
+    assert error.code == "canonical_encoding_failed"
+    assert public["item_id"] == "sword-1"
+    assert any("soft alpha values" in reason for reason in public["reasons"])
+    assert public["next_action"] == (
+        "Remove this image from the currently built dataset, then retry baseline preparation."
+    )
+    assert str(source) not in json.dumps(public)
+    assert source.name not in json.dumps(public)
 
 
 def test_preparation_requires_a_stable_accepted_item_identity(tmp_path: Path) -> None:
@@ -309,6 +341,57 @@ def test_preparation_endpoint_redacts_controlled_failure_paths(
     assert source.name not in serialized
 
 
+def test_preparation_failure_shows_the_verified_image_reason_and_dataset_remediation(tmp_path: Path) -> None:
+    context, source = _project(tmp_path)
+    expected_image = _make_training_unsupported(context, source)
+    app = FastAPI()
+    app.include_router(create_router(context, service=object()))  # type: ignore[arg-type]
+    client = TestClient(app)
+
+    assert client.post("/training/api/preparation", json={"authorize_baseline": True}).status_code == 202
+    for _ in range(100):
+        state = client.get("/training/api/preparation").json()
+        if state["status"] == "failed":
+            break
+        time.sleep(0.01)
+
+    error = state["error"]
+    assert state["status"] == "failed"
+    assert error["code"] == "canonical_encoding_failed"
+    assert error["item_id"] == "sword-1"
+    assert any("soft alpha values" in reason for reason in error["reasons"])
+    assert error["next_action"].startswith("Remove this image from the currently built dataset")
+    assert error["review_url"] == "/dataset/review"
+    assert error["image_url"].startswith("/training/api/preparation/error-image?item_id=")
+    serialized = json.dumps(state)
+    assert str(source) not in serialized
+    assert source.name not in serialized
+
+    preview = client.get(error["image_url"])
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] == "image/png"
+    assert preview.headers["cache-control"] == "no-store"
+    assert preview.content == expected_image
+
+    source.write_bytes(expected_image + b"changed after failure")
+    changed = client.get(error["image_url"])
+    assert changed.status_code == 409
+    assert changed.json()["error_code"] == "accepted_source_changed"
+    assert str(source) not in changed.text
+
+
+def test_preparation_error_image_is_limited_to_the_current_failed_item(tmp_path: Path) -> None:
+    context, _source = _project(tmp_path)
+    app = FastAPI()
+    app.include_router(create_router(context, service=object()))  # type: ignore[arg-type]
+    client = TestClient(app)
+
+    response = client.get("/training/api/preparation/error-image?item_id=sword-1")
+
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "preparation_error_image_unavailable"
+
+
 def test_training_page_exposes_preparation_authorizations(tmp_path: Path) -> None:
     context, _source = _project(tmp_path)
 
@@ -324,8 +407,19 @@ def test_training_page_exposes_preparation_authorizations(tmp_path: Path) -> Non
     assert 'id="authorize-freeze"' not in page.text
     assert 'id="authorize-training"' not in page.text
     assert 'id="preparation-progress"' in page.text
+    assert 'id="preparation-error-card"' in page.text
+    assert 'id="preparation-error-image"' in page.text
+    assert "Why preparation stopped" in page.text
+    assert "Review the currently built dataset" in page.text
     assert "This never unlocks training" in page.text
     assert "conditioned Dataset-v5 freeze" in page.text
+    root = Path(__file__).resolve().parents[1]
+    javascript = (root / "src/spritelab/product_features/training/static/training.js").read_text(encoding="utf-8")
+    stylesheet = (root / "src/spritelab/product_features/training/static/training.css").read_text(encoding="utf-8")
+    assert "renderPreparationError(data.error)" in javascript
+    assert "image.src=error.image_url" in javascript
+    assert "error.reasons" in javascript
+    assert ".preparation-error-card[hidden]{display:none}" in stylesheet
 
 
 def test_preparation_job_state_survives_router_recreation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

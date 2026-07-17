@@ -14,6 +14,18 @@
   <label class="progress-label" for="preparation-progress">Preparation progress <span id="preparation-progress-label">0 / 0</span></label>
   <progress id="preparation-progress" value="0" max="1">0%</progress>
   <div id="preparation-message" class="action-summary" role="status" aria-live="polite">No files have been prepared.</div>
+  <article id="preparation-error-card" class="preparation-error-card" aria-labelledby="preparation-error-title" hidden>
+    <img id="preparation-error-image" alt="Accepted image that training preparation could not encode">
+    <div>
+      <span class="eyebrow">Unsupported accepted image</span>
+      <h3 id="preparation-error-title">Remove this image before retrying</h3>
+      <p>Dataset item <code id="preparation-error-item"></code> was accepted, but it cannot be encoded for training.</p>
+      <strong>Why preparation stopped</strong>
+      <ul id="preparation-error-reasons"></ul>
+      <p id="preparation-error-action"></p>
+      <a id="preparation-error-review" class="button secondary" href="/dataset/review">Review the currently built dataset</a>
+    </div>
+  </article>
   <details id="preparation-log-details"><summary>Preparation log</summary><pre id="preparation-logs" class="log-preview">No preparation log entries yet.</pre></details>
 </section>
 

@@ -32,6 +32,8 @@ Preparation writes content-addressed artifacts under `.spritelab/training-prepar
 
 Background state is durable under `.spritelab/training-preparation/jobs`. It binds source, config, code, input, result, worker, and job identities. Cross-process locking refuses concurrent starts, a live worker is not interrupted by a second server process, and a dead worker is reconstructed as safely retryable. The privacy-safe event history is atomically rewritten and capped at 200 records. Linked, reparse-point, or hard-linked state and history entries fail closed.
 
+If an image was manually accepted even though the canonical training encoder does not support it, preparation stops without publishing a partial baseline. The Training page shows that current, hash-verified image together with the encoder reasons and directs the user to exclude it from the currently built dataset before retrying. The preview and durable error state expose no source path, and removing an image remains an explicit dataset-review action.
+
 ## Conditioned Dataset-v5 activation contract
 
 The web start action fails closed until the exact selected profile satisfies `spritelab.training.conditioned-dataset-contract.v2`. `dataset.freeze_manifest` and `training.dataset_freeze` must contain the same canonical project-relative path; absolute paths, traversal, links, reparse points, and hard links are rejected.
@@ -103,6 +105,7 @@ Every preview is marked `exploratory: true`, `benchmark_evidence: false`, and `p
 
 - `GET /training/api/preparation` - passive background-preparation state and privacy-safe logs.
 - `POST /training/api/preparation` - explicitly authorized immutable image-only baseline preparation using `authorize_baseline: true`; rejects freeze or training authorization and starts no training process.
+- `GET /training/api/preparation/error-image` - current hash-verified source preview for the one accepted image that blocked preparation; available only while that failure remains current.
 
 - `GET /training` — page shell; no backend probe or launch.
 - `GET /training/api/state` — current plan, exact-profile conditioned activation contract, and blockers; device check deferred.
