@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Dataset v5 · Sprite Lab{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="/dataset-v5/static/conditioned-v5.css">
+<main class="cv5-shell" data-conditioned-v5-root>
+  <header class="page-header"><div><p class="eyebrow">Offline conditioning</p><h1>Conditioned Dataset-v5</h1>
+    <p>Turn transactional, re-verified CC0/public-domain Dataset imports into a source-grounded 2,000–3,000 image candidate. Unknown and conflicting labels are excluded.</p></div><span class="status-pill">No network or provider calls</span></header>
+  <p id="cv5-status" class="cv5-status" role="status" aria-live="polite">Loading managed inventory…</p>
+
+  <section class="panel"><div class="section-heading"><div><p class="eyebrow">1 · Inventory</p><h2>Managed Dataset imports</h2></div><button class="button secondary" id="cv5-refresh" type="button">Refresh</button></div>
+    <div id="cv5-intakes" class="cv5-grid"></div><p class="help">First use Harvest’s “Import into Dataset” action. Select only the resulting opaque imports; copied source bytes, intake output, receipt, and original handoff are revalidated.</p>
+    <div class="cv5-actions"><button class="button secondary" id="cv5-preview" type="button">Preview conditioning</button><button class="button primary" id="cv5-build" type="button" disabled>Build candidate</button></div>
+    <pre id="cv5-preview-output">No preview yet.</pre></section>
+
+  <section class="panel"><div class="section-heading"><div><p class="eyebrow">2 · Durable build</p><h2>Candidate, counts, and logs</h2></div><span id="cv5-poll">Idle</span></div>
+    <div id="cv5-jobs"></div><pre id="cv5-logs">No build selected.</pre></section>
+
+  <section class="panel"><p class="eyebrow">3 · Independent evidence</p><h2>Attach and select exact PASS reports</h2>
+    <p>Reports must come from independent audit runs and enumerate the complete candidate inventory. This workflow never creates its own PASS evidence.</p>
+    <div class="cv5-grid"><label>Label-audit JSON file<input id="cv5-label-file" type="file" accept="application/json,.json"></label><label>Dataset-validation JSON file<input id="cv5-validation-file" type="file" accept="application/json,.json"></label></div>
+    <div class="cv5-actions"><button class="button secondary" id="cv5-upload-label" type="button">Attach label audit</button><button class="button secondary" id="cv5-upload-validation" type="button">Attach dataset validation</button></div></section>
+
+  <section class="panel"><p class="eyebrow">4 · One-time publication</p><h2>Publish immutable freeze</h2>
+    <p>The action is bound to the exact candidate and both evidence hashes. It publishes below <code>datasets/</code>, creates the exact 3-seed 5,000-step campaign, and does not activate configuration or start training.</p>
+    <label class="cv5-check"><input id="cv5-authorize" type="checkbox"> I authorize this exact one-time production freeze.</label>
+    <button class="button primary" id="cv5-publish" type="button" disabled>Publish authorized freeze</button><pre id="cv5-publication">Nothing published.</pre></section>
+</main>
+<script id="conditioned-v5-initial" type="application/json">{{ conditioned_initial_state|tojson }}</script>
+<script src="/dataset-v5/static/conditioned-v5.js" defer></script>
+{% endblock %}

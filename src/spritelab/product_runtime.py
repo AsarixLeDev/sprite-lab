@@ -15,8 +15,11 @@ from spritelab.product_core import (
     ProjectContext,
 )
 from spritelab.product_core.cli import ProductCliRegistry
+from spritelab.product_features.conditioned_v5 import build_plugin as build_conditioned_v5_plugin
+from spritelab.product_features.conditioned_v5.intake import ConditionedDatasetImportAdapter
 from spritelab.product_features.dataset.plugin import create_plugin as create_dataset_plugin
 from spritelab.product_features.evaluation.plugin import build_plugin as build_evaluation_plugin
+from spritelab.product_features.harvest import create_plugin as create_harvest_plugin
 from spritelab.product_features.providers.plugin import build_plugin as build_provider_plugin
 from spritelab.product_features.providers.product_adapter import HubProductVisionProvider
 from spritelab.product_features.training import build_plugin as build_training_plugin
@@ -38,9 +41,12 @@ def build_product_runtime() -> ProductRuntime:
     """Build the complete product without creating mutable process-global state."""
 
     registry = ProductPluginRegistry()
+    dataset_import_adapter = ConditionedDatasetImportAdapter()
     for plugin in (
         _web_shell_plugin(),
         build_provider_plugin(),
+        create_harvest_plugin(dataset_import_callback=dataset_import_adapter),
+        build_conditioned_v5_plugin(),
         create_dataset_plugin(provider_factory=_dataset_provider),
         build_training_plugin(),
         build_evaluation_plugin(),
