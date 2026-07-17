@@ -38,6 +38,7 @@ venv/
 
 # Local project settings and credentials. Commit only documented examples.
 /spritelab.yaml
+/.spritelab/
 .env
 .env.*
 !.env.example

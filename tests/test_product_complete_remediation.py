@@ -90,7 +90,7 @@ def test_complete_shell_rendering_has_zero_active_provider_or_compute_operations
     )
     monkeypatch.setattr("spritelab.remote_compute.local.LocalComputeBackend.probe", forbidden_compute)
     client = TestClient(create_app(_context(tmp_path), plugins=build_product_runtime().plugins))
-    for path in ("/", "/", "/settings", "/settings/vision", "/dataset", "/training", "/evaluation"):
+    for path in ("/", "/", "/settings", "/settings/vision", "/harvest", "/dataset", "/training", "/evaluation"):
         response = client.get(path)
         assert response.status_code == 200, path
         assert "skip-link" in response.text
@@ -151,6 +151,18 @@ def test_provider_save_is_passive_and_detect_and_test_are_explicit_once(tmp_path
     assert registry.discover_count == 1
     assert provider.probe_count == 2
     assert tested.json()["image_inference_requests"] == 0
+    assert tested.json()["available"] is True
+    assert tested.json()["model_validation"]["state"] == "available"
+    refreshed = client.post("/settings/vision/api/models/refresh", headers=_csrf(client), json={})
+    assert refreshed.status_code == 200
+    assert refreshed.json()["models"] == [
+        {
+            "model_id": "mock-vision-v1",
+            "display_name": "Mock vision v1",
+            "capabilities": ["vision", "structured_output"],
+            "metadata": {},
+        }
+    ]
 
 
 def test_provider_javascript_has_no_page_load_discovery() -> None:
@@ -485,7 +497,7 @@ def test_error_contract_has_only_allowlisted_fields() -> None:
 
 def test_shared_pages_and_assets_expose_keyboard_chart_and_narrow_layout_contracts(tmp_path: Path) -> None:
     client = TestClient(create_app(_context(tmp_path), plugins=build_product_runtime().plugins))
-    for path in ("/dataset", "/settings/vision", "/training", "/evaluation"):
+    for path in ("/harvest", "/dataset", "/settings/vision", "/training", "/evaluation"):
         page = client.get(path)
         assert page.status_code == 200
         for marker in ("Skip to content", 'aria-label="Primary"', "Current run", "spritelab-csrf"):

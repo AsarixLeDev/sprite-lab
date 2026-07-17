@@ -28,13 +28,15 @@ from spritelab.evaluation.memorization_review import append_bound_review_event
 from spritelab.hierarchical_labeling.contracts import LabelEvidenceBundle
 from spritelab.hierarchical_labeling.json_utils import ContractValidationError
 from spritelab.hierarchical_labeling.product import product_status
-from spritelab.hierarchical_labeling.review import append_review_action
+from spritelab.hierarchical_labeling.review import append_review_action, latest_events_by_record, load_review_events
 from spritelab.hierarchical_labeling.taxonomy import load_default_taxonomy
 from spritelab.hierarchical_labeling.technical import extract_technical_evidence
 from spritelab.product_core import (
     ApprovedFolderError,
     ApprovedFolderStore,
     ProductEvent,
+    ProductSettingsError,
+    ProductSettingsRepository,
     ProductStatus,
     ProjectContext,
     VisionProvider,
@@ -48,8 +50,10 @@ from spritelab.product_features.dataset.intake import (
     DatasetIntakeService,
     discover_source_packs,
     inspect_dataset_folder,
+    prepare_existing_dataset_labeling,
     save_sheet_decision,
 )
+from spritelab.product_features.dataset.managed import ManagedDatasetError, validate_managed_dataset_output
 from spritelab.product_features.dataset.review import DatasetReviewStore, ReviewDecisionError
 from spritelab.product_features.dataset.sheets import uniform_grid_plan
 from spritelab.product_features.dataset.sidecar import (
@@ -66,7 +70,9 @@ from spritelab.product_features.evaluation.checkpoints import (
     expected_training_view_identity,
 )
 from spritelab.product_features.evaluation.memorization_display import memorization_display
+from spritelab.product_features.providers.state import passive_provider_projection
 from spritelab.product_web.events import EventRepository
+from spritelab.utils.safe_fs import UnsafeFilesystemOperation, require_confined_path
 
 ProviderFactory = Callable[[ProjectContext, Callable[[str], bool] | None], VisionProvider | None]
 
@@ -156,6 +162,39 @@ def _public_review_queue(queue: Mapping[str, Any], *, project_root: Path) -> dic
         ]
     public["paths_exposed"] = False
     return public
+
+
+def _full_review_queue(output: Path, *, context: ProjectContext) -> dict[str, Any]:
+    """Join the exception queue with the complete manifest for an auditable full-dataset review."""
+
+    queue = DatasetReviewStore(output, context=context).queue()
+    queued = {
+        str(item.get("item_id")): dict(item)
+        for item in queue.get("items", ())
+        if isinstance(item, Mapping) and item.get("item_id")
+    }
+    full: list[dict[str, Any]] = []
+    for manifest_item in _read_labeling_items(output):
+        item_id = str(manifest_item.get("item_id") or "")
+        item = {**manifest_item, **queued.get(item_id, {})}
+        item.setdefault("queue_kind", "dataset_audit")
+        item.setdefault("default_visible", False)
+        item["thumbnail_url"] = f"/dataset/review/thumb/{item_id}"
+        suitability = item.get("suitability") if isinstance(item.get("suitability"), Mapping) else {}
+        potential_bad = item.get("current_disposition") == "accepted" and bool(
+            item.get("automatic_disposition") != "accepted"
+            or item.get("technical_reasons")
+            or item.get("reasons")
+            or suitability.get("status") not in {None, "accept"}
+            or item.get("queue_kind") == "near_duplicate_exception"
+        )
+        item["potential_bad"] = potential_bad
+        full.append(item)
+    combined = dict(queue)
+    combined["items"] = full
+    combined["complete_item_count"] = len(full)
+    combined["potential_bad_count"] = sum(bool(item["potential_bad"]) for item in full)
+    return combined
 
 
 def _public_memorization_review(review: Mapping[str, Any], *, project_root: Path) -> dict[str, Any]:
@@ -277,12 +316,34 @@ def build_review_router(
         for path in (Path(str(value)).expanduser(),)
     )
     store = approved_folders or ApprovedFolderStore(context, import_roots=import_roots)
+    settings_repository = ProductSettingsRepository(context)
     events = EventRepository(context.runs_directory, private_roots=(context.project_root,))
     build_jobs: dict[str, dict[str, Any]] = {}
     build_jobs_lock = Lock()
+    existing_dataset_jobs: dict[str, dict[str, Any]] = {}
+    existing_dataset_jobs_lock = Lock()
+    labeling_jobs: dict[str, dict[str, Any]] = {}
+    labeling_jobs_lock = Lock()
+    active_labeling_job: dict[str, str] = {}
+    active_selection_lock = Lock()
+    try:
+        saved_dataset_settings, _saved_dataset_version, _dataset_settings_saved = (
+            settings_repository.effective_settings("dataset")
+        )
+    except ProductSettingsError:
+        saved_dataset_settings = {}
+    active_selection: dict[str, str] = {"mode": "existing"} if saved_dataset_settings.get("selected_root") else {}
     router.spritelab_approved_folders = store
     pending_input = dataset_config.get("pending_input_root") if isinstance(dataset_config, Mapping) else None
     pending_input_root = Path(str(pending_input)).expanduser().resolve() if pending_input else None
+
+    def effective_context() -> ProjectContext:
+        """Return project configuration overlaid with current web settings."""
+
+        try:
+            return settings_repository.effective_context()
+        except ProductSettingsError:
+            return context
 
     def public_error(
         exc: BaseException,
@@ -312,6 +373,62 @@ def build_review_router(
             job["logs"].append(_job_log(log))
             if result is not None:
                 job["result"] = result
+
+    def update_existing_dataset_job(
+        job: dict[str, Any],
+        *,
+        status: str,
+        message: str,
+        log: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        with existing_dataset_jobs_lock:
+            job.update(status=status, message=message)
+            job["logs"].append(_job_log(log))
+            if result is not None:
+                job["result"] = result
+
+    def update_labeling_job(
+        job: dict[str, Any],
+        *,
+        status: str,
+        stage: str,
+        progress: int,
+        message: str,
+        log: str | None = None,
+        result: Mapping[str, Any] | None = None,
+    ) -> None:
+        with labeling_jobs_lock:
+            job.update(
+                status=status,
+                stage=stage,
+                progress=max(0, min(100, int(progress))),
+                message=message,
+            )
+            if log:
+                job["logs"].append(_job_log(log))
+            if result is not None:
+                job["result"] = dict(result)
+            if status in {"complete", "failed"}:
+                job["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    def public_labeling_job(job: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in job.items()
+            if key
+            in {
+                "job_id",
+                "status",
+                "stage",
+                "progress",
+                "message",
+                "logs",
+                "result",
+                "started_at",
+                "finished_at",
+            }
+        }
 
     def metadata_wizard_session(request: Request) -> MetadataWizardSession | None:
         session = getattr(request.app.state, "spritelab_metadata_wizard_session", None)
@@ -347,8 +464,28 @@ def build_review_router(
         queue = DatasetReviewStore(output, context=context).queue()
         item = next((value for value in queue["items"] if value.get("item_id") == item_id), None)
         if item is None:
+            item = next((value for value in _read_labeling_items(output) if value.get("item_id") == item_id), None)
+        if item is None:
             raise HTTPException(status_code=404, detail="Unknown review item.")
         return output, queue, item
+
+    def existing_dataset_summary(output: Path) -> dict[str, Any]:
+        DatasetReviewStore(output, context=context).queue()
+        items = _read_labeling_items(output)
+        counts: dict[str, int] = {}
+        for item in items:
+            disposition = str(item.get("current_disposition") or item.get("automatic_disposition") or "unknown")
+            counts[disposition] = counts.get(disposition, 0) + 1
+        return {
+            "status": "selected",
+            "folder_name": output.name,
+            "item_count": len(items),
+            "counts": counts,
+            "review_url": "/dataset/review",
+            "labeling_url": "/labeling",
+            "paths_exposed": False,
+            "message": "The existing imported dataset is active. No rebuild is required.",
+        }
 
     def render(
         request: Request, template: str, values: Mapping[str, Any] | None = None, *, status_code: int = 200
@@ -357,6 +494,94 @@ def build_review_router(
         if callable(renderer):
             return renderer(request, "dataset.intake", template, values, status_code=status_code)
         return None
+
+    @router.get("/settings", response_class=HTMLResponse)
+    def settings_page(request: Request) -> Any:
+        settings_error = None
+        try:
+            labeling, version, saved = settings_repository.effective_settings("labeling")
+        except ProductSettingsError as exc:
+            labeling, version, saved = {}, 0, False
+            settings_error = public_error(exc)
+        return render(
+            request,
+            "settings.html",
+            {
+                "labeling_settings": {
+                    "hierarchical_enabled": labeling.get("hierarchical_enabled") is True,
+                    "hierarchical_profile": str(labeling.get("hierarchical_profile", "fast_local")),
+                    "reference_cohort_size": labeling.get("reference_cohort_size", 400),
+                },
+                "configuration_version": version,
+                "settings_saved": saved,
+                "settings_error": settings_error,
+            },
+        )
+
+    @router.post("/settings/api/labeling")
+    @product_api
+    def save_labeling_settings(payload: dict[str, Any]) -> JSONResponse:
+        expected = {"hierarchical_enabled", "hierarchical_profile", "reference_cohort_size"}
+        if set(payload) != expected:
+            return api_error(
+                422,
+                "labeling_settings_invalid",
+                "Hierarchical labeling settings are incomplete or contain an unknown field.",
+            )
+        enabled = payload.get("hierarchical_enabled")
+        profile = payload.get("hierarchical_profile")
+        cohort_size = payload.get("reference_cohort_size")
+        if type(enabled) is not bool:
+            return api_error(422, "labeling_settings_invalid", "Enabled must be true or false.")
+        if profile not in {"fast_local", "balanced", "high_quality"}:
+            return api_error(422, "labeling_settings_invalid", "Choose a supported labeling profile.")
+        if type(cohort_size) is not int or not 300 <= cohort_size <= 500:
+            return api_error(
+                422,
+                "labeling_settings_invalid",
+                "Reference cohort size must be a whole number from 300 through 500.",
+            )
+        try:
+            saved = settings_repository.save(
+                "labeling",
+                {
+                    "hierarchical_enabled": enabled,
+                    "hierarchical_profile": profile,
+                    "reference_cohort_size": cohort_size,
+                },
+            )
+        except ProductSettingsError as exc:
+            return api_error(409, "labeling_settings_not_saved", public_error(exc))
+        return JSONResponse(
+            {
+                "schema_version": "spritelab.labeling.product-settings-result.v1",
+                "saved": True,
+                "enabled": enabled,
+                "configuration_version": saved["configuration_version"],
+                "message": (
+                    "Hierarchical labeling is enabled. Rebuild the dataset to generate hierarchical suggestions."
+                    if enabled
+                    else "Hierarchical labeling is disabled."
+                ),
+            }
+        )
+
+    @router.delete("/settings/api/labeling")
+    @product_api
+    def clear_labeling_settings() -> JSONResponse:
+        try:
+            settings_repository.clear("labeling")
+        except ProductSettingsError as exc:
+            return api_error(409, "labeling_settings_not_cleared", public_error(exc))
+        enabled = context.config.get("labeling", {}).get("hierarchical_enabled") is True
+        return JSONResponse(
+            {
+                "schema_version": "spritelab.labeling.product-settings-result.v1",
+                "saved": False,
+                "enabled": enabled,
+                "message": "Project-file labeling defaults were restored.",
+            }
+        )
 
     @router.get("/dataset", response_class=HTMLResponse)
     def dataset_page(request: Request) -> Any:
@@ -403,13 +628,19 @@ def build_review_router(
 
     @router.get("/labeling", response_class=HTMLResponse)
     def labeling_page(request: Request) -> Any:
-        status = product_status(context.config, context.project_root)
+        current = effective_context()
+        status = product_status(current.config, current.project_root)
+        try:
+            provider_projection = passive_provider_projection(current)
+        except (ValueError, ProductSettingsError):
+            provider_projection = {"state": "not_configured", "configured": False}
         response = render(
             request,
             "labeling.html",
             {
                 "labeling_status": status,
-                "reference_cohort_size": context.config.get("labeling", {}).get("reference_cohort_size", 400),
+                "reference_cohort_size": current.config.get("labeling", {}).get("reference_cohort_size", 400),
+                "provider_projection": provider_projection,
             },
         )
         return response or HTMLResponse(_labeling_page(status))
@@ -417,7 +648,8 @@ def build_review_router(
     @router.get("/labeling/api/status")
     @product_api
     def hierarchical_status() -> JSONResponse:
-        return JSONResponse(product_status(context.config, context.project_root))
+        current = effective_context()
+        return JSONResponse(product_status(current.config, current.project_root))
 
     @router.get("/labeling/api/taxonomy")
     @product_api
@@ -455,7 +687,10 @@ def build_review_router(
             )
         try:
             items = _read_labeling_items(output)
-        except (OSError, ValueError, json.JSONDecodeError):
+            reviewed = latest_events_by_record(
+                load_review_events(output / "hierarchical_labeling" / "review_events.jsonl")
+            )
+        except (OSError, ValueError, json.JSONDecodeError, ContractValidationError):
             return api_error(
                 409,
                 "labeling_queue_unavailable",
@@ -463,18 +698,52 @@ def build_review_router(
                 next_action="Rebuild the dataset, then reopen Labeling.",
             )
         graph = load_default_taxonomy()
-        rows = []
-        for item in items:
-            if item.get("current_disposition") != "accepted" or not item.get("hierarchical_labeling"):
+        eligible = [
+            item
+            for item in items
+            if item.get("current_disposition") == "accepted" and item.get("hierarchical_labeling")
+        ]
+        pending = []
+        for item in eligible:
+            semantic = item.get("semantic") if isinstance(item.get("semantic"), Mapping) else {}
+            item_id = str(item.get("item_id") or "")
+            if semantic.get("needs_review") is not True or item_id in reviewed:
                 continue
-            rows.append(_public_labeling_item(output, item, graph))
-            if len(rows) >= max(1, min(limit, 250)):
-                break
+            pending.append(item)
+        rows = [
+            _public_labeling_item(output, item, graph)
+            for item in pending[: max(1, min(limit, 250))]
+        ]
+        auto_prefilled = sum(
+            _semantic_triage_state(item) == "auto_prefilled" for item in eligible
+        )
+        provider_pending = sum(
+            _semantic_triage_state(item) in {"provider_unavailable", "certification_blocked"}
+            for item in eligible
+        )
+        if pending:
+            queue_message = (
+                f"{auto_prefilled} high-certainty labels were prefilled automatically. "
+                f"{len(pending)} low-certainty labels are excluded from semantic supervision; add human truth only "
+                "for an image you want to keep semantically."
+            )
+        elif provider_pending:
+            queue_message = (
+                f"No human review is requested. {provider_pending} images still need provider prefill; "
+                "configure and test the vision provider, then prepare labeling again."
+            )
+        else:
+            queue_message = f"All {auto_prefilled} eligible labels were prefilled automatically."
         return JSONResponse(
             {
                 "schema_version": "spritelab.labeling.product-queue.v1",
                 "items": rows,
-                "message": "Choose the deepest taxonomy node defensible from the visible evidence.",
+                "message": queue_message,
+                "auto_prefilled": auto_prefilled,
+                "provider_prefill_pending": provider_pending,
+                "low_certainty_remaining": len(pending),
+                "human_truth_required_for_all": False,
+                "low_certainty_default": "exclude_semantic_supervision",
                 "internal_ids_required": False,
             }
         )
@@ -589,32 +858,208 @@ def build_review_router(
     @router.post("/labeling/api/actions/{action}")
     @product_api
     def hierarchical_action(action: str) -> JSONResponse:
-        commands = {
-            "create_reference_cohort": "python -m spritelab dev labeling cohort --size 400",
-            "open_semantic_review": "Open the Labeling review queue in this page.",
-            "run_automatic_labeling": "python -m spritelab dev labeling run --profile balanced",
-            "reconcile": "python -m spritelab dev labeling reconcile",
-            "calibrate": "python -m spritelab dev labeling calibrate",
-            "view_report": "python -m spritelab dev labeling report",
-        }
-        if action not in commands:
+        if action not in {"open_semantic_review", "run_automatic_labeling"}:
             return api_error(404, "labeling_action_unknown", "The requested labeling action is not available.")
-        status = product_status(context.config, context.project_root)
+        current = effective_context()
+        status = product_status(current.config, current.project_root)
         if action == "run_automatic_labeling" and not status["enabled"]:
             return api_error(
                 409,
                 "hierarchical_labeling_disabled",
                 "Enable hierarchical labeling in project settings before running automatic suggestions.",
             )
+        if action == "open_semantic_review":
+            return JSONResponse(
+                {
+                    "schema_version": "spritelab.labeling.product-action.v2",
+                    "action": action,
+                    "message": "Semantic review is ready below.",
+                    "review_url": "/labeling#semantic-review",
+                    "started": False,
+                }
+            )
+        output = find_dataset_output(context)
+        if output is None:
+            return api_error(
+                409,
+                "labeling_dataset_required",
+                "Build or select a dataset before preparing hierarchical labeling.",
+                next_action="Open Dataset and choose the active dataset.",
+            )
+        try:
+            queue = json.loads((output / "review_queue.json").read_text(encoding="utf-8"))
+            input_root = Path(str(queue.get("input_root") or "")).resolve(strict=True)
+            ensure_dataset_writes_outside_input(
+                context.project_root,
+                input_root,
+                output_root=output,
+                runs_directory=context.runs_directory,
+            )
+        except (OSError, ValueError, json.JSONDecodeError, PackMetadataError) as exc:
+            return api_error(
+                409,
+                "labeling_dataset_invalid",
+                public_error(exc, output=output),
+                next_action="Rebuild or reselect the dataset before labeling.",
+            )
+        with labeling_jobs_lock:
+            current_job = labeling_jobs.get(active_labeling_job.get("job_id", ""))
+            if current_job and current_job.get("status") in {"queued", "running"}:
+                return JSONResponse(public_labeling_job(current_job), status_code=202)
+            job_id = secrets.token_urlsafe(18)
+            job = {
+                "job_id": job_id,
+                "status": "queued",
+                "stage": "queued",
+                "progress": 0,
+                "message": "Hierarchical labeling is queued.",
+                "logs": [_job_log("Queued hierarchical labeling in the background.")],
+                "result": None,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "finished_at": None,
+            }
+            labeling_jobs[job_id] = job
+            active_labeling_job["job_id"] = job_id
+
+        def run_labeling() -> None:
+            last_log = {"stage": "", "bucket": -1}
+
+            def progress(stage: str, current_count: int, total: int, message: str) -> None:
+                if (
+                    stage == "vision_provider"
+                    and provider_state.get("state") != "not_configured"
+                    and "not configured" in message.casefold()
+                ):
+                    state_label = str(provider_state.get("state", "unavailable")).replace("_", " ")
+                    message = f"Vision provider stage skipped: {state_label}. Test the provider to enable descriptions."
+                if stage == "inventory":
+                    percent = 5 + round((current_count / max(total, 1)) * 15)
+                    public_stage = "Verifying dataset"
+                elif stage == "vision_provider":
+                    percent = 25 + round((current_count / max(total, 1)) * 25)
+                    public_stage = "Vision provider"
+                else:
+                    percent = 55 + round((current_count / max(total, 1)) * 40)
+                    public_stage = "Preparing labeling"
+                bucket = percent // 10
+                should_log = stage != last_log["stage"] or bucket > last_log["bucket"] or current_count == total
+                update_labeling_job(
+                    job,
+                    status="running",
+                    stage=public_stage,
+                    progress=percent,
+                    message=message,
+                    log=message if should_log else None,
+                )
+                if should_log:
+                    last_log.update(stage=stage, bucket=bucket)
+
+            try:
+                update_labeling_job(
+                    job,
+                    status="running",
+                    stage="Starting",
+                    progress=4,
+                    message="Loading the active dataset.",
+                    log="Loaded the active dataset and verified its managed output boundary.",
+                )
+                runtime_context = effective_context()
+                provider_state = passive_provider_projection(runtime_context)
+                provider = (
+                    provider_factory(runtime_context, None)
+                    if provider_factory and provider_state.get("state") == "previously_verified"
+                    else None
+                )
+                result = prepare_existing_dataset_labeling(
+                    output,
+                    context=runtime_context,
+                    vision_provider=provider,
+                    progress=progress,
+                )
+                DatasetReviewStore(output, context=runtime_context).refresh_projection()
+                processed = int(result.get("processed", 0))
+                provider_status = str(result.get("provider_status", "not_configured"))
+                if provider is None and provider_state.get("state") != "not_configured":
+                    provider_status = str(provider_state.get("state"))
+                provider_message = {
+                    "not_configured": (
+                        "No vision provider was configured; technical evidence is ready without automatic descriptions."
+                    ),
+                    "available": "Automatic vision descriptions and hierarchical evidence are ready for review.",
+                    "health_failed": (
+                        "Technical evidence is ready, but the configured vision provider was unavailable."
+                    ),
+                    "configured_unverified": (
+                        "Technical evidence is ready; test the saved vision provider before automatic descriptions."
+                    ),
+                    "stale_cached": (
+                        "Technical evidence is ready; re-test the vision provider before automatic descriptions."
+                    ),
+                    "unavailable_cached": (
+                        "Technical evidence is ready; the saved vision provider or selected model is unavailable."
+                    ),
+                    "authentication_required_cached": (
+                        "Technical evidence is ready; the saved vision provider needs authentication."
+                    ),
+                    "certification_blocked": (
+                        "Technical evidence is ready; provider use was blocked by the current labeling scope."
+                    ),
+                }.get(provider_status, "Hierarchical evidence is ready for review.")
+                update_labeling_job(
+                    job,
+                    status="complete",
+                    stage="Ready for review",
+                    progress=100,
+                    message=f"Prepared {processed} images for semantic review. {provider_message}",
+                    log=(
+                        f"Hierarchical labeling finished. {processed} images are ready for semantic review. "
+                        f"{provider_message}"
+                    ),
+                    result={
+                        "processed": processed,
+                        "failures": int(result.get("failures", 0)),
+                        "provider_status": provider_status,
+                        "semantically_labeled": int(result.get("semantically_labeled", 0)),
+                        "review_url": "/labeling#semantic-review",
+                    },
+                )
+            except (OSError, ValueError, DatasetInputError, ProductSettingsError) as exc:
+                update_labeling_job(
+                    job,
+                    status="failed",
+                    stage="Needs attention",
+                    progress=int(job.get("progress", 0)),
+                    message=public_error(exc, folder=input_root, output=output),
+                    log="Labeling stopped safely. Existing dataset files were preserved when possible.",
+                )
+
+        Thread(target=run_labeling, name=f"hierarchical-labeling-{job_id[:8]}", daemon=True).start()
         return JSONResponse(
             {
-                "schema_version": "spritelab.labeling.product-action.v1",
+                **public_labeling_job(job),
+                "schema_version": "spritelab.labeling.product-action.v2",
                 "action": action,
-                "next_step": commands[action],
-                "started": False,
-                "production_authorized": False,
-            }
+                "started": True,
+                "status_url": f"/labeling/api/jobs/{job_id}",
+            },
+            status_code=202,
         )
+
+    @router.get("/labeling/api/jobs/current")
+    @product_api
+    def current_labeling_job() -> JSONResponse:
+        with labeling_jobs_lock:
+            job = labeling_jobs.get(active_labeling_job.get("job_id", ""))
+            return JSONResponse({"job": public_labeling_job(job) if job else None})
+
+    @router.get("/labeling/api/jobs/{job_id}")
+    @product_api
+    def labeling_job(job_id: str) -> JSONResponse:
+        with labeling_jobs_lock:
+            job = labeling_jobs.get(job_id)
+            if job is None:
+                return api_error(404, "labeling_job_not_found", "The labeling job is no longer available.")
+            return JSONResponse(public_labeling_job(job))
 
     @router.post("/dataset/api/folders/choose")
     @product_api
@@ -653,6 +1098,9 @@ def build_review_router(
                     next_action="Choose image folder when you are ready.",
                 )
             approval = store.approve(selected, source="native_picker")
+            with active_selection_lock:
+                active_selection.clear()
+                active_selection.update(mode="source", approval_id=approval.approval_id)
         except ApprovedFolderError as exc:
             return api_error(409, "folder_selection_unavailable", public_error(exc))
         return JSONResponse(
@@ -661,6 +1109,147 @@ def build_review_router(
                 "message": "Sprite Lab can only read folders you explicitly choose.",
             }
         )
+
+    @router.post("/dataset/api/existing/choose")
+    @product_api
+    async def choose_existing_dataset(request: Request) -> JSONResponse:
+        settings = getattr(request.app.state, "spritelab_settings", None)
+        if settings is not None and not settings.is_loopback:
+            return api_error(
+                403,
+                "native_picker_loopback_only",
+                "Existing dataset selection is available only from the loopback desktop session.",
+                recoverable=False,
+                next_action="Restart Sprite Lab on loopback before selecting a local dataset.",
+            )
+        try:
+            body = (
+                await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+            )
+        except (ValueError, json.JSONDecodeError):
+            body = {}
+        if isinstance(body, Mapping) and any(key in body for key in ("folder", "path", "directory")):
+            return api_error(
+                422,
+                "browser_path_not_allowed",
+                "Browser-supplied filesystem paths are not accepted.",
+                next_action="Use Select existing dataset to open the native folder picker.",
+            )
+        job_id = secrets.token_urlsafe(18)
+        job = {
+            "job_id": job_id,
+            "status": "queued",
+            "message": "Preparing the existing dataset selector.",
+            "logs": [_job_log("Selection job queued; the web application remains available.")],
+            "result": None,
+        }
+        with existing_dataset_jobs_lock:
+            existing_dataset_jobs[job_id] = job
+
+        def run_selection() -> None:
+            output: Path | None = None
+            try:
+                update_existing_dataset_job(
+                    job,
+                    status="running",
+                    message="Waiting for folder selection.",
+                    log="Opening the native folder picker.",
+                )
+                selected = (folder_chooser or choose_native_folder)()
+                if not selected:
+                    raise ValueError("No dataset folder was selected.")
+                update_existing_dataset_job(
+                    job,
+                    status="running",
+                    message="Validating the selected dataset.",
+                    log="Folder selected. Checking the imported dataset structure.",
+                )
+                output = validate_managed_dataset_output(
+                    selected,
+                    context=context,
+                    require_datasets_root=True,
+                )
+                update_existing_dataset_job(
+                    job,
+                    status="running",
+                    message="Reading the imported dataset manifests.",
+                    log="Required files found. Loading and validating the review queue and item manifest.",
+                )
+                summary = existing_dataset_summary(output)
+                items_count = int(summary["item_count"])
+                update_existing_dataset_job(
+                    job,
+                    status="running",
+                    message="Saving the project selection.",
+                    log=f"Validated {items_count} imported item(s). Saving the active dataset selection.",
+                )
+                current, _version, _saved = settings_repository.effective_settings("dataset")
+                settings_repository.save("dataset", {**current, "selected_root": str(output)})
+                with active_selection_lock:
+                    active_selection.clear()
+                    active_selection.update(mode="existing")
+                update_existing_dataset_job(
+                    job,
+                    status="complete",
+                    message="Existing dataset ready.",
+                    log="Selection complete. Review and labeling actions are now available.",
+                    result=summary,
+                )
+            except (OSError, ValueError, json.JSONDecodeError, ManagedDatasetError, ProductSettingsError) as exc:
+                update_existing_dataset_job(
+                    job,
+                    status="failed",
+                    message=public_error(exc, output=output),
+                    log="Selection failed safely. Choose a completed imported Sprite Lab dataset and try again.",
+                )
+
+        Thread(target=run_selection, name=f"dataset-select-{job_id[:8]}", daemon=True).start()
+        return JSONResponse(
+            {
+                "job_id": job_id,
+                "status": "queued",
+                "status_url": f"/dataset/api/existing/{job_id}",
+                "message": "Dataset selection started in the background.",
+            },
+            status_code=202,
+        )
+
+    @router.get("/dataset/api/selection")
+    @product_api
+    def current_dataset_selection() -> JSONResponse:
+        with active_selection_lock:
+            selection = dict(active_selection)
+        if selection.get("mode") == "source":
+            try:
+                approval_id = str(selection.get("approval_id") or "")
+                folder = store.resolve(approval_id)
+                inspection = inspect_dataset_folder(folder, context=context)
+            except (ApprovedFolderError, DatasetInputError):
+                return JSONResponse({"mode": "none", "paths_exposed": False})
+            public = _public_inspection(inspection, approval_id=approval_id, folder_name=folder.name)
+            public.update(mode="source", status="ready")
+            return JSONResponse(public)
+        if selection.get("mode") == "existing":
+            output = find_dataset_output(context)
+            if output is not None:
+                try:
+                    return JSONResponse({"mode": "existing", **existing_dataset_summary(output)})
+                except (OSError, ValueError, json.JSONDecodeError):
+                    pass
+        return JSONResponse({"mode": "none", "paths_exposed": False})
+
+    @router.get("/dataset/api/existing/{job_id}")
+    @product_api
+    def existing_dataset_job(job_id: str) -> JSONResponse:
+        with existing_dataset_jobs_lock:
+            job = existing_dataset_jobs.get(job_id)
+            public = dict(job) if job is not None else None
+            if public is not None:
+                public["logs"] = [dict(entry) for entry in job["logs"]]
+                public["result"] = dict(job["result"]) if isinstance(job.get("result"), Mapping) else None
+        if public is None:
+            return api_error(404, "existing_dataset_job_unknown", "The dataset selection job is unavailable.")
+        return JSONResponse(public)
 
     @router.get("/dataset/api/folders/approved")
     @product_api
@@ -919,15 +1508,15 @@ def build_review_router(
         if approval is None:
             return api_error(422, "folder_approval_invalid", "The folder approval is no longer available.")
         confirmed = payload.get("confirm_hosted") is True
-        output = _product_output_root(context, folder)
         try:
+            output = _product_output_root(context, folder)
             ensure_dataset_writes_outside_input(
                 context.project_root,
                 folder,
                 output_root=output,
                 runs_directory=context.runs_directory,
             )
-        except PackMetadataError as exc:
+        except (DatasetInputError, PackMetadataError) as exc:
             return api_error(
                 422,
                 "dataset_write_boundary_overlap",
@@ -978,11 +1567,12 @@ def build_review_router(
                 log="Started dataset build.",
             )
             try:
-                provider = provider_factory(context, lambda _prompt: confirmed) if provider_factory else None
+                current = effective_context()
+                provider = provider_factory(current, lambda _prompt: confirmed) if provider_factory else None
                 result = DatasetIntakeService(provider).build(
                     folder,
                     output_root=output,
-                    context=context,
+                    context=current,
                 )
                 counts = result.data.get("counts", {}) if isinstance(result.data, Mapping) else {}
                 events.append(
@@ -1075,9 +1665,7 @@ def build_review_router(
         if output is None:
             response = render(request, "review_empty.html")
             return response or HTMLResponse(_empty_page())
-        queue = _public_review_queue(
-            DatasetReviewStore(output, context=context).queue(), project_root=context.project_root
-        )
+        queue = _public_review_queue(_full_review_queue(output, context=context), project_root=context.project_root)
         response = render(request, "review.html", {"review_queue": queue})
         return response or HTMLResponse(_review_page(queue))
 
@@ -1088,9 +1676,7 @@ def build_review_router(
         output = find_dataset_output(context)
         if output is None:
             raise HTTPException(status_code=404, detail="No dataset review queue is available.")
-        return _public_review_queue(
-            DatasetReviewStore(output, context=context).queue(), project_root=context.project_root
-        )
+        return _public_review_queue(_full_review_queue(output, context=context), project_root=context.project_root)
 
     @router.get("/dataset/review/thumb/{item_id}")
     @router.get("/dataset/api/review/thumb/{item_id}")
@@ -1202,7 +1788,7 @@ def build_review_router(
         result = DatasetIntakeService().build(
             Path(str(queue["input_root"])),
             output_root=output,
-            context=context,
+            context=effective_context(),
         )
         return {
             "saved": True,
@@ -1372,9 +1958,25 @@ def _public_labeling_item(output: Path, item: Mapping[str, Any], graph: Any) -> 
         "metadata_evidence": {"filename": Path(str(item.get("relative_path", ""))).name},
         "metadata_is_separate": True,
         "conflicts": list(semantic.get("conflicts", ())),
+        "confidence": semantic.get("confidence"),
+        "triage_state": semantic.get("triage_state"),
+        "keep_requires_human_truth": semantic.get("keep_requires_human_truth") is True,
         "abstention_available": True,
         "exclude_semantic_supervision_available": True,
     }
+
+
+def _semantic_triage_state(item: Mapping[str, Any]) -> str:
+    semantic = item.get("semantic") if isinstance(item.get("semantic"), Mapping) else {}
+    explicit = str(semantic.get("triage_state") or "")
+    if explicit:
+        return explicit
+    state = str(semantic.get("state") or "pending")
+    if state == "proposed":
+        return "low_certainty_rejected" if semantic.get("needs_review") is True else "auto_prefilled"
+    if state == "abstained":
+        return "low_certainty_rejected"
+    return "provider_unavailable"
 
 
 def _labeling_page(status: Mapping[str, Any]) -> str:
@@ -1389,21 +1991,39 @@ def _labeling_page(status: Mapping[str, Any]) -> str:
 
 
 def find_dataset_output(context: ProjectContext) -> Path | None:
-    dataset_config = context.config.get("dataset", {}) if isinstance(context.config, Mapping) else {}
+    try:
+        dataset_config, _version, _saved = ProductSettingsRepository(context).effective_settings("dataset")
+    except ProductSettingsError:
+        dataset_config = context.config.get("dataset", {}) if isinstance(context.config, Mapping) else {}
     if isinstance(dataset_config, Mapping):
-        configured = dataset_config.get("output_root") or dataset_config.get("result_path")
+        configured = (
+            dataset_config.get("selected_root")
+            or dataset_config.get("output_root")
+            or dataset_config.get("result_path")
+        )
         if configured:
             path = Path(str(configured)).expanduser()
             if path.name == "result.json":
                 path = path.parent
-            if path.is_dir() and (path / "review_queue.json").is_file():
-                return path.resolve()
+            try:
+                return validate_managed_dataset_output(
+                    path,
+                    context=context,
+                    require_datasets_root=bool(dataset_config.get("selected_root")),
+                )
+            except ManagedDatasetError:
+                pass
     datasets = context.project_root / "datasets"
     if not datasets.is_dir():
         return None
-    candidates = [
-        path.parent for path in datasets.glob("*/result.json") if (path.parent / "review_queue.json").is_file()
-    ]
+    candidates: list[Path] = []
+    for result_path in datasets.glob("*/result.json"):
+        try:
+            candidates.append(
+                validate_managed_dataset_output(result_path.parent, context=context, require_datasets_root=True)
+            )
+        except ManagedDatasetError:
+            continue
     if not candidates:
         return None
     return max(candidates, key=lambda path: (path / "result.json").stat().st_mtime_ns).resolve()
@@ -1411,12 +2031,21 @@ def find_dataset_output(context: ProjectContext) -> Path | None:
 
 def _product_output_root(context: ProjectContext, folder: Path) -> Path:
     dataset_config = context.config.get("dataset", {}) if isinstance(context.config, Mapping) else {}
+    datasets_root = context.project_root / "datasets"
     if isinstance(dataset_config, Mapping):
         configured = dataset_config.get("output_root") or dataset_config.get("result_path")
         if configured:
-            return Path(str(configured)).expanduser().resolve()
+            candidate = Path(str(configured)).expanduser()
+            if candidate.name == "result.json":
+                candidate = candidate.parent
+            try:
+                return require_confined_path(candidate, datasets_root)
+            except UnsafeFilesystemOperation as exc:
+                raise DatasetInputError(
+                    "The dataset output must be a dedicated directory below this project's datasets directory."
+                ) from exc
     name = re.sub(r"[^a-z0-9]+", "-", folder.name.casefold()).strip("-") or "images"
-    return (context.project_root / "datasets" / f"{name}-dataset").resolve()
+    return require_confined_path(datasets_root / f"{name}-dataset", datasets_root)
 
 
 def discover_review_queues(context: ProjectContext) -> dict[str, Any]:
@@ -1602,7 +2231,7 @@ def _metadata_page(
         license_options = "".join(
             f'<option value="{value}"{" selected" if license_value == value else ""}>{title}</option>'
             for value, title in (
-                ("", "Chooseâ€¦"),
+                ("", "Choose…"),
                 ("cc0", "CC0"),
                 ("public_domain", "Public domain"),
                 ("cc_by", "CC BY"),
@@ -1635,12 +2264,13 @@ def _metadata_page(
             '<button type="submit">Save pack information</button></form></section>'
         )
     approval = html.escape(approval_id or "")
+    dataset_href = f"/dataset?approval_id={approval}" if approval else "/dataset"
     wizard_controls = (
         '<button id="metadata-complete" type="button"'
         + (" disabled" if inspection.get("wizard_required") else "")
         + '>Complete and continue</button><button id="metadata-cancel" type="button">Cancel</button>'
         if wizard_session_active
-        else '<a href="/dataset">Return to dataset</a>'
+        else f'<a id="metadata-return" href="{dataset_href}">Return to dataset</a>'
     )
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Pack information · Sprite Lab</title></head>
 <body><h1>Complete source and license information</h1><p>Sprite Lab records your declaration but cannot verify ownership or give legal advice.</p>

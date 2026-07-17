@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,6 +81,71 @@ def import_png_as_dataset_item(
     except (OSError, UnidentifiedImageError) as exc:
         return _failed_import(base_item, [f"could not load PNG: {exc}."])
 
+    return _import_loaded_rgba(
+        base_item,
+        source_path,
+        rgba,
+        options=options,
+        default_category=default_category,
+        default_tags=default_tags,
+        warnings=warnings,
+    )
+
+
+def import_png_bytes_as_dataset_item(
+    content: bytes,
+    *,
+    source_name: str,
+    options: ImportOptions,
+    default_category: str = "unknown",
+    default_tags: Sequence[str] = (),
+) -> ImportedSprite:
+    """Import already-held PNG bytes without reopening a mutable pathname."""
+
+    source_path = Path(source_name)
+    base_item = DatasetMakerItem(
+        sprite_id=normalize_sprite_id(source_path.stem),
+        source_path=source_path,
+        status="rejected",
+        category=default_category,
+        tags=tuple(default_tags),
+        source_name=source_path.name,
+    )
+    if source_path.suffix.lower() != ".png":
+        return _failed_import(base_item, [f"unsupported file type for {source_path.name}; expected .png."])
+    if options.max_palette_slots < 1:
+        return _failed_import(base_item, ["max_palette_slots must be at least 1."])
+    if not isinstance(content, bytes) or not content:
+        return _failed_import(base_item, [f"could not load PNG bytes for {source_path.name}."])
+    try:
+        with Image.open(io.BytesIO(content)) as opened:
+            if opened.format != "PNG" or getattr(opened, "n_frames", 1) != 1:
+                return _failed_import(base_item, [f"could not load a static PNG: {source_path.name}."])
+            opened.load()
+            rgba = opened.convert("RGBA")
+    except (OSError, UnidentifiedImageError) as exc:
+        return _failed_import(base_item, [f"could not load PNG: {exc}."])
+    return _import_loaded_rgba(
+        base_item,
+        source_path,
+        rgba,
+        options=options,
+        default_category=default_category,
+        default_tags=default_tags,
+    )
+
+
+def _import_loaded_rgba(
+    base_item: DatasetMakerItem,
+    source_path: Path,
+    rgba: Image.Image,
+    *,
+    options: ImportOptions,
+    default_category: str,
+    default_tags: Sequence[str],
+    warnings: Sequence[str] = (),
+) -> ImportedSprite:
+    warnings = list(warnings)
     if rgba.size != (SPRITE_WIDTH, SPRITE_HEIGHT):
         if not options.allow_nearest_resize:
             return _failed_import(base_item, [f"expected image size (32, 32), got {rgba.size}."])

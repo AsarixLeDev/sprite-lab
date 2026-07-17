@@ -17,6 +17,13 @@ from spritelab.product_features.dataset.intake import (
     recompute_summary_from_items,
     terminal_message,
 )
+from spritelab.product_features.dataset.managed import (
+    atomic_append_jsonl_event,
+    atomic_write_json_document,
+    atomic_write_jsonl_document,
+    dataset_write_guard,
+    validate_managed_dataset_output,
+)
 
 
 class ReviewDecisionError(ValueError):
@@ -27,8 +34,8 @@ class DatasetReviewStore:
     """Mutable current decisions backed by an immutable append-only audit log."""
 
     def __init__(self, output_root: str | Path, *, context: ProjectContext | None = None) -> None:
-        self.output_root = Path(output_root).resolve()
         self.context = context
+        self.output_root = validate_managed_dataset_output(output_root, context=context)
         self.queue_path = self.output_root / "review_queue.json"
         self.items_path = self.output_root / "items.jsonl"
         self.result_path = self.output_root / "result.json"
@@ -41,14 +48,34 @@ class DatasetReviewStore:
         return _read_json(self.queue_path)
 
     def apply(self, item_id: str, decision: str) -> dict[str, Any]:
+        with dataset_write_guard(self.output_root, context=self.context):
+            return self._apply_locked(item_id, decision)
+
+    def _apply_locked(self, item_id: str, decision: str) -> dict[str, Any]:
         normalized = decision.strip().casefold()
         if normalized not in {"keep", "exclude"}:
             raise ReviewDecisionError("Review decision must be 'keep' or 'exclude'.")
         queue = self.queue()
+        items = _read_jsonl(self.items_path)
+        item = next((value for value in items if value.get("item_id") == item_id), None)
+        if item is None:
+            raise ReviewDecisionError(f"Review item is not present in the current dataset state: {item_id}")
         queue_item = next((item for item in queue["items"] if item.get("item_id") == item_id), None)
         if queue_item is None:
-            raise ReviewDecisionError(f"Unknown review item: {item_id}")
-        if queue_item.get("queue_kind") != "intake_exception":
+            if item.get("current_disposition") != "accepted":
+                raise ReviewDecisionError(f"Unknown review item: {item_id}")
+            queue_item = {
+                **item,
+                "queue_kind": "dataset_audit",
+                "default_visible": False,
+                "thumbnail_url": f"/dataset/review/thumb/{item_id}",
+            }
+            queue["items"].append(queue_item)
+        audit_decision = item.get("current_disposition") == "accepted" or queue_item.get("queue_kind") in {
+            "dataset_audit",
+            "near_duplicate_exception",
+        }
+        if queue_item.get("queue_kind") != "intake_exception" and not audit_decision:
             raise ReviewDecisionError(
                 "Semantic exceptions require semantic confirmation, not an intake keep/exclude override."
             )
@@ -83,19 +110,24 @@ class DatasetReviewStore:
         }
         queue_item["current_decision"] = normalized
         queue_item["current_disposition"] = (
-            "accepted" if normalized == "keep" else str(queue_item["automatic_disposition"])
+            "accepted"
+            if normalized == "keep"
+            else "rejected"
+            if audit_decision and queue_item.get("automatic_disposition") == "accepted"
+            else str(queue_item["automatic_disposition"])
         )
-        queue_item["human_override"] = "rescued" if normalized == "keep" else "confirmed_excluded"
+        if audit_decision and queue_item.get("automatic_disposition") == "accepted":
+            queue_item["human_override"] = (
+                "human_confirmed_in_full_review" if normalized == "keep" else "human_excluded_in_full_review"
+            )
+        else:
+            queue_item["human_override"] = "rescued" if normalized == "keep" else "confirmed_excluded"
         queue_item["review_confirmed"] = True
         queue_item["default_visible"] = normalized == "exclude" and queue_item["current_disposition"] in {
             "rejected",
             "uncertain",
             "requires_special_extraction",
         }
-        items = _read_jsonl(self.items_path)
-        item = next((value for value in items if value.get("item_id") == item_id), None)
-        if item is None:
-            raise ReviewDecisionError(f"Review item is not present in the current dataset state: {item_id}")
         for key in ("current_decision", "current_disposition", "human_override", "review_confirmed"):
             item[key] = queue_item[key]
         _write_json(self.queue_path, queue)
@@ -123,6 +155,10 @@ class DatasetReviewStore:
         }
 
     def confirm_all_current_exclusions(self, *, reason: str | None = None) -> dict[str, Any]:
+        with dataset_write_guard(self.output_root, context=self.context):
+            return self._confirm_all_current_exclusions_locked(reason=reason)
+
+    def _confirm_all_current_exclusions_locked(self, *, reason: str | None = None) -> dict[str, Any]:
         queue = self.queue()
         selected = [
             item
@@ -151,6 +187,17 @@ class DatasetReviewStore:
             }
         )
         return {"confirmed": len(ids), "item_ids": sorted(ids), "review_log": str(self.log_path)}
+
+    def refresh_projection(self) -> dict[str, Any]:
+        """Refresh result/report projections after a labeling-only item update."""
+
+        with dataset_write_guard(self.output_root, context=self.context):
+            return self._refresh_projection_locked()
+
+    def _refresh_projection_locked(self) -> dict[str, Any]:
+        items = _read_jsonl(self.items_path)
+        self._refresh_result(items)
+        return {"items": len(items), "paths_exposed": False}
 
     def _refresh_result(self, items: list[dict[str, Any]]) -> None:
         result = _read_json(self.result_path)
@@ -195,8 +242,7 @@ class DatasetReviewStore:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             **dict(event),
         }
-        with self.log_path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n")
+        atomic_append_jsonl_event(self.log_path, record, output_root=self.output_root)
 
 
 def _status_cards(summary: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -234,17 +280,8 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _write_json(path: Path, value: Any) -> None:
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json_document(path, value, output_root=path.parent)
 
 
 def _write_jsonl(path: Path, values: list[dict[str, Any]]) -> None:
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(
-        "".join(
-            json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n" for value in values
-        ),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    atomic_write_jsonl_document(path, values, output_root=path.parent)

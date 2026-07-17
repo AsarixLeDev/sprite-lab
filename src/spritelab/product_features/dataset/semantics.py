@@ -34,7 +34,13 @@ def propose_semantics(
 
     eligible = [item for item in items if item["current_disposition"] == "accepted"]
     supplied = _apply_human_labels(eligible)
-    pending = [item for item in eligible if not item.get("semantic")]
+    _normalize_existing_triage(eligible)
+    pending = [
+        item
+        for item in eligible
+        if not item.get("semantic")
+        or (isinstance(item.get("semantic"), Mapping) and item["semantic"].get("state") == "pending")
+    ]
     verification = labeling_audit_verification(context)
     authorized_scopes = verification.authorized_scopes
     if provider is not None and not pending:
@@ -49,7 +55,15 @@ def propose_semantics(
         return summary
     if provider is None:
         for item in pending:
-            item["semantic"] = {"state": "pending", "truth_status": "unavailable", "provider_id": None}
+            item["semantic"] = {
+                "state": "pending",
+                "truth_status": "unavailable",
+                "provider_id": None,
+                "needs_review": False,
+                "triage_state": "provider_unavailable",
+                "semantic_supervision_eligible": False,
+                "keep_requires_human_truth": False,
+            }
         return _summary(
             eligible,
             provider_status="not_configured",
@@ -72,7 +86,7 @@ def propose_semantics(
             pending,
             eligible,
             provider,
-            f"Provider health probe failed: {exc}",
+            f"Provider health probe failed ({type(exc).__name__}).",
             authorized_scopes=authorized_scopes,
         )
     if not capabilities or not any(capability.available for capability in capabilities):
@@ -108,7 +122,7 @@ def propose_semantics(
             pending,
             eligible,
             provider,
-            f"Vision provider execution failed: {exc}",
+            f"Vision provider execution failed ({type(exc).__name__}).",
             authorized_scopes=authorized_scopes,
         )
     if not isinstance(result, ProductResult) or result.status not in {
@@ -150,9 +164,47 @@ def _apply_human_labels(items: Sequence[dict[str, Any]]) -> int:
                 "truth_status": "human_supplied",
                 "labels": labels,
                 "needs_review": False,
+                "triage_state": "human_verified",
+                "semantic_supervision_eligible": True,
+                "keep_requires_human_truth": False,
             }
             count += 1
     return count
+
+
+def _normalize_existing_triage(items: Sequence[dict[str, Any]]) -> None:
+    """Project pre-triage manifests into the confidence-based queue policy."""
+
+    for item in items:
+        semantic = item.get("semantic")
+        if not isinstance(semantic, dict) or semantic.get("triage_state"):
+            continue
+        state = str(semantic.get("state") or "pending")
+        human = semantic.get("truth_status") == "human_supplied"
+        needs_review = semantic.get("needs_review") is True
+        if human:
+            triage = "human_verified"
+            eligible = True
+            keep_requires_truth = False
+        elif state in {"proposed", "abstained"} and needs_review:
+            triage = "low_certainty_rejected"
+            eligible = False
+            keep_requires_truth = True
+        elif state == "proposed":
+            triage = "auto_prefilled"
+            eligible = True
+            keep_requires_truth = False
+        else:
+            triage = "provider_unavailable"
+            eligible = False
+            keep_requires_truth = False
+        semantic.update(
+            {
+                "triage_state": triage,
+                "semantic_supervision_eligible": eligible,
+                "keep_requires_human_truth": keep_requires_truth,
+            }
+        )
 
 
 def _validated_proposal(value: Mapping[str, Any] | None, provider_id: str) -> dict[str, Any]:
@@ -162,6 +214,9 @@ def _validated_proposal(value: Mapping[str, Any] | None, provider_id: str) -> di
             "truth_status": "provider_proposal_not_human_truth",
             "provider_id": provider_id,
             "needs_review": True,
+            "triage_state": "low_certainty_rejected",
+            "semantic_supervision_eligible": False,
+            "keep_requires_human_truth": True,
             "reason": str(value.get("reason", "provider_abstained")) if value else "provider_omitted_item",
         }
     labels = value.get("labels")
@@ -182,6 +237,9 @@ def _validated_proposal(value: Mapping[str, Any] | None, provider_id: str) -> di
         "conflicts": conflicts,
         "health_ok": health_ok,
         "needs_review": needs_review,
+        "triage_state": "low_certainty_rejected" if needs_review else "auto_prefilled",
+        "semantic_supervision_eligible": not needs_review,
+        "keep_requires_human_truth": needs_review,
     }
 
 
@@ -198,7 +256,10 @@ def _health_failure(
             "state": "pending",
             "truth_status": "unavailable",
             "provider_id": provider.provider_id,
-            "needs_review": True,
+            "needs_review": False,
+            "triage_state": "provider_unavailable",
+            "semantic_supervision_eligible": False,
+            "keep_requires_human_truth": False,
             "health_failure": message,
         }
     summary = _summary(
@@ -226,6 +287,9 @@ def _certification_blocked(
             "truth_status": "unavailable",
             "provider_id": provider_id,
             "needs_review": False,
+            "triage_state": "certification_blocked",
+            "semantic_supervision_eligible": False,
+            "keep_requires_human_truth": False,
             "certification_blocker": reason,
         }
     summary = _summary(

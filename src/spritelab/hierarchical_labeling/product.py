@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from spritelab.hierarchical_labeling.renders import RENDER_POLICIES, build_render_bundle
 from spritelab.hierarchical_labeling.taxonomy import load_default_taxonomy
 from spritelab.hierarchical_labeling.technical import extract_technical_evidence
+from spritelab.utils.safe_fs import UnsafeFilesystemOperation, require_confined_path
 from spritelab.v3.run_state import atomic_write_json
 
 
@@ -30,6 +31,7 @@ def prepare_configured_labeling(
     *,
     config: Mapping[str, Any],
     output_root: str | Path,
+    progress: Callable[[str, int, int, str], None] | None = None,
 ) -> dict[str, Any]:
     """Run deterministic stages after intake; semantic stages remain proposals.
 
@@ -52,12 +54,23 @@ def prepare_configured_labeling(
     graph = load_default_taxonomy()
     profile = settings["profile"]
     policy = RENDER_POLICIES[profile]
-    root = Path(output_root) / "hierarchical_labeling"
+    output = Path(output_root)
+    try:
+        root = require_confined_path(output / "hierarchical_labeling", output)
+        root.mkdir(parents=True, exist_ok=True)
+        root = require_confined_path(root, output)
+        artifacts_root = require_confined_path(root / "artifacts", output)
+        artifacts_root.mkdir(parents=True, exist_ok=True)
+        artifacts_root = require_confined_path(artifacts_root, output)
+    except (OSError, UnsafeFilesystemOperation) as exc:
+        raise ValueError("labeling output is outside its approved regular directory") from exc
     completed = 0
     failures: list[dict[str, str]] = []
-    for item in items:
-        if item.get("current_disposition") != "accepted":
-            continue
+    eligible = [item for item in items if item.get("current_disposition") == "accepted"]
+    total = len(eligible)
+    if progress:
+        progress("hierarchical_labeling", 0, total, "Preparing hierarchical evidence and render views.")
+    for index, item in enumerate(eligible, start=1):
         try:
             record_identity = str(item.get("item_id") or item.get("relative_path") or "")
             technical = extract_technical_evidence(item["source_path"], record_identity=record_identity)
@@ -66,6 +79,7 @@ def prepare_configured_labeling(
                 technical,
                 root / "renders" / technical.image_identity[:16],
                 policy=policy,
+                approved_root=output,
             )
             manifest = {
                 "schema_version": "spritelab.labeling.product-item-preparation.v1",
@@ -77,7 +91,10 @@ def prepare_configured_labeling(
                 "semantic_state": "awaiting_strict_description_or_review",
                 "truth_status": "not_human_truth",
             }
-            artifact = root / "artifacts" / f"{technical.image_identity}.json"
+            artifact = require_confined_path(
+                artifacts_root / f"{technical.image_identity}.json",
+                output,
+            )
             atomic_write_json(artifact, manifest)
             item["hierarchical_labeling"] = {
                 "state": "prepared",
@@ -101,6 +118,13 @@ def prepare_configured_labeling(
                     "error_type": type(exc).__name__,
                 }
             )
+        if progress:
+            progress(
+                "hierarchical_labeling",
+                index,
+                total,
+                f"Prepared hierarchical evidence for {index} of {total} accepted images.",
+            )
     summary = {
         "schema_version": "spritelab.labeling.product-preparation.v1",
         "enabled": True,
@@ -114,7 +138,8 @@ def prepare_configured_labeling(
         "conditioned_dataset_ready": False,
         "next_action": "Run automatic suggestions, review a reference cohort, then calibrate.",
     }
-    atomic_write_json(root / "preparation_summary.json", summary)
+    summary_path = require_confined_path(root / "preparation_summary.json", output)
+    atomic_write_json(summary_path, summary)
     return summary
 
 
@@ -145,9 +170,14 @@ def product_status(config: Mapping[str, Any], project_root: str | Path) -> dict[
             {"key": "image_preparation", "title": "Image preparation", "status": "READY"},
             {
                 "key": "reference_truth",
-                "title": "Reference truth",
-                "status": "READY" if truth_size else "NOT_STARTED",
+                "title": "Optional reference truth",
+                "status": "READY" if truth_size else "OPTIONAL",
                 "reviewed_records": truth_size,
+                "message": (
+                    None
+                    if truth_size
+                    else "Human truth is requested only when keeping a low-certainty semantic prefill."
+                ),
             },
             {
                 "key": "automatic_reliability",

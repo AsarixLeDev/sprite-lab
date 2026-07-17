@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from tests._labeling_audit import audit_context, write_labeling_audit
 
 from spritelab.product_core import (
@@ -18,6 +19,7 @@ from spritelab.product_core import (
 from spritelab.product_features.dataset import cli as dataset_cli
 from spritelab.product_features.dataset.intake import DatasetIntakeService
 from spritelab.product_features.dataset.plugin import build_plugin
+from spritelab.product_web.app import create_app
 from spritelab.v3 import cli as v3_cli
 from test_product_dataset_helpers import make_configured, make_opaque_background, make_png
 
@@ -26,9 +28,10 @@ class FakeVisionProvider:
     provider_id = "fake.vision"
     title = "Fake vision"
 
-    def __init__(self, *, abstain: bool = False, healthy: bool = True) -> None:
+    def __init__(self, *, abstain: bool = False, healthy: bool = True, confidence: float = 0.95) -> None:
         self.abstain = abstain
         self.healthy = healthy
+        self.confidence = confidence
         self.actions: list[ProductAction] = []
 
     def probe(self, _context: ProjectContext) -> tuple[ProductCapability, ...]:
@@ -51,7 +54,7 @@ class FakeVisionProvider:
                     {
                         "item_id": item["item_id"],
                         "labels": {"category": "object", "canonical_object": "unknown"},
-                        "confidence": 0.95,
+                        "confidence": self.confidence,
                         "health_ok": True,
                     }
                 )
@@ -71,10 +74,27 @@ def _certified_context(tmp_path: Path, *scopes: str) -> ProjectContext:
 def test_no_provider_completes_image_only_dataset(tmp_path: Path) -> None:
     root = make_configured(tmp_path / "input")
     make_png(root / "one.png")
-    result = DatasetIntakeService().build(root, output_root=tmp_path / "out")
+    output = tmp_path / "out"
+    context = ProjectContext(
+        tmp_path,
+        {
+            "dataset": {"output_root": str(output)},
+            "labeling": {
+                "hierarchical_enabled": True,
+                "hierarchical_profile": "fast_local",
+                "reference_cohort_size": 400,
+            },
+        },
+    )
+    result = DatasetIntakeService().build(root, output_root=output, context=context)
     assert result.data["counts"]["image_only_eligible"] == 1
     assert result.data["semantic"]["provider_status"] == "not_configured"
     assert result.data["semantic"]["conditioned_dataset_ready"] is False
+    client = TestClient(create_app(context, plugins=(build_plugin(),)))
+    queue = client.get("/labeling/api/queue").json()
+    assert queue["items"] == []
+    assert queue["provider_prefill_pending"] == 1
+    assert queue["human_truth_required_for_all"] is False
 
 
 def test_provider_is_invoked_through_shared_contract(tmp_path: Path) -> None:
@@ -87,6 +107,67 @@ def test_provider_is_invoked_through_shared_contract(tmp_path: Path) -> None:
     assert provider.actions[0].parameters["proposals_are_human_truth"] is False
     assert result.data["counts"]["semantically_labeled"] == 1
     assert result.data["semantic"]["conditioned_dataset_ready"] is True
+    semantic = json.loads((tmp_path / "out" / "items.jsonl").read_text(encoding="utf-8").splitlines()[0])[
+        "semantic"
+    ]
+    assert semantic["triage_state"] == "auto_prefilled"
+    assert semantic["semantic_supervision_eligible"] is True
+    assert semantic["keep_requires_human_truth"] is False
+    queue = json.loads((tmp_path / "out" / "review_queue.json").read_text(encoding="utf-8"))
+    assert not any(item["queue_kind"] == "semantic_exception" for item in queue["items"])
+
+
+def test_low_certainty_prefill_is_rejected_unless_human_rescues_it(tmp_path: Path) -> None:
+    root = make_configured(tmp_path / "input")
+    make_png(root / "one.png")
+    output = tmp_path / "out"
+    base = _certified_context(tmp_path, CONSERVATIVE_PROPOSAL_GENERATION)
+    context = ProjectContext(
+        base.project_root,
+        {
+            **base.config,
+            "dataset": {"output_root": str(output)},
+            "labeling": {
+                **base.config["labeling"],
+                "hierarchical_enabled": True,
+                "hierarchical_profile": "fast_local",
+                "reference_cohort_size": 400,
+            },
+        },
+    )
+    DatasetIntakeService(FakeVisionProvider(confidence=0.4)).build(
+        root,
+        output_root=output,
+        context=context,
+    )
+    item = json.loads((output / "items.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert item["current_disposition"] == "accepted"
+    assert item["semantic"]["triage_state"] == "low_certainty_rejected"
+    assert item["semantic"]["semantic_supervision_eligible"] is False
+    assert item["semantic"]["keep_requires_human_truth"] is True
+    intake_queue = json.loads((output / "review_queue.json").read_text(encoding="utf-8"))
+    exception = next(row for row in intake_queue["items"] if row["queue_kind"] == "semantic_exception")
+    assert exception["automatic_decision"] == "exclude_semantic_supervision"
+
+    client = TestClient(create_app(context, plugins=(build_plugin(),)))
+    queue = client.get("/labeling/api/queue").json()
+    assert queue["human_truth_required_for_all"] is False
+    assert queue["low_certainty_default"] == "exclude_semantic_supervision"
+    assert queue["low_certainty_remaining"] == 1
+    assert len(queue["items"]) == 1
+    reviewed = client.post(
+        f"/labeling/api/review/{item['item_id']}",
+        headers={"x-csrf-token": client.app.state.spritelab_csrf_token},
+        json={
+            "action": "choose_alternative",
+            "selected_node": "object",
+            "reviewer_identity": "test-reviewer",
+            "partition": "reference",
+            "submission_token": "low-certainty-rescue-1",
+        },
+    )
+    assert reviewed.status_code == 200
+    assert client.get("/labeling/api/queue").json()["items"] == []
 
 
 def test_provider_abstention_is_preserved_for_exception_review(tmp_path: Path) -> None:
@@ -116,6 +197,44 @@ def test_semantic_health_failure_preserves_image_only_dataset(tmp_path: Path) ->
     assert result.status == ProductStatus.COMPLETE
     assert result.data["counts"]["image_only_eligible"] == 1
     assert result.data["semantic"]["health_ok"] is False
+
+
+@pytest.mark.parametrize("failure_stage", ["probe", "execute"])
+def test_provider_failure_details_are_redacted_from_dataset_artifacts(
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    secret = r"C:\private\provider-token=do-not-persist"
+
+    class FailingProvider(FakeVisionProvider):
+        def probe(self, context: ProjectContext) -> tuple[ProductCapability, ...]:
+            if failure_stage == "probe":
+                raise RuntimeError(secret)
+            return super().probe(context)
+
+        def execute(self, action: ProductAction, context: ProjectContext, emit) -> ProductResult:
+            if failure_stage == "execute":
+                raise RuntimeError(secret)
+            return super().execute(action, context, emit)
+
+    root = make_configured(tmp_path / "input")
+    make_png(root / "one.png")
+    output = tmp_path / "out"
+    result = DatasetIntakeService(FailingProvider()).build(
+        root,
+        output_root=output,
+        context=_certified_context(tmp_path, CONSERVATIVE_PROPOSAL_GENERATION),
+    )
+
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (output / "result.json", output / "report_data.json", output / "items.jsonl")
+    )
+    assert result.status == ProductStatus.COMPLETE
+    assert result.data["counts"]["image_only_eligible"] == 1
+    assert secret not in persisted
+    assert secret not in json.dumps(result.data)
+    assert "RuntimeError" in persisted
 
 
 def test_human_labels_csv_do_not_require_provider(tmp_path: Path) -> None:

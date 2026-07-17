@@ -1,0 +1,20 @@
+.local-provider-guidance {
+  padding: 15px;
+  margin-bottom: 20px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  border: 1px solid currentColor;
+  border-radius: 10px;
+}
+
+.local-provider-guidance p {
+  margin: 4px 0 0;
+  color: inherit;
+}
+
+.local-provider-guidance code {
+  padding: 2px 5px;
+  color: inherit;
+  background: color-mix(in srgb, var(--surface) 65%, transparent);
+  border-radius: 4px;
+}

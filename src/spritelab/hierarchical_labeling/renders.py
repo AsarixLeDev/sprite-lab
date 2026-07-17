@@ -20,6 +20,7 @@ from spritelab.hierarchical_labeling.json_utils import (
     require_text,
     require_unique_text,
 )
+from spritelab.utils.safe_fs import UnsafeFilesystemOperation, atomic_write_bytes, require_confined_path
 
 RENDER_IMPLEMENTATION_VERSION = "spritelab-multi-view-render-v1"
 
@@ -311,6 +312,7 @@ def build_render_bundle(
     duplicate_context: tuple[str | Path, ...] = (),
     pack_context: tuple[str | Path, ...] = (),
     pack_context_permitted: bool = False,
+    approved_root: str | Path | None = None,
 ) -> MultiViewRenderBundle:
     path = Path(image_path)
     if exact_rgba_content_hash(path) != technical.image_identity:
@@ -334,8 +336,14 @@ def build_render_bundle(
     render_types = tuple(
         item for item in policy.render_types if item not in context_availability or context_availability[item]
     )
-    output = Path(output_root)
-    output.mkdir(parents=True, exist_ok=True)
+    requested_output = Path(output_root)
+    boundary = Path(approved_root) if approved_root is not None else requested_output.parent
+    try:
+        output = require_confined_path(requested_output, boundary)
+        output.mkdir(parents=True, exist_ok=True)
+        output = require_confined_path(output, boundary)
+    except (OSError, UnsafeFilesystemOperation) as exc:
+        raise ContractValidationError("render output is outside its approved regular directory") from exc
     views: list[RenderView] = []
     with Image.open(path) as opened:
         source = opened.convert("RGBA")
@@ -364,8 +372,14 @@ def build_render_bundle(
             "render_sha256": render_sha256,
         }
         view_identity = content_identity("spritelab-render-view-v1", view_seed)
-        artifact = output / f"{index:02d}-{render_type.value}-{view_identity[:12]}.png"
-        artifact.write_bytes(payload)
+        try:
+            artifact = require_confined_path(
+                output / f"{index:02d}-{render_type.value}-{view_identity[:12]}.png",
+                output,
+            )
+            atomic_write_bytes(artifact, payload)
+        except (OSError, UnsafeFilesystemOperation) as exc:
+            raise ContractValidationError("render artifact publication is outside its approved directory") from exc
         views.append(
             RenderView(
                 technical.image_identity,

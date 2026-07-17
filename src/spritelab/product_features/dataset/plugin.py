@@ -51,39 +51,26 @@ def create_plugin(
         navigation=(
             WebNavigationItem("dataset", "Dataset", "/dataset", order=20),
             WebNavigationItem("labeling", "Labeling", "/labeling", order=25),
+            WebNavigationItem("settings", "Settings", "/settings", order=60),
         ),
         required_backend_capabilities=(),
         settings_schema={
             "type": "object",
             "properties": {
                 "output_root": {"type": "string", "description": "Latest dataset build output (normally automatic)."},
+                "selected_root": {
+                    "type": "string",
+                    "description": "Explicitly selected existing imported dataset used by the web review workflow.",
+                },
                 "vision_provider": {
                     "type": ["string", "null"],
                     "description": "Optional shared VisionProvider ID; intake remains image-only without it.",
-                },
-                "hierarchical_labeling": {
-                    "type": "object",
-                    "properties": {
-                        "enabled": {"type": "boolean", "default": False},
-                        "profile": {
-                            "type": "string",
-                            "enum": ["fast_local", "balanced", "high_quality"],
-                            "default": "fast_local",
-                        },
-                        "reference_cohort_size": {
-                            "type": "integer",
-                            "minimum": 300,
-                            "maximum": 500,
-                            "default": 400,
-                        },
-                    },
-                    "additionalProperties": False,
                 },
             },
             "additionalProperties": False,
         },
         web_assets=(WebAssetBundle("spritelab.product_features.dataset"),),
-        api_prefixes=("/dataset/api", "/labeling/api"),
+        api_prefixes=("/dataset/api", "/labeling/api", "/settings/api/labeling"),
     )
 
 

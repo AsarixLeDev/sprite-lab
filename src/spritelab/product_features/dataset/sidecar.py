@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import stat
 import threading
 import time
@@ -28,6 +27,12 @@ from spritelab.product_features.dataset.packs import (
     SourcePack,
     detect_packs,
     pack_id_for_relative_root,
+)
+from spritelab.utils.safe_fs import (
+    AnchoredDirectory,
+    OwnedFileIdentity,
+    UnsafeFilesystemOperation,
+    remove_confined_tree,
 )
 
 PACK_METADATA_SCHEMA = "spritelab.dataset.pack_metadata.v2"
@@ -910,68 +915,82 @@ def _write_json_transaction_locked(
 
     transaction_id = uuid.uuid4().hex
     transactions = _ensure_transactions_directory(store)
-    preparing = transactions / f"preparing_{transaction_id}"
     transaction = transactions / f"txn_{transaction_id}"
-    preparing.mkdir(exist_ok=False)
-    active_transaction = preparing
     manifest_entries: list[dict[str, Any]] = []
+    transaction_created = False
     try:
-        for index, (target, new_bytes) in enumerate(normalized):
-            new_path = preparing / "new" / f"{index:04d}.json"
-            _write_durable_file(new_path, new_bytes)
-            try:
-                target.lstat()
-            except FileNotFoundError:
-                old_bytes = None
-            else:
-                old_bytes = _read_confined_bytes(target, store, label="Metadata transaction target")
-            old_path = preparing / "old" / f"{index:04d}.json"
-            if old_bytes is not None:
-                _write_durable_file(old_path, old_bytes)
-            manifest_entries.append(
-                {
-                    "index": index,
-                    "target": target.name,
-                    "had_original": old_bytes is not None,
-                    "old_sha256": hashlib.sha256(old_bytes).hexdigest() if old_bytes is not None else None,
-                    "new_sha256": hashlib.sha256(new_bytes).hexdigest(),
-                    "new_payload": f"new/{index:04d}.json",
-                    "old_payload": f"old/{index:04d}.json" if old_bytes is not None else None,
-                }
-            )
-        manifest = {
-            "schema_version": _METADATA_TRANSACTION_SCHEMA,
-            "transaction_id": transaction_id,
-            "entries": manifest_entries,
-        }
-        manifest_bytes = _json_document_bytes(manifest)
-        _write_durable_file(preparing / "manifest.json", manifest_bytes)
-        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-        _durable_replace(preparing, transaction)
-        active_transaction = transaction
-        _write_transaction_marker(transaction / "PREPARED", transaction_id, manifest_sha256)
-        for row in manifest_entries:
-            expected_old = row["old_sha256"] if row["had_original"] else None
-            if _path_sha256(store / str(row["target"])) != expected_old:
-                raise OSError("Metadata transaction target changed after preparation.")
-            _install_transaction_payload(
-                transaction / str(row["new_payload"]),
-                store / str(row["target"]),
-                transaction_id=transaction_id,
-                index=int(row["index"]),
-            )
-        for row in manifest_entries:
-            if _path_sha256(store / str(row["target"])) != row["new_sha256"]:
-                raise OSError("Metadata transaction target verification failed before commit.")
-        if validate_before_commit is not None:
-            validate_before_commit()
-        for row in manifest_entries:
-            if _path_sha256(store / str(row["target"])) != row["new_sha256"]:
-                raise OSError("Metadata transaction target changed during final source validation.")
-        _write_transaction_marker(transaction / "COMMITTED", transaction_id, manifest_sha256)
+        with AnchoredDirectory(transactions, transactions) as transactions_anchor:
+            owned_transaction = transactions_anchor.mkdir(transaction.name, exist_ok=False)
+            transaction_created = True
+            with AnchoredDirectory(transaction, transaction) as transaction_anchor:
+                if not owned_transaction.matches(transaction_anchor.directory_metadata()):
+                    raise OSError("Metadata transaction directory changed while it was being opened.")
+                owned_new = transaction_anchor.mkdir("new", exist_ok=False)
+                owned_old = transaction_anchor.mkdir("old", exist_ok=False)
+                with (
+                    AnchoredDirectory(transaction / "new", transaction / "new") as new_anchor,
+                    AnchoredDirectory(transaction / "old", transaction / "old") as old_anchor,
+                ):
+                    if not owned_new.matches(new_anchor.directory_metadata()) or not owned_old.matches(
+                        old_anchor.directory_metadata()
+                    ):
+                        raise OSError("Metadata transaction payload directory changed while it was being opened.")
+                    for index, (target, new_bytes) in enumerate(normalized):
+                        new_path = transaction / "new" / f"{index:04d}.json"
+                        _write_durable_file(new_path, new_bytes)
+                        try:
+                            target.lstat()
+                        except FileNotFoundError:
+                            old_bytes = None
+                        else:
+                            old_bytes = _read_confined_bytes(target, store, label="Metadata transaction target")
+                        old_path = transaction / "old" / f"{index:04d}.json"
+                        if old_bytes is not None:
+                            _write_durable_file(old_path, old_bytes)
+                        manifest_entries.append(
+                            {
+                                "index": index,
+                                "target": target.name,
+                                "had_original": old_bytes is not None,
+                                "old_sha256": hashlib.sha256(old_bytes).hexdigest() if old_bytes is not None else None,
+                                "new_sha256": hashlib.sha256(new_bytes).hexdigest(),
+                                "new_payload": f"new/{index:04d}.json",
+                                "old_payload": f"old/{index:04d}.json" if old_bytes is not None else None,
+                            }
+                        )
+                    manifest = {
+                        "schema_version": _METADATA_TRANSACTION_SCHEMA,
+                        "transaction_id": transaction_id,
+                        "entries": manifest_entries,
+                    }
+                    manifest_bytes = _json_document_bytes(manifest)
+                    _write_durable_file(transaction / "manifest.json", manifest_bytes)
+                    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+                    _write_transaction_marker(transaction / "PREPARED", transaction_id, manifest_sha256)
+                    for row in manifest_entries:
+                        expected_old = row["old_sha256"] if row["had_original"] else None
+                        if _path_sha256(store / str(row["target"])) != expected_old:
+                            raise OSError("Metadata transaction target changed after preparation.")
+                        _install_transaction_payload(
+                            transaction / str(row["new_payload"]),
+                            store / str(row["target"]),
+                            transaction_id=transaction_id,
+                            index=int(row["index"]),
+                        )
+                    for row in manifest_entries:
+                        if _path_sha256(store / str(row["target"])) != row["new_sha256"]:
+                            raise OSError("Metadata transaction target verification failed before commit.")
+                    if validate_before_commit is not None:
+                        validate_before_commit()
+                    for row in manifest_entries:
+                        if _path_sha256(store / str(row["target"])) != row["new_sha256"]:
+                            raise OSError("Metadata transaction target changed during final source validation.")
+                    _write_transaction_marker(transaction / "COMMITTED", transaction_id, manifest_sha256)
     except Exception as exc:
+        if not transaction_created:
+            raise
         try:
-            _recover_transaction_locked(store, active_transaction)
+            _recover_transaction_locked(store, transaction)
         except OSError as recovery_exc:
             raise OSError(
                 f"Metadata transaction failed and transaction-wide recovery was incomplete: {recovery_exc}"
@@ -998,10 +1017,11 @@ def _metadata_store_guard(store: Path, *, create: bool) -> Iterator[None]:
                 return
         _require_safe_directory(store.parent, parent=store.parent.parent)
         _require_safe_directory(store, parent=store.parent)
-        lock_path = store / ".metadata.lock"
-        with _interprocess_metadata_lock(lock_path):
-            _recover_transactions_locked(store)
-            yield
+        with AnchoredDirectory(store, store):
+            lock_path = store / ".metadata.lock"
+            with _interprocess_metadata_lock(lock_path):
+                _recover_transactions_locked(store)
+                yield
 
 
 @contextmanager
@@ -1071,14 +1091,12 @@ def _ensure_transactions_directory(store: Path) -> Path:
     if transactions.exists() or transactions.is_symlink():
         _require_safe_directory(transactions, parent=store)
         return transactions
-    preparing = store / f".transactions.creating.{uuid.uuid4().hex}"
-    preparing.mkdir()
     try:
-        _durable_replace(preparing, transactions)
-    finally:
-        if preparing.exists():
-            preparing.rmdir()
+        transactions.mkdir()
+    except FileExistsError:
+        pass
     _require_safe_directory(transactions, parent=store)
+    _fsync_directory(store)
     return transactions
 
 
@@ -1093,36 +1111,41 @@ def _recover_transactions_locked(store: Path) -> None:
     except FileNotFoundError:
         return
     _require_safe_directory(transactions, parent=store)
-    children = sorted(transactions.iterdir())
-    for preparing in (path for path in children if path.name.startswith("preparing_")):
-        _require_safe_directory(preparing, parent=transactions)
-        _cleanup_transaction_directory(preparing)
-    children = sorted(transactions.iterdir())
-    for stale in (path for path in children if path.name.startswith("cleanup_")):
-        _require_safe_directory(stale, parent=transactions)
-        try:
-            shutil.rmtree(stale)
-        except OSError:
-            pass
-    children = sorted(transactions.iterdir())
-    for transaction in (path for path in children if path.name.startswith("txn_")):
-        _require_safe_directory(transaction, parent=transactions)
-        _recover_transaction_locked(store, transaction)
-    try:
-        transactions.rmdir()
-    except OSError:
-        pass
+    with AnchoredDirectory(transactions, transactions):
+        children = sorted(transactions.iterdir())
+        for preparing in (path for path in children if path.name.startswith("preparing_")):
+            _require_safe_directory(preparing, parent=transactions)
+            _cleanup_transaction_directory(preparing)
+        children = sorted(transactions.iterdir())
+        for stale in (path for path in children if path.name.startswith("cleanup_")):
+            _require_safe_directory(stale, parent=transactions)
+            try:
+                _cleanup_transaction_directory(stale)
+            except OSError:
+                pass
+        children = sorted(transactions.iterdir())
+        for transaction in (path for path in children if path.name.startswith("txn_")):
+            _require_safe_directory(transaction, parent=transactions)
+            _recover_transaction_locked(store, transaction)
 
 
 def _recover_transaction_locked(store: Path, transaction: Path) -> None:
     _require_safe_directory(store)
     _require_safe_directory(store / ".transactions", parent=store)
     _require_safe_directory(transaction, parent=store / ".transactions")
+    identity = OwnedFileIdentity.from_stat(transaction.lstat())
+    with AnchoredDirectory(transaction, transaction) as transaction_anchor:
+        if not identity.matches(transaction_anchor.directory_metadata()):
+            raise OSError("Metadata transaction directory changed while it was being opened.")
+        _recover_transaction_contents_locked(store, transaction)
+    _cleanup_transaction_directory(transaction)
+
+
+def _recover_transaction_contents_locked(store: Path, transaction: Path) -> None:
     prepared_path = transaction / "PREPARED"
     try:
         prepared_path.lstat()
     except FileNotFoundError:
-        _cleanup_transaction_directory(transaction)
         return
     _require_safe_regular_file(prepared_path, parent=transaction, label="PREPARED marker")
     manifest_path = transaction / "manifest.json"
@@ -1165,7 +1188,6 @@ def _recover_transaction_locked(store: Path, transaction: Path) -> None:
         _recover_transaction_entry(store, transaction, raw, committed=committed, transaction_id=transaction_id)
     _require_directory_durable(store)
     _require_directory_durable(transaction)
-    _cleanup_transaction_directory(transaction)
 
 
 def _recover_transaction_entry(
@@ -1304,19 +1326,26 @@ def _durable_replace(source: Path, target: Path) -> None:
 
 
 def _write_durable_file(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     _require_safe_directory(path.parent)
-    with path.open("xb") as handle:
-        opened = os.fstat(handle.fileno())
-        current = _require_safe_regular_file(path, parent=path.parent, label="Durable metadata file")
-        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-            raise OSError("Durable metadata file changed while it was being created.")
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-        if os.fstat(handle.fileno()).st_nlink != 1:
-            raise OSError("Durable metadata file acquired multiple hard links while it was being written.")
-    _fsync_directory(path.parent)
+    with AnchoredDirectory(path.parent, path.parent) as parent_anchor:
+        descriptor = parent_anchor.open_file(
+            path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0)),
+        )
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                opened = os.fstat(descriptor)
+                current = parent_anchor.lstat(path.name)
+                if not OwnedFileIdentity.from_stat(opened).matches(current) or opened.st_nlink != 1:
+                    raise OSError("Durable metadata file changed while it was being created.")
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+                if os.fstat(handle.fileno()).st_nlink != 1:
+                    raise OSError("Durable metadata file acquired multiple hard links while it was being written.")
+        finally:
+            os.close(descriptor)
+        _fsync_directory(path.parent)
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1356,10 +1385,10 @@ def _cleanup_transaction_directory(transaction: Path) -> None:
     parent = Path(os.path.abspath(transaction.parent))
     _require_safe_directory(parent)
     _require_safe_directory(transaction, parent=parent)
-    cleanup = transaction.with_name(f"cleanup_{transaction.name.removeprefix('txn_')}_{uuid.uuid4().hex}")
-    _durable_replace(transaction, cleanup)
-    _require_safe_directory(cleanup, parent=parent)
-    shutil.rmtree(cleanup)
+    try:
+        remove_confined_tree(transaction, parent)
+    except UnsafeFilesystemOperation as exc:
+        raise OSError("Metadata transaction cleanup lost its exact owned directory.") from exc
     _fsync_directory(parent)
 
 

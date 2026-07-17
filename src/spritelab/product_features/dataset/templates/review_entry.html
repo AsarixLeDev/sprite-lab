@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Review · Sprite Lab{% endblock %}
 {% block content %}
-<header class="page-header"><div><span class="eyebrow">Shared review</span><h1>Review</h1><p>Each review queue keeps its authoritative append-only evidence format.</p></div></header>
+<header class="page-header"><div><span class="eyebrow">Shared review</span><h1>Review</h1><p>Each review queue keeps its authoritative append-only evidence format.</p></div><a class="button secondary" href="/dataset">Back to dataset</a></header>
 <section class="plugin-card-grid" aria-label="Review queues">
 {% for queue in review_summary.queues %}<a class="plugin-card" href="{{ queue.route }}"><div><h2>{{ queue.title }}</h2><p>{{ queue.count }} item(s)</p></div><span class="status-pill">Open</span></a>{% endfor %}
 </section>

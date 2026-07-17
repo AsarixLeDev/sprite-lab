@@ -2,7 +2,7 @@
 {% block title %}Labeling · Sprite Lab{% endblock %}
 {% block content %}
 <header class="page-header"><div><span class="eyebrow">Semantic workflow</span><h1>Hierarchical labeling</h1>
-  <p>Choose the deepest category supported by the visible evidence. Parent categories and abstention are valid outcomes.</p></div><a class="button secondary" href="/dataset">Back to dataset</a></header>
+  <p>Prefill every eligible image, automatically keep high-certainty labels, and optionally rescue low-certainty labels.</p></div><div class="header-actions"><a class="button secondary" href="/settings">Settings</a><a class="button secondary" href="/dataset">Back to dataset</a></div></header>
 <section class="labeling-status-grid" aria-label="Labeling status">
   {% for card in labeling_status.cards %}<article class="panel labeling-status-card"><span class="eyebrow">{{ card.status|replace('_', ' ') }}</span><h2>{{ card.title }}</h2>
     {% if card.key == 'automatic_reliability' and card.held_out_precision is not none %}<p>{{ '%.1f'|format(card.held_out_precision * 100) }}% held-out precision (n={{ card.sample_size }})</p>
@@ -10,31 +10,52 @@
     {% elif card.key == 'accepted_coverage' and card.coverage is not none %}<p>{{ '%.1f'|format(card.coverage * 100) }}% accepted coverage</p>
     {% elif card.message %}<p>{{ card.message }}</p>{% endif %}</article>{% endfor %}
 </section>
-<section class="panel" aria-labelledby="workflow-title"><div class="section-heading"><div><span class="eyebrow">Normal actions</span><h2 id="workflow-title">Labeling workflow</h2></div></div>
-  <div class="labeling-actions">
-    <button class="button secondary" data-labeling-action="create_reference_cohort">Create reference cohort ({{ reference_cohort_size }})</button>
-    <button class="button secondary" data-labeling-action="open_semantic_review">Open semantic review</button>
-    <button class="button primary" data-labeling-action="run_automatic_labeling">Run automatic suggestions</button>
-    <button class="button secondary" data-labeling-action="reconcile">Reconcile</button>
-    <button class="button secondary" data-labeling-action="calibrate">Calibrate</button>
-    <button class="button secondary" data-labeling-action="view_report">View report</button>
-  </div><p id="labeling-action-status" role="status" aria-live="polite">Automatic suggestions remain proposals until human review and held-out calibration.</p>
+<section class="provider-callout provider-{{ provider_projection.state }}" aria-labelledby="labeling-provider-title">
+  <span class="provider-callout-icon" aria-hidden="true">V</span>
+  <div><span class="eyebrow">Vision provider</span><h2 id="labeling-provider-title">
+    {% if provider_projection.state == 'not_configured' %}Automatic descriptions are off
+    {% elif provider_projection.state == 'previously_verified' %}Vision provider is ready
+    {% elif provider_projection.state == 'configured_unverified' %}Provider needs a connection test
+    {% else %}Provider needs attention{% endif %}</h2>
+    <p>{% if provider_projection.state == 'not_configured' %}You can prepare technical evidence now, but no automatic object descriptions will be generated. Configure Local Ollama and test it first for automatic suggestions.
+    {% elif provider_projection.state == 'previously_verified' %}The last explicit provider check succeeded. Labeling will use the saved provider configuration.
+    {% elif provider_projection.state == 'configured_unverified' %}Settings are saved, but the provider has not been verified. Test the connection before starting labeling.
+    {% else %}The last provider check did not confirm availability. Review the provider settings before labeling.{% endif %}</p></div>
+  <a class="button secondary" href="/settings/vision">{{ "Configure Local Ollama" if provider_projection.state == 'not_configured' else "Review provider" }}</a>
 </section>
-<section class="panel" id="semantic-review" aria-labelledby="review-title"><div class="section-heading"><div><span class="eyebrow">Human truth</span><h2 id="review-title">Semantic review</h2></div><span id="review-position">Loading…</span></div>
-  <div id="review-empty" class="labeling-empty" hidden>No prepared semantic review items are available. Build a dataset with hierarchical labeling enabled.</div>
+<section class="panel workflow-panel" aria-labelledby="workflow-title"><div class="section-heading"><div><span class="eyebrow">Prepare and review</span><h2 id="workflow-title">Labeling workflow</h2></div><span>Reference cohort: {{ reference_cohort_size }}</span></div>
+  <ol class="workflow-steps">
+    <li class="active"><span>1</span><div><strong>Prefill everything</strong><small>Generate semantic proposals and controlled image evidence in the background.</small></div></li>
+    <li><span>2</span><div><strong>Triage certainty</strong><small>Keep high-certainty labels and exclude uncertain labels from semantic supervision.</small></div></li>
+    <li><span>3</span><div><strong>Optional rescue</strong><small>Add human truth only for a low-certainty label you want to keep.</small></div></li>
+  </ol>
+  <div class="labeling-actions">
+    <button class="button primary" data-labeling-action="run_automatic_labeling">{{ "Prepare labeling" if provider_projection.state == 'previously_verified' else "Prepare evidence only" }}</button>
+    <button class="button secondary" data-labeling-action="open_semantic_review">Review low-certainty labels</button>
+  </div>
+  <p id="labeling-action-status" class="workflow-hint" role="status" aria-live="polite">Preparation runs in the background. This page remains usable and suggestions remain proposals.</p>
+
+  <div id="labeling-job" class="labeling-job" hidden>
+    <div class="job-heading"><div><span class="job-pulse" aria-hidden="true"></span><div><strong id="labeling-job-stage">Starting</strong><small id="labeling-job-message">Preparing the labeling job.</small></div></div><strong id="labeling-job-percent">0%</strong></div>
+    <progress id="labeling-job-progress" max="100" value="0">0%</progress>
+    <details class="job-logs" open><summary>Live activity log</summary><ol id="labeling-job-logs"></ol></details>
+  </div>
+</section>
+<section class="panel" id="semantic-review" aria-labelledby="review-title"><div class="section-heading"><div><span class="eyebrow">Optional rescue</span><h2 id="review-title">Low-certainty semantic review</h2><p>High-certainty labels are kept automatically. Review only a rejected low-certainty label that you want to keep for semantic training.</p></div><span id="review-position">Loading…</span></div>
+  <div id="review-empty" class="labeling-empty" hidden>No low-certainty labels need attention. Human truth is not required for automatically prefilled images.</div>
   <div id="review-workspace" class="labeling-review" hidden>
     <div><img id="review-image" class="labeling-image" alt="Sprite under semantic review"><div id="render-strip" class="render-strip" aria-label="Controlled image views"></div></div>
-    <div class="labeling-evidence"><h3>Suggested taxonomy path</h3><p id="suggested-path">No safe suggestion</p>
+    <div class="labeling-evidence"><span id="semantic-confidence" class="eyebrow">Low certainty</span><h3>Suggested taxonomy path</h3><p id="suggested-path">No safe suggestion</p>
       <label for="taxonomy-node">Choose alternative or parent</label><select id="taxonomy-node"></select>
       <h3>Visible description</h3><p id="visual-description">No strict description is available.</p>
       <details><summary>Retrieved verified neighbors</summary><ul id="retrieved-neighbors"></ul></details>
       <details class="metadata-channel"><summary>Metadata evidence (separate channel)</summary><pre id="metadata-evidence"></pre></details>
       <div id="conflict-indicators" class="conflict-indicators" role="status"></div>
-      <label for="reviewer-identity">Reviewer identity</label><input id="reviewer-identity" autocomplete="username" placeholder="reviewer name">
+      <label for="reviewer-identity">Reviewer identity (required only when saving a rescue decision)</label><input id="reviewer-identity" autocomplete="username" placeholder="reviewer name">
       <label for="review-caption">Optional short caption correction</label><input id="review-caption" placeholder="Optional">
       <label><input id="exclude-semantic" type="checkbox"> Exclude from semantic supervision</label>
       <label><input id="flag-render" type="checkbox"> Flag render problem</label><label><input id="flag-pack" type="checkbox"> Flag pack-context issue</label>
-      <div class="review-actions"><button class="button primary" data-review-action="accept_suggested_path">Accept suggested path <kbd>A</kbd></button>
+      <div class="review-actions"><button class="button primary" data-review-action="accept_suggested_path">Keep with suggested truth <kbd>A</kbd></button>
         <button class="button secondary" data-review-action="choose_parent">Choose parent <kbd>P</kbd></button>
         <button class="button secondary" data-review-action="choose_alternative">Choose alternative <kbd>X</kbd></button>
         <button class="button secondary" data-review-action="abstain">Abstain <kbd>U</kbd></button>
@@ -44,8 +65,9 @@
     </div>
   </div>
 </section>
-<section class="panel"><h2>Taxonomy, providers, runs, and reports</h2><p>The Taxonomy, Providers, Runs, and Reports areas expose detail without requiring prompt hashes, model IDs, or cache identities in the normal workflow.</p>
-  <div class="labeling-links"><a class="button secondary" href="/providers">Providers</a><a class="button secondary" href="/runs">Runs</a><a class="button secondary" href="#workflow-title">Reports</a></div></section>
+<section class="panel labeling-resources"><div><span class="eyebrow">Resources</span><h2>Providers and run history</h2><p>Inspect the optional vision provider or review completed product runs without exposing internal identifiers in the normal workflow.</p></div>
+  <div class="labeling-links"><a class="button secondary" href="/settings/vision">Vision provider</a><a class="button secondary" href="/runs">Run history</a></div></section>
 <link rel="stylesheet" href="/plugins/dataset.intake/static/labeling.css">
-<script src="/plugins/dataset.intake/static/labeling.js" defer></script>
+<link rel="stylesheet" href="/plugins/dataset.intake/static/labeling_provider.css">
+<script src="/plugins/dataset.intake/static/labeling.js?v=csrf-actions-1" defer></script>
 {% endblock %}

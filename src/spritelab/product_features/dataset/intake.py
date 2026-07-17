@@ -6,6 +6,7 @@ import copy
 import csv
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import stat
@@ -34,6 +35,11 @@ from spritelab.product_core import (
     VisionProvider,
 )
 from spritelab.product_features.dataset.evidence import evidence_digest_payload, evidence_for_image
+from spritelab.product_features.dataset.managed import (
+    atomic_write_json_document,
+    atomic_write_jsonl_document,
+    dataset_write_guard,
+)
 from spritelab.product_features.dataset.packs import SourcePack, detect_packs
 from spritelab.product_features.dataset.semantics import propose_semantics
 from spritelab.product_features.dataset.sheets import (
@@ -112,10 +118,18 @@ class DatasetIntakeService:
         output_root: str | Path | None = None,
         context: ProjectContext | None = None,
         interrupt_after: int | None = None,
+        progress: Callable[[str, int, int, str], None] | None = None,
+        private_fresh_output: bool = False,
     ) -> ProductResult:
         try:
             location = _resolve_locations(folder, output_root)
-            return self._build(location, context=context, interrupt_after=interrupt_after)
+            return self._build(
+                location,
+                context=context,
+                interrupt_after=interrupt_after,
+                progress=progress,
+                private_fresh_output=private_fresh_output,
+            )
         except DatasetInputError as exc:
             return ProductResult(
                 status=ProductStatus.BLOCKED,
@@ -131,11 +145,15 @@ class DatasetIntakeService:
         *,
         context: ProjectContext | None,
         interrupt_after: int | None,
+        progress: Callable[[str, int, int, str], None] | None,
+        private_fresh_output: bool,
     ) -> ProductResult:
         root, output = location.input_root, location.output_root
         paths = _discover_pngs(root)
         if not paths:
             raise DatasetInputError(f'No PNG files were found under "{root}".')
+        if progress:
+            progress("inventory", 0, len(paths), f"Found {len(paths)} source images.")
         effective_context = context or ProjectContext(project_root=Path.cwd(), config={})
         try:
             ensure_dataset_writes_outside_input(
@@ -176,7 +194,7 @@ class DatasetIntakeService:
             }
         )
         _write_json_atomic(state_path, state)
-        for path in paths:
+        for path_index, path in enumerate(paths, start=1):
             relative = path.relative_to(root).as_posix()
             byte_hash = file_sha256(path)
             pack = pack_by_image.get(relative)
@@ -245,6 +263,8 @@ class DatasetIntakeService:
                 raise DatasetImportInterrupted(
                     f"Import interrupted after {processed_now} newly processed item(s); resumable state was preserved."
                 )
+            if progress:
+                progress("inventory", path_index, len(paths), f"Checked {path_index} of {len(paths)} source images.")
         deleted = sorted(set(prior_items) - set(current))
         items = [current[key] for key in sorted(current)]
         _finalize_dispositions(items, prior_items)
@@ -266,9 +286,15 @@ class DatasetIntakeService:
             items,
             config=effective_context.config,
             output_root=output,
+            progress=progress,
         )
         revalidate_source()
-        rebuild_raw_extraction(output, items, validate_before_publish=revalidate_source)
+        rebuild_raw_extraction(
+            output,
+            items,
+            validate_before_publish=revalidate_source,
+            publish_direct_fresh=private_fresh_output,
+        )
         pack_summary = _pack_summary(packs, applicable_sidecars, items)
         summary = _summary(items, semantic, hierarchical=hierarchical, pack_summary=pack_summary)
         result = _product_result(root, output, items, summary, reused=reused, deleted=deleted)
@@ -294,6 +320,7 @@ def build_dataset(
     vision_provider: VisionProvider | None = None,
     context: ProjectContext | None = None,
     interrupt_after: int | None = None,
+    progress: Callable[[str, int, int, str], None] | None = None,
 ) -> ProductResult:
     """Convenience API used by the plugin and tests."""
 
@@ -302,7 +329,178 @@ def build_dataset(
         output_root=output_root,
         context=context,
         interrupt_after=interrupt_after,
+        progress=progress,
     )
+
+
+def prepare_existing_dataset_labeling(
+    output_root: str | Path,
+    *,
+    context: ProjectContext,
+    vision_provider: VisionProvider | None = None,
+    progress: Callable[[str, int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    """Prepare labeling while holding the dataset-wide mutation lock."""
+
+    with dataset_write_guard(output_root, context=context):
+        return _prepare_existing_dataset_labeling_locked(
+            output_root,
+            context=context,
+            vision_provider=vision_provider,
+            progress=progress,
+        )
+
+
+def _prepare_existing_dataset_labeling_locked(
+    output_root: str | Path,
+    *,
+    context: ProjectContext,
+    vision_provider: VisionProvider | None = None,
+    progress: Callable[[str, int, int, str], None] | None = None,
+) -> dict[str, Any]:
+    """Prepare semantics and hierarchy without recomputing dataset dispositions."""
+
+    output = Path(output_root).resolve(strict=True)
+    items_path = output / "items.jsonl"
+    queue_path = output / "review_queue.json"
+    if not items_path.is_file() or not queue_path.is_file():
+        raise DatasetInputError("The active dataset does not contain a completed item and review manifest.")
+    try:
+        queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        items = [dict(json.loads(line)) for line in items_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        raise DatasetInputError("The active dataset manifests could not be verified for labeling.") from exc
+    if not isinstance(queue, Mapping) or not all(isinstance(item, Mapping) for item in items):
+        raise DatasetInputError("The active dataset manifests are malformed.")
+    root = Path(str(queue.get("input_root") or "")).resolve(strict=True)
+    _restore_review_decisions(output, items, queue)
+
+    def validate_sources(stage_message: str, *, emit_progress: bool) -> None:
+        total = len(items)
+        for index, item in enumerate(items, start=1):
+            relative = Path(str(item.get("relative_path") or ""))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise DatasetInputError("A dataset image reference is outside the approved source folder.")
+            source = Path(str(item.get("source_path") or "")).resolve()
+            expected = (root / relative).resolve()
+            if source != expected:
+                raise DatasetInputError("A dataset image reference changed after preprocessing.")
+            _require_source_entry_confined(source, root, expected="file")
+            if file_sha256(source) != item.get("byte_sha256"):
+                raise DatasetInputError("A source image changed after preprocessing; rebuild before labeling.")
+            if progress and emit_progress:
+                progress("inventory", index, total, f"{stage_message} {index} of {total} dataset images.")
+
+    if progress:
+        progress("inventory", 0, len(items), f"Verifying {len(items)} current dataset images and review decisions.")
+    validate_sources("Verified", emit_progress=True)
+    accepted = sum(item.get("current_disposition") == "accepted" for item in items)
+    if progress:
+        progress("vision_provider", 0, accepted, "Checking the configured vision provider.")
+    semantic = propose_semantics(items, vision_provider, context)
+    if progress:
+        provider_status = str(semantic.get("provider_status", "not_configured")).replace("_", " ")
+        progress(
+            "vision_provider",
+            accepted,
+            accepted,
+            f"Vision provider stage finished: {provider_status}.",
+        )
+    hierarchical = prepare_configured_labeling(
+        items,
+        config=context.config,
+        output_root=output,
+        progress=progress,
+    )
+    validate_sources("Rechecked", emit_progress=False)
+    _write_jsonl_atomic(items_path, items)
+    _sync_review_queue_items(queue, items)
+    _write_json_atomic(queue_path, queue)
+    state_path = output / "preprocessing_state.json"
+    if state_path.is_file():
+        state = _load_state(state_path, root)
+        current = state.get("items") if isinstance(state.get("items"), dict) else {}
+        by_relative = {str(item.get("relative_path")): item for item in items}
+        for relative, item in by_relative.items():
+            cached = current.get(relative)
+            if isinstance(cached, dict):
+                for key in (
+                    "current_decision",
+                    "current_disposition",
+                    "human_override",
+                    "review_confirmed",
+                    "semantic",
+                    "hierarchical_labeling",
+                ):
+                    if key in item:
+                        cached[key] = copy.deepcopy(item[key])
+        _write_json_atomic(state_path, state)
+    return {
+        "processed": int(hierarchical.get("processed", 0)),
+        "failures": len(hierarchical.get("failures", ())),
+        "provider_status": str(semantic.get("provider_status", "not_configured")),
+        "semantically_labeled": int(semantic.get("semantically_labeled", 0)),
+        "semantically_abstained": int(semantic.get("semantically_abstained", 0)),
+        "accepted": accepted,
+    }
+
+
+def _restore_review_decisions(output: Path, items: list[dict[str, Any]], queue: Mapping[str, Any]) -> None:
+    log_path = output / "review_log.jsonl"
+    if not log_path.is_file():
+        return
+    decisions: dict[str, dict[str, Any]] = {}
+    try:
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if isinstance(event, Mapping) and event.get("event") == "item_decision":
+                item_id = str(event.get("item_id") or "")
+                after = event.get("after")
+                if item_id and isinstance(after, Mapping):
+                    decisions[item_id] = dict(after)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DatasetInputError("The append-only dataset review log could not be replayed safely.") from exc
+    for item in items:
+        decision = decisions.get(str(item.get("item_id") or ""))
+        if not decision:
+            continue
+        item.update(decision)
+        item["review_confirmed"] = True
+        item["human_override"] = (
+            "human_confirmed_in_full_review"
+            if decision.get("current_decision") == "keep" and item.get("automatic_disposition") == "accepted"
+            else "rescued"
+            if decision.get("current_decision") == "keep"
+            else "human_excluded_in_full_review"
+            if item.get("automatic_disposition") == "accepted"
+            else "confirmed_excluded"
+        )
+    _sync_review_queue_items(queue, items)
+
+
+def _sync_review_queue_items(queue: Mapping[str, Any], items: Sequence[Mapping[str, Any]]) -> None:
+    rows = queue.get("items")
+    if not isinstance(rows, list):
+        return
+    by_id = {str(item.get("item_id") or ""): item for item in items}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = by_id.get(str(row.get("item_id") or ""))
+        if item is None:
+            continue
+        for key in (
+            "current_decision",
+            "current_disposition",
+            "human_override",
+            "review_confirmed",
+            "semantic",
+            "hierarchical_labeling",
+        ):
+            if key in item:
+                row[key] = copy.deepcopy(item[key])
 
 
 def inspect_dataset_folder(
@@ -323,12 +521,32 @@ def inspect_dataset_folder(
     for pack in packs:
         record = sidecars.get(pack.pack_id)
         applicable = bool(record and sidecar_is_applicable(record, pack, root))
+        prefill = dict(pack.prefill)
+        if applicable and record is not None:
+            for field in (
+                "creator_or_rights_holder",
+                "pack_title",
+                "source_type",
+                "source_page_url",
+                "original_work_declaration",
+                "license_identifier",
+                "license_url",
+                "license_evidence_file",
+                "attribution_text",
+                "permission_confirmed",
+                "direct_download_url",
+                "version",
+                "acquisition_date",
+                "notes",
+            ):
+                prefill[field] = record.get(field)
         first = root / pack.image_relative_paths[0]
         source, license_record = _effective_evidence(first, root, pack, record if applicable else None)
         missing = _pack_missing_fields(source, license_record, pack, sidecar_applied=applicable)
         rows.append(
             {
                 **pack.to_dict(),
+                "prefill": prefill,
                 "sidecar_applied": applicable,
                 "sidecar_stale": bool(record) and not applicable,
                 "missing_fields": missing,
@@ -380,6 +598,7 @@ def rebuild_raw_extraction(
     items: Sequence[Mapping[str, Any]],
     *,
     validate_before_publish: Callable[[], None] | None = None,
+    publish_direct_fresh: bool = False,
 ) -> None:
     """Materialize current accepted records through the existing raw extraction backend."""
 
@@ -389,6 +608,23 @@ def rebuild_raw_extraction(
     backup = output / ".raw_extraction.previous"
     for managed in (destination, candidate, backup):
         require_confined_path(managed, output)
+    if publish_direct_fresh:
+        if any(path.exists() or path.is_symlink() for path in (destination, candidate, backup)):
+            raise DatasetInputError("Private raw extraction requires a fresh managed output directory.")
+        if not accepted:
+            if validate_before_publish is not None:
+                validate_before_publish()
+            return
+        specs = [_raw_spec(item) for item in accepted]
+        try:
+            build_raw_extraction(specs, destination, publish_direct_fresh=True)
+            if validate_before_publish is not None:
+                validate_before_publish()
+        except BaseException:
+            if destination.exists():
+                remove_confined_tree(destination, output)
+            raise
+        return
     for stale in (candidate, backup):
         if stale.exists():
             remove_confined_tree(stale, output)
@@ -899,23 +1135,19 @@ def _audit_extracted_cell(
     item_id: str,
     output: Path,
 ) -> tuple[dict[str, Any] | None, str, list[str]]:
-    """Run the existing suitability backend against a temporary derived crop."""
+    """Run the existing suitability backend against an in-memory derived crop."""
 
-    audit_root = output / ".sheet-suitability-audit"
-    audit_root.mkdir(parents=True, exist_ok=True)
-    path = audit_root / f"{item_id}.png"
-    try:
-        Image.fromarray(cell, "RGBA").save(path, format="PNG")
-        suitability = audit_sprite(
-            SuitabilityInput(sprite_id=item_id, image_path=path),
-            load_config("single_object_source_resolution"),
-        ).to_dict()
-    finally:
-        path.unlink(missing_ok=True)
-        try:
-            audit_root.rmdir()
-        except OSError:
-            pass
+    del output
+    encoded = io.BytesIO()
+    Image.fromarray(cell, "RGBA").save(encoded, format="PNG")
+    suitability = audit_sprite(
+        SuitabilityInput(
+            sprite_id=item_id,
+            image_path=Path(f"{item_id}.png"),
+            image_bytes=encoded.getvalue(),
+        ),
+        load_config("single_object_source_resolution"),
+    ).to_dict()
     reasons = sorted({_controlled_reason(code) for code in suitability["reason_codes"]})
     if "unresolved_sheet" in reasons:
         disposition = "requires_special_extraction"
@@ -1506,7 +1738,8 @@ def _semantic_review_item(item: Mapping[str, Any]) -> dict[str, Any]:
         **dict(item),
         "queue_kind": "semantic_exception",
         "reasons": reasons or ["semantic_review_required"],
-        "automatic_decision": "keep_image_only",
+        "automatic_decision": "exclude_semantic_supervision",
+        "keep_requires_human_truth": True,
         "default_visible": False,
         "thumbnail_url": f"/dataset/review/thumb/{item['item_id']}",
     }
@@ -1731,21 +1964,11 @@ def _controlled_reason(code: str) -> str:
 
 
 def _write_json_atomic(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json_document(path, value, output_root=path.parent)
 
 
 def _write_jsonl_atomic(path: Path, values: Sequence[Mapping[str, Any]]) -> None:
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(
-        "".join(
-            json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n" for value in values
-        ),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    atomic_write_jsonl_document(path, values, output_root=path.parent)
 
 
 def _safe_name(value: str) -> str:

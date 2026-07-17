@@ -184,7 +184,7 @@ The review log is JSONL and append-only. A suitability false positive can be res
 
 A vision model is optional. Without a configured `VisionProvider`, technical preprocessing completes, the accepted image-only dataset is ready, semantic records are marked pending, and the conditioned dataset remains unavailable.
 
-An integration layer can inject an object implementing the shared `VisionProvider` protocol into `DatasetIntakeService`. Intake first runs the provider health probe. It then sends one structured `dataset.semantic.propose` action for current accepted items. Returned values remain `provider_proposal_not_human_truth`. Abstentions, omissions, low confidence (below `0.8`), conflicts, and health failures remain semantic review exceptions. Provider health failure never discards the accepted image-only dataset.
+An integration layer can inject an object implementing the shared `VisionProvider` protocol into `DatasetIntakeService`. Intake first runs the provider health probe. It then sends one structured `dataset.semantic.propose` action for current accepted items. Returned values remain `provider_proposal_not_human_truth`. Valid proposals at or above `0.8` confidence are automatic prefills when conflict-free and healthy. Abstentions, omissions, lower confidence, and conflicts are excluded from semantic supervision by default and enter the optional human-rescue queue. Provider health failures are reported once rather than creating per-image human work, and never discard the accepted image-only dataset.
 
 User-supplied rows in `labels.csv` or `labels.jsonl` are marked `human_supplied`; provider proposals never receive that status.
 

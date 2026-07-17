@@ -18,7 +18,7 @@
     const data=Object.fromEntries(new FormData(form).entries());
     data.original_work_declaration=form.elements.original_work_declaration.checked;
     data.permission_confirmed=form.elements.permission_confirmed.checked;
-    try{const result=await post("/dataset/api/metadata/save",{...base(pack),metadata:data});pack.querySelector(".status-pill").textContent="Complete";announce(`Saved pack information. ${result.inspection.image_count} PNG file(s) remain protected by project-side metadata.`);if(!result.inspection.wizard_required){document.getElementById("metadata-next").textContent="All pack declarations are complete. Choose Complete and continue to resume the command.";if(complete)complete.disabled=false;}}catch(error){announce(error.message);}finally{submit.disabled=false;}
+    try{const result=await post("/dataset/api/metadata/save",{...base(pack),metadata:data});pack.querySelector(".status-pill").textContent="Complete";announce(`Saved pack information. ${result.inspection.image_count} PNG file(s) remain protected by project-side metadata.`);if(!result.inspection.wizard_required){const returning=document.getElementById("metadata-return");document.getElementById("metadata-next").textContent=complete?"All pack declarations are complete. Choose Complete and continue to resume the command.":"All pack declarations are complete. Continue to the dataset build.";if(complete)complete.disabled=false;if(returning)returning.textContent="Continue to build";}}catch(error){announce(error.message);}finally{submit.disabled=false;}
   });
   list.addEventListener("click",async(event)=>{
     const pack=event.target.closest(".metadata-pack");if(!pack)return;

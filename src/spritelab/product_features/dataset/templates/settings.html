@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Settings · Sprite Lab{% endblock %}
+{% block content %}
+<header class="page-header">
+  <div><span class="eyebrow">Project settings</span><h1>Settings</h1>
+    <p>Shape how Sprite Lab prepares and labels this project. Changes stay local and never start work by themselves.</p></div>
+</header>
+
+{% if settings_error %}<div class="warning-banner" role="alert">{{ settings_error }}</div>{% endif %}
+<div class="settings-layout">
+  <form id="hierarchical-labeling-settings" class="panel settings-card" data-enabled="{{ 'true' if labeling_settings.hierarchical_enabled else 'false' }}" novalidate>
+    <div class="settings-card-header">
+      <div class="settings-title">
+        <span class="settings-icon" aria-hidden="true">H</span>
+        <div><span class="eyebrow">Dataset enrichment</span><h2>Hierarchical labeling</h2></div>
+      </div>
+      <span class="settings-state" id="hierarchical-state"><span aria-hidden="true"></span>{{ "Enabled" if labeling_settings.hierarchical_enabled else "Disabled" }}</span>
+    </div>
+
+    <p class="settings-lede">Generate conservative taxonomy suggestions and a semantic review queue while building a dataset.</p>
+
+    <label class="enable-card" for="hierarchical-enabled">
+      <span class="enable-copy"><strong>Use hierarchical labeling</strong><small>Suggestions stay reviewable and are never treated as human truth.</small></span>
+      <span class="switch" aria-hidden="true"><input id="hierarchical-enabled" name="hierarchical_enabled" type="checkbox" {% if labeling_settings.hierarchical_enabled %}checked{% endif %}><span></span></span>
+    </label>
+
+    <div class="settings-fields">
+      <label for="hierarchical-profile"><span>Processing profile</span>
+        <select id="hierarchical-profile" name="hierarchical_profile">
+          <option value="fast_local" {% if labeling_settings.hierarchical_profile == 'fast_local' %}selected{% endif %}>Fast local</option>
+          <option value="balanced" {% if labeling_settings.hierarchical_profile == 'balanced' %}selected{% endif %}>Balanced</option>
+          <option value="high_quality" {% if labeling_settings.hierarchical_profile == 'high_quality' %}selected{% endif %}>High quality</option>
+        </select>
+        <small>Fast local is the best starting point for interactive builds.</small>
+      </label>
+      <label for="reference-cohort-size"><span>Reference cohort</span>
+        <div class="number-field"><input id="reference-cohort-size" name="reference_cohort_size" type="number" min="300" max="500" step="1" value="{{ labeling_settings.reference_cohort_size }}"><span>images</span></div>
+        <small>Use 300–500 human-reviewed reference images.</small>
+      </label>
+    </div>
+
+    <div class="settings-note"><span aria-hidden="true">i</span><p><strong>Applies to the next build.</strong> Rebuild an existing dataset to create its hierarchical artifacts.</p></div>
+
+    <div class="settings-footer">
+      <div class="settings-actions">
+        <button class="button primary" id="save-labeling-settings" type="button">Save changes</button>
+        <a class="button secondary" href="/labeling">Open labeling</a>
+      </div>
+      <button class="text-action" id="reset-labeling-settings" type="button">Restore defaults</button>
+    </div>
+    <div id="labeling-settings-summary" class="settings-summary" role="status" aria-live="polite">{{ "Saved locally for this project · configuration v" ~ configuration_version if settings_saved else "Using project defaults" }}</div>
+  </form>
+
+  <aside class="settings-aside" aria-label="Related settings">
+    <div class="panel related-card">
+      <span class="eyebrow">Related</span>
+      <span class="related-icon" aria-hidden="true">V</span>
+      <h2>Vision labeling</h2>
+      <p>Choose the optional vision provider that creates image descriptions.</p>
+      <a class="button secondary" href="/settings/vision">Configure provider <span aria-hidden="true">→</span></a>
+    </div>
+    <div class="settings-meta">
+      <span>Storage</span><strong>Local project</strong>
+      <span>Configuration</span><strong>v{{ configuration_version }}</strong>
+    </div>
+  </aside>
+</div>
+<link rel="stylesheet" href="/plugins/dataset.intake/static/settings.css">
+<script src="/plugins/dataset.intake/static/settings.js" defer></script>
+{% endblock %}

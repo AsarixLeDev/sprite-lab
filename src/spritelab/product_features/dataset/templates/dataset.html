@@ -2,19 +2,26 @@
 {% block title %}Dataset · Sprite Lab{% endblock %}
 {% block content %}
 <header class="page-header"><div><span class="eyebrow">Step 1</span><h1>Build a dataset</h1>
-  <p>Choose a folder, check source and license information, then build a read-only derived dataset.</p></div><a class="button secondary" href="/review">Open review</a></header>
+  <p>Choose a folder, check source and license information, then build a read-only derived dataset.</p></div><div class="form-actions"><a class="button secondary" href="/">Back to home</a><a class="button secondary" href="/review">Open review</a></div></header>
 <section class="panel dataset-steps" aria-labelledby="dataset-steps-title"><h2 id="dataset-steps-title">What happens</h2>
   <ol><li><strong>Choose image folder</strong><span>A native folder picker opens only after your action.</span></li><li><strong>Check evidence</strong><span>Sprite Lab looks for PNG images, source records, and license records.</span></li><li><strong>Build dataset</strong><span>Derived artifacts are written to the project. Original files remain unchanged.</span></li></ol></section>
 <section class="panel" aria-labelledby="folder-title"><div class="section-heading"><div><span class="eyebrow">Read-only access</span><h2 id="folder-title">Image folder</h2></div></div>
   <p>{{ folder_policy_message }}</p>
   {% if not native_picker_available %}<p class="dataset-fallback" role="status">The native picker is unavailable in this desktop session. {% if configured_import_roots %}A configured import root remains available to developer or automation workflows.{% else %}Configure a project import root or restart in an interactive desktop session.{% endif %}</p>{% endif %}
   <div class="folder-selection"><div><strong id="selected-folder">No folder selected</strong><small id="folder-detail">No server path is accepted from the browser.</small></div>
-    <button class="button primary" id="choose-folder" type="button">Choose image folder</button></div>
+    <button class="button primary" id="choose-folder" type="button">Choose image folder</button>
+    <button class="button secondary" id="choose-existing-dataset" type="button">Use existing imported dataset</button></div>
   <div id="dataset-summary" class="dataset-summary" role="status" aria-live="polite">Next action: Choose image folder</div>
   <label class="confirm-hosted"><input id="confirm-hosted" type="checkbox"> Allow the configured hosted description provider for this build when the privacy policy requires confirmation.</label>
   <div class="form-actions"><button class="button primary" id="build-dataset" type="button" disabled aria-describedby="build-disabled-reason">Build dataset</button>
-    <span id="build-disabled-reason">Choose and inspect a folder first.</span></div>
+    <a class="button secondary" id="dataset-metadata-action" href="/dataset/metadata" hidden>Complete pack information</a>
+    <span id="build-disabled-reason">Choose and inspect a source folder to build, or select an imported dataset to continue without rebuilding.</span></div>
+  <div class="form-actions" id="dataset-actions" hidden>
+    <a class="button primary" id="dataset-review-action" href="/dataset/review">Review exclusions</a>
+    <a class="button secondary" href="/dataset/review?view=all">Review whole dataset</a>
+    <a class="button secondary" href="/labeling">Review image descriptions</a>
+  </div>
 </section>
 <link rel="stylesheet" href="/plugins/dataset.intake/static/dataset.css">
-<script src="/plugins/dataset.intake/static/dataset.js" defer></script>
+<script src="/plugins/dataset.intake/static/dataset.js?v=existing-dataset-action-2" defer></script>
 {% endblock %}

@@ -41,11 +41,15 @@ def build_product_runtime() -> ProductRuntime:
     """Build the complete product without creating mutable process-global state."""
 
     registry = ProductPluginRegistry()
-    dataset_import_adapter = ConditionedDatasetImportAdapter()
     for plugin in (
         _web_shell_plugin(),
         build_provider_plugin(),
-        create_harvest_plugin(dataset_import_callback=dataset_import_adapter),
+        create_harvest_plugin(
+            dataset_import_callback_factory=lambda context: ConditionedDatasetImportAdapter(
+                context.project_root
+            ),
+            load_repository_capabilities=True,
+        ),
         build_conditioned_v5_plugin(),
         create_dataset_plugin(provider_factory=_dataset_provider),
         build_training_plugin(),

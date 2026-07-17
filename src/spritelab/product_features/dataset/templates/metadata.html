@@ -2,7 +2,7 @@
 {% block title %}Pack information · Sprite Lab{% endblock %}
 {% block content %}
 <header class="page-header"><div><span class="eyebrow">Pack intake</span><h1>Complete source and license information</h1>
-  <p>Answer once for each independently licensed pack. Sprite Lab records your declaration but cannot verify ownership or give legal advice.</p></div></header>
+  <p>Answer once for each independently licensed pack. Sprite Lab records your declaration but cannot verify ownership or give legal advice.</p></div><a class="button secondary" href="/dataset{% if approval_id %}?approval_id={{ approval_id|urlencode }}{% endif %}">Back to dataset</a></header>
 <div id="metadata-status" class="dataset-summary" role="status" aria-live="polite">
   {{ inspection.image_count }} PNG file(s) in {{ inspection.pack_count }} proposed pack(s).
 </div>
@@ -35,20 +35,20 @@
       <label>Source page URL<input name="source_page_url" type="url" value="{{ pack.prefill.get('source_page_url', '') }}"></label>
       <label>License<select name="license_identifier" required>
         {% set license = pack.prefill.get('license_identifier', '') %}
-        <option value="" {% if not license %}selected{% endif %}>Chooseâ€¦</option>
+        <option value="" {% if not license %}selected{% endif %}>Choose…</option>
         {% for value, title in [('cc0','CC0'),('public_domain','Public domain'),('cc_by','CC BY'),('cc_by_sa','CC BY-SA'),('mit','MIT'),('apache_2','Apache-2.0'),('bsd','BSD'),('wtfpl','WTFPL'),('custom','Custom'),('private_permission','Private permission'),('unknown','Unknown')] %}
         <option value="{{ value }}" {% if license == value %}selected{% endif %}>{{ title }}</option>{% endfor %}
       </select></label>
       <label>License URL<input name="license_url" type="url" value="{{ pack.prefill.get('license_url', '') }}"></label>
       <label>License evidence file<input name="license_evidence_file" value="{{ pack.prefill.get('license_evidence_file', '') }}"></label>
       <label>Attribution text<textarea name="attribution_text">{{ pack.prefill.get('attribution_text', '') }}</textarea></label>
-      <label>Direct download URL <span>(optional)</span><input name="direct_download_url" type="url"></label>
-      <label>Version <span>(optional)</span><input name="version"></label>
-      <label>Acquisition date <span>(optional)</span><input name="acquisition_date" type="date"></label>
-      <label>Notes <span>(optional)</span><textarea name="notes"></textarea></label>
+      <label>Direct download URL <span>(optional)</span><input name="direct_download_url" type="url" value="{{ pack.prefill.get('direct_download_url', '') or '' }}"></label>
+      <label>Version <span>(optional)</span><input name="version" value="{{ pack.prefill.get('version', '') or '' }}"></label>
+      <label>Acquisition date <span>(optional)</span><input name="acquisition_date" type="date" value="{{ pack.prefill.get('acquisition_date', '') or '' }}"></label>
+      <label>Notes <span>(optional)</span><textarea name="notes">{{ pack.prefill.get('notes', '') or '' }}</textarea></label>
     </div>
-    <label class="confirm-hosted"><input name="original_work_declaration" type="checkbox"> I explicitly declare that this is my original work and that I hold the rights needed for the recorded use.</label>
-    <label class="confirm-hosted"><input name="permission_confirmed" type="checkbox"> I confirm that I have permission under the custom/private agreement.</label>
+    <label class="confirm-hosted"><input name="original_work_declaration" type="checkbox" {% if pack.prefill.get('original_work_declaration') %}checked{% endif %}> I explicitly declare that this is my original work and that I hold the rights needed for the recorded use.</label>
+    <label class="confirm-hosted"><input name="permission_confirmed" type="checkbox" {% if pack.prefill.get('permission_confirmed') %}checked{% endif %}> I confirm that I have permission under the custom/private agreement.</label>
     <div class="form-actions"><button class="button primary" type="submit">Save pack information</button>
       <button class="button secondary export-metadata" type="button">Export metadata files…</button></div>
   </form>
@@ -61,7 +61,7 @@
     <button class="button primary" id="metadata-complete" type="button" {% if inspection.wizard_required %}disabled{% endif %}>Complete and continue</button>
     <button class="button secondary" id="metadata-cancel" type="button">Cancel</button>
   </div>
-  {% else %}<a class="button primary" href="/dataset">Return to dataset</a>{% endif %}</section>
+  {% else %}<a class="button primary" id="metadata-return" href="/dataset{% if approval_id %}?approval_id={{ approval_id|urlencode }}{% endif %}">Return to dataset</a>{% endif %}</section>
 <link rel="stylesheet" href="/plugins/dataset.intake/static/dataset.css">
 <script src="/plugins/dataset.intake/static/metadata.js" defer></script>
 {% endblock %}

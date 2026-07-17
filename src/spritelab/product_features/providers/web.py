@@ -7,6 +7,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 
 from spritelab.product_core import (
@@ -17,7 +18,7 @@ from spritelab.product_core import (
     product_api,
 )
 from spritelab.product_features.providers.config import ProviderSettings
-from spritelab.product_features.providers.contracts import PrivacyClass, PrivacyPolicy, ProviderMode
+from spritelab.product_features.providers.contracts import DiscoveryState, PrivacyClass, PrivacyPolicy, ProviderMode
 from spritelab.product_features.providers.discovery import VisionProviderRegistry
 from spritelab.product_features.providers.errors import ProviderError
 from spritelab.product_features.providers.state import passive_provider_projection
@@ -47,7 +48,7 @@ def create_settings_router(
     def vision_settings_page(request: Request) -> Any:
         try:
             settings, version, saved = effective()
-            projection = passive_provider_projection(context)
+            projection = passive_provider_projection(repository.effective_context())
             error = ""
         except (ValueError, ProductSettingsError) as exc:
             settings, version, saved = ProviderSettings(), 0, False
@@ -69,6 +70,9 @@ def create_settings_router(
                     "configuration_version": version,
                     "settings_saved": saved,
                     "provider_projection": projection,
+                    "provider_actions_available": projection.get("state") != "not_configured",
+                    "provider_models_available": projection.get("state") == "previously_verified",
+                    "provider_clear_available": saved,
                     "settings_error": error,
                 },
             )
@@ -210,20 +214,38 @@ def create_settings_router(
                     "No provider is configured for a connection test.",
                     next_action="Save provider settings or choose Automatic, then test again.",
                 )
-            probe = selected.probe()
+            probe = await run_in_threadpool(selected.probe)
+            validation = (
+                await run_in_threadpool(selected.validate_model, settings.model)
+                if probe.available
+                else None
+            )
+            observed_state = validation.state if validation is not None else probe.state
             observation = repository.record_observation(
                 "provider",
                 {
                     "configuration_version": version,
                     "action": "test",
-                    "state": probe.state.value,
+                    "state": observed_state.value,
                     "provider_id": selected.provider_id,
                 },
             )
         except (ValueError, ProductSettingsError, ProviderError) as exc:
             return api_error(400, "provider_test_failed", str(exc))
+        available = observed_state == DiscoveryState.AVAILABLE
         payload = {
             **probe.to_dict(),
+            "state": observed_state.value,
+            "message": validation.message if validation is not None else probe.message,
+            "available": available,
+            "model_validation": {
+                "model_id": validation.model_id,
+                "state": validation.state.value,
+                "message": validation.message,
+                "capabilities": list(validation.capabilities),
+            }
+            if validation is not None
+            else None,
             "display_name": selected.display_name,
             "privacy_class": selected.privacy_class.value,
             "test_kind": "one model-list health check; no image inference",
@@ -245,13 +267,21 @@ def create_settings_router(
             selected = _select_unprobed(registry(settings), settings, provider_id=body.get("provider_id"))
             if selected is None:
                 return api_error(503, "provider_not_configured", "No provider is configured for model refresh.")
-            models = selected.list_models()
+            models = await run_in_threadpool(selected.list_models)
         except (ValueError, ProductSettingsError, ProviderError) as exc:
             return api_error(503, "model_refresh_failed", str(exc))
         return JSONResponse(
             {
                 "provider_id": selected.provider_id,
-                "models": [model.to_dict() for model in models],
+                "models": [
+                    {
+                        "model_id": model.model_id,
+                        "display_name": model.display_name,
+                        "capabilities": list(model.capabilities),
+                        "metadata": dict(model.metadata),
+                    }
+                    for model in models
+                ],
                 "model_list_requests": 1,
                 "image_inference_requests": 0,
             }

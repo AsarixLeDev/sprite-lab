@@ -17,6 +17,7 @@
       {% elif provider_projection.state == 'stale_cached' %}The previous observation is stale. Detect or test explicitly to refresh it.
       {% else %}The last explicit check is cached; run Test connection for current state.{% endif %}
     </p>
+    {% if provider_projection.state == 'not_configured' %}<small>Save Automatic to use local discovery, choose a specific provider, or detect compatible local providers first.</small>{% endif %}
     {% if provider_projection.observation_timestamp %}<small>Observed {{ provider_projection.observation_timestamp }}</small>{% endif %}
   </div>
   <button class="button secondary" id="detect" type="button">Detect providers</button>
@@ -35,6 +36,8 @@
 
   <div class="hosted-warning" data-hosted-warning hidden role="note"><strong>Hosted privacy and cost warning</strong>
     <p>Hosted image transfer is controlled by the privacy policy and still requires confirmation when configured to ask.</p></div>
+  <div class="local-provider-guidance" data-ollama-guidance hidden role="note"><strong>Local Ollama must be running</strong>
+    <p>Start Ollama from the Windows Start menu or run <code>ollama serve</code>. Then save these settings and test the connection at <code>http://127.0.0.1:11434</code> before refreshing models.</p></div>
 
   <div class="form-grid" data-advanced-provider-fields>
     <label for="provider-endpoint">Endpoint
@@ -67,13 +70,14 @@
 
   <div class="form-actions">
     <button class="button primary" id="save" type="button">Save settings</button>
-    <button class="button secondary" id="test" type="button">Test connection</button>
-    <button class="button secondary" id="refresh-models" type="button">Refresh models</button>
-    <button class="button danger" id="clear" type="button">Clear provider configuration</button>
+    <button class="button secondary" id="test" type="button" {% if not provider_actions_available %}disabled title="Save or detect a provider first"{% endif %}>Test connection</button>
+    <button class="button secondary" id="refresh-models" type="button" {% if not provider_models_available %}disabled title="Test the provider connection first"{% endif %}>Refresh models</button>
+    <button class="button danger" id="clear" type="button" {% if not provider_clear_available %}disabled title="No saved provider configuration"{% endif %}>Clear provider configuration</button>
   </div>
-  <div id="summary" class="action-summary" role="status" aria-live="polite">No provider request has been made on this page.</div>
+  <div id="summary" class="action-summary" role="status" aria-live="polite">{% if provider_projection.state == 'not_configured' %}Start with Detect providers, or choose a mode and save it. Model refresh is unavailable until then.{% else %}No provider request has been made on this page.{% endif %}</div>
   <div id="models" class="model-results" aria-live="polite"></div>
 </form>
 <link rel="stylesheet" href="/plugins/vision.providers/static/providers.css">
+<link rel="stylesheet" href="/plugins/vision.providers/static/provider_feedback.css">
 <script src="/plugins/vision.providers/static/providers.js" defer></script>
 {% endblock %}

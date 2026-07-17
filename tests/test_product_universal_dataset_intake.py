@@ -8,7 +8,7 @@ import zipfile
 from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from typing import Any
 
 import pytest
@@ -16,7 +16,7 @@ import yaml
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from spritelab.product_core import ProjectContext
+from spritelab.product_core import ProductSettingsRepository, ProjectContext
 from spritelab.product_features.dataset import cli as dataset_cli
 from spritelab.product_features.dataset import intake as dataset_intake
 from spritelab.product_features.dataset import sidecar as dataset_sidecar
@@ -95,6 +95,32 @@ def _await_dataset_build(client: TestClient, response: Any) -> dict[str, Any]:
             pytest.fail(str(job.get("message") or "Dataset build failed."))
         time.sleep(0.01)
     pytest.fail("Dataset build did not complete before the test timeout.")
+
+
+def _await_existing_dataset_selection(client: TestClient, response: Any) -> dict[str, Any]:
+    assert response.status_code == 202
+    status_url = str(response.json()["status_url"])
+    for _ in range(200):
+        status_response = client.get(status_url)
+        assert status_response.status_code == 200
+        job = status_response.json()
+        if job["status"] in {"complete", "failed"}:
+            return job
+        time.sleep(0.01)
+    pytest.fail("Dataset selection did not complete before the test timeout.")
+
+
+def _await_labeling_job(client: TestClient, response: Any) -> dict[str, Any]:
+    assert response.status_code == 202
+    status_url = str(response.json()["status_url"])
+    for _ in range(300):
+        status_response = client.get(status_url)
+        assert status_response.status_code == 200
+        job = status_response.json()
+        if job["status"] in {"complete", "failed"}:
+            return job
+        time.sleep(0.01)
+    pytest.fail("Hierarchical labeling did not complete before the test timeout.")
 
 
 def _ambiguous_sheet(path: Path) -> Path:
@@ -823,6 +849,35 @@ def test_locked_transaction_helper_treats_empty_entries_as_a_no_op(tmp_path: Pat
         dataset_sidecar._write_json_transaction_locked(store, ())
 
     assert not list((store / ".transactions").glob("txn_*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows dynamic transaction handles block directory renames")
+def test_metadata_transaction_dynamic_directory_swap_is_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = tmp_path / "project" / "datasets" / "source_metadata"
+    target = store / "pack_0123456789abcdef01234567.json"
+    outside = tmp_path / "outside-sentinel.bin"
+    outside.write_bytes(b"unchanged")
+    original_write = dataset_sidecar._write_durable_file
+    blocked = False
+
+    def inject_swap(path: Path, payload: bytes) -> None:
+        nonlocal blocked
+        if path.name == "manifest.json" and not blocked:
+            moved = tmp_path / "moved-transaction"
+            with pytest.raises(OSError):
+                os.replace(path.parent, moved)
+            blocked = True
+        original_write(path, payload)
+
+    monkeypatch.setattr(dataset_sidecar, "_write_durable_file", inject_swap)
+    dataset_sidecar._write_json_transaction(((target, {"generation": "new"}),))
+
+    assert blocked is True
+    assert json.loads(target.read_text(encoding="utf-8")) == {"generation": "new"}
+    assert outside.read_bytes() == b"unchanged"
 
 
 def test_metadata_template_rejects_a_forged_source_pack_path_outside_input(tmp_path: Path) -> None:
@@ -1817,13 +1872,36 @@ def test_web_wizard_prefill_save_and_build(tmp_path: Path) -> None:
     page = client.get(f"/dataset/metadata?approval_id={approval_id}")
     assert "My original work" in page.text and "cannot verify ownership" in page.text
     pack_id = inspection["packs"][0]["pack_id"]
+    metadata = {
+        **_metadata(),
+        "direct_download_url": "https://example.test/synthetic-pack.zip",
+        "version": "2.4",
+        "acquisition_date": "2026-07-16",
+        "notes": "Keep this declaration editable.",
+    }
     saved = client.post(
         "/dataset/api/metadata/save",
         headers=_csrf(client),
-        json={"approval_id": approval_id, "pack_id": pack_id, "metadata": _metadata()},
+        json={"approval_id": approval_id, "pack_id": pack_id, "metadata": metadata},
     )
     assert saved.status_code == 200
     assert saved.json()["input_folder_written"] is False
+    saved_prefill = saved.json()["inspection"]["packs"][0]["prefill"]
+    assert saved_prefill["creator_or_rights_holder"] == "Synthetic Artist"
+    assert saved_prefill["original_work_declaration"] is True
+    assert saved_prefill["direct_download_url"] == "https://example.test/synthetic-pack.zip"
+    reopened = client.get(f"/dataset/metadata?approval_id={approval_id}")
+    assert 'value="https://example.test/synthetic-pack.zip"' in reopened.text
+    assert 'value="2.4"' in reopened.text
+    assert 'value="2026-07-16"' in reopened.text
+    assert "Keep this declaration editable." in reopened.text
+    assert 'name="original_work_declaration" type="checkbox" checked' in reopened.text
+    assert f'href="/dataset?approval_id={approval_id}"' in reopened.text
+    dataset_script = client.get("/plugins/dataset.intake/static/dataset.js")
+    assert 'new URLSearchParams(window.location.search).get("approval_id")' in dataset_script.text
+    assert 'build.textContent="Use selected dataset"' in dataset_script.text
+    assert 'node.removeAttribute("aria-busy")' in dataset_script.text
+    assert 'window.location.assign(existingDataset.review_url||"/dataset/review")' in dataset_script.text
     assert tree_hashes(selected) == before
     built = client.post(
         "/dataset/api/build",
@@ -1832,6 +1910,300 @@ def test_web_wizard_prefill_save_and_build(tmp_path: Path) -> None:
     )
     result = _await_dataset_build(client, built)
     assert result["data"]["counts"]["accepted"] == 1
+
+
+def test_labeling_browser_actions_send_csrf_and_reach_the_action_endpoint(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    client = TestClient(create_app(_context(project), plugins=(build_plugin(),)))
+
+    script = client.get("/plugins/dataset.intake/static/labeling.js")
+    rejected = client.post("/labeling/api/actions/open_semantic_review")
+    accepted = client.post(
+        "/labeling/api/actions/open_semantic_review",
+        headers=_csrf(client),
+    )
+
+    assert script.status_code == 200
+    assert 'meta[name="spritelab-csrf"]' in script.text
+    assert "headers['X-CSRF-Token'] = csrf" in script.text
+    assert 'body.error_code === "csrf_validation_failed"' in script.text
+    assert rejected.status_code == 403
+    assert rejected.json()["error_code"] == "csrf_validation_failed"
+    assert accepted.status_code == 200
+    assert accepted.json()["action"] == "open_semantic_review"
+
+
+def test_project_settings_enable_hierarchical_labeling_and_persist(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    context = _context(project)
+    client = TestClient(create_app(context, plugins=(build_plugin(),)))
+
+    page = client.get("/settings")
+    rejected = client.post(
+        "/settings/api/labeling",
+        json={
+            "hierarchical_enabled": True,
+            "hierarchical_profile": "fast_local",
+            "reference_cohort_size": 400,
+        },
+    )
+    saved = client.post(
+        "/settings/api/labeling",
+        headers=_csrf(client),
+        json={
+            "hierarchical_enabled": True,
+            "hierarchical_profile": "balanced",
+            "reference_cohort_size": 350,
+        },
+    )
+
+    assert page.status_code == 200
+    assert "Use hierarchical labeling" in page.text
+    assert "No settings provider is registered" not in page.text
+    assert rejected.status_code == 403
+    assert saved.status_code == 200
+    assert saved.json()["enabled"] is True
+    assert client.get("/labeling/api/status").json()["enabled"] is True
+    action = client.post(
+        "/labeling/api/actions/run_automatic_labeling",
+        headers=_csrf(client),
+    )
+    assert action.status_code == 409
+    assert action.json()["error_code"] == "labeling_dataset_required"
+    persisted, version, is_saved = ProductSettingsRepository(context).effective_settings("labeling")
+    assert persisted == {
+        "hierarchical_enabled": True,
+        "hierarchical_profile": "balanced",
+        "reference_cohort_size": 350,
+    }
+    assert version == 1
+    assert is_saved is True
+
+
+def test_web_hierarchical_labeling_runs_in_background_with_progress_and_logs(tmp_path: Path) -> None:
+    source = make_configured(tmp_path / "source")
+    make_png(source / "sprite.png")
+    project = tmp_path / "project"
+    output = project / "datasets" / "dataset"
+    context = _context(project, output=output)
+    build_dataset(source, output_root=output, context=context)
+    client = TestClient(create_app(context, plugins=(build_plugin(),)))
+    saved = client.post(
+        "/settings/api/labeling",
+        headers=_csrf(client),
+        json={
+            "hierarchical_enabled": True,
+            "hierarchical_profile": "fast_local",
+            "reference_cohort_size": 400,
+        },
+    )
+
+    job = _await_labeling_job(
+        client,
+        client.post("/labeling/api/actions/run_automatic_labeling", headers=_csrf(client)),
+    )
+
+    assert saved.status_code == 200
+    assert job["status"] == "complete"
+    assert job["progress"] == 100
+    assert job["stage"] == "Ready for review"
+    assert job["result"] == {
+        "processed": 1,
+        "failures": 0,
+        "provider_status": "not_configured",
+        "semantically_labeled": 0,
+        "review_url": "/labeling#semantic-review",
+    }
+    assert any("dataset images" in entry["message"] for entry in job["logs"])
+    assert any("ready for semantic review" in entry["message"] for entry in job["logs"])
+    assert _items(output)[0]["hierarchical_labeling"]["state"] == "prepared"
+    assert len(list((output / "hierarchical_labeling" / "artifacts").glob("*.json"))) == 1
+    current = client.get("/labeling/api/jobs/current").json()["job"]
+    assert current["job_id"] == job["job_id"]
+
+
+def test_web_labeling_preserves_reviewed_dataset_decisions(tmp_path: Path) -> None:
+    source = make_configured(tmp_path / "source")
+    make_png(source / "sprite.png")
+    project = tmp_path / "project"
+    output = project / "datasets" / "dataset"
+    context = _context(project, output=output)
+    build_dataset(source, output_root=output, context=context)
+    item = _items(output)[0]
+    DatasetReviewStore(output, context=context).apply(item["item_id"], "exclude")
+    client = TestClient(create_app(context, plugins=(build_plugin(),)))
+    client.post(
+        "/settings/api/labeling",
+        headers=_csrf(client),
+        json={
+            "hierarchical_enabled": True,
+            "hierarchical_profile": "fast_local",
+            "reference_cohort_size": 400,
+        },
+    )
+
+    job = _await_labeling_job(
+        client,
+        client.post("/labeling/api/actions/run_automatic_labeling", headers=_csrf(client)),
+    )
+
+    reviewed = _items(output)[0]
+    assert job["status"] == "complete"
+    assert reviewed["current_decision"] == "exclude"
+    assert reviewed["current_disposition"] == "rejected"
+    assert reviewed["human_override"] == "human_excluded_in_full_review"
+    assert reviewed["review_confirmed"] is True
+    assert json.loads((output / "result.json").read_text(encoding="utf-8"))["data"]["counts"]["accepted"] == 0
+
+
+def test_hierarchical_labeling_settings_validate_complete_bounded_payload(tmp_path: Path) -> None:
+    client = TestClient(create_app(_context(tmp_path / "project"), plugins=(build_plugin(),)))
+    payload = {
+        "hierarchical_enabled": True,
+        "hierarchical_profile": "fast_local",
+        "reference_cohort_size": 299,
+    }
+
+    invalid = client.post("/settings/api/labeling", headers=_csrf(client), json=payload)
+
+    assert invalid.status_code == 422
+    assert invalid.json()["error_code"] == "labeling_settings_invalid"
+
+
+def test_web_can_select_an_existing_imported_dataset_without_rebuilding(tmp_path: Path) -> None:
+    source = make_configured(tmp_path / "source")
+    make_png(source / "sprite.png")
+    project = tmp_path / "project"
+    output = project / "datasets" / "imported-dataset"
+    build_dataset(source, output_root=output)
+    context = _context(project)
+    client = TestClient(create_app(context, plugins=(create_plugin(folder_chooser=lambda: output),)))
+
+    selected = _await_existing_dataset_selection(
+        client,
+        client.post("/dataset/api/existing/choose", headers=_csrf(client), json={}),
+    )
+
+    assert selected["status"] == "complete"
+    assert selected["result"]["folder_name"] == "imported-dataset"
+    assert selected["result"]["item_count"] == 1
+    assert selected["result"]["paths_exposed"] is False
+    assert str(output.resolve()) not in json.dumps(selected)
+    assert any("Validated 1 imported item" in entry["message"] for entry in selected["logs"])
+    assert dataset_web.find_dataset_output(context) == output.resolve()
+    restored = client.get("/dataset/api/selection")
+    assert restored.status_code == 200
+    assert restored.json()["mode"] == "existing"
+    assert restored.json()["item_count"] == 1
+    review = client.get("/dataset/api/review/data")
+    assert review.status_code == 200
+    assert len(review.json()["items"]) == 1
+
+
+def test_dataset_page_restores_the_session_approved_source_folder(tmp_path: Path) -> None:
+    source = make_configured(tmp_path / "source")
+    make_png(source / "sprite.png")
+    project = tmp_path / "project"
+    client = TestClient(create_app(_context(project), plugins=(create_plugin(folder_chooser=lambda: source),)))
+    chosen = client.post("/dataset/api/folders/choose", headers=_csrf(client), json={})
+
+    restored = client.get("/dataset/api/selection")
+
+    assert chosen.status_code == 200
+    assert restored.status_code == 200
+    assert restored.json()["mode"] == "source"
+    assert restored.json()["approval_id"] == chosen.json()["approval"]["approval_id"]
+    assert restored.json()["folder_name"] == "source"
+    assert restored.json()["image_count"] == 1
+    assert str(source.resolve()) not in restored.text
+
+
+def test_full_dataset_review_can_exclude_and_restore_an_automatically_accepted_image(tmp_path: Path) -> None:
+    source = make_configured(tmp_path / "source")
+    make_png(source / "first.png", color=(220, 60, 40, 255))
+    make_png(source / "second.png", color=(40, 160, 220, 255))
+    before = tree_hashes(source)
+    project = tmp_path / "project"
+    output = project / "datasets" / "dataset"
+    build_dataset(source, output_root=output)
+    context = _context(project, output=output)
+    client = TestClient(create_app(context, plugins=(build_plugin(),)))
+    item = next(value for value in _items(output) if value["automatic_disposition"] == "accepted")
+
+    page = client.get("/dataset/review?view=all")
+    data = client.get("/dataset/api/review/data")
+    excluded = client.post(
+        f"/dataset/api/review/items/{item['item_id']}/decision",
+        headers=_csrf(client),
+        json={"decision": "exclude"},
+    )
+    restored = client.post(
+        f"/dataset/api/review/items/{item['item_id']}/decision",
+        headers=_csrf(client),
+        json={"decision": "keep"},
+    )
+
+    assert page.status_code == 200
+    assert "Back to dataset" in page.text
+    assert "Potentially problematic accepted images" in page.text
+    assert "Whole dataset (2)" in page.text
+    assert 'id="filename-filter"' in page.text
+    assert data.json()["complete_item_count"] == 2
+    assert len(data.json()["items"]) == 2
+    assert excluded.status_code == 200
+    assert excluded.json()["current_disposition"] == "rejected"
+    assert restored.status_code == 200
+    assert restored.json()["current_disposition"] == "accepted"
+    assert tree_hashes(source) == before
+
+
+def test_web_rejects_invalid_or_browser_supplied_existing_dataset_paths(tmp_path: Path) -> None:
+    invalid = tmp_path / "not-a-dataset"
+    invalid.mkdir()
+    project = tmp_path / "project"
+    context = _context(project)
+    client = TestClient(create_app(context, plugins=(create_plugin(folder_chooser=lambda: invalid),)))
+
+    browser_path = client.post(
+        "/dataset/api/existing/choose",
+        headers=_csrf(client),
+        json={"path": str(invalid)},
+    )
+    selected = _await_existing_dataset_selection(
+        client,
+        client.post("/dataset/api/existing/choose", headers=_csrf(client), json={}),
+    )
+
+    assert browser_path.status_code == 422
+    assert browser_path.json()["error_code"] == "browser_path_not_allowed"
+    assert selected["status"] == "failed"
+    assert str(invalid.resolve()) not in json.dumps(selected)
+    assert dataset_web.find_dataset_output(context) is None
+
+
+def test_existing_dataset_selection_keeps_web_server_responsive_while_picker_is_open(tmp_path: Path) -> None:
+    picker_opened = Event()
+    release_picker = Event()
+
+    def delayed_picker() -> None:
+        picker_opened.set()
+        release_picker.wait(timeout=5)
+        return None
+
+    project = tmp_path / "project"
+    client = TestClient(create_app(_context(project), plugins=(create_plugin(folder_chooser=delayed_picker),)))
+
+    started = client.post("/dataset/api/existing/choose", headers=_csrf(client), json={})
+    try:
+        assert started.status_code == 202
+        assert picker_opened.wait(timeout=1)
+        status = client.get(started.json()["status_url"])
+        assert status.status_code == 200
+        assert status.json()["status"] == "running"
+        assert status.json()["message"] == "Waiting for folder selection."
+        assert client.get("/dataset").status_code == 200
+    finally:
+        release_picker.set()
 
 
 def test_dataset_browser_apis_never_disclose_canonical_local_paths(tmp_path: Path) -> None:
@@ -2035,13 +2407,14 @@ def test_duplicate_categories_and_near_duplicates_are_reported_separately(tmp_pa
 def test_ambiguous_sheet_has_prefilled_review_and_keep_proposal(tmp_path: Path) -> None:
     root = make_configured(tmp_path / "input")
     _ambiguous_sheet(root / "sheet.png")
-    output = tmp_path / "out"
+    project = tmp_path / "project"
+    output = project / "datasets" / "out"
     result = build_dataset(root, output_root=output)
     assert result.data["counts"]["needs_sheet_review"] == 1
     item = json.loads((output / "review_queue.json").read_text(encoding="utf-8"))["items"][0]
     assert item["current_disposition"] == "requires_special_extraction"
     assert item["sheet_plan"]["unambiguous"] is False
-    context = _context(tmp_path / "project", output=output)
+    context = _context(project, output=output)
     client = TestClient(create_app(context, plugins=(build_plugin(),)))
     page = client.get("/dataset/review")
     assert "Keep proposal" in page.text and "Adjust grid" in page.text and "Exclude sheet" in page.text
@@ -2060,10 +2433,11 @@ def test_ambiguous_sheet_has_prefilled_review_and_keep_proposal(tmp_path: Path) 
 def test_sheet_decision_is_invalidated_when_source_identity_changes(tmp_path: Path) -> None:
     root = make_configured(tmp_path / "input")
     sheet = _ambiguous_sheet(root / "sheet.png")
-    output = tmp_path / "out"
+    project = tmp_path / "project"
+    output = project / "datasets" / "out"
     build_dataset(root, output_root=output)
     item = json.loads((output / "review_queue.json").read_text(encoding="utf-8"))["items"][0]
-    client = TestClient(create_app(_context(tmp_path / "project", output=output), plugins=(build_plugin(),)))
+    client = TestClient(create_app(_context(project, output=output), plugins=(build_plugin(),)))
     decision = client.post(
         f"/dataset/api/review/sheets/{item['item_id']}/decision",
         headers=_csrf(client),
