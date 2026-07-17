@@ -27,6 +27,20 @@ _PUBLISH_KEYS = frozenset(
         "authorize_one_time_freeze",
     }
 )
+_ACTIVATE_KEYS = frozenset(
+    {
+        "candidate_identity",
+        "publication_identity_sha256",
+        "activation_manifest_sha256",
+        "campaign_config_sha256",
+        "campaign_identity_sha256",
+        "expected_config_sha256",
+        "activation_authorization_id",
+        "explicit_action",
+        "authorize_dataset_freeze",
+        "authorize_training",
+    }
+)
 _PATH_FRAGMENTS = ("path", "directory", "folder", "output", "destination", "url", "uri")
 
 
@@ -143,6 +157,31 @@ def create_router(
                 authorization_id=_required_string(payload, "authorization_id"),
                 explicit_action=payload.get("explicit_action") is True,
                 authorize_one_time_freeze=payload.get("authorize_one_time_freeze") is True,
+            )
+        except ConditionedDatasetError as exc:
+            return _error(exc)
+        except (TypeError, ValueError):
+            return _invalid()
+
+    @router.post("/dataset-v5/api/jobs/{job_id}/activate")
+    @product_api
+    def activate(job_id: str, payload: dict[str, Any]) -> Any:
+        rejected = _validate_payload(payload, _ACTIVATE_KEYS)
+        if rejected is not None:
+            return rejected
+        try:
+            return conditioned.activate(
+                job_id,
+                candidate_identity=_required_string(payload, "candidate_identity"),
+                publication_identity_sha256=_required_string(payload, "publication_identity_sha256"),
+                activation_manifest_sha256=_required_string(payload, "activation_manifest_sha256"),
+                campaign_config_sha256=_required_string(payload, "campaign_config_sha256"),
+                campaign_identity_sha256=_required_string(payload, "campaign_identity_sha256"),
+                expected_config_sha256=_required_string(payload, "expected_config_sha256"),
+                activation_authorization_id=_required_string(payload, "activation_authorization_id"),
+                explicit_action=payload.get("explicit_action") is True,
+                authorize_dataset_freeze=payload.get("authorize_dataset_freeze") is True,
+                authorize_training=payload.get("authorize_training") is True,
             )
         except ConditionedDatasetError as exc:
             return _error(exc)

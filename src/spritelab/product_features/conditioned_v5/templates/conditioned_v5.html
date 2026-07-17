@@ -24,6 +24,15 @@
     <p>The action is bound to the exact candidate and both evidence hashes. It publishes below <code>datasets/</code>, creates the exact 3-seed 5,000-step campaign, and does not activate configuration or start training.</p>
     <label class="cv5-check"><input id="cv5-authorize" type="checkbox"> I authorize this exact one-time production freeze.</label>
     <button class="button primary" id="cv5-publish" type="button" disabled>Publish authorized freeze</button><pre id="cv5-publication">Nothing published.</pre></section>
+
+  <section class="panel"><p class="eyebrow">5 · Explicit activation</p><h2>Activate audited freeze and campaign</h2>
+    <p>This separate compare-and-swap action rechecks the exact freeze, campaign, current project configuration, and applicable training audit. It never starts training.</p>
+    <div class="cv5-grid"><label>Observed configuration SHA-256<input id="cv5-config-sha" type="text" readonly aria-describedby="cv5-activation-help"></label><label>One-time activation authorization<input id="cv5-activation-auth" type="text" autocomplete="off" spellcheck="false"></label></div>
+    <p id="cv5-activation-help" class="help">Refresh immediately before activation. A stale configuration hash is refused.</p>
+    <label class="cv5-check"><input id="cv5-authorize-dataset" type="checkbox"> I authorize activation of this exact conditioned Dataset-v5 freeze.</label>
+    <label class="cv5-check"><input id="cv5-authorize-training" type="checkbox"> I authorize training readiness for this exact audited three-seed campaign.</label>
+    <button class="button primary" id="cv5-activate" type="button" disabled>Activate exact audited configuration</button>
+  </section>
 </main>
 <script id="conditioned-v5-initial" type="application/json">{{ conditioned_initial_state|tojson }}</script>
 <script src="/dataset-v5/static/conditioned-v5.js" defer></script>

@@ -14,16 +14,20 @@ import os
 import re
 import stat
 import threading
+import time
 import unicodedata
 import uuid
 from collections import Counter, defaultdict
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager, ExitStack, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import numpy as np
+import yaml
 from PIL import Image, UnidentifiedImageError
 
 from spritelab.dataset_maker.exporter import (
@@ -33,7 +37,7 @@ from spritelab.dataset_maker.exporter import (
 from spritelab.dataset_maker.importer import (
     ImportedSprite,
     ImportOptions,
-    import_png_as_dataset_item,
+    import_png_bytes_as_dataset_item,
 )
 from spritelab.dataset_maker.model import DatasetMakerItem, normalize_sprite_id
 from spritelab.dataset_maker.qa import qa_dataset
@@ -50,21 +54,29 @@ from spritelab.harvest.semantic_v3 import (
     semantic_v3_to_json,
 )
 from spritelab.product_core import strict_json_dumps, strict_json_loads
+from spritelab.product_features.conditioned_v5.identity import (
+    TRUSTED_AUDITOR_IDS,
+    conditioned_code_inventory,
+    trusted_auditor_inventory,
+)
 from spritelab.product_features.conditioned_v5.intake import (
     ConditionedIntakeError,
     load_managed_intake,
     managed_intake_inventory,
+    read_receipt_bound_derived_frame,
 )
 from spritelab.product_features.harvest.storage import scan_artifacts
 from spritelab.product_features.harvest.trusted_backend import AcquiredFile, HarvestLimits
 from spritelab.training.campaign import file_sha256, stable_hash
+from spritelab.utils.portable_paths import canonical_portable_relative_path
 from spritelab.utils.safe_fs import (
+    AnchoredDirectory,
+    OwnedFileIdentity,
     UnsafeFilesystemOperation,
-    atomic_write_bytes,
     atomic_write_text,
-    remove_confined_tree,
     require_confined_path,
 )
+from spritelab.v3.config import ProjectConfig
 
 HANDOFF_SCHEMA = "spritelab.harvest.dataset-handoff.v2"
 CANDIDATE_SCHEMA = "spritelab.dataset.conditioned-candidate.v1"
@@ -72,6 +84,7 @@ ACTIVATION_SCHEMA = "spritelab.dataset.freeze.conditioned.v5"
 INVENTORY_SCHEMA = "spritelab.dataset.freeze.inventory.v1"
 LABEL_AUDIT_SCHEMA = "spritelab.audit.conditioned-labels.v1"
 DATASET_VALIDATION_SCHEMA = "spritelab.audit.conditioned-dataset.v1"
+AUDIT_SUBJECTS_SCHEMA = "spritelab.audit.conditioned-subjects.v1"
 
 TAXONOMY = (
     "character",
@@ -106,6 +119,7 @@ LABEL_AUDIT_GATES = frozenset(
         "semantic_coverage",
         "provenance_and_license_binding",
         "duplicate_family_split_integrity",
+        "local_pixel_descriptor_recomputation",
     }
 )
 DATASET_VALIDATION_GATES = frozenset(
@@ -119,8 +133,54 @@ DATASET_VALIDATION_GATES = frozenset(
         "publication_filesystem_safety",
         "portable_paths",
         "provenance_hashes",
+        "near_duplicate_retained_pair_recomputation",
     }
 )
+
+LOCAL_PIXEL_VISION_ALGORITHM = "local_pixel_vision_v1"
+CONDITIONING_RECIPE = "conditioned_filename_taxonomy_v1+local_pixel_vision_v1+near_duplicate_v2"
+LOCAL_PIXEL_VISION_CONFIG = {
+    "schema_version": "spritelab.dataset.local-pixel-vision-config.v1",
+    "alpha_threshold": 255,
+    "canvas_size": [32, 32],
+    "dominant_palette": [
+        ["black", [24, 24, 24]],
+        ["gray", [128, 128, 128]],
+        ["white", [232, 232, 232]],
+        ["red", [210, 52, 52]],
+        ["orange", [224, 126, 42]],
+        ["yellow", [222, 204, 56]],
+        ["green", [66, 170, 82]],
+        ["cyan", [56, 184, 190]],
+        ["blue", [58, 104, 206]],
+        ["purple", [142, 74, 190]],
+        ["pink", [220, 104, 164]],
+        ["brown", [126, 82, 48]],
+    ],
+    "scale_max_bbox_dimension": {"tiny": 8, "small": 16, "medium": 24, "large": 30},
+    "symmetry_mismatch_basis_points": {"high": 1000, "moderate": 2500},
+    "edge_density_basis_points": {"low": 2500, "medium": 5000},
+}
+LOCAL_PIXEL_VISION_CONFIG_IDENTITY = stable_hash(LOCAL_PIXEL_VISION_CONFIG)
+
+NEAR_DUPLICATE_ALGORITHM = "conditioned_near_duplicate_v2"
+NEAR_DUPLICATE_CONFIG = {
+    "schema_version": "spritelab.dataset.conditioned-near-duplicate-config.v1",
+    "same_taxonomy_category": True,
+    "max_perceptual_hamming": 2,
+    "max_bbox_dimension_delta": 1,
+    "max_bbox_center_delta_half_pixels": 2,
+    "max_alpha_xor_pixels": 12,
+}
+NEAR_DUPLICATE_CONFIG_IDENTITY = stable_hash(NEAR_DUPLICATE_CONFIG)
+VARIANT_FAMILY_CONFIG = {
+    "schema_version": "spritelab.dataset.conditioned-variant-family-config.v1",
+    "same_taxonomy_category": True,
+    "max_perceptual_hamming": 6,
+    "max_bbox_dimension_delta": 3,
+    "max_bbox_center_delta_half_pixels": 6,
+    "max_alpha_xor_pixels": 64,
+}
 
 _CATEGORY_TERMS: dict[str, frozenset[str]] = {
     "character": frozenset({"character", "hero", "player", "npc", "knight", "wizard", "warrior", "archer"}),
@@ -193,6 +253,60 @@ class ConditionedDatasetError(RuntimeError):
         self.status_code = status_code
 
 
+class _ConditionedMutationLock(AbstractContextManager["_ConditionedMutationLock"]):
+    """Persistent, descriptor-bound cross-process lock for owned roots."""
+
+    def __init__(self, root: Path, name: str, *, timeout_seconds: float = 5.0) -> None:
+        self.root = root
+        self.name = name
+        self.timeout_seconds = timeout_seconds
+        self._handle: Any = None
+        self._anchor: AnchoredDirectory | None = None
+
+    def __enter__(self) -> _ConditionedMutationLock:
+        try:
+            self._anchor = AnchoredDirectory(self.root, self.root)
+            self._anchor.__enter__()
+            self._handle = _open_conditioned_lock(self._anchor, self.name)
+            deadline = time.monotonic() + self.timeout_seconds
+            while True:
+                try:
+                    _lock_conditioned_handle(self._handle)
+                    _verify_conditioned_lock(self._handle, self._anchor, self.name)
+                    self._anchor.verify()
+                    return self
+                except (BlockingIOError, OSError):
+                    if time.monotonic() >= deadline:
+                        raise ConditionedDatasetError(
+                            "mutation_conflict", "Another process is changing this conditioned workflow state."
+                        ) from None
+                    time.sleep(0.01)
+        except BaseException as exc:
+            if self._handle is not None:
+                self._handle.close()
+                self._handle = None
+            if self._anchor is not None:
+                self._anchor.__exit__(type(exc), exc, exc.__traceback__)
+                self._anchor = None
+            raise
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        try:
+            if self._handle is not None:
+                assert self._anchor is not None
+                _verify_conditioned_lock(self._handle, self._anchor, self.name)
+                _unlock_conditioned_handle(self._handle)
+        finally:
+            try:
+                if self._handle is not None:
+                    self._handle.close()
+                    self._handle = None
+            finally:
+                if self._anchor is not None:
+                    self._anchor.__exit__(exc_type, exc_value, traceback)
+                    self._anchor = None
+
+
 @dataclass(frozen=True)
 class CandidatePolicy:
     """Server-owned candidate bounds; browsers cannot override them."""
@@ -223,6 +337,8 @@ class _SourceRecord:
     byte_sha256: str
     pixel_sha256: str
     alpha_sha256: str
+    alpha_bitmap: bytes
+    alpha_bbox: tuple[int, int, int, int]
     perceptual_hash: int
     category: str
     object_name: str
@@ -232,10 +348,17 @@ class _SourceRecord:
     creator: str
     license_id: str
     license_evidence: Mapping[str, Any]
+    visual_descriptor: Mapping[str, Any]
+    visual_tags: tuple[str, ...]
+    content: bytes = b""
+    source_group_identity: str | None = None
+    derivation: Mapping[str, Any] | None = None
 
 
 HandoffLoader = Callable[[str], Mapping[str, Any]]
 CampaignBuilder = Callable[..., Any]
+ManagedIntakeLoader = Callable[[str], Mapping[str, Any]]
+ActivationLoader = Callable[..., Any]
 
 
 class ConditionedDatasetService:
@@ -246,7 +369,9 @@ class ConditionedDatasetService:
         project_root: str | Path,
         *,
         handoff_loader: HandoffLoader | None = None,
+        managed_intake_loader: ManagedIntakeLoader | None = None,
         campaign_builder: CampaignBuilder | None = None,
+        activation_loader: ActivationLoader | None = None,
         policy: CandidatePolicy | None = None,
     ) -> None:
         self.project_root = Path(project_root).resolve()
@@ -256,10 +381,13 @@ class ConditionedDatasetService:
         self.campaigns_root = self.project_root / "campaigns"
         self.policy = policy or CandidatePolicy()
         self._handoff_loader = handoff_loader
+        self._managed_intake_loader = managed_intake_loader
         self._campaign_builder = campaign_builder
+        self._activation_loader = activation_loader
         self._threads: dict[str, threading.Thread] = {}
-        self._cancelled: set[str] = set()
         self._lock = threading.RLock()
+        self._instance_id = uuid.uuid4().hex
+        self._lease_seconds = 300
 
     def inventory(self) -> dict[str, Any]:
         """Return passive published-intake/job inventory without hashing artifacts."""
@@ -274,9 +402,21 @@ class ConditionedDatasetService:
                 "maximum": self.policy.max_images,
             },
             "taxonomy": list(TAXONOMY),
+            "config_sha256": self._config_sha256(),
             "network_actions": 0,
             "paths_exposed": False,
         }
+
+    def _config_sha256(self) -> str | None:
+        path = self.project_root / "spritelab.yaml"
+        if not os.path.lexists(path):
+            return None
+        try:
+            with AnchoredDirectory(self.project_root, self.project_root) as anchor:
+                payload = _read_anchored_regular_bytes(anchor, "spritelab.yaml", max_bytes=16 * 1024 * 1024)
+        except (ConditionedDatasetError, UnsafeFilesystemOperation):
+            return None
+        return hashlib.sha256(payload).hexdigest()
 
     def preview(self, dataset_references: Sequence[str] | str) -> dict[str, Any]:
         """Re-verify managed imports and deterministically preview conditioning."""
@@ -289,7 +429,7 @@ class ConditionedDatasetService:
             source_records, source_exclusions = self._inspect_records(source)
             records.extend(source_records)
             exclusions.extend(source_exclusions)
-        records, duplicate_exclusions = _deduplicate_records(records)
+        records, duplicate_exclusions, near_duplicate_exclusions = _deduplicate_records(records)
         exclusions.extend(duplicate_exclusions)
         selected = _representative_selection(records, self.policy.target_images)
         counts = Counter(record.category for record in selected)
@@ -307,6 +447,7 @@ class ConditionedDatasetService:
             "category_counts": dict(sorted(counts.items())),
             "source_counts": dict(sorted(source_counts.items())),
             "excluded_counts": dict(sorted(Counter(exclusions).items())),
+            "near_duplicate_exclusions": near_duplicate_exclusions,
             "ready_to_build": ready,
             "blockers": [] if ready else ["A conditioned Dataset-v5 candidate requires 2,000-3,000 unique images."],
             "labels_are_human_truth": False,
@@ -333,7 +474,14 @@ class ConditionedDatasetService:
                 "explicit_build_action_required", "Candidate build requires an explicit action.", status_code=422
             )
         request_identity = stable_hash({"dataset_references": list(normalized_ids), "idempotency_key": idempotency_key})
-        with self._lock:
+        runs_root = _ensure_anchored_child_directory(self.project_root, self.project_root, "runs")
+        v3_root = _ensure_anchored_child_directory(runs_root, self.project_root, "v3")
+        jobs_root = _ensure_anchored_child_directory(v3_root, self.project_root, "conditioned-dataset-v5")
+        if jobs_root != self.jobs_root:
+            raise ConditionedDatasetError("jobs_root_unsafe", "The conditioned job directory changed.")
+        if not _safe_directory(self.jobs_root):
+            raise ConditionedDatasetError("jobs_root_unsafe", "The conditioned job directory is unsafe.")
+        with self._lock, _ConditionedMutationLock(self.jobs_root, ".conditioned-jobs.lock"):
             for existing in self._job_inventory():
                 if existing.get("idempotency_key") == idempotency_key:
                     if existing.get("request_identity") != request_identity:
@@ -342,12 +490,14 @@ class ConditionedDatasetService:
                             "That idempotency key already belongs to a different candidate request.",
                         )
                     return existing, False
+                if existing.get("status") in {"RUNNING", "CANCELLING"}:
+                    raise ConditionedDatasetError(
+                        "build_conflict", "Another conditioned candidate build is already active."
+                    )
             # Fail before mutating job state if the source is not a valid completed handoff.
             sources = [self._verified_source(reference) for reference in normalized_ids]
             job_id = f"conditioned-{uuid.uuid4().hex[:20]}"
-            self.jobs_root.mkdir(parents=True, exist_ok=True)
-            job_root = require_confined_path(self.jobs_root / job_id, self.jobs_root)
-            job_root.mkdir()
+            job_root, _job_identity = _create_anchored_named_directory(self.jobs_root, self.project_root, job_id)
             state = {
                 "schema_version": "spritelab.dataset.conditioned-job.v1",
                 "job_id": job_id,
@@ -368,6 +518,8 @@ class ConditionedDatasetService:
                 "evidence": {},
                 "publication": None,
                 "freeze_authorization": None,
+                "activation_authorization": None,
+                "lease": self._lease(),
                 "paths_exposed": False,
             }
             self._write_state(job_root, state)
@@ -383,13 +535,18 @@ class ConditionedDatasetService:
 
     def job(self, job_id: str) -> dict[str, Any]:
         root = self._job_root(job_id)
-        state = self._read_state(root)
-        thread = self._threads.get(job_id)
-        if state.get("status") == "RUNNING" and (thread is None or not thread.is_alive()):
+        with self._lock, _ConditionedMutationLock(root, ".conditioned-state.lock"):
+            state = self._read_state(root)
+            thread = self._threads.get(job_id)
+        if state.get("status") in {"RUNNING", "CANCELLING"} and thread is not None and thread.is_alive():
+            return state
+        if state.get("status") in {"RUNNING", "CANCELLING"} and self._lease_is_fresh(state.get("lease")):
+            return state
+        if state.get("status") in {"RUNNING", "CANCELLING"}:
             projected = dict(state)
             projected["status"] = "INTERRUPTED"
             projected["message"] = (
-                "The process stopped before this durable build completed; start a new build to retry."
+                "The durable worker lease expired before this build completed; start a new build to retry."
             )
             return projected
         return state
@@ -399,11 +556,26 @@ class ConditionedDatasetService:
             raise ConditionedDatasetError(
                 "explicit_cancel_action_required", "Cancellation requires an explicit action.", status_code=422
             )
-        state = self.job(job_id)
-        if state["status"] not in {"RUNNING", "INTERRUPTED"}:
-            raise ConditionedDatasetError("job_not_cancellable", "Only an active candidate build can be cancelled.")
-        with self._lock:
-            self._cancelled.add(job_id)
+        root = self._job_root(job_id)
+        with self._state_transaction(root) as state:
+            if state["status"] not in {"RUNNING", "CANCELLING"}:
+                raise ConditionedDatasetError("job_not_cancellable", "Only an active candidate build can be cancelled.")
+            cancel = {
+                "schema_version": "spritelab.dataset.conditioned-cancel.v1",
+                "job_id": job_id,
+                "requested_at": _now(),
+                "explicit_action": True,
+                "paths_exposed": False,
+            }
+            with AnchoredDirectory(root, root) as anchor:
+                anchor.atomic_write_bytes(
+                    "cancel.json",
+                    (strict_json_dumps(cancel, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+                )
+            state["status"] = "CANCELLING"
+            state["stage"] = "cancelling"
+            state["message"] = "Cancellation requested; publication remains disabled."
+            state["updated_at"] = _now()
         return self.job(job_id)
 
     def attach_evidence(self, job_id: str, *, kind: str, document: Mapping[str, Any]) -> dict[str, Any]:
@@ -414,26 +586,28 @@ class ConditionedDatasetService:
                 "evidence_kind", "Evidence kind must be label_audit or dataset_validation.", status_code=422
             )
         root = self._job_root(job_id)
-        with self._lock:
-            state = self.job(job_id)
+        with self._state_transaction(root) as state:
             if state["status"] not in {"NEEDS_REVIEW", "COMPLETE"} or not isinstance(state.get("candidate"), Mapping):
                 raise ConditionedDatasetError(
                     "candidate_not_ready", "Complete the candidate build before attaching audit evidence."
                 )
             candidate = self._load_candidate(root, state)
+            self._revalidate_candidate_context(root, state, candidate)
             normalized = self._validate_evidence(kind, document, candidate)
             payload = (strict_json_dumps(normalized, indent=2, sort_keys=True) + "\n").encode("utf-8")
             digest = hashlib.sha256(payload).hexdigest()
-            evidence_root = require_confined_path(root / "evidence", root)
-            evidence_root.mkdir(exist_ok=True)
-            path = require_confined_path(evidence_root / f"{kind}-{digest}.json", root)
-            if path.exists():
-                if path.read_bytes() != payload:
-                    raise ConditionedDatasetError(
-                        "evidence_identity_conflict", "Existing evidence bytes do not match their identity."
-                    )
-            else:
-                atomic_write_bytes(path, payload)
+            evidence_root = _ensure_anchored_child_directory(root, root, "evidence")
+            filename = f"{kind}-{digest}.json"
+            path = evidence_root / filename
+            with AnchoredDirectory(evidence_root, root) as anchor:
+                if anchor.lexists(filename):
+                    existing = _read_anchored_regular_bytes(anchor, filename, max_bytes=64 * 1024 * 1024)
+                    if existing != payload:
+                        raise ConditionedDatasetError(
+                            "evidence_identity_conflict", "Existing evidence bytes do not match their identity."
+                        )
+                else:
+                    anchor.atomic_write_bytes(filename, payload)
             evidence = dict(state.get("evidence") or {})
             evidence[kind] = {
                 "relative_path": path.relative_to(root).as_posix(),
@@ -446,8 +620,7 @@ class ConditionedDatasetService:
             state["status"] = "NEEDS_REVIEW"
             state["message"] = "Independent evidence recorded; both reports remain required before publication."
             state["updated_at"] = _now()
-            self._write_state(root, state)
-            return self.job(job_id)
+        return self.job(job_id)
 
     def publish(
         self,
@@ -475,8 +648,33 @@ class ConditionedDatasetService:
                 status_code=422,
             )
         root = self._job_root(job_id)
-        with self._lock:
-            state = self.job(job_id)
+        publication_rollback: dict[str, Any] = {}
+
+        def rollback_publication() -> None:
+            with _ConditionedMutationLock(self.project_root, ".conditioned-publication.lock"):
+                entries: list[tuple[Path, Path, Mapping[str, Mapping[str, Any]], OwnedFileIdentity]] = []
+                for prefix in ("campaign", "dataset"):
+                    path = publication_rollback.get(f"{prefix}_path")
+                    boundary = publication_rollback.get(f"{prefix}_boundary")
+                    inventory = publication_rollback.get(f"{prefix}_inventory")
+                    identity = publication_rollback.get(f"{prefix}_identity")
+                    if (
+                        isinstance(path, Path)
+                        and isinstance(boundary, Path)
+                        and isinstance(inventory, Mapping)
+                        and isinstance(identity, OwnedFileIdentity)
+                    ):
+                        entries.append((path, boundary, inventory, identity))
+                _rollback_published_directories(entries)
+            current = self._read_state(root)
+            current["publication"] = None
+            current["status"] = "FAILED"
+            current["stage"] = "publication_state_failed"
+            current["message"] = "Publication state commit failed; fresh outputs were rolled back."
+            current["updated_at"] = _now()
+            self._write_state_payload(root, current)
+
+        with self._state_transaction(root, write_failure_rollback=rollback_publication) as state:
             if state.get("freeze_authorization") is not None:
                 raise ConditionedDatasetError(
                     "freeze_authorization_consumed",
@@ -501,6 +699,7 @@ class ConditionedDatasetService:
                 label_audit_sha256=label_audit_sha256,
                 dataset_validation_sha256=dataset_validation_sha256,
             )
+            self._revalidate_candidate_context(root, state, candidate)
             state["freeze_authorization"] = {
                 "authorization_id_sha256": hashlib.sha256(authorization_id.encode("utf-8")).hexdigest(),
                 "candidate_identity": candidate_identity,
@@ -513,30 +712,28 @@ class ConditionedDatasetService:
             state["stage"] = "publishing"
             state["message"] = "Publishing the authorized immutable freeze."
             state["updated_at"] = _now()
-            self._write_state(root, state)
+            self._write_state_unlocked(root, state)
             try:
-                publication = self._publish(root, candidate, evidence)
+                with _ConditionedMutationLock(self.project_root, ".conditioned-publication.lock"):
+                    publication = self._publish(root, candidate, evidence, rollback_record=publication_rollback)
             except ConditionedDatasetError:
-                state = self._read_state(root)
                 state["status"] = "FAILED"
                 state["stage"] = "publication_failed"
                 state["message"] = "Publication failed closed; the one-time authorization was consumed."
                 state["updated_at"] = _now()
-                self._write_state(root, state)
+                self._write_state_unlocked(root, state)
                 raise
             except (OSError, ValueError, TypeError, KeyError) as exc:
-                state = self._read_state(root)
                 state["status"] = "FAILED"
                 state["stage"] = "publication_failed"
                 state["message"] = "Publication failed before project configuration was changed."
                 state["updated_at"] = _now()
-                self._write_state(root, state)
+                self._write_state_unlocked(root, state)
                 raise ConditionedDatasetError(
                     "publication_failed",
                     "Publication failed before project configuration was changed.",
                     status_code=500,
                 ) from exc
-            state = self._read_state(root)
             state["publication"] = publication
             state["status"] = "COMPLETE"
             state["stage"] = "published"
@@ -544,8 +741,351 @@ class ConditionedDatasetService:
                 "Conditioned Dataset-v5 freeze and bound campaign are published; project activation remains separate."
             )
             state["updated_at"] = _now()
-            self._write_state(root, state)
-            return self.job(job_id)
+        return self.job(job_id)
+
+    def activate(
+        self,
+        job_id: str,
+        *,
+        candidate_identity: str,
+        publication_identity_sha256: str,
+        activation_manifest_sha256: str,
+        campaign_config_sha256: str,
+        campaign_identity_sha256: str,
+        expected_config_sha256: str,
+        activation_authorization_id: str,
+        explicit_action: bool,
+        authorize_dataset_freeze: bool,
+        authorize_training: bool,
+    ) -> dict[str, Any]:
+        """CAS-activate one audited freeze/campaign without starting training."""
+
+        if explicit_action is not True or authorize_dataset_freeze is not True or authorize_training is not True:
+            raise ConditionedDatasetError(
+                "activation_authorization_required",
+                "Activation requires explicit dataset-freeze and training authorization.",
+                status_code=422,
+            )
+        if not KEY_PATTERN.fullmatch(str(activation_authorization_id)):
+            raise ConditionedDatasetError(
+                "activation_authorization_id", "A fresh activation authorization ID is required.", status_code=422
+            )
+        identities = (
+            candidate_identity,
+            publication_identity_sha256,
+            activation_manifest_sha256,
+            campaign_config_sha256,
+            campaign_identity_sha256,
+            expected_config_sha256,
+        )
+        if any(SHA256_PATTERN.fullmatch(str(value)) is None for value in identities):
+            raise ConditionedDatasetError(
+                "activation_identity", "Every selected activation identity must be an exact SHA-256.", status_code=422
+            )
+        if any(os.environ.get(name) for name in ("SPRITELAB_CONFIG", "SPRITELAB_PROJECT_ROOT", "SPRITELAB_RUNS_DIR")):
+            raise ConditionedDatasetError(
+                "activation_config_override",
+                "Activation is unavailable while project configuration path overrides are active.",
+            )
+
+        root = self._job_root(job_id)
+        rollback_state: dict[str, Any] = {"committed": False}
+
+        def rollback_activation() -> None:
+            if rollback_state.get("committed") is True:
+                return
+            cleanup_actions: list[Callable[[], Any]] = []
+
+            def rollback_config() -> None:
+                config_path = rollback_state.get("config_path")
+                before = rollback_state.get("config_before")
+                before_sha256 = rollback_state.get("config_before_sha256")
+                after_sha256 = rollback_state.get("config_after_sha256")
+                if not (isinstance(config_path, Path) and isinstance(before, bytes) and isinstance(after_sha256, str)):
+                    return
+                with (
+                    _ConditionedMutationLock(self.project_root, ".conditioned-config.lock"),
+                    AnchoredDirectory(self.project_root, self.project_root) as config_anchor,
+                ):
+                    current_bytes = _read_anchored_regular_bytes(
+                        config_anchor,
+                        "spritelab.yaml",
+                        max_bytes=16 * 1024 * 1024,
+                    )
+                    current_sha256 = hashlib.sha256(current_bytes).hexdigest()
+                    if current_sha256 == after_sha256:
+                        config_anchor.atomic_write_bytes("spritelab.yaml", before)
+                    elif current_sha256 != before_sha256:
+                        raise ConditionedDatasetError(
+                            "activation_rollback_conflict",
+                            "Project configuration changed before activation rollback could complete.",
+                        )
+
+            cleanup_actions.append(rollback_config)
+            receipt_final = rollback_state.get("receipt_final")
+            receipt_inventory = rollback_state.get("receipt_inventory")
+            receipt_identity = rollback_state.get("receipt_identity")
+            if (
+                isinstance(receipt_final, Path)
+                and isinstance(receipt_inventory, Mapping)
+                and isinstance(receipt_identity, OwnedFileIdentity)
+            ):
+                cleanup_actions.append(
+                    lambda: _rollback_published_directory(receipt_final, root, receipt_inventory, receipt_identity)
+                )
+            receipt_staging = rollback_state.get("receipt_staging")
+            receipt_staging_identity = rollback_state.get("receipt_staging_identity")
+            if isinstance(receipt_staging, Path) and isinstance(receipt_staging_identity, OwnedFileIdentity):
+                cleanup_actions.append(
+                    lambda: _quarantine_owned_directory(
+                        receipt_staging,
+                        root,
+                        receipt_staging_identity,
+                        prefix=".rollback-activation-receipt-",
+                    )
+                )
+            _run_cleanup_actions(cleanup_actions)
+
+        def rollback_activation_state_write() -> None:
+            rollback_activation()
+            before_state = rollback_state.get("state_before")
+            if isinstance(before_state, Mapping) and self._read_state(root) != before_state:
+                self._write_state_unlocked(root, before_state)
+
+        with self._state_transaction(
+            root,
+            rollback=rollback_activation,
+            write_failure_rollback=rollback_activation_state_write,
+        ) as state:
+            rollback_state["state_before"] = deepcopy(state)
+            if state.get("status") != "COMPLETE":
+                raise ConditionedDatasetError("publication_not_ready", "Publish the exact freeze before activation.")
+            if state.get("activation_authorization") is not None:
+                raise ConditionedDatasetError(
+                    "activation_authorization_consumed", "This job already consumed its activation authorization."
+                )
+            candidate = state.get("candidate")
+            publication = state.get("publication")
+            if not isinstance(candidate, Mapping) or candidate.get("candidate_identity") != candidate_identity:
+                raise ConditionedDatasetError(
+                    "activation_candidate_changed", "The selected candidate identity changed."
+                )
+            expected_publication = {
+                "publication_identity_sha256": publication_identity_sha256,
+                "activation_manifest_sha256": activation_manifest_sha256,
+                "campaign_config_sha256": campaign_config_sha256,
+                "campaign_identity_sha256": campaign_identity_sha256,
+                "campaign_launch_ready": True,
+                "campaign_seeds": [731001, 731002, 731003],
+                "campaign_steps": 5_000,
+                "configuration_activated": False,
+                "training_started": False,
+                "paths_exposed": False,
+            }
+            if not isinstance(publication, Mapping) or any(
+                publication.get(key) != value for key, value in expected_publication.items()
+            ):
+                raise ConditionedDatasetError(
+                    "activation_publication_changed", "The selected publication or campaign identity changed."
+                )
+            activation_relative = _canonical_relative(str(publication.get("activation_manifest") or ""))
+            campaign_relative = _canonical_relative(str(publication.get("campaign_config") or ""))
+            activation_path = require_confined_path(
+                self.project_root.joinpath(*PurePosixPath(activation_relative).parts), self.project_root
+            )
+            campaign_path = require_confined_path(
+                self.project_root.joinpath(*PurePosixPath(campaign_relative).parts), self.project_root
+            )
+            if _anchored_file_sha256(activation_path.parent, activation_path.name) != activation_manifest_sha256:
+                raise ConditionedDatasetError("activation_freeze_changed", "The published freeze bytes changed.")
+            if _anchored_file_sha256(campaign_path.parent, campaign_path.name) != campaign_config_sha256:
+                raise ConditionedDatasetError("activation_campaign_changed", "The campaign configuration changed.")
+
+            receipt_final = require_confined_path(root / "activation_receipt", root)
+            with AnchoredDirectory(root, root) as receipt_parent:
+                if receipt_parent.lexists(receipt_final.name):
+                    raise ConditionedDatasetError(
+                        "activation_receipt_exists", "An activation receipt already exists for this job."
+                    )
+                receipt_staging_name, receipt_staging_identity = receipt_parent.mkdir_unique(
+                    ".activation-receipt-staging-"
+                )
+            receipt_staging = root / receipt_staging_name
+            rollback_state["receipt_final"] = receipt_final
+            rollback_state["receipt_staging"] = receipt_staging
+            rollback_state["receipt_staging_identity"] = receipt_staging_identity
+
+            config_path = require_confined_path(self.project_root / "spritelab.yaml", self.project_root)
+            with (
+                _ConditionedMutationLock(self.project_root, ".conditioned-config.lock"),
+                AnchoredDirectory(self.project_root, self.project_root) as config_anchor,
+            ):
+                before = _read_anchored_regular_bytes(
+                    config_anchor,
+                    "spritelab.yaml",
+                    max_bytes=16 * 1024 * 1024,
+                )
+                before_sha256 = hashlib.sha256(before).hexdigest()
+                rollback_state["config_path"] = config_path
+                rollback_state["config_before"] = before
+                rollback_state["config_before_sha256"] = before_sha256
+                if before_sha256 != expected_config_sha256:
+                    raise ConditionedDatasetError(
+                        "activation_config_changed", "Project configuration changed before activation."
+                    )
+                try:
+                    current = ProjectConfig.load(config_path)
+                except ValueError as exc:
+                    raise ConditionedDatasetError(
+                        "activation_config_invalid", "Project configuration is unavailable or invalid."
+                    ) from exc
+                if current.root != self.project_root or current.path != config_path:
+                    raise ConditionedDatasetError(
+                        "activation_config_scope", "Activation requires the canonical project configuration."
+                    )
+                values = deepcopy(current.values)
+                view_relative = _canonical_relative(
+                    (PurePosixPath(activation_relative).parent / "view_manifest.json").as_posix()
+                )
+                values["dataset"]["view_manifest"] = view_relative
+                values["dataset"]["freeze_manifest"] = activation_relative
+                values["training"]["dataset_freeze"] = activation_relative
+                values["training"]["campaign_config"] = campaign_relative
+                values["execution"]["allow_dataset_production_freeze"] = True
+                values["execution"]["allow_training"] = True
+                prospective = ProjectConfig(self.project_root, config_path, values)
+                activation_loader = self._activation_loader
+                if activation_loader is None:
+                    from spritelab.product_features.training.activation import (
+                        load_conditioned_training_activation,
+                    )
+
+                    activation_loader = load_conditioned_training_activation
+                try:
+                    selected = activation_loader(
+                        prospective,
+                        expected_campaign={"campaign_identity": campaign_identity_sha256},
+                        require_audit=True,
+                    )
+                except ValueError as exc:
+                    raise ConditionedDatasetError(
+                        "activation_audit_blocked",
+                        "The exact prospective freeze and campaign lack an applicable PASS training audit.",
+                    ) from exc
+                selected_training = dict(selected.campaign.get("training") or {})
+                if (
+                    not selected.ready
+                    or selected.freeze_sha256 != activation_manifest_sha256
+                    or selected.campaign_config_sha256 != campaign_config_sha256
+                    or selected.campaign.get("campaign_identity") != campaign_identity_sha256
+                    or selected.campaign.get("seeds") != [731001, 731002, 731003]
+                    or selected_training.get("max_optimizer_steps") != 5_000
+                ):
+                    raise ConditionedDatasetError(
+                        "activation_contract_changed", "The prospective training activation contract changed."
+                    )
+                payload = yaml.safe_dump(values, sort_keys=False, allow_unicode=True).encode("utf-8")
+                if (
+                    hashlib.sha256(
+                        _read_anchored_regular_bytes(
+                            config_anchor,
+                            "spritelab.yaml",
+                            max_bytes=16 * 1024 * 1024,
+                        )
+                    ).hexdigest()
+                    != expected_config_sha256
+                ):
+                    raise ConditionedDatasetError(
+                        "activation_config_changed", "Project configuration changed during activation."
+                    )
+                config_anchor.atomic_write_bytes("spritelab.yaml", payload)
+                after_sha256 = hashlib.sha256(payload).hexdigest()
+                rollback_state["config_after_sha256"] = after_sha256
+                reloaded = ProjectConfig.load(config_path)
+                revalidated = activation_loader(
+                    reloaded,
+                    expected_campaign={"campaign_identity": campaign_identity_sha256},
+                    require_audit=True,
+                )
+                if (
+                    hashlib.sha256(
+                        _read_anchored_regular_bytes(
+                            config_anchor,
+                            "spritelab.yaml",
+                            max_bytes=16 * 1024 * 1024,
+                        )
+                    ).hexdigest()
+                    != after_sha256
+                    or not revalidated.ready
+                    or revalidated.freeze_sha256 != activation_manifest_sha256
+                    or revalidated.campaign_config_sha256 != campaign_config_sha256
+                ):
+                    raise ConditionedDatasetError(
+                        "activation_reload_failed", "The activated configuration failed exact reload validation."
+                    )
+
+                receipt_without_identity = {
+                    "schema_version": "spritelab.dataset.conditioned-activation-receipt.v1",
+                    "job_id": job_id,
+                    "candidate_identity": candidate_identity,
+                    "publication_identity_sha256": publication_identity_sha256,
+                    "activation_manifest_sha256": activation_manifest_sha256,
+                    "campaign_config_sha256": campaign_config_sha256,
+                    "campaign_identity_sha256": campaign_identity_sha256,
+                    "authorization_id_sha256": hashlib.sha256(activation_authorization_id.encode("utf-8")).hexdigest(),
+                    "config_before_sha256": before_sha256,
+                    "config_after_sha256": after_sha256,
+                    "configuration_keys": [
+                        "dataset.view_manifest",
+                        "dataset.freeze_manifest",
+                        "training.dataset_freeze",
+                        "training.campaign_config",
+                        "execution.allow_dataset_production_freeze",
+                        "execution.allow_training",
+                    ],
+                    "training_started": False,
+                    "paths_exposed": False,
+                    "activated_at": _now(),
+                }
+                receipt = {
+                    **receipt_without_identity,
+                    "receipt_identity": stable_hash(receipt_without_identity),
+                }
+                receipt_path = require_confined_path(receipt_staging / "receipt.json", receipt_staging)
+                with AnchoredDirectory(receipt_staging, root) as receipt_anchor:
+                    receipt_anchor.atomic_write_bytes(
+                        receipt_path.name,
+                        (strict_json_dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+                    )
+                receipt_inventory = _inventory(receipt_staging)
+                rollback_state["receipt_inventory"] = receipt_inventory
+                rollback_state["receipt_identity"] = receipt_staging_identity
+                with AnchoredDirectory(root, root) as receipt_parent:
+                    _publish_directory_noreplace(
+                        receipt_parent,
+                        receipt_staging.name,
+                        receipt_final.name,
+                        receipt_staging_identity,
+                    )
+                if _inventory(receipt_final) != receipt_inventory:
+                    raise ConditionedDatasetError(
+                        "activation_receipt_changed", "The activation receipt changed during publication."
+                    )
+                publication_value = dict(publication)
+                publication_value["configuration_activated"] = True
+                state["publication"] = publication_value
+                state["activation_authorization"] = {
+                    "receipt_identity": receipt["receipt_identity"],
+                    "receipt_relative_path": "activation_receipt/receipt.json",
+                    "config_after_sha256": after_sha256,
+                    "consumed_at": receipt["activated_at"],
+                    "one_time": True,
+                }
+                state["stage"] = "activated"
+                state["message"] = "Conditioned freeze and audited campaign activated; training was not started."
+                state["updated_at"] = _now()
+        rollback_state["committed"] = True
+        return self.job(job_id)
 
     def _handoff_inventory(self) -> list[dict[str, Any]]:
         if not self.harvest_root.is_dir() or _is_link_or_reparse(self.harvest_root):
@@ -583,14 +1123,9 @@ class ConditionedDatasetService:
             if not JOB_ID_PATTERN.fullmatch(entry.name) or not _safe_directory(entry):
                 continue
             try:
-                state = self._read_state(entry)
+                state = self.job(entry.name)
             except ConditionedDatasetError:
                 continue
-            thread = self._threads.get(entry.name)
-            if state.get("status") == "RUNNING" and (thread is None or not thread.is_alive()):
-                state = dict(state)
-                state["status"] = "INTERRUPTED"
-                state["message"] = "The process stopped before this durable operation completed."
             results.append(state)
         return results
 
@@ -598,6 +1133,8 @@ class ConditionedDatasetService:
         """Load only a published, revalidated DatasetIntake-backed import."""
 
         try:
+            if self._managed_intake_loader is not None:
+                return dict(self._managed_intake_loader(dataset_reference))
             return load_managed_intake(self.project_root, dataset_reference)
         except ConditionedIntakeError as exc:
             raise ConditionedDatasetError(
@@ -847,76 +1384,96 @@ class ConditionedDatasetService:
         exclusions: list[str] = []
         files = source["artifact_manifest"]["files"]
         accepted_relative_paths = set(source["accepted_relative_paths"])
-        for raw in files:
-            relative = _canonical_relative(str(raw.get("relative_path") or ""))
-            if relative not in accepted_relative_paths:
-                exclusions.append("dataset_intake_excluded")
-                continue
-            if raw.get("usable") is not True:
-                exclusions.append("harvest_quarantine")
-                continue
-            if raw.get("mime_type") != "image/png":
-                exclusions.append("not_png")
-                continue
-            path = require_confined_path(
-                source["artifacts_root"].joinpath(*PurePosixPath(relative).parts), source["artifacts_root"]
+        covered_source_paths = set(source.get("covered_source_relative_paths") or accepted_relative_paths)
+        source_root = Path(source["artifacts_root"])
+        raw_derived_records = source.get("derived_sheet_records", [])
+        if not isinstance(raw_derived_records, list):
+            raise ConditionedDatasetError(
+                "derived_manifest_invalid", "Managed derived-frame records are unavailable or malformed."
             )
-            try:
-                content = _read_regular_bytes(path, source["artifacts_root"], max_bytes=self.policy.max_file_bytes)
-            except ConditionedDatasetError:
-                exclusions.append("unsafe_or_unreadable")
-                continue
-            digest = hashlib.sha256(content).hexdigest()
-            expected = str(raw.get("actual_sha256") or "")
-            if digest != expected or len(content) != int(raw.get("byte_count", -1)):
-                raise ConditionedDatasetError(
-                    "harvest_artifact_changed", "A Harvest PNG changed during candidate inspection."
-                )
-            try:
-                with Image.open(io.BytesIO(content)) as opened:
-                    if opened.format != "PNG" or opened.size != (32, 32):
-                        exclusions.append("not_exact_32x32_png")
-                        continue
-                    rgba = np.asarray(opened.convert("RGBA"), dtype=np.uint8)
-            except (OSError, UnidentifiedImageError):
-                exclusions.append("invalid_png")
-                continue
-            alpha = rgba[:, :, 3]
-            if not np.all(np.isin(alpha, (0, 255))):
-                exclusions.append("soft_alpha")
-                continue
-            category, object_name, tokens, disagreement = _infer_semantics(relative)
-            if disagreement:
-                exclusions.append("taxonomy_disagreement")
-                continue
-            if category == "unknown" or not object_name:
-                exclusions.append("unknown_or_low_confidence")
-                continue
-            records.append(
-                _SourceRecord(
-                    relative_path=relative,
+        with AnchoredDirectory(source_root, source_root) as source_anchor:
+            for raw in files:
+                relative = _canonical_relative(str(raw.get("relative_path") or ""))
+                if relative not in accepted_relative_paths:
+                    if relative not in covered_source_paths:
+                        exclusions.append("dataset_intake_excluded")
+                    continue
+                if raw.get("usable") is not True:
+                    exclusions.append("harvest_quarantine")
+                    continue
+                if raw.get("mime_type") != "image/png":
+                    exclusions.append("not_png")
+                    continue
+                try:
+                    content = _read_anchored_relative_bytes(
+                        source_anchor,
+                        relative,
+                        max_bytes=self.policy.max_file_bytes,
+                    )
+                except ConditionedDatasetError:
+                    exclusions.append("unsafe_or_unreadable")
+                    continue
+                digest = hashlib.sha256(content).hexdigest()
+                expected = str(raw.get("actual_sha256") or "")
+                if digest != expected or len(content) != int(raw.get("byte_count", -1)):
+                    raise ConditionedDatasetError(
+                        "harvest_artifact_changed", "A Harvest PNG changed during candidate inspection."
+                    )
+                path = source_root.joinpath(*PurePosixPath(relative).parts)
+                record, exclusion = _source_record_from_png(
+                    relative=relative,
                     path=path,
-                    byte_count=len(content),
-                    byte_sha256=digest,
-                    pixel_sha256=hashlib.sha256(rgba.tobytes()).hexdigest(),
-                    alpha_sha256=hashlib.sha256(alpha.tobytes()).hexdigest(),
-                    perceptual_hash=_perceptual_hash(rgba),
-                    category=category,
-                    object_name=object_name,
-                    tokens=tokens,
-                    source_id=str(source["source_id"]),
-                    source_title=str(source["source_title"]),
-                    creator=str(source["creator"]),
-                    license_id=str(source["license_id"]),
-                    license_evidence=dict(source["license_evidence"]),
+                    content=content,
+                    source=source,
                 )
-            )
+                if record is None:
+                    exclusions.append(str(exclusion))
+                else:
+                    records.append(record)
+
+            if raw_derived_records:
+                derived_root = Path(source["derived_root"])
+                with AnchoredDirectory(derived_root, derived_root) as derived_anchor:
+                    for raw in raw_derived_records:
+                        if not isinstance(raw, Mapping):
+                            raise ConditionedDatasetError(
+                                "derived_manifest_invalid", "A managed derived-frame record is malformed."
+                            )
+                        relative = _canonical_relative(str(raw.get("semantic_relative_path") or ""))
+                        output_relative = _canonical_relative(str(raw.get("output_relative_path") or ""))
+                        try:
+                            content = read_receipt_bound_derived_frame(
+                                source_anchor=source_anchor,
+                                derived_anchor=derived_anchor,
+                                record=raw,
+                                max_bytes=self.policy.max_file_bytes,
+                            )
+                        except ConditionedIntakeError as exc:
+                            raise ConditionedDatasetError(
+                                "derived_frame_changed",
+                                "A receipt-bound derived frame or its exact parent changed during inspection.",
+                            ) from exc
+                        path = derived_root.joinpath(*PurePosixPath(output_relative).parts)
+                        record, exclusion = _source_record_from_png(
+                            relative=relative,
+                            path=path,
+                            content=content,
+                            source=source,
+                            source_group_identity=str(raw.get("source_group_identity") or ""),
+                            derivation=dict(raw),
+                        )
+                        if record is None:
+                            exclusions.append(str(exclusion))
+                        else:
+                            records.append(record)
         return records, exclusions
 
     def _run_build(self, job_id: str) -> None:
         root = self._job_root(job_id)
         try:
-            state = self._read_state(root)
+            self._check_cancel(job_id)
+            with self._lock, _ConditionedMutationLock(root, ".conditioned-state.lock"):
+                state = self._read_state(root)
             sources = [self._verified_source(value) for value in state["dataset_references"]]
             records: list[_SourceRecord] = []
             exclusions: list[str] = []
@@ -924,7 +1481,7 @@ class ConditionedDatasetService:
                 source_records, source_exclusions = self._inspect_records(source)
                 records.extend(source_records)
                 exclusions.extend(source_exclusions)
-            records, duplicate_exclusions = _deduplicate_records(records)
+            records, duplicate_exclusions, near_duplicate_exclusions = _deduplicate_records(records)
             exclusions.extend(duplicate_exclusions)
             selected = _representative_selection(records, self.policy.target_images)
             if not self.policy.min_images <= len(selected) <= self.policy.max_images:
@@ -933,47 +1490,50 @@ class ConditionedDatasetService:
                     "The verified, known-category unique source set cannot produce 2,000-3,000 conditioned images.",
                 )
             self._event(root, "conditioning", 0, len(selected), "Building deterministic filename-grounded labels.")
-            candidate = self._build_candidate(root, sources, selected, exclusions)
-            state = self._read_state(root)
-            state["candidate"] = {
-                "candidate_identity": candidate["candidate_identity"],
-                "manifest_relative_path": "candidate_manifest.json",
-                "manifest_sha256": file_sha256(root / "candidate_manifest.json"),
-                "image_count": candidate["image_count"],
-                "category_counts": candidate["category_counts"],
-                "source_counts": candidate["source_counts"],
-                "split_counts": candidate["split_counts"],
-            }
-            state["status"] = "NEEDS_REVIEW"
-            state["stage"] = "independent_evidence"
-            state["current"] = len(selected)
-            state["total"] = len(selected)
-            state["message"] = (
-                "Candidate built and locally checked; independent label audit and dataset validation are required."
+            candidate = self._build_candidate(
+                root,
+                sources,
+                selected,
+                exclusions,
+                near_duplicate_exclusions,
             )
-            state["updated_at"] = _now()
-            self._write_state(root, state)
+            self._check_cancel(job_id)
+            with self._state_transaction(root) as state:
+                state["candidate"] = {
+                    "candidate_identity": candidate["candidate_identity"],
+                    "manifest_relative_path": "candidate_manifest.json",
+                    "manifest_sha256": _anchored_file_sha256(root, "candidate_manifest.json"),
+                    "image_count": candidate["image_count"],
+                    "category_counts": candidate["category_counts"],
+                    "source_counts": candidate["source_counts"],
+                    "split_counts": candidate["split_counts"],
+                }
+                state["status"] = "NEEDS_REVIEW"
+                state["stage"] = "independent_evidence"
+                state["current"] = len(selected)
+                state["total"] = len(selected)
+                state["message"] = (
+                    "Candidate built and locally checked; independent label audit and dataset validation are required."
+                )
+                state["updated_at"] = _now()
         except ConditionedDatasetError as exc:
-            state = self._read_state(root)
-            state["status"] = "CANCELLED" if exc.code == "build_cancelled" else "FAILED"
-            state["stage"] = "cancelled" if exc.code == "build_cancelled" else "failed"
-            state["message"] = exc.public_message
-            state["updated_at"] = _now()
-            self._write_state(root, state)
+            with self._state_transaction(root) as state:
+                state["status"] = "CANCELLED" if exc.code == "build_cancelled" else "FAILED"
+                state["stage"] = "cancelled" if exc.code == "build_cancelled" else "failed"
+                state["message"] = exc.public_message
+                state["updated_at"] = _now()
         except (OSError, ValueError, TypeError, KeyError) as exc:
-            state = self._read_state(root)
-            state["status"] = "FAILED"
-            state["stage"] = "failed"
-            state["message"] = (
-                "Candidate build failed safely; no production freeze or project configuration changed "
-                f"({type(exc).__name__})."
-            )
-            state["updated_at"] = _now()
-            self._write_state(root, state)
+            with self._state_transaction(root) as state:
+                state["status"] = "FAILED"
+                state["stage"] = "failed"
+                state["message"] = (
+                    "Candidate build failed safely; no production freeze or project configuration changed "
+                    f"({type(exc).__name__})."
+                )
+                state["updated_at"] = _now()
         finally:
             with self._lock:
                 self._threads.pop(job_id, None)
-                self._cancelled.discard(job_id)
 
     def _build_candidate(
         self,
@@ -981,7 +1541,10 @@ class ConditionedDatasetService:
         sources: Sequence[Mapping[str, Any]],
         selected: Sequence[_SourceRecord],
         exclusions: Sequence[str],
+        near_duplicate_exclusions: Sequence[Mapping[str, Any]],
     ) -> dict[str, Any]:
+        build_code_inventory = conditioned_code_inventory()
+        implementation_code_identity = str(build_code_inventory["inventory_sha256"])
         family_by_key = _family_assignments(selected)
         split_by_key = _split_assignments(selected, family_by_key)
         imported: list[ImportedSprite] = []
@@ -989,8 +1552,13 @@ class ConditionedDatasetService:
         seen_ids: set[str] = set()
         for index, record in enumerate(selected, start=1):
             self._check_cancel(root.name)
-            imported_record = import_png_as_dataset_item(
-                record.path,
+            if not record.content or hashlib.sha256(record.content).hexdigest() != record.byte_sha256:
+                raise ConditionedDatasetError(
+                    "source_changed_during_build", "A held managed PNG differs from its verified source identity."
+                )
+            imported_record = import_png_bytes_as_dataset_item(
+                record.content,
+                source_name=record.path.name,
                 options=ImportOptions(
                     max_palette_slots=32,
                     allow_quantize_overcolor=False,
@@ -1000,16 +1568,12 @@ class ConditionedDatasetService:
                     canonicalize_palette=True,
                 ),
                 default_category=record.category,
-                default_tags=(record.category, *record.tokens[:6]),
+                default_tags=tuple(dict.fromkeys((record.category, *record.tokens[:6], *record.visual_tags))),
             )
             if imported_record.errors or imported_record.bundle is None:
                 raise ConditionedDatasetError(
                     "phase7_import_rejected",
                     "A selected exact-32x32 PNG failed the lossless Phase-7 import contract.",
-                )
-            if file_sha256(record.path) != record.byte_sha256:
-                raise ConditionedDatasetError(
-                    "source_changed_during_build", "A Harvest PNG changed during Phase-7 import."
                 )
             sprite_id = _sprite_id(record)
             if sprite_id in seen_ids:
@@ -1020,8 +1584,8 @@ class ConditionedDatasetService:
             family_id = family_by_key[_record_key(record)]
             source_group = _source_group(record)
             evidence = {
-                "evidence_type": "deterministic_filename_and_relative_path_tokens",
-                "inference_method": "conditioned_filename_taxonomy_v1",
+                "evidence_type": "source_grounding_with_deterministic_local_pixel_facts",
+                "inference_method": "conditioned_filename_taxonomy_v1+local_pixel_vision_v1",
                 "human_verified": False,
                 "human_truth_claim": False,
                 "claim_scope": "source_grounded_non_human_proposal",
@@ -1030,17 +1594,29 @@ class ConditionedDatasetService:
                 "tokens": list(record.tokens),
                 "taxonomy_category": record.category,
                 "source_id": record.source_id,
+                "source_pack": record.source_title,
                 "source_group": source_group,
+                "source_sha256": record.byte_sha256,
+                "source_byte_count": record.byte_count,
+                "license_id": record.license_id,
+                "creator": record.creator,
                 "duplicate_family_id": family_id,
+                "local_pixel_vision": dict(record.visual_descriptor),
+                "local_pixel_vision_algorithm": LOCAL_PIXEL_VISION_ALGORITHM,
+                "local_pixel_vision_config": LOCAL_PIXEL_VISION_CONFIG,
+                "local_pixel_vision_config_identity": LOCAL_PIXEL_VISION_CONFIG_IDENTITY,
+                "implementation_code_inventory_sha256": implementation_code_identity,
+                "semantic_category_from_pixels": False,
             }
+            tags = list(dict.fromkeys((record.category, *record.tokens[:6], *record.visual_tags)))
             prediction = {
                 "safe_prefill": {
                     "category": record.category,
                     "object_name": record.object_name,
-                    "tags": [record.category, *record.tokens[:6]],
-                    "short_description": record.object_name.replace("_", " "),
+                    "tags": tags,
+                    "short_description": _visual_short_description(record),
                     "confidence": "source_grounded_low",
-                    "confidence_reason": "filename_path_tokens_only",
+                    "confidence_reason": "filename_path_category_with_verified_local_pixel_descriptors",
                 },
                 "source_profile": {"name": "conditioned_filename_taxonomy_v1", "domain": "sprite_assets"},
                 "bucket": "filename_grounded",
@@ -1057,14 +1633,15 @@ class ConditionedDatasetService:
                 prompt_phrases=build_prompt_phrases(semantic),
                 negative_tags=DEFAULT_NEGATIVE_TAGS,
             )
-            portable_path = Path("harvest") / record.source_id / "artifacts" / Path(record.relative_path)
+            source_storage_kind = "derived" if record.derivation is not None else "artifacts"
+            portable_path = Path("managed") / record.source_id / source_storage_kind / Path(record.relative_path)
             item = DatasetMakerItem(
                 sprite_id=sprite_id,
                 source_path=portable_path,
                 status="accepted",
                 category=record.category,
-                tags=(record.category, *record.tokens[:6]),
-                notes="Deterministic filename/path semantic proposal; not human truth.",
+                tags=tuple(tags),
+                notes="Source-grounded category plus deterministic local RGBA descriptors; not human truth.",
                 source_name=record.relative_path,
                 license=record.license_id,
                 author=record.creator,
@@ -1079,6 +1656,7 @@ class ConditionedDatasetService:
                 "label_v2_safe_prefill": prediction["safe_prefill"],
                 "semantic_v3": semantic_v3_to_json(semantic),
                 "conditioned_v5": evidence,
+                "local_pixel_vision": dict(record.visual_descriptor),
             }
             imported.append(replace(imported_record, item=item, auto_metadata=auto_metadata))
             metadata_by_id[sprite_id] = {
@@ -1092,6 +1670,9 @@ class ConditionedDatasetService:
                 "creator": record.creator,
                 "duplicate_family_id": family_id,
                 "label_evidence": evidence,
+                "local_pixel_vision": dict(record.visual_descriptor),
+                "source_storage_kind": source_storage_kind,
+                "source_derivation": dict(record.derivation) if record.derivation is not None else None,
             }
             if index == 1 or index % 50 == 0 or index == len(selected):
                 self._event(
@@ -1102,8 +1683,7 @@ class ConditionedDatasetService:
                     f"Conditioned {index} of {len(selected)} selected sprites.",
                 )
 
-        candidate_root = require_confined_path(root / "candidate", root)
-        candidate_root.mkdir()
+        candidate_root, _ = _create_anchored_named_directory(root, root, "candidate")
         result = export_dataset_from_imported_sprites(
             imported,
             DatasetMakerExportConfig(
@@ -1136,14 +1716,7 @@ class ConditionedDatasetService:
         _write_jsonl(
             phase7 / "conditioned_records.jsonl",
             [
-                {
-                    "sprite_id": item.item.sprite_id,
-                    "split": item.item.split,
-                    "category": item.item.category,
-                    "object_name": item.auto_metadata["label_v2_safe_prefill"]["object_name"],
-                    **metadata_by_id[item.item.sprite_id],
-                    "semantic_v3": item.auto_metadata["semantic_v3"],
-                }
+                _conditioned_record(item, metadata_by_id[item.item.sprite_id])
                 for item in sorted(imported, key=lambda value: value.item.sprite_id)
             ],
         )
@@ -1171,38 +1744,32 @@ class ConditionedDatasetService:
             )
         _write_json(phase7 / "coverage_report.json", coverage)
         _write_json(phase7 / "split_integrity_report.json", split_check)
+        retained_near_duplicate_gate = _retained_near_duplicate_gate(selected)
+        if retained_near_duplicate_gate["ok"] is not True:
+            raise ConditionedDatasetError(
+                "retained_near_duplicate",
+                "The conditioned candidate retained a pair inside the conservative near-duplicate bound.",
+            )
         _write_json(
             phase7 / "duplicate_report.json",
             {
-                "schema_version": "spritelab.dataset.conditioned-duplicates.v1",
+                "schema_version": "spritelab.dataset.conditioned-duplicates.v2",
                 "exact_byte_and_pixel_duplicates_excluded": int(
                     Counter(exclusions)["exact_byte_duplicate"] + Counter(exclusions)["exact_pixel_duplicate"]
                 ),
-                "near_duplicate_policy": "same source-grounded object, alpha identity, and perceptual Hamming distance <= 1",
+                "near_duplicate_algorithm": NEAR_DUPLICATE_ALGORITHM,
+                "near_duplicate_config": NEAR_DUPLICATE_CONFIG,
+                "near_duplicate_config_identity": NEAR_DUPLICATE_CONFIG_IDENTITY,
+                "near_duplicate_implementation_code_inventory_sha256": implementation_code_identity,
+                "near_duplicate_excluded_count": len(near_duplicate_exclusions),
+                "near_duplicate_exclusions": [dict(value) for value in near_duplicate_exclusions],
+                "retained_near_duplicate_gate": retained_near_duplicate_gate,
+                "broader_variant_family_config": VARIANT_FAMILY_CONFIG,
                 "family_count": len(set(family_by_key.values())),
                 "whole_family_split_gate": split_check["ok"],
             },
         )
-        source_evidence = []
-        for source in sources:
-            source_evidence.append(
-                {
-                    "dataset_reference": source["dataset_reference"],
-                    "harvest_run_id": source["run_id"],
-                    "handoff_identity": source["handoff_identity"],
-                    "harvest_import_receipt_identity": source["harvest_import_receipt_identity"],
-                    "managed_intake_receipt_identity": source["managed_intake_receipt_identity"],
-                    "managed_source_inventory_sha256": source["managed_source_inventory_sha256"],
-                    "managed_output_inventory_sha256": source["managed_output_inventory_sha256"],
-                    "artifact_manifest_sha256": source["artifact_manifest_sha256"],
-                    "artifact_set_identity": source["artifact_manifest"]["artifact_set_identity"],
-                    "source_id": source["source_id"],
-                    "title": source["source_title"],
-                    "creator": source["creator"],
-                    "license_id": source["license_id"],
-                    "license_evidence": dict(source["license_evidence"]),
-                }
-            )
+        source_evidence = [_conditioned_source_binding(source) for source in sources]
         _write_json(
             phase7 / "provenance_manifest.json",
             {
@@ -1215,6 +1782,8 @@ class ConditionedDatasetService:
         )
         benchmark = _benchmark_manifest(imported, metadata_by_id)
         _write_json(phase7 / "benchmark_manifest.json", benchmark)
+        audit_subjects = _label_audit_subjects(imported)
+        _write_json(phase7 / "label_audit_subjects.json", audit_subjects)
         dataset_qa = qa_dataset(phase7, require_semantic_v3=True)
         training_qa = qa_training_manifest(phase7, training_manifest)
         dataset_qa_value = dataset_qa.to_json_dict()
@@ -1261,15 +1830,20 @@ class ConditionedDatasetService:
         _write_json(phase7 / "view_manifest.json", view_manifest)
         payload_inventory = _inventory(phase7)
         inventory_identity = _inventory_identity(payload_inventory)
+        if conditioned_code_inventory() != build_code_inventory:
+            raise ConditionedDatasetError(
+                "conditioned_code_changed",
+                "Conditioned production code changed during candidate construction.",
+            )
+        code_inventory = build_code_inventory
         candidate_identity = stable_hash(
             {
                 "schema_version": CANDIDATE_SCHEMA,
-                "handoff_identities": [source["handoff_identity"] for source in sources],
-                "managed_intake_receipt_identities": [source["managed_intake_receipt_identity"] for source in sources],
-                "managed_output_inventory_sha256": [source["managed_output_inventory_sha256"] for source in sources],
+                "input_bindings": source_evidence,
+                "production_code_identity": code_inventory["inventory_sha256"],
                 "payload_inventory_sha256": inventory_identity,
                 "image_count": len(imported),
-                "recipe": "conditioned_filename_taxonomy_v1",
+                "recipe": CONDITIONING_RECIPE,
             }
         )
         candidate = {
@@ -1281,6 +1855,21 @@ class ConditionedDatasetService:
             "category_counts": coverage["category_counts"],
             "source_counts": coverage["source_counts"],
             "split_counts": coverage["split_counts"],
+            "label_audit_subjects": audit_subjects,
+            "label_audit_subjects_identity": audit_subjects["subjects_identity"],
+            "benchmark_category_counts": benchmark["category_counts"],
+            "input_bindings": source_evidence,
+            "production_code_inventory": code_inventory,
+            "production_code_identity": code_inventory["inventory_sha256"],
+            "conditioning_recipe": CONDITIONING_RECIPE,
+            "local_pixel_vision_config_identity": LOCAL_PIXEL_VISION_CONFIG_IDENTITY,
+            "near_duplicate_config_identity": NEAR_DUPLICATE_CONFIG_IDENTITY,
+            "near_duplicate_retained_gate": retained_near_duplicate_gate,
+            "count_policy": {
+                "minimum": self.policy.min_images,
+                "target": self.policy.target_images,
+                "maximum": self.policy.max_images,
+            },
             "handoff_identities": [source["handoff_identity"] for source in sources],
             "dataset_references": [source["dataset_reference"] for source in sources],
             "managed_intake_receipt_identities": [source["managed_intake_receipt_identity"] for source in sources],
@@ -1298,18 +1887,35 @@ class ConditionedDatasetService:
             "production_authorized": False,
             "paths_exposed": False,
         }
-        _write_json(root / "candidate_manifest.json", candidate)
+        with AnchoredDirectory(root, root) as anchor:
+            anchor.atomic_write_bytes(
+                "candidate_manifest.json",
+                (strict_json_dumps(candidate, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            )
         return candidate
 
     def _load_candidate(self, root: Path, state: Mapping[str, Any]) -> dict[str, Any]:
         reference = state.get("candidate")
         if not isinstance(reference, Mapping):
             raise ConditionedDatasetError("candidate_not_ready", "No complete conditioned candidate is available.")
-        path = require_confined_path(root / str(reference.get("manifest_relative_path") or ""), root)
-        candidate = _read_json_mapping(path, max_bytes=128 * 1024 * 1024)
+        if reference.get("manifest_relative_path") != "candidate_manifest.json":
+            raise ConditionedDatasetError("candidate_schema", "The conditioned candidate manifest location changed.")
+        with AnchoredDirectory(root, root) as anchor:
+            content = _read_anchored_regular_bytes(
+                anchor,
+                "candidate_manifest.json",
+                max_bytes=128 * 1024 * 1024,
+            )
+        try:
+            value = strict_json_loads(content)
+        except ValueError as exc:
+            raise ConditionedDatasetError("candidate_schema", "The conditioned candidate manifest is invalid.") from exc
+        if not isinstance(value, Mapping):
+            raise ConditionedDatasetError("candidate_schema", "The conditioned candidate manifest is invalid.")
+        candidate = dict(value)
         if candidate.get("schema_version") != CANDIDATE_SCHEMA:
             raise ConditionedDatasetError("candidate_schema", "The conditioned candidate manifest schema is invalid.")
-        if file_sha256(path) != reference.get("manifest_sha256"):
+        if hashlib.sha256(content).hexdigest() != reference.get("manifest_sha256"):
             raise ConditionedDatasetError(
                 "candidate_manifest_changed", "The conditioned candidate manifest changed after build."
             )
@@ -1324,6 +1930,52 @@ class ConditionedDatasetService:
             )
         return candidate
 
+    def _revalidate_candidate_context(
+        self,
+        root: Path,
+        state: Mapping[str, Any],
+        candidate: Mapping[str, Any],
+    ) -> None:
+        references = state.get("dataset_references")
+        if not isinstance(references, list) or references != candidate.get("dataset_references"):
+            raise ConditionedDatasetError(
+                "candidate_input_selection_changed", "The candidate input selection is missing or changed."
+            )
+        sources = [self._verified_source(str(reference)) for reference in references]
+        bindings = [_conditioned_source_binding(source) for source in sources]
+        if bindings != candidate.get("input_bindings"):
+            raise ConditionedDatasetError(
+                "candidate_input_stale", "A managed input, Harvest handoff, catalog, or certificate binding changed."
+            )
+        code_inventory = conditioned_code_inventory()
+        if (
+            candidate.get("production_code_inventory") != code_inventory
+            or candidate.get("production_code_identity") != code_inventory["inventory_sha256"]
+        ):
+            raise ConditionedDatasetError(
+                "candidate_code_stale", "Conditioned production code changed after the candidate was built."
+            )
+        payload_inventory = _inventory(root / "candidate" / "phase7")
+        payload_identity = _inventory_identity(payload_inventory)
+        if payload_inventory != candidate.get("payload_inventory") or payload_identity != candidate.get(
+            "payload_inventory_sha256"
+        ):
+            raise ConditionedDatasetError("candidate_bytes_changed", "Candidate artifact bytes changed after build.")
+        expected_identity = stable_hash(
+            {
+                "schema_version": CANDIDATE_SCHEMA,
+                "input_bindings": bindings,
+                "production_code_identity": code_inventory["inventory_sha256"],
+                "payload_inventory_sha256": payload_identity,
+                "image_count": candidate.get("image_count"),
+                "recipe": CONDITIONING_RECIPE,
+            }
+        )
+        if candidate.get("candidate_identity") != expected_identity:
+            raise ConditionedDatasetError(
+                "candidate_identity_changed", "The candidate identity no longer matches its exact inputs and code."
+            )
+
     def _validate_evidence(
         self,
         kind: str,
@@ -1337,6 +1989,23 @@ class ConditionedDatasetService:
         value = json.loads(strict_json_dumps(dict(document), sort_keys=True))
         schema = LABEL_AUDIT_SCHEMA if kind == "label_audit" else DATASET_VALIDATION_SCHEMA
         gates = LABEL_AUDIT_GATES if kind == "label_audit" else DATASET_VALIDATION_GATES
+        expected_keys = {
+            "schema_version",
+            "verdict",
+            "independent",
+            "generated_by_conditioned_workflow",
+            "auditor",
+            "audit_run_identity",
+            "bindings",
+            "subject_files",
+            "checks",
+            "audit_subjects",
+            "metrics",
+        }
+        if set(value) != expected_keys or _contains_private_or_absolute_path(value):
+            raise ConditionedDatasetError(
+                "evidence_schema", "Independent evidence contains unknown or private-path-bearing fields."
+            )
         if value.get("schema_version") != schema or str(value.get("verdict", "")).upper() != "PASS":
             raise ConditionedDatasetError(
                 "evidence_verdict", "The selected independent report is not an applicable PASS report."
@@ -1346,40 +2015,83 @@ class ConditionedDatasetService:
                 "evidence_independence", "The report must explicitly be independent of the conditioned workflow."
             )
         auditor = value.get("auditor")
-        if not isinstance(auditor, Mapping):
+        if not isinstance(auditor, Mapping) or set(auditor) != {
+            "auditor_id",
+            "code_identity_sha256",
+            "implementation_inventory",
+        }:
             raise ConditionedDatasetError("evidence_auditor", "Independent evidence lacks auditor identity.")
         auditor_id = str(auditor.get("auditor_id") or "")
         code_identity = str(auditor.get("code_identity_sha256") or "")
-        if not AUDITOR_ID_PATTERN.fullmatch(auditor_id) or not SHA256_PATTERN.fullmatch(code_identity):
-            raise ConditionedDatasetError(
-                "evidence_auditor", "Independent evidence has an invalid auditor or code identity."
-            )
-        if auditor_id.startswith(("spritelab.conditioned", "conditioned.v5")):
-            raise ConditionedDatasetError(
-                "evidence_self_certification", "The conditioned workflow cannot certify its own candidate."
-            )
-        if not SHA256_PATTERN.fullmatch(str(value.get("audit_run_identity") or "")):
-            raise ConditionedDatasetError(
-                "evidence_run_identity", "Independent evidence lacks a stable audit-run identity."
-            )
-        bindings = value.get("bindings")
-        if not isinstance(bindings, Mapping) or bindings.get("candidate_identity") != candidate.get(
-            "candidate_identity"
+        expected_auditor = TRUSTED_AUDITOR_IDS[kind]
+        expected_inventory = trusted_auditor_inventory(kind)
+        if (
+            auditor_id != expected_auditor
+            or code_identity != expected_inventory["inventory_sha256"]
+            or auditor.get("implementation_inventory") != expected_inventory
         ):
             raise ConditionedDatasetError(
+                "evidence_auditor",
+                "Independent evidence is not bound to the current trusted auditor implementation inventory.",
+            )
+        bindings = value.get("bindings")
+        expected_bindings = {
+            "candidate_identity": candidate.get("candidate_identity"),
+            "payload_inventory_sha256": candidate.get("payload_inventory_sha256"),
+            "image_count": candidate.get("image_count"),
+            "production_code_identity": candidate.get("production_code_identity"),
+            "label_audit_subjects_identity": candidate.get("label_audit_subjects_identity"),
+        }
+        if not isinstance(bindings, Mapping) or dict(bindings) != expected_bindings:
+            raise ConditionedDatasetError(
                 "evidence_candidate_binding", "Independent evidence is not bound to this exact candidate."
-            )
-        if bindings.get("payload_inventory_sha256") != candidate.get("payload_inventory_sha256"):
-            raise ConditionedDatasetError(
-                "evidence_inventory_binding", "Independent evidence is not bound to this exact artifact inventory."
-            )
-        if bindings.get("image_count") != candidate.get("image_count"):
-            raise ConditionedDatasetError(
-                "evidence_count_binding", "Independent evidence is not bound to this exact image count."
             )
         if value.get("subject_files") != candidate.get("payload_inventory"):
             raise ConditionedDatasetError(
                 "evidence_file_inventory", "Independent evidence does not enumerate every exact candidate file."
+            )
+        audit_subjects = candidate.get("label_audit_subjects")
+        if not isinstance(audit_subjects, Mapping) or value.get("audit_subjects") != audit_subjects:
+            raise ConditionedDatasetError(
+                "evidence_audit_subjects",
+                "Independent evidence does not cover the exact stratified and mandatory audit subjects.",
+            )
+        if kind == "label_audit":
+            expected_metrics = {
+                "audited_record_ids": audit_subjects["required_label_audit_ids"],
+                "stratified_sample_ids": audit_subjects["stratified_sample_ids"],
+                "low_confidence_ids": audit_subjects["low_confidence_ids"],
+                "disagreement_ids": audit_subjects["disagreement_ids"],
+                "high_impact_ids": audit_subjects["high_impact_ids"],
+                "generic_label_ids": audit_subjects["generic_label_ids"],
+                "distributions": audit_subjects["distributions"],
+                "quality_rates_basis_points": audit_subjects["quality_rates_basis_points"],
+                "recomputed_visual_descriptor_bindings": audit_subjects["visual_descriptor_bindings"],
+                "local_pixel_vision_config_identity": audit_subjects["local_pixel_vision_config_identity"],
+            }
+        else:
+            expected_metrics = {
+                "split_counts": candidate.get("split_counts"),
+                "category_counts": candidate.get("category_counts"),
+                "source_counts": candidate.get("source_counts"),
+                "benchmark_category_counts": candidate.get("benchmark_category_counts"),
+                "payload_inventory_sha256": candidate.get("payload_inventory_sha256"),
+                "verified_file_count": len(candidate.get("payload_inventory") or {}),
+                "near_duplicate_recomputation": {
+                    "algorithm_id": NEAR_DUPLICATE_ALGORITHM,
+                    "config_identity": NEAR_DUPLICATE_CONFIG_IDENTITY,
+                    "retained_count": candidate.get("image_count"),
+                    "checked_same_category_pairs": sum(
+                        int(count) * (int(count) - 1) // 2
+                        for count in dict(candidate.get("category_counts") or {}).values()
+                    ),
+                    "violation_count": 0,
+                    "gate_identity": dict(candidate.get("near_duplicate_retained_gate") or {}).get("gate_identity"),
+                },
+            }
+        if value.get("metrics") != expected_metrics:
+            raise ConditionedDatasetError(
+                "evidence_metrics", "Independent evidence metrics do not reproduce the exact required distributions."
             )
         checks = value.get("checks")
         if not isinstance(checks, Mapping) or set(checks) != gates:
@@ -1388,6 +2100,12 @@ class ConditionedDatasetService:
             )
         if {str(result).upper() for result in checks.values()} != {"PASS"}:
             raise ConditionedDatasetError("evidence_checks", "Every mandatory independent evidence gate must PASS.")
+        run_payload = dict(value)
+        run_identity = str(run_payload.pop("audit_run_identity", ""))
+        if not SHA256_PATTERN.fullmatch(run_identity) or stable_hash(run_payload) != run_identity:
+            raise ConditionedDatasetError(
+                "evidence_run_identity", "Independent evidence audit-run identity does not match its exact report."
+            )
         return value
 
     def _verified_selected_evidence(
@@ -1419,8 +2137,14 @@ class ConditionedDatasetService:
                 raise ConditionedDatasetError(
                     "evidence_selection", "The selected evidence is not the verified report attached to this candidate."
                 )
-            path = require_confined_path(root / str(reference.get("relative_path") or ""), root)
-            content = _read_regular_bytes(path, root, max_bytes=64 * 1024 * 1024)
+            relative = _canonical_relative(str(reference.get("relative_path") or ""))
+            parts = PurePosixPath(relative).parts
+            if len(parts) != 2 or parts[0] != "evidence":
+                raise ConditionedDatasetError("evidence_changed", "Independent evidence location changed.")
+            evidence_root = require_confined_path(root / "evidence", root)
+            path = evidence_root / parts[1]
+            with AnchoredDirectory(evidence_root, root) as anchor:
+                content = _read_anchored_regular_bytes(anchor, parts[1], max_bytes=64 * 1024 * 1024)
             if hashlib.sha256(content).hexdigest() != digest or len(content) != reference.get("byte_count"):
                 raise ConditionedDatasetError("evidence_changed", "Independent evidence bytes changed after selection.")
             try:
@@ -1434,6 +2158,7 @@ class ConditionedDatasetService:
                 "path": path,
                 "sha256": digest,
                 "byte_count": len(content),
+                "content": content,
             }
         return results
 
@@ -1442,6 +2167,8 @@ class ConditionedDatasetService:
         job_root: Path,
         candidate: Mapping[str, Any],
         evidence: Mapping[str, Mapping[str, Any]],
+        *,
+        rollback_record: dict[str, Any],
     ) -> dict[str, Any]:
         source_root = require_confined_path(job_root / "candidate" / "phase7", job_root)
         source_inventory = _inventory(source_root)
@@ -1453,36 +2180,86 @@ class ConditionedDatasetService:
                 "byte_count": record["byte_count"],
             }
         publication_identity = _inventory_identity(files)
-        self.datasets_root.mkdir(parents=True, exist_ok=True)
+        datasets_root = _ensure_anchored_child_directory(self.project_root, self.project_root, "datasets")
+        if datasets_root != self.datasets_root:
+            raise ConditionedDatasetError("datasets_root_unsafe", "The project datasets directory changed.")
         if not _safe_directory(self.datasets_root):
             raise ConditionedDatasetError(
                 "datasets_root_unsafe", "The project datasets directory is unsafe for publication."
             )
         name = f"conditioned-v5-{publication_identity}"
         final = require_confined_path(self.datasets_root / name, self.datasets_root)
-        if os.path.lexists(final):
+        campaigns_root = _ensure_anchored_child_directory(self.project_root, self.project_root, "campaigns")
+        if campaigns_root != self.campaigns_root:
+            raise ConditionedDatasetError("campaigns_root_unsafe", "The project campaigns directory changed.")
+        if not _safe_directory(self.campaigns_root):
             raise ConditionedDatasetError(
-                "fresh_publication_required",
-                "This content-addressed publication already exists; it was not overwritten.",
+                "campaigns_root_unsafe", "The project campaigns directory is unsafe for publication."
             )
-        staging = require_confined_path(self.datasets_root / f".{name}.staging-{uuid.uuid4().hex}", self.datasets_root)
-        staging.mkdir()
-        try:
-            for relative, expected in sorted(source_inventory.items()):
-                source = require_confined_path(source_root.joinpath(*PurePosixPath(relative).parts), source_root)
-                content = _read_regular_bytes(
-                    source, source_root, max_bytes=max(self.policy.max_source_bytes, 1024 * 1024 * 1024)
+        campaign_name = f"conditioned-v5-{publication_identity}"
+        campaign_directory = require_confined_path(self.campaigns_root / campaign_name, self.campaigns_root)
+        with AnchoredDirectory(self.datasets_root, self.project_root) as dataset_parent:
+            if dataset_parent.lexists(final.name):
+                raise ConditionedDatasetError(
+                    "fresh_publication_required",
+                    "This content-addressed publication already exists; it was not overwritten.",
                 )
-                if hashlib.sha256(content).hexdigest() != expected["sha256"] or len(content) != expected["byte_count"]:
+            staging_name, staging_identity = dataset_parent.mkdir_unique(f".{name}.staging-")
+        staging = self.datasets_root / staging_name
+        try:
+            with AnchoredDirectory(self.campaigns_root, self.project_root) as campaign_parent:
+                if campaign_parent.lexists(campaign_directory.name):
                     raise ConditionedDatasetError(
-                        "candidate_copy_changed", "A candidate file changed during freeze publication."
+                        "fresh_campaign_required",
+                        "The conditioned campaign directory already exists and was not reused.",
                     )
-                destination = require_confined_path(staging.joinpath(*PurePosixPath(relative).parts), staging)
-                atomic_write_bytes(destination, content)
-            for kind in ("label_audit", "dataset_validation"):
-                record = evidence[kind]
-                content = _read_regular_bytes(record["path"], job_root, max_bytes=64 * 1024 * 1024)
-                atomic_write_bytes(staging / "evidence" / f"{kind}.json", content)
+                campaign_staging_name, campaign_staging_identity = campaign_parent.mkdir_unique(
+                    f".{campaign_name}.staging-"
+                )
+        except BaseException:
+            _quarantine_owned_directory(
+                staging,
+                self.datasets_root,
+                staging_identity,
+                prefix=f".rollback-{name}-",
+            )
+            raise
+        campaign_staging = self.campaigns_root / campaign_staging_name
+        staged_dataset_inventory: dict[str, dict[str, Any]] | None = None
+        try:
+            with (
+                AnchoredDirectory(source_root, job_root) as source_anchor,
+                AnchoredDirectory(staging, self.datasets_root) as staging_anchor,
+            ):
+                for relative, expected in sorted(source_inventory.items()):
+                    if len(PurePosixPath(relative).parts) != 1:
+                        raise ConditionedDatasetError(
+                            "publication_layout_unsupported",
+                            "Conditioned candidate publication accepts only its fixed flat artifact layout.",
+                        )
+                    content = _read_anchored_regular_bytes(
+                        source_anchor,
+                        relative,
+                        max_bytes=max(self.policy.max_source_bytes, 1024 * 1024 * 1024),
+                    )
+                    if (
+                        hashlib.sha256(content).hexdigest() != expected["sha256"]
+                        or len(content) != expected["byte_count"]
+                    ):
+                        raise ConditionedDatasetError(
+                            "candidate_copy_changed", "A candidate file changed during freeze publication."
+                        )
+                    staging_anchor.atomic_write_bytes(relative, content)
+            evidence_staging = _ensure_anchored_child_directory(staging, self.datasets_root, "evidence")
+            with AnchoredDirectory(evidence_staging, staging) as evidence_anchor:
+                for kind in ("label_audit", "dataset_validation"):
+                    record = evidence[kind]
+                    content = record.get("content")
+                    if not isinstance(content, bytes):
+                        raise ConditionedDatasetError(
+                            "evidence_changed", "Independent evidence bytes are unavailable for publication."
+                        )
+                    evidence_anchor.atomic_write_bytes(f"{kind}.json", content)
             actual = _inventory(staging)
             if actual != files:
                 raise ConditionedDatasetError(
@@ -1520,23 +2297,63 @@ class ConditionedDatasetService:
                 "paths_are_relative": True,
                 "paths_exposed": False,
             }
-            _write_json(staging / "activation.json", activation)
-            staging.replace(final)
+            with AnchoredDirectory(staging, self.datasets_root) as staging_anchor:
+                staging_anchor.atomic_write_bytes(
+                    "activation.json",
+                    (strict_json_dumps(activation, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+                )
+            staged_dataset_inventory = _inventory(staging)
+            activation_sha256 = staged_dataset_inventory["activation.json"]["sha256"]
+            with AnchoredDirectory(self.datasets_root, self.project_root) as dataset_parent:
+                _publish_directory_noreplace(
+                    dataset_parent,
+                    staging.name,
+                    final.name,
+                    staging_identity,
+                )
+            if _inventory(final) != staged_dataset_inventory:
+                raise ConditionedDatasetError(
+                    "publication_post_rename_changed",
+                    "The freeze bytes changed across atomic no-replace publication.",
+                )
+            rollback_record.update(
+                {
+                    "dataset_path": final,
+                    "dataset_boundary": self.datasets_root,
+                    "dataset_inventory": staged_dataset_inventory,
+                    "dataset_identity": staging_identity,
+                }
+            )
         except BaseException:
-            if staging.exists():
-                remove_confined_tree(staging, self.datasets_root, missing_ok=True)
+            cleanup_actions: list[Callable[[], Any]] = [
+                lambda: _quarantine_owned_directory(
+                    campaign_staging,
+                    self.campaigns_root,
+                    campaign_staging_identity,
+                    prefix=f".rollback-{campaign_name}-",
+                ),
+                lambda: _quarantine_owned_directory(
+                    staging,
+                    self.datasets_root,
+                    staging_identity,
+                    prefix=f".rollback-{name}-",
+                ),
+            ]
+            if staged_dataset_inventory is not None:
+                cleanup_actions.append(
+                    lambda: _rollback_published_directory(
+                        final,
+                        self.datasets_root,
+                        staged_dataset_inventory,
+                        staging_identity,
+                    )
+                )
+            _run_cleanup_actions(cleanup_actions)
             raise
 
         activation_path = final / "activation.json"
         activation_relative = activation_path.relative_to(self.project_root).as_posix()
-        campaign_relative_directory = f"campaigns/conditioned-v5-{publication_identity}"
-        self.campaigns_root.mkdir(parents=True, exist_ok=True)
-        campaign_directory = require_confined_path(self.project_root / campaign_relative_directory, self.project_root)
-        if os.path.lexists(campaign_directory):
-            raise ConditionedDatasetError(
-                "fresh_campaign_required", "The conditioned campaign directory already exists and was not reused."
-            )
-        campaign_directory.mkdir()
+        campaign_staging_relative = campaign_staging.relative_to(self.project_root).as_posix()
         builder = self._campaign_builder
         if builder is None:
             from spritelab.product_features.training.activation import build_conditioned_three_seed_campaign
@@ -1545,9 +2362,9 @@ class ConditionedDatasetService:
         try:
             built = builder(
                 self.project_root,
-                campaign_directory=campaign_relative_directory,
+                campaign_directory=campaign_staging_relative,
                 activation_manifest=activation_relative,
-                activation_manifest_sha256=file_sha256(activation_path),
+                activation_manifest_sha256=activation_sha256,
                 view_manifest=(final / "view_manifest.json").relative_to(self.project_root).as_posix(),
                 split_manifest=(final / "training_manifest.jsonl").relative_to(self.project_root).as_posix(),
                 conditioning_vocabulary=(final / "conditioning_vocabulary.json")
@@ -1558,11 +2375,28 @@ class ConditionedDatasetService:
                 campaign_id=f"conditioned_v5_{publication_identity[:16]}",
             )
             portable = dict(built.portable_campaign)
+            resolved_campaign = dict(built.campaign)
             validation = dict(built.validation)
         except (OSError, ValueError, TypeError, KeyError) as exc:
+            _run_cleanup_actions(
+                [
+                    lambda: _quarantine_owned_directory(
+                        campaign_staging,
+                        self.campaigns_root,
+                        campaign_staging_identity,
+                        prefix=f".rollback-{campaign_name}-",
+                    ),
+                    lambda: _rollback_published_directory(
+                        final,
+                        self.datasets_root,
+                        staged_dataset_inventory,
+                        staging_identity,
+                    ),
+                ]
+            )
             raise ConditionedDatasetError(
                 "campaign_build_failed",
-                "The freeze was published, but its exact three-seed campaign failed authoritative validation; configuration was not changed.",
+                "Freeze and campaign publication failed transactionally; configuration was not changed.",
             ) from exc
         campaign_document = {
             "schema_version": "spritelab.training.conditioned-campaign-config.v1",
@@ -1573,16 +2407,95 @@ class ConditionedDatasetService:
                 }
             },
         }
-        _write_json(campaign_directory / "campaign.json", campaign_document)
+        if (
+            validation.get("launch_ready") is not True
+            or portable.get("seeds") != [731001, 731002, 731003]
+            or dict(portable.get("training") or {}).get("max_optimizer_steps") != 5_000
+            or not SHA256_PATTERN.fullmatch(str(resolved_campaign.get("campaign_identity") or ""))
+        ):
+            _run_cleanup_actions(
+                [
+                    lambda: _quarantine_owned_directory(
+                        campaign_staging,
+                        self.campaigns_root,
+                        campaign_staging_identity,
+                        prefix=f".rollback-{campaign_name}-",
+                    ),
+                    lambda: _rollback_published_directory(
+                        final,
+                        self.datasets_root,
+                        staged_dataset_inventory,
+                        staging_identity,
+                    ),
+                ]
+            )
+            raise ConditionedDatasetError(
+                "campaign_build_failed", "The exact conditioned campaign is not launch-ready."
+            )
+        staged_campaign_inventory: dict[str, dict[str, Any]] | None = None
+        try:
+            with AnchoredDirectory(campaign_staging, self.campaigns_root) as campaign_staging_anchor:
+                campaign_staging_anchor.atomic_write_bytes(
+                    "campaign.json",
+                    (strict_json_dumps(campaign_document, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+                )
+            staged_campaign_inventory = _inventory(campaign_staging)
+            campaign_sha256 = staged_campaign_inventory["campaign.json"]["sha256"]
+            with AnchoredDirectory(self.campaigns_root, self.project_root) as campaign_parent:
+                _publish_directory_noreplace(
+                    campaign_parent,
+                    campaign_staging.name,
+                    campaign_directory.name,
+                    campaign_staging_identity,
+                )
+            if _inventory(campaign_directory) != staged_campaign_inventory:
+                raise ConditionedDatasetError(
+                    "campaign_post_rename_changed",
+                    "The campaign bytes changed across atomic no-replace publication.",
+                )
+            rollback_record.update(
+                {
+                    "campaign_path": campaign_directory,
+                    "campaign_boundary": self.campaigns_root,
+                    "campaign_inventory": staged_campaign_inventory,
+                    "campaign_identity": campaign_staging_identity,
+                }
+            )
+        except BaseException:
+            entries = []
+            if os.path.lexists(campaign_directory) and staged_campaign_inventory is not None:
+                entries.append(
+                    (
+                        campaign_directory,
+                        self.campaigns_root,
+                        staged_campaign_inventory,
+                        campaign_staging_identity,
+                    )
+                )
+            entries.append((final, self.datasets_root, staged_dataset_inventory, staging_identity))
+            _run_cleanup_actions(
+                [
+                    lambda: _quarantine_owned_directory(
+                        campaign_staging,
+                        self.campaigns_root,
+                        campaign_staging_identity,
+                        prefix=f".rollback-{campaign_name}-",
+                    ),
+                    lambda: _rollback_published_directories(entries),
+                ]
+            )
+            raise
+        campaign_path = campaign_directory / "campaign.json"
         return {
             "publication_identity_sha256": publication_identity,
             "activation_manifest": activation_relative,
-            "activation_manifest_sha256": file_sha256(activation_path),
-            "campaign_config": (campaign_directory / "campaign.json").relative_to(self.project_root).as_posix(),
-            "campaign_config_sha256": file_sha256(campaign_directory / "campaign.json"),
-            "campaign_launch_ready": validation.get("launch_ready") is True,
-            "campaign_seeds": list(portable.get("seeds") or ()),
-            "campaign_steps": dict(portable.get("training") or {}).get("max_optimizer_steps"),
+            "activation_manifest_sha256": activation_sha256,
+            "campaign_config": campaign_path.relative_to(self.project_root).as_posix(),
+            "campaign_config_sha256": campaign_sha256,
+            "campaign_identity_sha256": resolved_campaign["campaign_identity"],
+            "campaign_launch_ready": True,
+            "campaign_seeds": [731001, 731002, 731003],
+            "campaign_steps": 5_000,
             "configuration_activated": False,
             "training_started": False,
             "paths_exposed": False,
@@ -1602,51 +2515,124 @@ class ConditionedDatasetService:
         return root
 
     def _read_state(self, root: Path) -> dict[str, Any]:
-        with self._lock:
-            state = _read_json_mapping(root / "state.json", max_bytes=16 * 1024 * 1024)
+        with AnchoredDirectory(root, root) as anchor:
+            content = _read_anchored_regular_bytes(anchor, "state.json", max_bytes=16 * 1024 * 1024)
+        try:
+            value = strict_json_loads(content)
+        except ValueError as exc:
+            raise ConditionedDatasetError("job_state", "The conditioned candidate job state is invalid.") from exc
+        if not isinstance(value, Mapping):
+            raise ConditionedDatasetError("job_state", "The conditioned candidate job state is invalid.")
+        state = dict(value)
+        self._validate_state(root, state)
+        return state
+
+    def _validate_state(self, root: Path, state: Mapping[str, Any]) -> None:
         if state.get("schema_version") != "spritelab.dataset.conditioned-job.v1" or state.get("job_id") != root.name:
             raise ConditionedDatasetError("job_state", "The conditioned candidate job state is invalid.")
         if state.get("paths_exposed") is not False:
             raise ConditionedDatasetError(
                 "job_state_privacy", "The conditioned candidate job state violates the private-path contract."
             )
-        return state
 
     def _write_state(self, root: Path, state: Mapping[str, Any]) -> None:
+        with self._lock, _ConditionedMutationLock(root, ".conditioned-state.lock"):
+            self._write_state_unlocked(root, state)
+
+    def _write_state_unlocked(self, root: Path, state: Mapping[str, Any]) -> None:
+        self._write_state_payload(root, state)
+
+    def _write_state_payload(self, root: Path, state: Mapping[str, Any]) -> None:
         payload = strict_json_dumps(dict(state), indent=2, sort_keys=True) + "\n"
         if str(self.project_root) in payload or str(self.project_root).replace("\\", "/") in payload:
             raise ConditionedDatasetError(
                 "private_path_persistence", "A private project path was refused from durable job state."
             )
-        with self._lock:
-            atomic_write_text(require_confined_path(root / "state.json", root), payload)
+        with AnchoredDirectory(root, root) as anchor:
+            anchor.atomic_write_bytes("state.json", payload.encode("utf-8"))
+
+    @contextmanager
+    def _state_transaction(
+        self,
+        root: Path,
+        *,
+        rollback: Callable[[], None] | None = None,
+        write_failure_rollback: Callable[[], None] | None = None,
+    ) -> Any:
+        with self._lock, _ConditionedMutationLock(root, ".conditioned-state.lock"):
+            state = self._read_state(root)
+            try:
+                yield state
+            except BaseException:
+                if rollback is not None:
+                    rollback()
+                raise
+            else:
+                try:
+                    self._write_state_unlocked(root, state)
+                except BaseException:
+                    active_rollback = write_failure_rollback or rollback
+                    if active_rollback is not None:
+                        active_rollback()
+                    raise
 
     def _event(self, root: Path, stage: str, current: int, total: int, message: str) -> None:
-        state = self._read_state(root)
-        events = list(state.get("events") or ())[-(self.policy.max_events - 1) :]
-        events.append(
-            {
-                "timestamp": _now(),
-                "stage": stage,
-                "current": current,
-                "total": total,
-                "message": message[:500],
-            }
-        )
-        state["events"] = events
-        state["stage"] = stage
-        state["current"] = current
-        state["total"] = total
-        state["message"] = message[:500]
-        state["updated_at"] = _now()
-        self._write_state(root, state)
+        with self._state_transaction(root) as state:
+            events = list(state.get("events") or ())[-(self.policy.max_events - 1) :]
+            events.append(
+                {
+                    "timestamp": _now(),
+                    "stage": stage,
+                    "current": current,
+                    "total": total,
+                    "message": message[:500],
+                }
+            )
+            state["events"] = events
+            state["stage"] = stage
+            state["current"] = current
+            state["total"] = total
+            state["message"] = message[:500]
+            state["updated_at"] = _now()
+            state["lease"] = self._lease()
 
     def _check_cancel(self, job_id: str) -> None:
-        with self._lock:
-            if job_id in self._cancelled:
-                raise ConditionedDatasetError(
-                    "build_cancelled", "Candidate build was cancelled; no production freeze changed."
-                )
+        root = self._job_root(job_id)
+        cancel = root / "cancel.json"
+        if os.path.lexists(cancel):
+            value = _read_json_mapping(cancel, max_bytes=16 * 1024)
+            if (
+                value.get("schema_version") != "spritelab.dataset.conditioned-cancel.v1"
+                or value.get("job_id") != job_id
+                or value.get("explicit_action") is not True
+                or value.get("paths_exposed") is not False
+            ):
+                raise ConditionedDatasetError("cancel_marker_invalid", "The durable cancellation marker is invalid.")
+            raise ConditionedDatasetError(
+                "build_cancelled", "Candidate build was cancelled; no production freeze changed."
+            )
+
+    def _lease(self) -> dict[str, Any]:
+        return {
+            "owner_instance_id": self._instance_id,
+            "owner_pid": os.getpid(),
+            "heartbeat_at": _now(),
+            "expires_after_seconds": self._lease_seconds,
+        }
+
+    def _lease_is_fresh(self, value: Any) -> bool:
+        if not isinstance(value, Mapping):
+            return False
+        if value.get("expires_after_seconds") != self._lease_seconds:
+            return False
+        try:
+            heartbeat = datetime.fromisoformat(str(value.get("heartbeat_at")))
+        except ValueError:
+            return False
+        if heartbeat.tzinfo is None:
+            return False
+        age = (datetime.now(UTC) - heartbeat.astimezone(UTC)).total_seconds()
+        return -5 <= age <= self._lease_seconds
 
 
 def _normalize_dataset_references(values: Sequence[str] | str) -> tuple[str, ...]:
@@ -1683,6 +2669,36 @@ def _safe_directory(path: Path) -> bool:
     return stat.S_ISDIR(metadata.st_mode) and not _metadata_is_link_or_reparse(metadata) and not path.is_mount()
 
 
+def _ensure_anchored_child_directory(parent: Path, boundary: Path, name: str) -> Path:
+    """Create or validate one fixed direct-child directory through a stable parent."""
+
+    with AnchoredDirectory(parent, boundary) as anchor:
+        try:
+            anchor.mkdir(name, exist_ok=True)
+        except (OSError, UnsafeFilesystemOperation) as exc:
+            raise ConditionedDatasetError(
+                "managed_directory_unsafe", "A conditioned managed directory is unsafe."
+            ) from exc
+    return parent / name
+
+
+def _create_anchored_named_directory(
+    parent: Path,
+    boundary: Path,
+    name: str,
+) -> tuple[Path, OwnedFileIdentity]:
+    """Publish one fresh fixed-name directory and retain its inode identity."""
+
+    with AnchoredDirectory(parent, boundary) as anchor:
+        try:
+            identity = anchor.mkdir(name, exist_ok=False)
+        except FileExistsError as exc:
+            raise ConditionedDatasetError(
+                "fresh_directory_required", "A fresh conditioned directory is required."
+            ) from exc
+    return parent / name, identity
+
+
 def _metadata_is_link_or_reparse(metadata: os.stat_result) -> bool:
     return stat.S_ISLNK(metadata.st_mode) or bool(
         getattr(metadata, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -1694,6 +2710,312 @@ def _is_link_or_reparse(path: Path) -> bool:
         return _metadata_is_link_or_reparse(path.lstat())
     except OSError:
         return False
+
+
+def _open_conditioned_lock(anchor: AnchoredDirectory, name: str) -> Any:
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    for _attempt in range(8):
+        before: os.stat_result | None = None
+        handle: Any = None
+        if anchor.lexists(name):
+            before = anchor.lstat(name)
+            _require_safe_lock_metadata(before)
+            try:
+                descriptor = anchor.open_file(name, flags)
+            except FileNotFoundError:
+                continue
+        else:
+            try:
+                descriptor = anchor.open_file(name, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                continue
+            before = os.fstat(descriptor)
+        try:
+            opened = os.fstat(descriptor)
+            assert before is not None
+            _require_same_lock_metadata(before, opened, "A conditioned mutation lock changed while opening.")
+            _require_same_lock_metadata(opened, anchor.lstat(name), "A conditioned mutation lock path changed.")
+            handle = os.fdopen(descriptor, "r+b", buffering=0)
+            descriptor = -1
+            if opened.st_size == 0:
+                if handle.write(b"0") != 1:
+                    raise ConditionedDatasetError(
+                        "mutation_lock_unsafe", "A conditioned mutation lock could not be initialized."
+                    )
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            _verify_conditioned_lock(handle, anchor, name)
+            return handle
+        except BaseException:
+            if handle is not None:
+                handle.close()
+            if descriptor >= 0:
+                os.close(descriptor)
+            raise
+    raise ConditionedDatasetError(
+        "mutation_lock_unsafe", "A conditioned mutation lock changed repeatedly while opening."
+    )
+
+
+def _verify_conditioned_lock(handle: Any, anchor: AnchoredDirectory, name: str) -> None:
+    _require_same_lock_metadata(
+        os.fstat(handle.fileno()),
+        anchor.lstat(name),
+        "A conditioned mutation lock path changed while held.",
+    )
+
+
+def _lock_conditioned_handle(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_conditioned_handle(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _require_safe_lock_metadata(metadata: os.stat_result) -> None:
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or _metadata_is_link_or_reparse(metadata)
+        or int(getattr(metadata, "st_nlink", 1)) != 1
+    ):
+        raise ConditionedDatasetError("mutation_lock_unsafe", "A conditioned mutation lock is unsafe.")
+
+
+def _require_same_lock_metadata(before: os.stat_result, after: os.stat_result, message: str) -> None:
+    _require_safe_lock_metadata(after)
+    if (
+        after.st_dev != before.st_dev
+        or after.st_ino != before.st_ino
+        or after.st_size != before.st_size
+        or after.st_mtime_ns != before.st_mtime_ns
+    ):
+        raise ConditionedDatasetError("mutation_lock_changed", message)
+
+
+def _require_same_directory_metadata(before: os.stat_result, after: os.stat_result, message: str) -> None:
+    if (
+        not stat.S_ISDIR(after.st_mode)
+        or _metadata_is_link_or_reparse(after)
+        or after.st_dev != before.st_dev
+        or after.st_ino != before.st_ino
+    ):
+        raise ConditionedDatasetError("mutation_root_changed", message)
+
+
+def _publish_directory_noreplace(
+    anchor: AnchoredDirectory,
+    source_name: str,
+    target_name: str,
+    identity: OwnedFileIdentity,
+) -> None:
+    """Atomically publish one exact owned directory through its stable parent."""
+
+    if not anchor.lexists(source_name) or not identity.matches(anchor.lstat(source_name)):
+        raise ConditionedDatasetError(
+            "publication_staging_unsafe", "A conditioned publication staging identity changed."
+        )
+    if anchor.lexists(target_name):
+        raise ConditionedDatasetError("fresh_publication_required", "A conditioned publication target already exists.")
+    try:
+        anchor.rename(source_name, target_name, replace=False)
+    except FileExistsError as exc:
+        raise ConditionedDatasetError(
+            "fresh_publication_required", "A conditioned publication target appeared concurrently."
+        ) from exc
+    if (
+        anchor.lexists(source_name)
+        or not anchor.lexists(target_name)
+        or not identity.matches(anchor.lstat(target_name))
+    ):
+        raise ConditionedDatasetError(
+            "publication_noreplace_failed", "Atomic no-replace publication could not be verified."
+        )
+
+
+def _rollback_published_directory(
+    path: Path,
+    boundary: Path,
+    expected_inventory: Mapping[str, Mapping[str, Any]],
+    identity: OwnedFileIdentity,
+) -> str | None:
+    """Quarantine an exact owned publication without deleting any tree."""
+
+    if path.parent != boundary:
+        raise ConditionedDatasetError("publication_rollback_scope", "A publication rollback path changed scope.")
+    with AnchoredDirectory(boundary, boundary) as anchor:
+        if not anchor.lexists(path.name):
+            return None
+        if not identity.matches(anchor.lstat(path.name)):
+            raise ConditionedDatasetError(
+                "publication_rollback_identity_changed",
+                "A publication directory identity changed; the foreign path was left untouched.",
+            )
+        # Inventory drift is retained inside the residue; inode drift is never moved.
+        inventory_changed = _inventory(path) != expected_inventory
+        residue = anchor.quarantine_if_owned(
+            path.name,
+            identity,
+            prefix=f".rollback-{'drift-' if inventory_changed else ''}{path.name}-",
+        )
+        if residue is None or anchor.lexists(path.name):
+            raise ConditionedDatasetError(
+                "publication_rollback_failed", "A fresh publication could not be quarantined safely."
+            )
+        return residue
+
+
+def _quarantine_owned_directory(
+    path: Path,
+    boundary: Path,
+    identity: OwnedFileIdentity,
+    *,
+    prefix: str,
+) -> str | None:
+    """Move one still-owned staging directory aside without recursive deletion."""
+
+    if path.parent != boundary:
+        raise ConditionedDatasetError("publication_rollback_scope", "A staging rollback path changed scope.")
+    with AnchoredDirectory(boundary, boundary) as anchor:
+        if not anchor.lexists(path.name):
+            return None
+        residue = anchor.quarantine_if_owned(path.name, identity, prefix=prefix)
+        if residue is None:
+            raise ConditionedDatasetError(
+                "publication_rollback_identity_changed",
+                "A staging directory identity changed; the foreign path was left untouched.",
+            )
+        return residue
+
+
+def _rollback_published_directories(
+    entries: Sequence[tuple[Path, Path, Mapping[str, Mapping[str, Any]], OwnedFileIdentity]],
+) -> None:
+    """Attempt every exact-owned rollback while preserving the first refusal."""
+
+    first_error: BaseException | None = None
+    for path, boundary, inventory, identity in entries:
+        try:
+            _rollback_published_directory(path, boundary, inventory, identity)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
+def _run_cleanup_actions(actions: Sequence[Callable[[], Any]]) -> None:
+    """Attempt every independent cleanup while preserving the first refusal."""
+
+    first_error: BaseException | None = None
+    for action in actions:
+        try:
+            action()
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise first_error
+
+
+def _read_anchored_regular_bytes(
+    anchor: AnchoredDirectory,
+    name: str,
+    *,
+    max_bytes: int,
+) -> bytes:
+    """Read one bounded single-link child through its already anchored parent."""
+
+    try:
+        before = anchor.lstat(name)
+    except OSError as exc:
+        raise ConditionedDatasetError(
+            "managed_file_unsafe", "A required managed file is unavailable or unsafe."
+        ) from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or _metadata_is_link_or_reparse(before)
+        or before.st_nlink != 1
+        or before.st_size > max_bytes
+    ):
+        raise ConditionedDatasetError(
+            "managed_file_unsafe", "A required managed file is not a singly linked bounded regular file."
+        )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = anchor.open_file(name, flags)
+    except OSError as exc:
+        raise ConditionedDatasetError(
+            "managed_file_unreadable", "A required managed file could not be opened safely."
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or opened.st_size != before.st_size
+            or opened.st_nlink != 1
+        ):
+            raise ConditionedDatasetError("managed_file_changed", "A managed file changed while it was opened.")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            content = handle.read(max_bytes + 1)
+        opened_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if len(content) > max_bytes:
+        raise ConditionedDatasetError("managed_file_oversized", "A required managed file exceeds its byte limit.")
+    after = anchor.lstat(name)
+    if (
+        len(content) != before.st_size
+        or after.st_dev != before.st_dev
+        or after.st_ino != before.st_ino
+        or after.st_size != before.st_size
+        or after.st_mtime_ns != before.st_mtime_ns
+        or opened_after.st_dev != before.st_dev
+        or opened_after.st_ino != before.st_ino
+        or opened_after.st_size != before.st_size
+        or opened_after.st_mtime_ns != before.st_mtime_ns
+        or opened_after.st_nlink != 1
+    ):
+        raise ConditionedDatasetError("managed_file_changed", "A managed file changed while it was read.")
+    return content
+
+
+def _read_anchored_relative_bytes(
+    anchor: AnchoredDirectory,
+    relative: str,
+    *,
+    max_bytes: int,
+) -> bytes:
+    parts = PurePosixPath(_canonical_relative(relative)).parts
+    with ExitStack() as stack:
+        current = anchor
+        for name in parts[:-1]:
+            current = stack.enter_context(current.open_directory(name))
+        return _read_anchored_regular_bytes(current, parts[-1], max_bytes=max_bytes)
+
+
+def _anchored_file_sha256(parent: Path, name: str) -> str:
+    with AnchoredDirectory(parent, parent) as anchor:
+        content = _read_anchored_regular_bytes(anchor, name, max_bytes=128 * 1024 * 1024)
+    return hashlib.sha256(content).hexdigest()
 
 
 def _read_regular_bytes(path: Path, root: Path, *, max_bytes: int) -> bytes:
@@ -1778,26 +3100,44 @@ def _canonical_bytes(value: Mapping[str, Any]) -> bytes:
 
 
 def _canonical_relative(value: str) -> str:
-    if not value or value != unicodedata.normalize("NFC", value) or "\\" in value or "\x00" in value:
+    try:
+        return canonical_portable_relative_path(value)
+    except ValueError as exc:
         raise ConditionedDatasetError(
             "artifact_relative_path", "A Harvest artifact path is not canonical and portable."
+        ) from exc
+
+
+def _contains_private_or_absolute_path(value: Any) -> bool:
+    """Reject path-bearing evidence that could leak host-private locations."""
+
+    if isinstance(value, Mapping):
+        return any(
+            _contains_private_or_absolute_path(key) or _contains_private_or_absolute_path(item)
+            for key, item in value.items()
         )
-    posix = PurePosixPath(value)
-    windows = PureWindowsPath(value)
-    if (
-        posix.is_absolute()
+    if isinstance(value, (list, tuple)):
+        return any(_contains_private_or_absolute_path(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    if not candidate:
+        return False
+    posix = PurePosixPath(candidate.replace("\\", "/"))
+    windows = PureWindowsPath(candidate)
+    folded = candidate.replace("\\", "/").casefold()
+    return (
+        "\x00" in candidate
+        or posix.is_absolute()
         or windows.is_absolute()
-        or windows.drive
-        or any(part in {"", ".", ".."} for part in posix.parts)
-    ):
-        raise ConditionedDatasetError(
-            "artifact_relative_path", "A Harvest artifact path is not canonical and portable."
-        )
-    if posix.as_posix() != value:
-        raise ConditionedDatasetError(
-            "artifact_relative_path", "A Harvest artifact path is not canonical and portable."
-        )
-    return value
+        or bool(windows.drive)
+        or folded.startswith("file:")
+        or any(part == ".." for part in posix.parts)
+        or "/users/" in folded
+        or folded.startswith("users/")
+        or "/home/" in folded
+        or folded.startswith("home/")
+    )
 
 
 def _path_tokens(value: str) -> tuple[str, ...]:
@@ -1807,6 +3147,7 @@ def _path_tokens(value: str) -> tuple[str, ...]:
 
 def _infer_semantics(relative_path: str) -> tuple[str, str, tuple[str, ...], bool]:
     all_tokens = _path_tokens(relative_path)
+    stem_tokens = _path_tokens(PurePosixPath(relative_path).stem)
     parent_tokens = _path_tokens(PurePosixPath(relative_path).parent.as_posix())
     path_matches = [
         category for category, terms in _CATEGORY_PATH_HINTS.items() if any(token in terms for token in parent_tokens)
@@ -1814,22 +3155,23 @@ def _infer_semantics(relative_path: str) -> tuple[str, str, tuple[str, ...], boo
     if len(path_matches) > 1:
         return "unknown", "", all_tokens, True
     path_category = path_matches[0] if path_matches else None
-    specific_matches = [
+    stem_matches = [
         category
         for category, terms in _CATEGORY_TERMS.items()
-        if category != "icon" and any(token in terms for token in all_tokens)
+        if category != "icon" and any(token in terms for token in stem_tokens)
     ]
     if path_category is not None:
+        if any(category != path_category for category in stem_matches):
+            return "unknown", "", all_tokens, True
         category = path_category
-    elif len(specific_matches) > 1:
+    elif len(stem_matches) > 1:
         return "unknown", "", all_tokens, True
-    elif specific_matches:
-        category = specific_matches[0]
+    elif stem_matches:
+        category = stem_matches[0]
     elif any(token in _CATEGORY_TERMS["icon"] for token in all_tokens):
         category = "icon"
     else:
         return "unknown", "", all_tokens, False
-    stem_tokens = _path_tokens(PurePosixPath(relative_path).stem)
     meaningful = tuple(token for token in stem_tokens if token not in {"sprite", "tile", "icon"})
     if not meaningful:
         meaningful = stem_tokens
@@ -1837,6 +3179,214 @@ def _infer_semantics(relative_path: str) -> tuple[str, str, tuple[str, ...], boo
     if not object_name or len(object_name) < 2:
         return "unknown", "", all_tokens, False
     return category, object_name, all_tokens, False
+
+
+def _source_record_from_png(
+    *,
+    relative: str,
+    path: Path,
+    content: bytes,
+    source: Mapping[str, Any],
+    source_group_identity: str | None = None,
+    derivation: Mapping[str, Any] | None = None,
+) -> tuple[_SourceRecord | None, str | None]:
+    digest = hashlib.sha256(content).hexdigest()
+    try:
+        with Image.open(io.BytesIO(content)) as opened:
+            if opened.format != "PNG" or getattr(opened, "n_frames", 1) != 1 or opened.size != (32, 32):
+                return None, "not_exact_32x32_png"
+            opened.load()
+            rgba = np.asarray(opened.convert("RGBA"), dtype=np.uint8)
+    except (Image.DecompressionBombError, OSError, UnidentifiedImageError, ValueError):
+        return None, "invalid_png"
+    alpha = rgba[:, :, 3]
+    if not np.all(np.isin(alpha, (0, 255))):
+        return None, "soft_alpha"
+    if not np.any(alpha == 255):
+        return None, "fully_transparent"
+    visible_colors = np.unique(rgba[alpha == 255, :3], axis=0)
+    if len(visible_colors) > 31:
+        return None, "over_palette"
+    category, object_name, tokens, disagreement = _infer_semantics(relative)
+    if disagreement:
+        return None, "taxonomy_disagreement"
+    if category == "unknown" or not object_name:
+        return None, "unknown_or_low_confidence"
+    visual_descriptor = _local_pixel_vision(rgba)
+    bbox = tuple(int(value) for value in visual_descriptor["metrics"]["alpha_bbox"])
+    if len(bbox) != 4:
+        raise ConditionedDatasetError("local_visual_bbox", "Local pixel vision produced an invalid alpha box.")
+    if source_group_identity is not None and SHA256_PATTERN.fullmatch(source_group_identity) is None:
+        raise ConditionedDatasetError(
+            "derived_source_group", "A receipt-bound derived frame has an invalid parent source group."
+        )
+    return (
+        _SourceRecord(
+            relative_path=relative,
+            path=path,
+            byte_count=len(content),
+            byte_sha256=digest,
+            pixel_sha256=hashlib.sha256(rgba.tobytes()).hexdigest(),
+            alpha_sha256=hashlib.sha256(alpha.tobytes()).hexdigest(),
+            alpha_bitmap=np.packbits(alpha == 255).tobytes(),
+            alpha_bbox=(bbox[0], bbox[1], bbox[2], bbox[3]),
+            perceptual_hash=_perceptual_hash(rgba),
+            category=category,
+            object_name=object_name,
+            tokens=tokens,
+            source_id=str(source["source_id"]),
+            source_title=str(source["source_title"]),
+            creator=str(source["creator"]),
+            license_id=str(source["license_id"]),
+            license_evidence=dict(source["license_evidence"]),
+            visual_descriptor=visual_descriptor,
+            visual_tags=tuple(str(value) for value in visual_descriptor["visual_tags"]),
+            content=content,
+            source_group_identity=source_group_identity,
+            derivation=dict(derivation) if derivation is not None else None,
+        ),
+        None,
+    )
+
+
+def _local_pixel_vision(rgba: np.ndarray) -> dict[str, Any]:
+    """Describe exact RGBA geometry/color without inventing semantic category."""
+
+    pixels = np.asarray(rgba, dtype=np.uint8)
+    if pixels.shape != (32, 32, 4):
+        raise ConditionedDatasetError("local_visual_shape", "Local pixel vision requires exact 32x32 RGBA input.")
+    mask = pixels[:, :, 3] == 255
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        raise ConditionedDatasetError("local_visual_blank", "Local pixel vision cannot describe a blank sprite.")
+    left, top, right, bottom = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+    bbox_width, bbox_height = right - left, bottom - top
+    foreground_pixels = int(mask.sum())
+    occupancy_bp = (foreground_pixels * 10_000 + 512) // 1024
+
+    palette = LOCAL_PIXEL_VISION_CONFIG["dominant_palette"]
+    prototypes = np.asarray([entry[1] for entry in palette], dtype=np.int32)
+    visible_rgb = pixels[mask, :3].astype(np.int32)
+    distances = ((visible_rgb[:, None, :] - prototypes[None, :, :]) ** 2).sum(axis=2)
+    assignments = np.argmin(distances, axis=1)
+    color_counts = np.bincount(assignments, minlength=len(palette))
+    dominant_index = int(np.argmax(color_counts))
+    dominant_color = str(palette[dominant_index][0])
+    dominant_color_share_bp = (int(color_counts[dominant_index]) * 10_000 + foreground_pixels // 2) // foreground_pixels
+
+    bbox_max = max(bbox_width, bbox_height)
+    scale_thresholds = LOCAL_PIXEL_VISION_CONFIG["scale_max_bbox_dimension"]
+    if bbox_max <= int(scale_thresholds["tiny"]):
+        silhouette_scale = "tiny"
+    elif bbox_max <= int(scale_thresholds["small"]):
+        silhouette_scale = "small"
+    elif bbox_max <= int(scale_thresholds["medium"]):
+        silhouette_scale = "medium"
+    elif bbox_max <= int(scale_thresholds["large"]):
+        silhouette_scale = "large"
+    else:
+        silhouette_scale = "full_canvas"
+
+    horizontal_offset_half_pixels = left + right - 32
+    vertical_offset_half_pixels = top + bottom - 32
+    horizontal_position = (
+        "horizontally_centered"
+        if abs(horizontal_offset_half_pixels) <= 2
+        else "left_weighted"
+        if horizontal_offset_half_pixels < 0
+        else "right_weighted"
+    )
+    vertical_position = (
+        "vertically_centered"
+        if abs(vertical_offset_half_pixels) <= 2
+        else "top_weighted"
+        if vertical_offset_half_pixels < 0
+        else "bottom_weighted"
+    )
+
+    symmetry_mismatch_pixels = int(np.count_nonzero(mask != np.fliplr(mask)))
+    symmetry_mismatch_bp = (symmetry_mismatch_pixels * 10_000 + 512) // 1024
+    symmetry_thresholds = LOCAL_PIXEL_VISION_CONFIG["symmetry_mismatch_basis_points"]
+    symmetry = (
+        "high_horizontal_symmetry"
+        if symmetry_mismatch_bp <= int(symmetry_thresholds["high"])
+        else "moderate_horizontal_symmetry"
+        if symmetry_mismatch_bp <= int(symmetry_thresholds["moderate"])
+        else "asymmetric_silhouette"
+    )
+
+    padded = np.pad(mask, 1, constant_values=False)
+    interior = padded[1:-1, 1:-1]
+    fully_surrounded = padded[:-2, 1:-1] & padded[2:, 1:-1] & padded[1:-1, :-2] & padded[1:-1, 2:]
+    boundary_pixels = int(np.count_nonzero(interior & ~fully_surrounded))
+    edge_density_bp = (boundary_pixels * 10_000 + foreground_pixels // 2) // foreground_pixels
+    edge_thresholds = LOCAL_PIXEL_VISION_CONFIG["edge_density_basis_points"]
+    edge_density = (
+        "low_edge_density"
+        if edge_density_bp <= int(edge_thresholds["low"])
+        else "medium_edge_density"
+        if edge_density_bp <= int(edge_thresholds["medium"])
+        else "high_edge_density"
+    )
+    occupancy = (
+        "sparse_occupancy"
+        if occupancy_bp < 1500
+        else "balanced_occupancy"
+        if occupancy_bp < 6000
+        else "dense_occupancy"
+    )
+    visual_tags = (
+        f"dominant_{dominant_color}",
+        f"{silhouette_scale}_silhouette",
+        horizontal_position,
+        vertical_position,
+        symmetry,
+        edge_density,
+        occupancy,
+    )
+    metrics = {
+        "alpha_bbox": [left, top, right, bottom],
+        "bbox_width": bbox_width,
+        "bbox_height": bbox_height,
+        "foreground_pixels": foreground_pixels,
+        "alpha_occupancy_basis_points": occupancy_bp,
+        "dominant_coarse_color": dominant_color,
+        "dominant_color_share_basis_points": dominant_color_share_bp,
+        "silhouette_scale": silhouette_scale,
+        "horizontal_offset_half_pixels": horizontal_offset_half_pixels,
+        "vertical_offset_half_pixels": vertical_offset_half_pixels,
+        "horizontal_position": horizontal_position,
+        "vertical_position": vertical_position,
+        "horizontal_symmetry_mismatch_pixels": symmetry_mismatch_pixels,
+        "horizontal_symmetry_mismatch_basis_points": symmetry_mismatch_bp,
+        "horizontal_symmetry": symmetry,
+        "boundary_pixels": boundary_pixels,
+        "edge_density_basis_points": edge_density_bp,
+        "edge_density": edge_density,
+        "occupancy": occupancy,
+    }
+    payload = {
+        "schema_version": "spritelab.dataset.local-pixel-vision.v1",
+        "algorithm_id": LOCAL_PIXEL_VISION_ALGORITHM,
+        "config_identity": LOCAL_PIXEL_VISION_CONFIG_IDENTITY,
+        "decoded_rgba_sha256": hashlib.sha256(pixels.tobytes()).hexdigest(),
+        "metrics": metrics,
+        "visual_tags": list(visual_tags),
+        "semantic_category_inferred": False,
+        "provider_contacted": False,
+        "model_weights_loaded": False,
+    }
+    return {**payload, "descriptor_identity": stable_hash(payload)}
+
+
+def _visual_short_description(record: _SourceRecord) -> str:
+    metrics = record.visual_descriptor["metrics"]
+    object_text = record.object_name.replace("_", " ")
+    color = str(metrics["dominant_coarse_color"])
+    scale = str(metrics["silhouette_scale"]).replace("_", " ")
+    horizontal = str(metrics["horizontal_position"]).replace("_", " ")
+    symmetry = str(metrics["horizontal_symmetry"]).replace("_", " ")
+    return f"{object_text}; {color}, {scale}, {horizontal}, {symmetry}."
 
 
 def _perceptual_hash(rgba: np.ndarray) -> int:
@@ -1855,12 +3405,50 @@ def _record_key(record: _SourceRecord) -> str:
     return f"{record.source_id}:{record.relative_path}"
 
 
-def _deduplicate_records(records: Sequence[_SourceRecord]) -> tuple[list[_SourceRecord], list[str]]:
+def _conditioned_source_binding(source: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "dataset_reference": source["dataset_reference"],
+        "harvest_run_id": source["run_id"],
+        "handoff_identity": source["handoff_identity"],
+        "harvest_import_receipt_identity": source["harvest_import_receipt_identity"],
+        "managed_intake_receipt_identity": source["managed_intake_receipt_identity"],
+        "managed_source_inventory_sha256": source["managed_source_inventory_sha256"],
+        "managed_output_inventory_sha256": source["managed_output_inventory_sha256"],
+        "managed_derived_inventory_sha256": source["managed_derived_inventory_sha256"],
+        "derived_sheet_manifest_identity": source["derived_sheet_manifest_identity"],
+        "trusted_catalog_identity": source["trusted_catalog_identity"],
+        "source_catalog_identity": source["source_catalog_identity"],
+        "backend_capability_identity": source["backend_capability_identity"],
+        "backend_capability_evidence_identity": source["backend_capability_evidence_identity"],
+        "backend_certificate_identity": source["backend_certificate_identity"],
+        "backend_audit_report_sha256": source["backend_audit_report_sha256"],
+        "backend_audit_report_identity": source["backend_audit_report_identity"],
+        "backend_capability_issued_at": source["backend_capability_issued_at"],
+        "backend_capability_expires_at": source["backend_capability_expires_at"],
+        "authorization_receipt_identity": source["authorization_receipt_identity"],
+        "acquisition_receipt_identity": source["acquisition_receipt_identity"],
+        "artifact_manifest_sha256": source["artifact_manifest_sha256"],
+        "artifact_set_identity": source["artifact_manifest"]["artifact_set_identity"],
+        "source_id": source["source_id"],
+        "title": source["source_title"],
+        "creator": source["creator"],
+        "license_id": source["license_id"],
+        "license_evidence": dict(source["license_evidence"]),
+        "source_document": dict(source["handoff"]["source"]),
+        "license_document": dict(source["handoff"]["license"]),
+    }
+
+
+def _deduplicate_records(
+    records: Sequence[_SourceRecord],
+) -> tuple[list[_SourceRecord], list[str], list[dict[str, Any]]]:
     ordered = sorted(records, key=lambda record: (record.source_id, record.relative_path))
     byte_seen: set[str] = set()
     pixel_seen: set[str] = set()
     kept: list[_SourceRecord] = []
+    kept_by_category: dict[str, list[_SourceRecord]] = defaultdict(list)
     exclusions: list[str] = []
+    near_exclusions: list[dict[str, Any]] = []
     for record in ordered:
         if record.byte_sha256 in byte_seen:
             exclusions.append("exact_byte_duplicate")
@@ -1870,8 +3458,100 @@ def _deduplicate_records(records: Sequence[_SourceRecord]) -> tuple[list[_Source
             exclusions.append("exact_pixel_duplicate")
             continue
         pixel_seen.add(record.pixel_sha256)
+        near_match: tuple[_SourceRecord, dict[str, Any]] | None = None
+        for representative in kept_by_category[record.category]:
+            metrics = _near_duplicate_metrics(representative, record)
+            if metrics["is_near_duplicate"] is True:
+                near_match = representative, metrics
+                break
+        if near_match is not None:
+            representative, metrics = near_match
+            exclusions.append("near_duplicate")
+            pair_keys = sorted((_record_key(representative), _record_key(record)))
+            near_exclusions.append(
+                {
+                    "disposition": "near_duplicate",
+                    "family_id": hashlib.sha256("\n".join(pair_keys).encode("utf-8")).hexdigest()[:24],
+                    "retained": {
+                        "source_id": representative.source_id,
+                        "relative_path": representative.relative_path,
+                        "pixel_sha256": representative.pixel_sha256,
+                    },
+                    "excluded": {
+                        "source_id": record.source_id,
+                        "relative_path": record.relative_path,
+                        "pixel_sha256": record.pixel_sha256,
+                    },
+                    "metric_evidence": metrics,
+                }
+            )
+            continue
         kept.append(record)
-    return kept, exclusions
+        kept_by_category[record.category].append(record)
+    return kept, exclusions, near_exclusions
+
+
+def _near_duplicate_metrics(left: _SourceRecord, right: _SourceRecord) -> dict[str, Any]:
+    left_bbox = left.alpha_bbox
+    right_bbox = right.alpha_bbox
+    width_delta = abs((left_bbox[2] - left_bbox[0]) - (right_bbox[2] - right_bbox[0]))
+    height_delta = abs((left_bbox[3] - left_bbox[1]) - (right_bbox[3] - right_bbox[1]))
+    center_x_delta_half_pixels = abs((left_bbox[0] + left_bbox[2]) - (right_bbox[0] + right_bbox[2]))
+    center_y_delta_half_pixels = abs((left_bbox[1] + left_bbox[3]) - (right_bbox[1] + right_bbox[3]))
+    alpha_xor_pixels = sum(
+        byte.bit_count() for byte in bytes(a ^ b for a, b in zip(left.alpha_bitmap, right.alpha_bitmap, strict=True))
+    )
+    perceptual_hamming = (left.perceptual_hash ^ right.perceptual_hash).bit_count()
+    same_category = left.category == right.category
+    is_near = (
+        same_category
+        and perceptual_hamming <= int(NEAR_DUPLICATE_CONFIG["max_perceptual_hamming"])
+        and width_delta <= int(NEAR_DUPLICATE_CONFIG["max_bbox_dimension_delta"])
+        and height_delta <= int(NEAR_DUPLICATE_CONFIG["max_bbox_dimension_delta"])
+        and center_x_delta_half_pixels <= int(NEAR_DUPLICATE_CONFIG["max_bbox_center_delta_half_pixels"])
+        and center_y_delta_half_pixels <= int(NEAR_DUPLICATE_CONFIG["max_bbox_center_delta_half_pixels"])
+        and alpha_xor_pixels <= int(NEAR_DUPLICATE_CONFIG["max_alpha_xor_pixels"])
+    )
+    return {
+        "algorithm_id": NEAR_DUPLICATE_ALGORITHM,
+        "config_identity": NEAR_DUPLICATE_CONFIG_IDENTITY,
+        "same_taxonomy_category": same_category,
+        "perceptual_hamming": perceptual_hamming,
+        "bbox_width_delta": width_delta,
+        "bbox_height_delta": height_delta,
+        "bbox_center_x_delta_half_pixels": center_x_delta_half_pixels,
+        "bbox_center_y_delta_half_pixels": center_y_delta_half_pixels,
+        "alpha_xor_pixels": alpha_xor_pixels,
+        "is_near_duplicate": is_near,
+    }
+
+
+def _retained_near_duplicate_gate(records: Sequence[_SourceRecord]) -> dict[str, Any]:
+    violations: list[dict[str, Any]] = []
+    ordered = sorted(records, key=lambda record: (_record_key(record), record.pixel_sha256))
+    for index, left in enumerate(ordered):
+        for right in ordered[index + 1 :]:
+            if left.category != right.category:
+                continue
+            metrics = _near_duplicate_metrics(left, right)
+            if metrics["is_near_duplicate"] is True:
+                violations.append(
+                    {
+                        "left_record_key": _record_key(left),
+                        "right_record_key": _record_key(right),
+                        "metric_evidence": metrics,
+                    }
+                )
+    payload = {
+        "algorithm_id": NEAR_DUPLICATE_ALGORITHM,
+        "config": NEAR_DUPLICATE_CONFIG,
+        "config_identity": NEAR_DUPLICATE_CONFIG_IDENTITY,
+        "retained_count": len(ordered),
+        "violation_count": len(violations),
+        "violations": violations,
+        "ok": not violations,
+    }
+    return {**payload, "gate_identity": stable_hash(payload)}
 
 
 def _representative_selection(records: Sequence[_SourceRecord], target: int) -> list[_SourceRecord]:
@@ -1927,6 +3607,12 @@ def _selection_key(record: _SourceRecord) -> str:
 
 
 def _source_group(record: _SourceRecord) -> str:
+    if record.source_group_identity is not None:
+        if SHA256_PATTERN.fullmatch(record.source_group_identity) is None:
+            raise ConditionedDatasetError(
+                "derived_source_group", "A receipt-bound derived frame has an invalid parent source group."
+            )
+        return record.source_group_identity
     parent = PurePosixPath(record.relative_path).parent.as_posix()
     family_stem = re.sub(
         r"(?:[_-](?:north|south|east|west|up|down|left|right|front|back|alt|[0-9]+))+$",
@@ -1957,17 +3643,17 @@ def _family_assignments(records: Sequence[_SourceRecord]) -> dict[str, str]:
     keys = [_record_key(record) for record in records]
     union = _UnionFind(keys)
     by_source_group: dict[str, list[_SourceRecord]] = defaultdict(list)
-    by_near_bucket: dict[tuple[str, str, str], list[_SourceRecord]] = defaultdict(list)
+    by_category: dict[str, list[_SourceRecord]] = defaultdict(list)
     for record in records:
         by_source_group[_source_group(record)].append(record)
-        by_near_bucket[(record.source_id, record.object_name, record.alpha_sha256)].append(record)
+        by_category[record.category].append(record)
     for members in by_source_group.values():
         for record in members[1:]:
             union.union(_record_key(members[0]), _record_key(record))
-    for members in by_near_bucket.values():
+    for members in by_category.values():
         for index, left in enumerate(members):
             for right in members[index + 1 :]:
-                if (left.perceptual_hash ^ right.perceptual_hash).bit_count() <= 1:
+                if _variant_family_match(left, right):
                     union.union(_record_key(left), _record_key(right))
     grouped: dict[str, list[str]] = defaultdict(list)
     for key in keys:
@@ -1978,6 +3664,29 @@ def _family_assignments(records: Sequence[_SourceRecord]) -> dict[str, str]:
         for key in members:
             family_by_key[key] = family_id
     return family_by_key
+
+
+def _variant_family_match(left: _SourceRecord, right: _SourceRecord) -> bool:
+    if left.category != right.category:
+        return False
+    left_bbox, right_bbox = left.alpha_bbox, right.alpha_bbox
+    return (
+        (left.perceptual_hash ^ right.perceptual_hash).bit_count()
+        <= int(VARIANT_FAMILY_CONFIG["max_perceptual_hamming"])
+        and abs((left_bbox[2] - left_bbox[0]) - (right_bbox[2] - right_bbox[0]))
+        <= int(VARIANT_FAMILY_CONFIG["max_bbox_dimension_delta"])
+        and abs((left_bbox[3] - left_bbox[1]) - (right_bbox[3] - right_bbox[1]))
+        <= int(VARIANT_FAMILY_CONFIG["max_bbox_dimension_delta"])
+        and abs((left_bbox[0] + left_bbox[2]) - (right_bbox[0] + right_bbox[2]))
+        <= int(VARIANT_FAMILY_CONFIG["max_bbox_center_delta_half_pixels"])
+        and abs((left_bbox[1] + left_bbox[3]) - (right_bbox[1] + right_bbox[3]))
+        <= int(VARIANT_FAMILY_CONFIG["max_bbox_center_delta_half_pixels"])
+        and sum(
+            byte.bit_count()
+            for byte in bytes(a ^ b for a, b in zip(left.alpha_bitmap, right.alpha_bitmap, strict=True))
+        )
+        <= int(VARIANT_FAMILY_CONFIG["max_alpha_xor_pixels"])
+    )
 
 
 def _split_assignments(records: Sequence[_SourceRecord], family_by_key: Mapping[str, str]) -> dict[str, str]:
@@ -2014,6 +3723,37 @@ def _sprite_id(record: _SourceRecord) -> str:
     return f"{prefix}-{digest}"
 
 
+def _conditioned_record(item: ImportedSprite, metadata: Mapping[str, Any]) -> dict[str, Any]:
+    prefill = item.auto_metadata.get("label_v2_safe_prefill")
+    semantic = item.auto_metadata.get("semantic_v3")
+    if not isinstance(prefill, Mapping) or not isinstance(semantic, Mapping):
+        raise ConditionedDatasetError("conditioned_label_contract", "A conditioned label contract is incomplete.")
+    label_contract = {
+        "schema_version": "spritelab.dataset.conditioned-label-contract.v1",
+        "category": item.item.category,
+        "object_name": str(prefill.get("object_name") or ""),
+        "tags": [str(value) for value in item.item.tags],
+        "short_description": str(prefill.get("short_description") or ""),
+        "confidence": str(prefill.get("confidence") or ""),
+        "confidence_reason": str(prefill.get("confidence_reason") or ""),
+        "captions": [str(value) for value in semantic.get("captions") or ()],
+        "prompt_phrases": [str(value) for value in semantic.get("prompt_phrases") or ()],
+        "negative_tags": [str(value) for value in semantic.get("negative_tags") or ()],
+        "disagreement": bool(dict(metadata["label_evidence"]).get("disagreement")),
+        "audit_state": "SOURCE_GROUNDED_REQUIRES_INDEPENDENT_AUDIT",
+        "human_truth_claim": False,
+    }
+    return {
+        "sprite_id": item.item.sprite_id,
+        "split": item.item.split,
+        "category": item.item.category,
+        "object_name": label_contract["object_name"],
+        **dict(metadata),
+        "label_contract": label_contract,
+        "semantic_v3": dict(semantic),
+    }
+
+
 def _enrich_manifests(dataset: Path, metadata: Mapping[str, Mapping[str, Any]]) -> None:
     for split in ("train", "val", "test"):
         path = dataset / f"manifest_{split}.jsonl"
@@ -2029,7 +3769,10 @@ def _enrich_manifests(dataset: Path, metadata: Mapping[str, Mapping[str, Any]]) 
             updated = dict(row)
             updated.update(
                 {
-                    "source_path": f"harvest/{source['source_id']}/artifacts/{source['source_relative_path']}",
+                    "source_path": (
+                        f"managed/{source['source_id']}/{source['source_storage_kind']}/"
+                        f"{source['source_relative_path']}"
+                    ),
                     "source_name": source["source_relative_path"],
                     "source_id": source["source_id"],
                     "source_pack": source["source_pack"],
@@ -2050,6 +3793,11 @@ def _enrich_manifests(dataset: Path, metadata: Mapping[str, Mapping[str, Any]]) 
                         "creator": source["creator"],
                     },
                     "label_evidence": dict(source["label_evidence"]),
+                    "source_derivation": (
+                        dict(source["source_derivation"])
+                        if isinstance(source.get("source_derivation"), Mapping)
+                        else None
+                    ),
                     "human_truth_claim": False,
                 }
             )
@@ -2134,41 +3882,176 @@ def _coverage_report(imported: Sequence[ImportedSprite], exclusions: Sequence[st
     }
 
 
+def _label_audit_subjects(imported: Sequence[ImportedSprite]) -> dict[str, Any]:
+    high_impact_categories = frozenset({"character", "creature", "weapon", "armor", "vehicle", "effect"})
+    generic_objects = frozenset({"sprite", "pixel_art_sprite", "item", "object", "asset", "unknown"})
+    by_category: dict[str, list[str]] = defaultdict(list)
+    low_confidence: list[str] = []
+    disagreements: list[str] = []
+    high_impact: list[str] = []
+    generic: list[str] = []
+    source_counts: Counter[str] = Counter()
+    confidence_counts: Counter[str] = Counter()
+    confidence_reason_counts: Counter[str] = Counter()
+    disagreement_counts: Counter[str] = Counter()
+    generic_counts: Counter[str] = Counter()
+    visual_bindings: list[dict[str, Any]] = []
+    for item in sorted(imported, key=lambda value: value.item.sprite_id):
+        sprite_id = item.item.sprite_id
+        category = item.item.category
+        prefill = item.auto_metadata.get("label_v2_safe_prefill", {})
+        evidence = item.auto_metadata.get("conditioned_v5", {})
+        confidence = str(prefill.get("confidence") or "unknown")
+        confidence_reason = str(prefill.get("confidence_reason") or "unknown")
+        object_name = str(prefill.get("object_name") or "").casefold()
+        disagreed = bool(evidence.get("disagreement"))
+        is_generic = object_name in generic_objects
+        visual = item.auto_metadata.get("local_pixel_vision", {})
+        descriptor_identity = str(visual.get("descriptor_identity") or "") if isinstance(visual, Mapping) else ""
+        decoded_identity = str(visual.get("decoded_rgba_sha256") or "") if isinstance(visual, Mapping) else ""
+        if not SHA256_PATTERN.fullmatch(descriptor_identity) or not SHA256_PATTERN.fullmatch(decoded_identity):
+            raise ConditionedDatasetError(
+                "local_visual_binding",
+                "A conditioned label lacks an exact local pixel descriptor binding.",
+            )
+        visual_bindings.append(
+            {
+                "sprite_id": sprite_id,
+                "descriptor_identity": descriptor_identity,
+                "decoded_rgba_sha256": decoded_identity,
+            }
+        )
+        by_category[category].append(sprite_id)
+        source_counts[str(evidence.get("source_id") or "unknown")] += 1
+        confidence_counts[confidence] += 1
+        confidence_reason_counts[confidence_reason] += 1
+        disagreement_counts["disagreement" if disagreed else "no_disagreement"] += 1
+        generic_counts["generic" if is_generic else "specific"] += 1
+        if confidence in {"source_grounded_low", "low", "unknown"}:
+            low_confidence.append(sprite_id)
+        if disagreed:
+            disagreements.append(sprite_id)
+        if category in high_impact_categories:
+            high_impact.append(sprite_id)
+        if is_generic:
+            generic.append(sprite_id)
+    stratified = sorted(
+        sprite_id for category in sorted(by_category) for sprite_id in sorted(by_category[category])[:10]
+    )
+    required = sorted({*stratified, *low_confidence, *disagreements, *high_impact, *generic})
+    base = {
+        "schema_version": AUDIT_SUBJECTS_SCHEMA,
+        "stratified_sample_ids": stratified,
+        "low_confidence_ids": sorted(low_confidence),
+        "disagreement_ids": sorted(disagreements),
+        "high_impact_ids": sorted(high_impact),
+        "generic_label_ids": sorted(generic),
+        "required_label_audit_ids": required,
+        "visual_descriptor_bindings": visual_bindings,
+        "local_pixel_vision_algorithm": LOCAL_PIXEL_VISION_ALGORITHM,
+        "local_pixel_vision_config_identity": LOCAL_PIXEL_VISION_CONFIG_IDENTITY,
+        "distributions": {
+            "category": {key: len(by_category[key]) for key in sorted(by_category)},
+            "source": dict(sorted(source_counts.items())),
+            "confidence": dict(sorted(confidence_counts.items())),
+            "confidence_reason": dict(sorted(confidence_reason_counts.items())),
+            "disagreement": dict(sorted(disagreement_counts.items())),
+            "generic_label": dict(sorted(generic_counts.items())),
+        },
+        "all_low_confidence_required": True,
+        "all_disagreements_required": True,
+        "all_high_impact_required": True,
+        "all_generic_labels_required": True,
+        "all_visual_descriptors_recompute_required": True,
+        "quality_rates_basis_points": {
+            "unknown_category": 0,
+            "generic_object": (len(generic) * 10_000 + max(1, len(imported)) // 2) // max(1, len(imported)),
+            "disagreement": (len(disagreements) * 10_000 + max(1, len(imported)) // 2) // max(1, len(imported)),
+            "useful_label": ((len(imported) - len(generic)) * 10_000 + max(1, len(imported)) // 2)
+            // max(1, len(imported)),
+        },
+        "human_truth_claim": False,
+    }
+    return {**base, "subjects_identity": stable_hash(base)}
+
+
 def _benchmark_manifest(
     imported: Sequence[ImportedSprite],
     metadata: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
-    candidates = [item for item in imported if item.item.split in {"val", "test"}]
-    candidates.sort(key=lambda item: hashlib.sha256(f"benchmark:{item.item.sprite_id}".encode()).hexdigest())
-    seen_groups: set[str] = set()
-    selected: list[dict[str, Any]] = []
-    for item in candidates:
+    train_groups = {
+        str(metadata[item.item.sprite_id]["source_group"]) for item in imported if item.item.split == "train"
+    }
+    train_families = {
+        str(metadata[item.item.sprite_id]["duplicate_family_id"]) for item in imported if item.item.split == "train"
+    }
+    buckets: dict[str, list[ImportedSprite]] = defaultdict(list)
+    for item in imported:
         source = metadata[item.item.sprite_id]
-        group = str(source["source_group"])
-        if group in seen_groups:
-            continue
-        seen_groups.add(group)
-        selected.append(
-            {
-                "sprite_id": item.item.sprite_id,
-                "split": item.item.split,
-                "category": item.item.category,
-                "source_id": source["source_id"],
-                "source_group": group,
-                "duplicate_family_id": source["duplicate_family_id"],
-                "source_sha256": source["source_sha256"],
-            }
-        )
-        if len(selected) >= 128:
-            break
+        if (
+            item.item.split in {"val", "test"}
+            and str(source["source_group"]) not in train_groups
+            and str(source["duplicate_family_id"]) not in train_families
+        ):
+            buckets[item.item.category].append(item)
+    for values in buckets.values():
+        values.sort(key=lambda item: hashlib.sha256(f"benchmark:{item.item.sprite_id}".encode()).hexdigest())
+    seen_groups: set[str] = set()
+    seen_families: set[str] = set()
+    selected: list[dict[str, Any]] = []
+    active = sorted(buckets)
+    while active and len(selected) < 128:
+        next_active: list[str] = []
+        for category in active:
+            values = buckets[category]
+            while values:
+                item = values.pop(0)
+                source = metadata[item.item.sprite_id]
+                group = str(source["source_group"])
+                family = str(source["duplicate_family_id"])
+                if group in seen_groups or family in seen_families:
+                    continue
+                seen_groups.add(group)
+                seen_families.add(family)
+                selected.append(
+                    {
+                        "sprite_id": item.item.sprite_id,
+                        "split": item.item.split,
+                        "category": category,
+                        "source_id": source["source_id"],
+                        "source_group": group,
+                        "duplicate_family_id": family,
+                        "source_sha256": source["source_sha256"],
+                    }
+                )
+                break
+            if values:
+                next_active.append(category)
+            if len(selected) >= 128:
+                break
+        active = next_active
     if not selected:
         raise ConditionedDatasetError(
             "benchmark_empty", "No source-group-disjoint validation/test benchmark could be built."
         )
+    selected_groups = {str(item["source_group"]) for item in selected}
+    selected_families = {str(item["duplicate_family_id"]) for item in selected}
+    candidate_categories = set(buckets) | {str(item["category"]) for item in selected}
+    category_counts = Counter(str(item["category"]) for item in selected)
+    disjoint = not (selected_groups & train_groups) and not (selected_families & train_families)
+    if not disjoint or set(category_counts) != candidate_categories:
+        raise ConditionedDatasetError(
+            "benchmark_integrity", "The category-stratified benchmark failed recomputed training-group disjointness."
+        )
     return {
         "schema_version": "spritelab.dataset.conditioned-benchmark.v1",
-        "selection_policy": "one deterministic val/test record per source_group",
-        "source_group_disjoint_from_training": True,
+        "selection_policy": "deterministic category round-robin with one record per source_group and family",
+        "category_stratified": True,
+        "category_counts": dict(sorted(category_counts.items())),
+        "source_group_disjoint_from_training": disjoint,
+        "duplicate_family_disjoint_from_training": disjoint,
+        "training_source_group_count": len(train_groups),
+        "training_duplicate_family_count": len(train_families),
         "record_count": len(selected),
         "records": selected,
     }

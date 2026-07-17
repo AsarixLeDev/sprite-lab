@@ -281,7 +281,10 @@ def _assign_windows_kill_job(process: Any) -> int:
     if not handle:
         raise OSError("unable to create contained process job")
     limits = ExtendedLimit()
-    limits.BasicLimitInformation.LimitFlags = 0x00002000
+    # Kill the entire containment boundary when the retained job handle closes
+    # and prevent the controlled worker from creating even one descendant.
+    limits.BasicLimitInformation.LimitFlags = 0x00002000 | 0x00000008
+    limits.BasicLimitInformation.ActiveProcessLimit = 1
     if not kernel32.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
         kernel32.CloseHandle(handle)
         raise OSError("unable to configure contained process job")
