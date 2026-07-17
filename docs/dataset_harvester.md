@@ -39,6 +39,37 @@ This document is not legal advice; the tool preserves metadata and warns.
 - **Known registry** — `data/source_registry.example.json` lists known packs
   as a convenience, not a legal guarantee.
 
+### Smart source prefill
+
+Paste one public pack-page URL instead of repeating its title, source ID, and
+every known metadata link. `source-prefill` is network-free and recognizes
+OpenGameArt, Kenney, and itch.io, with a conservative generic fallback:
+
+```bash
+python -m spritelab harvest source-prefill \
+  https://kenney.nl/assets/new-platformer-pack
+```
+
+The same defaults are applied directly by every import command when
+`--source-url` is present, so a Kenney ZIP needs only the local ZIP, run name,
+pack page, and explicit license confirmation:
+
+```bash
+python -m spritelab harvest import-zip \
+  --zip path/to/New-Platformer-Pack.zip \
+  --run-name new_platformer_pack \
+  --source-url https://kenney.nl/assets/new-platformer-pack \
+  --user-confirmed-license
+```
+
+Explicit CLI fields always override prefills. Kenney supplies its creator,
+CC0 evidence, and terms defaults. OpenGameArt and itch.io licenses remain
+pack-specific and are never inferred from the host; supply `--author` and
+`--license` after reviewing the page. Selecting `--license cc0` fills the
+canonical CC0 evidence URL, but `--user-confirmed-license` remains explicit.
+Use `--source-preset generic` to disable host recognition or an explicit
+platform preset to reject a mismatched/spoofed host.
+
 ## Public source examples
 
 - **Kenney**: manual ZIP or direct URL when available; usually CC0, prefilled

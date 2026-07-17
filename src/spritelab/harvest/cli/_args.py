@@ -7,6 +7,11 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
+from spritelab.harvest.source_prefill import (
+    build_source_prefill,
+    default_license_evidence_url,
+    source_preset_ids,
+)
 from spritelab.harvest.sources import SourceLicense, SourceRecord, normalize_license_name
 
 
@@ -20,11 +25,17 @@ def _parsed_config_kwargs(parsed: argparse.Namespace) -> dict[str, object]:
 def _add_source_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--run-root", default="harvest_runs", type=Path)
-    parser.add_argument("--source-id", required=True)
-    parser.add_argument("--source-name", required=True)
+    parser.add_argument(
+        "--source-preset",
+        default="auto",
+        choices=source_preset_ids(),
+        help="Network-free source metadata preset; auto recognizes OpenGameArt, Kenney, and itch.io.",
+    )
+    parser.add_argument("--source-id", default="", help="Optional when --source-url can provide a smart prefill.")
+    parser.add_argument("--source-name", default="", help="Optional when --source-url can provide a smart prefill.")
     parser.add_argument("--source-type", default="")
     parser.add_argument("--source-url", default="")
-    parser.add_argument("--license", default="unknown")
+    parser.add_argument("--license", default="")
     parser.add_argument("--license-url", default="")
     parser.add_argument("--author", default="")
     parser.add_argument("--attribution-required", action="store_true")
@@ -161,28 +172,56 @@ def _add_label_v2_args(parser: argparse.ArgumentParser, *, include_vlm_args: boo
 
 
 def _build_source(parsed: argparse.Namespace, *, kind: str) -> SourceRecord:
-    source_type = (
-        parsed.source_type
-        or {"zip": "manual_zip", "dir": "local_directory", "url": "direct_zip_url", "file": "direct_file_url"}[kind]
+    prefill = None
+    source_url = str(parsed.source_url).strip()
+    preset_id = str(parsed.source_preset).strip()
+    if source_url:
+        try:
+            prefill = build_source_prefill(source_url, preset_id=preset_id)
+        except ValueError as exc:
+            raise SystemExit(f"Source prefill failed: {exc}") from exc
+        source_url = prefill.source_page
+    elif preset_id != "auto":
+        raise SystemExit("--source-preset requires --source-url")
+
+    source_id = str(parsed.source_id).strip() or (prefill.source_id if prefill is not None else "")
+    source_name = str(parsed.source_name).strip() or (prefill.title if prefill is not None else "")
+    if not source_id or not source_name:
+        raise SystemExit("--source-id and --source-name are required unless --source-url can prefill them")
+    fallback_type = {"zip": "manual_zip", "dir": "local_directory", "url": "direct_zip_url", "file": "direct_file_url"}[
+        kind
+    ]
+    prefill_type = prefill.source_type if prefill is not None and kind == "zip" else fallback_type
+    source_type = str(parsed.source_type).strip() or prefill_type
+    license_name = str(parsed.license).strip() or (prefill.license_name if prefill is not None else "unknown")
+    normalized_license = normalize_license_name(license_name)
+    license_url = (
+        str(parsed.license_url).strip()
+        or (prefill.license_evidence_url if prefill is not None else "")
+        or default_license_evidence_url(normalized_license)
     )
+    author = str(parsed.author).strip() or (prefill.creator if prefill is not None else "")
+    notes = str(parsed.notes).strip()
+    if not notes and prefill is not None:
+        notes = prefill.guidance
     return SourceRecord(
-        source_id=parsed.source_id,
-        source_name=parsed.source_name,
+        source_id=source_id,
+        source_name=source_name,
         source_type=source_type,
-        source_url=parsed.source_url,
+        source_url=source_url,
         download_url=parsed.url if kind in {"url", "file"} else "",
         download_kind="file" if kind == "file" else "zip" if kind == "url" else "",
         local_archive_path=str(parsed.zip_path) if kind == "zip" else "",
         local_root_path=str(parsed.dir_path) if kind == "dir" else "",
-        author=parsed.author,
+        author=author,
         license=SourceLicense(
-            license=normalize_license_name(parsed.license),
-            license_url=parsed.license_url,
+            license=normalized_license,
+            license_url=license_url,
             attribution_required=parsed.attribution_required,
             share_alike=parsed.share_alike,
             user_confirmed=parsed.user_confirmed_license,
         ),
-        notes=parsed.notes,
+        notes=notes,
     )
 
 

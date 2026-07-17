@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from spritelab.harvest.cli._args import (
@@ -11,15 +12,50 @@ from spritelab.harvest.cli._args import (
     _build_source,
     _unique_candidates,
 )
+from spritelab.harvest.source_prefill import build_source_prefill, source_preset_ids
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
+    _register_source_prefill(subparsers)
     _register_gui(subparsers)
     _register_import_zip(subparsers)
     _register_import_dir(subparsers)
     _register_download_zip(subparsers)
     _register_download_file(subparsers)
     _register_import_diagnostics(subparsers)
+
+
+def _register_source_prefill(subparsers: argparse._SubParsersAction) -> None:
+    parser = subparsers.add_parser(
+        "source-prefill",
+        aliases=("smart-prefill",),
+        help="Turn one public pack-page URL into reviewable Harvest source defaults.",
+    )
+    parser.add_argument("source_page", help="Public HTTPS creator or pack page.")
+    parser.add_argument("--preset", default="auto", choices=source_preset_ids())
+    parser.add_argument("--format", default="human", choices=("human", "json"))
+    parser.set_defaults(func=_run_source_prefill)
+
+
+def _run_source_prefill(parsed: argparse.Namespace) -> None:
+    try:
+        prefill = build_source_prefill(parsed.source_page, preset_id=parsed.preset)
+    except ValueError as exc:
+        raise SystemExit(f"Source prefill failed: {exc}") from exc
+    payload = prefill.to_dict()
+    if parsed.format == "json":
+        print(json.dumps(payload, sort_keys=True, indent=2))
+        return
+    print(f"Preset: {prefill.preset_label}")
+    print(f"Source ID: {prefill.source_id}")
+    print(f"Title: {prefill.title}")
+    print(f"Creator: {prefill.creator or '[review required]'}")
+    print(f"License: {prefill.license_name if prefill.license_name != 'unknown' else '[review required]'}")
+    print(f"License evidence: {prefill.license_evidence_url or '[review required]'}")
+    print(f"Terms evidence: {prefill.terms_evidence_url or '[review source page]'}")
+    print(f"Direct download: {prefill.direct_download_url or '[paste exact creator-posted link]'}")
+    print(f"Review required: {', '.join(prefill.review_fields)}")
+    print(prefill.guidance)
 
 
 def _register_gui(subparsers: argparse._SubParsersAction) -> None:
