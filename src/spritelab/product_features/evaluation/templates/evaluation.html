@@ -3,6 +3,7 @@
 {% block content %}
   <link rel="stylesheet" href="/evaluation/static/evaluation.css">
   <link rel="stylesheet" href="/evaluation/static/evaluation-a11y.css">
+  <link rel="stylesheet" href="/evaluation/static/exploratory-smoke.css">
     <header class="page-header">
       <div>
         <p class="eyebrow">Sprite Lab</p>
@@ -122,6 +123,38 @@
         <span class="scope-badge">EXPLORATORY</span>
       </div>
       <p>Playground results are kept separate from frozen benchmark results and promotion evidence.</p>
+      <details class="smoke-registration">
+        <summary>Register a 2-step infrastructure smoke checkpoint</summary>
+        <div class="smoke-warning" role="note">
+          <strong>Exploratory only — never production Evaluation, resume, or promotion.</strong>
+          <span>Sprite Lab runs the fixed CPU and CUDA commands for you. A failed or interrupted run is never resumed; prepare a fresh nonce.</span>
+        </div>
+        <div class="smoke-identity-grid">
+          <label>Eligible conditioned publication<select id="smoke-conditioned-job"></select></label>
+          <label>Fresh preparation nonce<input id="smoke-preparation-nonce" autocomplete="off"></label>
+        </div>
+        <div class="actions dark-actions">
+          <button id="prepare-smoke" class="secondary dark-secondary">Prepare smoke plan</button>
+          <button id="fresh-smoke-bundle" class="secondary dark-secondary">Use fresh retry nonce</button>
+        </div>
+        <details class="smoke-command-transparency"><summary>Command transparency</summary>
+          <pre id="smoke-plan-output">No smoke plan has been prepared.</pre>
+        </details>
+        <div class="smoke-identity-grid smoke-registration-identities">
+          <label>Smoke ID<input id="smoke-id" readonly></label>
+          <label>Plan identity<input id="smoke-plan-identity" readonly></label>
+        </div>
+        <div class="actions dark-actions">
+          <button id="run-cpu-smoke" class="secondary dark-secondary" disabled>Run CPU smoke</button>
+          <button id="run-cuda-smoke" class="secondary dark-secondary" disabled>Run CUDA smoke</button>
+          <button id="register-smoke" class="secondary dark-secondary" disabled>Register for Playground only</button>
+        </div>
+        <div class="smoke-device-grid">
+          <pre id="smoke-cpu-status">CPU · NOT_STARTED</pre>
+          <pre id="smoke-cuda-status">CUDA · NOT_STARTED</pre>
+        </div>
+        <p id="smoke-registration-status" class="play-run-status" role="status" aria-live="polite">No exploratory smoke checkpoint is registered.</p>
+      </details>
       <div class="playground-form">
         <label class="span-two">Prompt<textarea id="play-prompt" rows="3">Describe a 32×32 sprite</textarea></label>
         <label>Checkpoint<select id="play-checkpoint"></select></label>

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 
 import yaml
@@ -23,6 +25,13 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     run = commands.add_parser("run")
     run.add_argument("--config", required=True, type=Path)
     run.add_argument("--smoke", action="store_true")
+    run.add_argument(
+        "--smoke-bundle-id",
+        help="Opaque ID from the web-prepared exploratory infrastructure-smoke plan.",
+    )
+    run.add_argument("--smoke-device", choices=("cpu", "cuda"))
+    run.add_argument("--smoke-plan-identity", help=argparse.SUPPRESS)
+    run.add_argument("--smoke-launch-identity", help="Exact server-owned contained-worker launch identity.")
     run.add_argument("--resume", type=Path)
     run.add_argument("--unsafe-resume", action="store_true")
     run.add_argument(
@@ -105,26 +114,49 @@ def _validate(parsed: argparse.Namespace) -> None:
     print(f"Valid experiment: {manifest['name']} ({manifest['experiment_hash']})")
 
 
-def _prepare_manifest(config_path: Path, *, write: bool) -> dict:
+def prepare_experiment_manifest(
+    config_path: Path,
+    *,
+    write: bool,
+    config: Mapping[str, object] | None = None,
+    runtime_overrides: Mapping[str, object] | None = None,
+    resolution_root: Path | None = None,
+) -> dict:
+    """Build the exact effective manifest, optionally from server-owned config bytes.
+
+    ``runtime_overrides`` is used by the two-step smoke contract so the adjacent
+    derived manifest describes the checkpoint that is actually written rather
+    than the untouched 5,000-step source campaign.
+    """
     from spritelab.training.data import read_jsonl
     from spritelab.training.experiment_system import build_experiment_manifest, load_config, validate_ablation_config
     from spritelab.training.structured_conditioning import build_structured_conditioning_vocab
     from spritelab.training.tokenization import SpriteTextTokenizer
 
-    config = load_config(config_path)
-    validate_ablation_config(config)
-    dataset = config["dataset"]
-    manifest_path = _resolve(config_path, dataset["training_manifest"])
+    effective = load_config(config_path) if config is None else deepcopy(dict(config))
+    if runtime_overrides:
+        runtime = effective.get("runtime")
+        if not isinstance(runtime, dict):
+            raise ValueError("experiment runtime configuration must be an object")
+        runtime.update(deepcopy(dict(runtime_overrides)))
+    validate_ablation_config(effective)
+    dataset = effective["dataset"]
+    resolver = (
+        (lambda value: _resolve(config_path, value))
+        if resolution_root is None
+        else (lambda value: _resolve_from_root(resolution_root, value))
+    )
+    manifest_path = resolver(dataset["training_manifest"])
     rows = read_jsonl(manifest_path)
     train_rows = [row for row in rows if row.get("split") == dataset.get("split", "train")]
     if not train_rows:
         raise ValueError("training manifest has no rows for configured split")
     generated_tokenizer = SpriteTextTokenizer.build_from_records(
-        train_rows, max_length=int(config["conditioning"].get("caption_max_length", 32))
+        train_rows, max_length=int(effective["conditioning"].get("caption_max_length", 32))
     )
-    vocabulary_path = config["conditioning"].get("vocabulary_path")
+    vocabulary_path = effective["conditioning"].get("vocabulary_path")
     if vocabulary_path:
-        vocabulary_file = _resolve(config_path, vocabulary_path)
+        vocabulary_file = resolver(vocabulary_path)
         try:
             tokenizer_payload = json.loads(vocabulary_file.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -134,7 +166,7 @@ def _prepare_manifest(config_path: Path, *, write: bool) -> dict:
         tokenizer = tokenizer_payload
     else:
         tokenizer = generated_tokenizer.to_json_dict()
-    bindings = config.get("campaign_bindings")
+    bindings = effective.get("campaign_bindings")
     if isinstance(bindings, dict):
         from spritelab.training.experiment_system import file_sha256
 
@@ -143,19 +175,19 @@ def _prepare_manifest(config_path: Path, *, write: bool) -> dict:
             raise ValueError("campaign split-manifest identity does not match the experiment input")
         expected_vocabulary_hash = bindings.get("conditioning_vocabulary_hash")
         if expected_vocabulary_hash and (
-            not vocabulary_path or expected_vocabulary_hash != file_sha256(_resolve(config_path, vocabulary_path))
+            not vocabulary_path or expected_vocabulary_hash != file_sha256(resolver(vocabulary_path))
         ):
             raise ValueError("campaign conditioning-vocabulary identity does not match the experiment input")
     structured = None
-    if "structured" in str(config["conditioning"]["mode"]):
+    if "structured" in str(effective["conditioning"]["mode"]):
         structured = build_structured_conditioning_vocab(train_rows).to_json_dict()
     result = build_experiment_manifest(
-        config,
+        effective,
         dataset_manifest=manifest_path,
-        split_manifest=_resolve(config_path, dataset.get("split_manifest", dataset["training_manifest"])),
+        split_manifest=resolver(dataset.get("split_manifest", dataset["training_manifest"])),
         tokenizer=tokenizer,
         structured_vocab=structured,
-        repo=Path.cwd(),
+        repo=Path.cwd() if resolution_root is None else resolution_root.resolve(),
     )
     if write:
         output = config_path.with_suffix(".manifest.json")
@@ -163,10 +195,42 @@ def _prepare_manifest(config_path: Path, *, write: bool) -> dict:
     return result
 
 
-def _run(parsed: argparse.Namespace) -> None:
-    from spritelab.training.experiment_system import load_config
-    from spritelab.training.generator_challenger import ChallengerTrainConfig, run_challenger_training
+def _prepare_manifest(
+    config_path: Path,
+    *,
+    write: bool,
+    config: Mapping[str, object] | None = None,
+    runtime_overrides: Mapping[str, object] | None = None,
+    resolution_root: Path | None = None,
+) -> dict:
+    return prepare_experiment_manifest(
+        config_path,
+        write=write,
+        config=config,
+        runtime_overrides=runtime_overrides,
+        resolution_root=resolution_root,
+    )
 
+
+def _run(parsed: argparse.Namespace) -> None:
+    bundle_id = parsed.smoke_bundle_id
+    bundle_device = parsed.smoke_device
+    bundle_plan_identity = getattr(parsed, "smoke_plan_identity", None)
+    bundle_launch_identity = getattr(parsed, "smoke_launch_identity", None)
+    if (bundle_id is None) != (bundle_device is None):
+        raise ValueError("--smoke-bundle-id and --smoke-device must be supplied together")
+    if bundle_id is not None and not parsed.smoke:
+        raise ValueError("registrable smoke bundles require --smoke")
+    if bundle_id is None and bundle_launch_identity is not None:
+        raise ValueError("--smoke-launch-identity requires a registrable smoke bundle")
+    if bundle_id is None and bundle_plan_identity is not None:
+        raise ValueError("--smoke-plan-identity requires a registrable smoke bundle")
+    if bundle_id is not None and bundle_launch_identity is None:
+        raise ValueError("registrable smoke bundles require --smoke-launch-identity")
+    if bundle_id is not None and bundle_plan_identity is None:
+        raise ValueError("registrable smoke bundles require --smoke-plan-identity")
+    if bundle_id is not None and (parsed.resume is not None or parsed.unsafe_resume):
+        raise ValueError("registrable smoke bundles cannot resume or use unsafe resume")
     if parsed.unsafe_resume:
         if parsed.resume is None:
             raise ValueError("--unsafe-resume requires --resume")
@@ -174,13 +238,91 @@ def _run(parsed: argparse.Namespace) -> None:
             raise ValueError("--unsafe-resume requires a nonempty explicit --unsafe-resume-reason")
     elif parsed.unsafe_resume_reason is not None:
         raise ValueError("--unsafe-resume-reason may only be used with --unsafe-resume")
-    manifest = _prepare_manifest(parsed.config, write=True)
-    config = load_config(parsed.config)
+    bundle_plan = None
+    bundle_config_sha256 = None
+    qualification = None
+    if bundle_id is not None:
+        import os
+
+        from spritelab.training.smoke_bundle import (
+            load_plan,
+            smoke_launch_identity,
+            validate_cli_configuration,
+            validate_smoke_environment,
+            validate_smoke_interpreter,
+            verify_execution_guards,
+        )
+
+        project_root = Path.cwd().resolve()
+        bundle_plan = load_plan(project_root, bundle_id)
+        if bundle_plan_identity != bundle_plan["plan_identity"]:
+            raise ValueError("the contained smoke plan identity changed")
+        if bundle_launch_identity != smoke_launch_identity(bundle_plan, str(bundle_device)):
+            raise ValueError("the contained smoke launch identity changed")
+        validate_smoke_interpreter(
+            bundle_plan,
+            lexical_path=os.environ.get("SPRITELAB_BOUND_INTERPRETER"),
+        )
+        validate_smoke_environment(project_root, bundle_plan, str(bundle_device), os.environ)
+        bundle_config_sha256, config = validate_cli_configuration(
+            project_root,
+            bundle_plan,
+            str(bundle_device),
+            parsed.config,
+        )
+        verify_execution_guards(project_root, bundle_plan)
+    else:
+        from spritelab.training.experiment_system import load_config
+
+        config = load_config(parsed.config)
+    runtime = config["runtime"]
+    smoke_runtime = (
+        {
+            "max_steps": min(2, int(runtime["max_steps"])),
+            "batch_size": min(2, int(runtime["batch_size"])),
+            "micro_batch_size": min(2, int(runtime.get("micro_batch_size", runtime["batch_size"]))),
+            "global_batch_size": min(2, int(runtime["batch_size"])),
+            "effective_batch_size": min(2, int(runtime["batch_size"]))
+            * int(runtime.get("gradient_accumulation_steps", 1)),
+            "sample_every": 0,
+            "save_every": 1,
+        }
+        if parsed.smoke
+        else None
+    )
+    manifest = _prepare_manifest(
+        parsed.config,
+        write=bundle_id is None,
+        config=config,
+        runtime_overrides=smoke_runtime,
+        resolution_root=Path.cwd().resolve() if bundle_id is not None else None,
+    )
+    if bundle_id is not None:
+        from spritelab.training.smoke_bundle import (
+            begin_device_run,
+            expected_manifest,
+            run_bundle_directory,
+        )
+
+        project_root = Path.cwd().resolve()
+        if bundle_plan is None or bundle_config_sha256 is None:
+            raise ValueError("the server-prepared smoke plan was not retained safely")
+        if manifest != expected_manifest(project_root, bundle_plan, str(bundle_device)):
+            raise ValueError("the effective smoke manifest differs from the server-prepared manifest")
+        out_dir = begin_device_run(project_root, bundle_plan, str(bundle_device))
+        expected_output = run_bundle_directory(project_root, bundle_id) / str(bundle_device)
+        if out_dir != expected_output:
+            raise ValueError("the fixed smoke output identity changed")
+        if bundle_device == "cuda":
+            from spritelab.training.determinism import qualify_determinism
+
+            qualification = qualify_determinism(mode="strict", device="cuda", steps=2)
+    else:
+        out_dir = _resolve(parsed.config, runtime["out_dir"])
     dataset, model = config["dataset"], config["model"]
     conditioning, loss = config["conditioning"], config["loss"]
     optimizer, augmentation = config["optimizer"], config["augmentation"]
-    runtime, ema = config["runtime"], config["ema"]
-    out_dir = _resolve(parsed.config, runtime["out_dir"])
+    ema = config["ema"]
     if not parsed.resume and out_dir.exists() and any(out_dir.glob("checkpoint*.pt")):
         raise FileExistsError(f"refusing to overwrite checkpoints in {out_dir}; choose a new run directory or resume")
     max_steps = min(2, int(runtime["max_steps"])) if parsed.smoke else int(runtime["max_steps"])
@@ -239,8 +381,58 @@ def _run(parsed: argparse.Namespace) -> None:
             float(value) for value in runtime.get("timestep_validation_boundaries", [0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
         ),
     }
+    from spritelab.training.generator_challenger import ChallengerTrainConfig, run_challenger_training
+
     report = run_challenger_training(ChallengerTrainConfig(**kwargs))
-    print(json.dumps({"steps_completed": report["steps_completed"], "out_dir": str(out_dir)}, sort_keys=True))
+    if bundle_id is not None:
+        from spritelab.training.smoke_bundle import (
+            canonical_json_bytes,
+            read_stable_single_link_bytes,
+            verify_execution_guards,
+            write_device_receipt,
+            write_exclusive_bytes,
+        )
+
+        if bundle_plan is None or bundle_config_sha256 is None:
+            raise ValueError("the server-prepared smoke identity was not retained safely")
+        project_root = Path.cwd().resolve()
+        verify_execution_guards(project_root, bundle_plan)
+        if qualification is not None:
+            write_exclusive_bytes(
+                out_dir / "cuda_determinism_qualification.json",
+                canonical_json_bytes(qualification, pretty=True),
+                boundary=project_root,
+            )
+        config_after = read_stable_single_link_bytes(
+            parsed.config.resolve(strict=True),
+            boundary=project_root,
+            max_bytes=16 * 1024 * 1024,
+        )
+        import hashlib
+
+        receipt = write_device_receipt(
+            project_root,
+            bundle_plan,
+            str(bundle_device),
+            config_sha256_before=bundle_config_sha256,
+            config_sha256_after=hashlib.sha256(config_after).hexdigest(),
+            environment=os.environ,
+        )
+        verify_execution_guards(project_root, bundle_plan)
+        print(
+            json.dumps(
+                {
+                    "device": bundle_device,
+                    "receipt_identity": receipt["receipt_identity"],
+                    "smoke_id": bundle_id,
+                    "status": "COMPLETE",
+                    "steps_completed": report["steps_completed"],
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        print(json.dumps({"steps_completed": report["steps_completed"], "out_dir": str(out_dir)}, sort_keys=True))
 
 
 def _sample(parsed: argparse.Namespace) -> None:
@@ -375,6 +567,11 @@ def _resolve(config_path: Path, value: str | Path) -> Path:
     del config_path
     path = Path(value)
     return path if path.is_absolute() else path.resolve()
+
+
+def _resolve_from_root(root: Path, value: str | Path) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else (root / path).resolve()
 
 
 def _set_dotted(data: dict, dotted: str, value: object) -> None:

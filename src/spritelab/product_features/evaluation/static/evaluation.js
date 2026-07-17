@@ -33,19 +33,34 @@
     if (!response.ok) throw new Error(body.message || "The evaluation request could not be completed.");
     return body;
   };
-  const checkpoints = state.checkpoints?.eligible || [];
+  const productionCheckpoints = state.checkpoints?.eligible || [];
+  let exploratoryCheckpoints = state.exploratory_checkpoints?.eligible || [];
   const fillCheckpoints = () => {
-    for (const id of ["eval-checkpoint", "play-checkpoint"]) {
-      const select = $(id);
-      if (!select) continue;
-      select.replaceChildren();
-      if (!checkpoints.length) select.add(new Option("No eligible checkpoint", ""));
-      checkpoints.forEach((item, index) => select.add(new Option(
+    const evaluationSelect = $("eval-checkpoint");
+    if (evaluationSelect) {
+      const selected = evaluationSelect.value;
+      evaluationSelect.replaceChildren();
+      if (!productionCheckpoints.length) evaluationSelect.add(new Option("No eligible production checkpoint", ""));
+      productionCheckpoints.forEach((item) => evaluationSelect.add(new Option(
         `${item.friendly_run_name} · step ${item.checkpoint_step ?? "—"} · ${item.weights.toUpperCase()}`,
         item.checkpoint_id,
-        index === 0,
-        index === 0,
       )));
+      if ([...evaluationSelect.options].some((option) => option.value === selected)) evaluationSelect.value = selected;
+    }
+    const playgroundSelect = $("play-checkpoint");
+    if (playgroundSelect) {
+      const selected = playgroundSelect.value || state.playground_defaults?.checkpoint_id || "";
+      playgroundSelect.replaceChildren();
+      const choices = [
+        ...productionCheckpoints.map((item) => ({...item, catalogLabel:"production"})),
+        ...exploratoryCheckpoints.map((item) => ({...item, catalogLabel:"EXPLORATORY ONLY"})),
+      ];
+      if (!choices.length) playgroundSelect.add(new Option("No Playground checkpoint", ""));
+      choices.forEach((item) => playgroundSelect.add(new Option(
+        `[${item.catalogLabel}] ${item.friendly_run_name} · step ${item.checkpoint_step ?? "—"} · ${item.weights.toUpperCase()}`,
+        item.checkpoint_id,
+      )));
+      if ([...playgroundSelect.options].some((option) => option.value === selected)) playgroundSelect.value = selected;
     }
   };
   const renderStages = (stages = []) => {
@@ -148,6 +163,115 @@
       result.presets.forEach((preset) => select.add(new Option(preset.name, preset.name)));
     } catch (_error) { /* Empty preset state is valid. */ }
   };
+  const smokePublications = state.smoke_publications?.eligible || [];
+  const smokePlans = [...(state.smoke_plans?.eligible || [])];
+  const fillSmokePublications = () => {
+    const select = $("smoke-conditioned-job");
+    if (!select) return;
+    select.replaceChildren();
+    if (!smokePublications.length) select.add(new Option("No eligible pre-activation publication", ""));
+    smokePublications.forEach((item) => select.add(new Option(item.label, item.conditioned_job_id)));
+  };
+  const smokeIdentityPayload = () => ({
+    conditioned_job_id: $("smoke-conditioned-job").value,
+    smoke_id:$("smoke-id").value,
+    plan_identity:$("smoke-plan-identity").value,
+  });
+  const freshSmokeNonce = () => {
+    if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+    return `nonce-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  };
+  const prepareSmoke = async (control) => {
+    busy(control, true);
+    const nonce = $("smoke-preparation-nonce");
+    if (!nonce.value.trim()) nonce.value = freshSmokeNonce();
+    try {
+      const plan = await jsonRequest("/evaluation/api/playground/smokes/prepare", {
+        method:"POST",
+        body:JSON.stringify({conditioned_job_id:$("smoke-conditioned-job").value, preparation_nonce:nonce.value.trim(), explicit_action:true}),
+      });
+      $("smoke-id").value = plan.smoke_id;
+      $("smoke-plan-identity").value = plan.plan_identity;
+      $("smoke-plan-output").textContent = JSON.stringify(plan, null, 2);
+      smokePlans.unshift({...plan, conditioned_job_id:$("smoke-conditioned-job").value});
+      $("smoke-registration-status").textContent = "Plan prepared. Use the Run CPU and Run CUDA web actions; commands are displayed only for transparency.";
+      toast("Exploratory smoke plan prepared. Production training was not started.");
+      await refreshSmokeStatus();
+    } catch (error) {
+      $("smoke-registration-status").textContent = error.message;
+      toast(error.message);
+    } finally { busy(control, false); }
+  };
+  let smokePoll = null;
+  const renderSmokeDevice = (device, value) => {
+    const node = $(`smoke-${device}-status`);
+    if (!node) return;
+    node.textContent = `${device.toUpperCase()} · ${value.status} · ${value.current || 0} / ${value.total || 2}\n${(value.logs || []).join("\n")}`;
+  };
+  const refreshSmokeStatus = async () => {
+    const identity = smokeIdentityPayload();
+    if (!identity.conditioned_job_id || !identity.smoke_id || !identity.plan_identity) return;
+    const query = new URLSearchParams({conditioned_job_id:identity.conditioned_job_id, plan_identity:identity.plan_identity});
+    const status = await jsonRequest(`/evaluation/api/playground/smokes/${encodeURIComponent(identity.smoke_id)}/status?${query}`);
+    renderSmokeDevice("cpu", status.devices.cpu);
+    renderSmokeDevice("cuda", status.devices.cuda);
+    $("run-cpu-smoke").disabled = status.devices.cpu.status !== "NOT_STARTED";
+    $("run-cuda-smoke").disabled = status.devices.cpu.status !== "COMPLETE" || status.devices.cuda.status !== "NOT_STARTED";
+    $("register-smoke").disabled = !status.registration_ready;
+    const active = Object.values(status.devices).some((value) => ["STARTING", "RUNNING"].includes(value.status));
+    const terminalFailure = Object.values(status.devices).some((value) => ["FAILED", "INTERRUPTED"].includes(value.status));
+    if (terminalFailure) $("smoke-registration-status").textContent = "A device run failed or was interrupted. Use a fresh retry nonce to prepare a new bundle; this bundle cannot resume.";
+    if (active && !smokePoll) smokePoll = window.setInterval(() => refreshSmokeStatus().catch((error) => toast(error.message)), 1500);
+    if (!active && smokePoll) { window.clearInterval(smokePoll); smokePoll = null; }
+  };
+  const runSmoke = async (device, control) => {
+    busy(control, true);
+    try {
+      const result = await jsonRequest(`/evaluation/api/playground/smokes/run-${device}`, {
+        method:"POST",
+        body:JSON.stringify({...smokeIdentityPayload(), explicit_action:true}),
+      });
+      renderSmokeDevice(device, result);
+      $("smoke-registration-status").textContent = `${device.toUpperCase()} smoke started by Sprite Lab.`;
+      await refreshSmokeStatus();
+    } catch (error) {
+      $("smoke-registration-status").textContent = error.message;
+      toast(error.message);
+    } finally { busy(control, false); }
+  };
+  const registerSmoke = async (control) => {
+    busy(control, true);
+    try {
+      const result = await jsonRequest("/evaluation/api/playground/smokes/register", {
+        method:"POST",
+        body:JSON.stringify({
+          ...smokeIdentityPayload(),
+          explicit_action:true,
+        }),
+      });
+      const catalog = await jsonRequest("/evaluation/api/playground/exploratory-checkpoints");
+      exploratoryCheckpoints = catalog.eligible || [];
+      fillCheckpoints();
+      $("smoke-registration-status").textContent = result.message;
+      toast("Exploratory checkpoint registered for Playground only.");
+    } catch (error) {
+      $("smoke-registration-status").textContent = error.message;
+      toast(error.message);
+    } finally { busy(control, false); }
+  };
+  if ($("smoke-preparation-nonce") && !$("smoke-preparation-nonce").value) {
+    $("smoke-preparation-nonce").value = freshSmokeNonce();
+  }
+  fillSmokePublications();
+  const restoreSmokePlan = () => {
+    const plan = smokePlans.find((item) => item.conditioned_job_id === $("smoke-conditioned-job").value);
+    if (!plan) return;
+    $("smoke-id").value = plan.smoke_id;
+    $("smoke-plan-identity").value = plan.plan_identity;
+    $("smoke-plan-output").textContent = JSON.stringify(plan, null, 2);
+    refreshSmokeStatus().catch((error) => toast(error.message));
+  };
+  restoreSmokePlan();
   fillCheckpoints();
   const durable = state.durable_run || {};
   renderStages(durable.stages?.length ? durable.stages : (state.promotion ? [state.promotion] : []));
@@ -160,6 +284,22 @@
   $("start-evaluation")?.addEventListener("click", (event) => runEvaluation(false, event.currentTarget));
   $("dry-run")?.addEventListener("click", (event) => runEvaluation(true, event.currentTarget));
   $("generate")?.addEventListener("click", (event) => generate(event.currentTarget));
+  $("prepare-smoke")?.addEventListener("click", (event) => prepareSmoke(event.currentTarget));
+  $("smoke-conditioned-job")?.addEventListener("change", restoreSmokePlan);
+  $("fresh-smoke-bundle")?.addEventListener("click", () => {
+    $("smoke-preparation-nonce").value = freshSmokeNonce();
+    $("smoke-id").value = "";
+    $("smoke-plan-identity").value = "";
+    $("smoke-plan-output").textContent = "Fresh retry nonce ready. Prepare a new immutable bundle.";
+    renderSmokeDevice("cpu", {status:"NOT_STARTED", current:0, total:2, logs:[]});
+    renderSmokeDevice("cuda", {status:"NOT_STARTED", current:0, total:2, logs:[]});
+    $("register-smoke").disabled = true;
+    $("run-cpu-smoke").disabled = true;
+    $("run-cuda-smoke").disabled = true;
+  });
+  $("run-cpu-smoke")?.addEventListener("click", (event) => runSmoke("cpu", event.currentTarget));
+  $("run-cuda-smoke")?.addEventListener("click", (event) => runSmoke("cuda", event.currentTarget));
+  $("register-smoke")?.addEventListener("click", (event) => registerSmoke(event.currentTarget));
   $("load-technical")?.addEventListener("click", async (event) => {
     busy(event.currentTarget, true);
     try { $("technical-output").textContent = JSON.stringify(await jsonRequest("/evaluation/api/technical/checkpoints?acknowledge=true"), null, 2); }

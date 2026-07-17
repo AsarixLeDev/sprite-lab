@@ -7,6 +7,14 @@ from spritelab.product_features.evaluation.dashboard import (
     compare_evaluations,
     filter_gallery,
 )
+from spritelab.product_features.evaluation.exploratory_smoke import (
+    ExploratoryCheckpointCandidate,
+    ExploratoryCheckpointCatalog,
+    ExploratorySmokeWorkflow,
+    SmokePreparationRequest,
+    SmokePublicationRequest,
+    SmokeRegistrationRequest,
+)
 from spritelab.product_features.evaluation.local_generator import (
     LocalCheckpointPlaygroundGenerator,
     LocalPlaygroundGenerationError,
@@ -42,6 +50,9 @@ __all__ = [
     "CheckpointCatalog",
     "EvaluationRequest",
     "EvaluationService",
+    "ExploratoryCheckpointCandidate",
+    "ExploratoryCheckpointCatalog",
+    "ExploratorySmokeWorkflow",
     "GeneratedAsset",
     "GenerationCancelledError",
     "GenerationRequest",
@@ -51,6 +62,9 @@ __all__ = [
     "LocalPlaygroundGenerationError",
     "MemorizationDisplayState",
     "PlaygroundService",
+    "SmokePreparationRequest",
+    "SmokePublicationRequest",
+    "SmokeRegistrationRequest",
     "build_dashboard",
     "build_plugin",
     "compare_evaluations",

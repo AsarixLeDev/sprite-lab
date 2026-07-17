@@ -14,6 +14,9 @@ from spritelab.product_features.evaluation.dashboard import (
     compare_evaluations,
     filter_gallery,
 )
+from spritelab.product_features.evaluation.exploratory_smoke import (
+    ExploratorySmokeWorkflow,
+)
 from spritelab.product_features.evaluation.local_generator import LocalCheckpointPlaygroundGenerator
 from spritelab.product_features.evaluation.playground import (
     GenerationCancelledError,
@@ -24,6 +27,7 @@ from spritelab.product_features.evaluation.playground import (
     PlaygroundService,
 )
 from spritelab.product_features.evaluation.service import EvaluationRequest, EvaluationService
+from spritelab.training.smoke_runner import ExploratorySmokeRunner
 
 
 def _resource_text(name: str) -> str:
@@ -35,6 +39,8 @@ def create_evaluation_router(
     *,
     service: EvaluationService | None = None,
     playground_generator: PlaygroundGenerator | None = None,
+    smoke_workflow: ExploratorySmokeWorkflow | None = None,
+    smoke_runner: ExploratorySmokeRunner | None = None,
 ) -> Any:
     """Build an isolated router; GET routes never invoke a generator."""
 
@@ -47,6 +53,9 @@ def create_evaluation_router(
         config=context.config,
         runs_directory=context.runs_directory,
     )
+    exploratory_smoke_workflow = smoke_workflow or ExploratorySmokeWorkflow(context.project_root)
+    exploratory_smoke_runner = smoke_runner or ExploratorySmokeRunner(context.project_root)
+    exploratory_catalog = exploratory_smoke_workflow.catalog()
     playground = PlaygroundService(
         evaluation.catalog,
         output_root=evaluation.output_root / "playground",
@@ -57,12 +66,17 @@ def create_evaluation_router(
         ),
         runs_directory=evaluation.runs_directory,
         catalog_provider=lambda: evaluation.catalog,
+        exploratory_catalog=exploratory_catalog,
+        exploratory_catalog_provider=exploratory_smoke_workflow.catalog,
     )
 
     @router.get("/evaluation", response_class=HTMLResponse)
     def evaluation_page(request: Request) -> Any:
         initial = {
             "checkpoints": evaluation.catalog.to_dict(),
+            "exploratory_checkpoints": exploratory_catalog.to_dict(),
+            "smoke_publications": exploratory_smoke_workflow.eligible_publications(),
+            "smoke_plans": exploratory_smoke_workflow.prepared_plans(),
             "playground_defaults": playground.defaults(),
             "playground_run": playground.latest_run(),
             "promotion": evaluation.plan(EvaluationRequest(dry_run=True))[2][-1].to_dict(),
@@ -99,9 +113,17 @@ def create_evaluation_router(
     def evaluation_a11y_css() -> Response:
         return Response(_resource_text("static/evaluation-a11y.css"), media_type="text/css")
 
+    @router.get("/evaluation/static/exploratory-smoke.css")
+    def exploratory_smoke_css() -> Response:
+        return Response(_resource_text("static/exploratory-smoke.css"), media_type="text/css")
+
     @router.get("/evaluation/static/evaluation.js")
     def evaluation_js() -> Response:
         return Response(_resource_text("static/evaluation.js"), media_type="application/javascript")
+
+    @router.get("/evaluation/static/exploratory-smoke-standalone.js")
+    def exploratory_smoke_standalone_js() -> Response:
+        return Response(_resource_text("static/exploratory-smoke-standalone.js"), media_type="application/javascript")
 
     @router.get("/evaluation/api/checkpoints")
     @product_api
@@ -225,7 +247,113 @@ def create_evaluation_router(
             "defaults": playground.defaults(),
             "scope": "EXPLORATORY",
             "billable_confirmation_required": playground.confirmation_required,
+            "exploratory_checkpoints": exploratory_smoke_workflow.catalog().to_dict(),
         }
+
+    @router.get("/evaluation/api/playground/exploratory-checkpoints")
+    @product_api
+    def exploratory_checkpoints() -> dict[str, Any]:
+        return exploratory_smoke_workflow.catalog().to_dict()
+
+    @router.get("/evaluation/api/playground/smoke-publications")
+    @product_api
+    def smoke_publications() -> dict[str, Any]:
+        return exploratory_smoke_workflow.eligible_publications()
+
+    @router.get("/evaluation/api/playground/smoke-plans")
+    @product_api
+    def smoke_plans() -> dict[str, Any]:
+        return exploratory_smoke_workflow.prepared_plans()
+
+    @router.post("/evaluation/api/playground/smokes/prepare")
+    @product_api
+    def prepare_exploratory_smoke(payload: dict[str, Any]) -> Any:
+        allowed = {
+            "conditioned_job_id",
+            "preparation_nonce",
+            "explicit_action",
+        }
+        if set(payload) != allowed:
+            return api_error(422, "smoke_prepare_payload", "Use only the exact opaque smoke preparation fields.")
+        try:
+            return exploratory_smoke_workflow.prepare_job(
+                str(payload["conditioned_job_id"]),
+                str(payload["preparation_nonce"]),
+                explicit_action=payload["explicit_action"] is True,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            code = getattr(exc, "code", "smoke_prepare_blocked")
+            message = getattr(exc, "public_message", "Exploratory smoke preparation was refused safely.")
+            return api_error(409, str(code), str(message))
+
+    def run_smoke_device(payload: dict[str, Any], device: str) -> Any:
+        allowed = {"conditioned_job_id", "smoke_id", "plan_identity", "explicit_action"}
+        if set(payload) != allowed:
+            return api_error(422, "smoke_run_payload", "Use only the selected job and server-prepared smoke identity.")
+        try:
+            plan = exploratory_smoke_workflow.validate_job_plan(
+                str(payload["conditioned_job_id"]),
+                str(payload["smoke_id"]),
+                str(payload["plan_identity"]),
+            )
+            return exploratory_smoke_runner.launch(
+                str(plan["smoke_id"]),
+                str(plan["plan_identity"]),
+                device,
+                explicit_action=payload["explicit_action"] is True,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            code = getattr(exc, "code", "smoke_run_blocked")
+            message = getattr(exc, "public_message", "The fixed smoke process was refused safely.")
+            return api_error(409, str(code), str(message))
+
+    @router.post("/evaluation/api/playground/smokes/run-cpu")
+    @product_api
+    def run_cpu_smoke(payload: dict[str, Any]) -> Any:
+        return run_smoke_device(payload, "cpu")
+
+    @router.post("/evaluation/api/playground/smokes/run-cuda")
+    @product_api
+    def run_cuda_smoke(payload: dict[str, Any]) -> Any:
+        return run_smoke_device(payload, "cuda")
+
+    @router.get("/evaluation/api/playground/smokes/{smoke_id}/status")
+    @product_api
+    def smoke_status(smoke_id: str, conditioned_job_id: str, plan_identity: str) -> Any:
+        try:
+            exploratory_smoke_workflow.validate_job_plan(conditioned_job_id, smoke_id, plan_identity)
+            return exploratory_smoke_runner.bundle_status(smoke_id)
+        except (OSError, TypeError, ValueError) as exc:
+            code = getattr(exc, "code", "smoke_status_unavailable")
+            message = getattr(exc, "public_message", "The smoke execution status is unavailable.")
+            return api_error(409, str(code), str(message))
+
+    @router.post("/evaluation/api/playground/smokes/register")
+    @product_api
+    def register_exploratory_smoke(payload: dict[str, Any]) -> Any:
+        allowed = {
+            "conditioned_job_id",
+            "smoke_id",
+            "plan_identity",
+            "explicit_action",
+        }
+        if set(payload) != allowed:
+            return api_error(422, "smoke_registration_payload", "Use only exact opaque registration identities.")
+        try:
+            executions = exploratory_smoke_runner.require_complete(str(payload["smoke_id"]))
+            return exploratory_smoke_workflow.register_job(
+                str(payload["conditioned_job_id"]),
+                str(payload["smoke_id"]),
+                str(payload["plan_identity"]),
+                explicit_action=payload["explicit_action"] is True,
+                server_execution_identities={
+                    device: str(value["execution_identity"]) for device, value in executions.items()
+                },
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            code = getattr(exc, "code", "smoke_registration_blocked")
+            message = getattr(exc, "public_message", "Exploratory smoke registration was refused safely.")
+            return api_error(409, str(code), str(message))
 
     @router.post("/evaluation/api/playground/generate")
     @product_api
@@ -233,7 +361,7 @@ def create_evaluation_router(
         try:
             request = GenerationRequest(
                 prompt=str(payload.get("prompt") or ""),
-                checkpoint_id=str(payload.get("checkpoint_id") or playground.catalog.default_checkpoint_id or ""),
+                checkpoint_id=str(payload.get("checkpoint_id") or playground.defaults()["checkpoint_id"]),
                 weights=str(payload.get("weights") or "ema"),
                 seed=int(payload.get("seed", 42)),
                 sampling_steps=int(payload.get("sampling_steps", 30)),
@@ -311,4 +439,6 @@ def create_evaluation_router(
 
     router.spritelab_evaluation_service = evaluation
     router.spritelab_playground_service = playground
+    router.spritelab_exploratory_smoke_workflow = exploratory_smoke_workflow
+    router.spritelab_exploratory_smoke_runner = exploratory_smoke_runner
     return router

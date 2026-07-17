@@ -21,6 +21,7 @@ from spritelab.product_core import (
     strict_json_dumps,
     strict_json_loads,
 )
+from spritelab.product_features.evaluation.exploratory_smoke import ExploratoryCheckpointCatalog
 from spritelab.product_features.evaluation.models import CheckpointCatalog
 from spritelab.product_web.events import EventRepository
 from spritelab.v3.run_state import lock_file
@@ -177,9 +178,13 @@ class PlaygroundService:
         run_id_factory: Callable[[], str] | None = None,
         initialization_hook: Callable[[str, Path], None] | None = None,
         catalog_provider: Callable[[], CheckpointCatalog] | None = None,
+        exploratory_catalog: ExploratoryCheckpointCatalog | None = None,
+        exploratory_catalog_provider: Callable[[], ExploratoryCheckpointCatalog] | None = None,
     ) -> None:
         self.catalog = catalog
         self.catalog_provider = catalog_provider
+        self.exploratory_catalog = exploratory_catalog or ExploratoryCheckpointCatalog()
+        self.exploratory_catalog_provider = exploratory_catalog_provider
         self.output_root = output_root.resolve()
         self.generator = generator
         self.run_id_factory = run_id_factory or _new_run_id
@@ -192,7 +197,8 @@ class PlaygroundService:
         self.startup_incomplete_run_ids = tuple(item["run_id"] for item in self.incomplete_initializations())
 
     def defaults(self) -> dict[str, Any]:
-        return GenerationRequest.defaults(self.catalog.default_checkpoint_id or "")
+        checkpoint_id = self.catalog.default_checkpoint_id or self.exploratory_catalog.default_checkpoint_id or ""
+        return GenerationRequest.defaults(checkpoint_id)
 
     @property
     def confirmation_required(self) -> bool:
@@ -213,13 +219,27 @@ class PlaygroundService:
             raise GenerationSafetyError("Generation requires an explicit Generate action.")
         if self.generator is None:
             raise GeneratorUnavailableError("No typed generation adapter is configured.")
-        if getattr(self.generator, "requires_fresh_catalog", False) and self.catalog_provider is None:
+        if (
+            getattr(self.generator, "requires_fresh_catalog", False)
+            and self.catalog_provider is None
+            and self.exploratory_catalog_provider is None
+        ):
             raise GenerationSafetyError("The local generation adapter requires a fresh checkpoint catalog provider.")
         if self.confirmation_required and not confirm_billable:
             raise GenerationSafetyError("Remote or billable generation requires explicit cost confirmation.")
         current_catalog = self.catalog_provider() if self.catalog_provider is not None else self.catalog
+        current_exploratory = (
+            self.exploratory_catalog_provider()
+            if self.exploratory_catalog_provider is not None
+            else self.exploratory_catalog
+        )
         self.catalog = current_catalog
+        self.exploratory_catalog = current_exploratory
         checkpoint = current_catalog.find(request.checkpoint_id, weights=request.weights)
+        checkpoint_classification = "production_complete"
+        if checkpoint is None:
+            checkpoint = current_exploratory.find(request.checkpoint_id, weights=request.weights)
+            checkpoint_classification = "exploratory_smoke"
         if (
             checkpoint is None
             or checkpoint.path is None
@@ -230,12 +250,26 @@ class PlaygroundService:
         started_at = _utc_now()
         run_id = _run_id or self.run_id_factory()
         request_payload = asdict(request)
+        checkpoint_run_id = str(
+            getattr(checkpoint, "run_id", None) or getattr(checkpoint, "registration_id", "exploratory-smoke")
+        )
         checkpoint_identity = {
             "checkpoint_id": checkpoint.checkpoint_id,
-            "checkpoint_run_id": checkpoint.run_id,
+            "checkpoint_run_id": checkpoint_run_id,
             "checkpoint_step": checkpoint.checkpoint_step,
             "weights": request.weights,
             "sha256": checkpoint.checkpoint_sha256,
+            "classification": checkpoint_classification,
+            "purpose": str(getattr(checkpoint, "purpose", "production")),
+            "registration_identity": getattr(checkpoint, "registration_identity", None),
+            "evidence_identity": getattr(checkpoint, "evidence_identity", None),
+            "dataset_freeze_identity": getattr(checkpoint, "freeze_identity", None),
+            "campaign_identity": getattr(checkpoint, "campaign_identity", None),
+            "training_code_identity": getattr(checkpoint, "code_identity", None),
+            "production_eligible": False if checkpoint_classification == "exploratory_smoke" else True,
+            "evaluation_eligible": False if checkpoint_classification == "exploratory_smoke" else True,
+            "training_resume_eligible": False if checkpoint_classification == "exploratory_smoke" else True,
+            "promotion_eligible": False if checkpoint_classification == "exploratory_smoke" else True,
         }
         adapter_identity = self._adapter_identity()
         command = {
@@ -393,7 +427,7 @@ class PlaygroundService:
                     result = {
                         "result_id": f"{run_id}-{index:03d}",
                         "checkpoint_identity": checkpoint.checkpoint_id,
-                        "checkpoint_run_id": checkpoint.run_id,
+                        "checkpoint_run_id": checkpoint_run_id,
                         "checkpoint_step": checkpoint.checkpoint_step,
                         "weights": request.weights,
                         "prompt": request.prompt,
@@ -439,8 +473,16 @@ class PlaygroundService:
             if len(results) != request.image_count:
                 raise RuntimeError("Generator returned a different number of images than requested.")
             refreshed_catalog = self.catalog_provider() if self.catalog_provider is not None else self.catalog
+            refreshed_exploratory = (
+                self.exploratory_catalog_provider()
+                if self.exploratory_catalog_provider is not None
+                else self.exploratory_catalog
+            )
             self.catalog = refreshed_catalog
+            self.exploratory_catalog = refreshed_exploratory
             refreshed = refreshed_catalog.find(request.checkpoint_id, weights=request.weights)
+            if refreshed is None:
+                refreshed = refreshed_exploratory.find(request.checkpoint_id, weights=request.weights)
             if (
                 refreshed is None
                 or refreshed.path != checkpoint.path

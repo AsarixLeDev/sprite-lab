@@ -1,9 +1,21 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/evaluation/static/exploratory-smoke.css">
 <title>Evaluation · Sprite Lab</title><link rel="stylesheet" href="/evaluation/static/evaluation.css"><link rel="stylesheet" href="/evaluation/static/evaluation-a11y.css"></head>
 <body><main class="shell"><header class="page-header"><h1>Evaluation</h1><p>Promotion integrity is not currently certified.</p></header>
 <section class="panel"><h2>Evaluation setup</h2><button id="start-evaluation">Start evaluation</button><button id="dry-run">Validate plan</button></section>
 <section class="playground"><h2>Generation playground</h2><span class="scope-badge">EXPLORATORY</span>
+<details class="smoke-registration"><summary>Register a 2-step infrastructure smoke checkpoint</summary>
+<div class="smoke-warning"><strong>Exploratory only — never production Evaluation, resume, or promotion.</strong><span>Sprite Lab runs both fixed commands. A failed or interrupted smoke is never resumed; prepare a fresh nonce.</span></div>
+<div class="smoke-identity-grid">
+<label>Eligible conditioned publication<select id="smoke-conditioned-job"></select></label>
+<label>Fresh preparation nonce<input id="smoke-preparation-nonce"></label></div>
+<button id="prepare-smoke">Prepare smoke plan</button><button id="fresh-smoke-bundle">Use fresh retry nonce</button><details class="smoke-command-transparency"><summary>Command transparency</summary><pre id="smoke-plan-output">No smoke plan has been prepared.</pre></details>
+<div class="smoke-identity-grid smoke-registration-identities">
+<label>Smoke ID<input id="smoke-id" readonly></label><label>Plan identity<input id="smoke-plan-identity" readonly></label></div>
+<button id="run-cpu-smoke" disabled>Run CPU smoke</button><button id="run-cuda-smoke" disabled>Run CUDA smoke</button><button id="register-smoke" disabled>Register for Playground only</button>
+<div class="smoke-device-grid"><pre id="smoke-cpu-status">CPU · NOT_STARTED</pre><pre id="smoke-cuda-status">CUDA · NOT_STARTED</pre></div>
+<p id="smoke-registration-status" role="status">No exploratory smoke checkpoint is registered.</p></details>
 <label>Sampling steps<input id="play-steps" type="number" value="30"></label>
 <label>CFG / guidance<input id="play-guidance" type="number" value="3.0"></label></section>
-<script id="evaluation-initial-state" type="application/json">__INITIAL_STATE__</script></main></body></html>
+<script id="evaluation-initial-state" type="application/json">__INITIAL_STATE__</script><script src="/evaluation/static/exploratory-smoke-standalone.js"></script></main></body></html>

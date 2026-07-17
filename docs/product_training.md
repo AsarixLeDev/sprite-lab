@@ -44,6 +44,20 @@ This structural contract does not replace the independent training-infrastructur
 
 Audit applicability re-hashes every recorded file and dynamically scans all training-bound production roots. Adding even one untracked production `.py` file makes a prior `PASS` stale. Start and every safe resume re-load the selected profile, activation, campaign, audit, and code bindings before any backend operation. Baseline preparation cannot manufacture or activate this contract.
 
+## Pre-activation exploratory smoke registration
+
+The Evaluation Playground exposes a separate, web-operated infrastructure-smoke lane for a completed conditioned publication before configuration activation. The server derives all six publication bindings from the selected conditioned job and prepares immutable plan/config/manifest artifacts under `artifacts/training/smokes/<smoke-id>`. Its CPU and CUDA outputs are fixed under `runs/v3/training-smokes/<smoke-id>/<device>`; every full 5,000-step campaign root remains an absent sentinel.
+
+Explicit CSRF-protected POST actions run CPU and then CUDA, never concurrently. Execution uses a fixed argument array with `shell=False`; CPU binds `CUDA_VISIBLE_DEVICES=-1` and `SPRITELAB_PROGRESS=0`, while CUDA binds `CUDA_VISIBLE_DEVICES=0`, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, and `SPRITELAB_PROGRESS=0` before Python starts. Mutable execution state is atomically published beside the immutable plan, retains bounded path-scrubbed log tails, and reconstructs a final receipt after restart. A dead owner without a receipt is `INTERRUPTED` and the bundle is permanently nonresumable.
+
+Each child receives the exact plan-bound minimal environment: provider credentials, `PYTHONPATH`, user-site startup, and unrelated host variables are excluded, while temporary and cache paths point inside the bundle. Worker and trainer start with `-I -B`; a stdlib-only preflight verifies the immutable plan, environment, exact interpreter bytes, orchestration sources, and the complete production-Python inventory before any Sprite Lab import. A bound source loader then rechecks every imported `spritelab` source file, so a source change between preflight and import fails closed.
+
+The exact interpreter target remains open across both process creations. On Windows each child is created suspended, assigned to a kill-on-close Job, verified against the held executable, and only then resumed. On Linux each child executes the held `/proc/self/fd` target with a parent-death signal and post-`prctl` parent-race check. The outer worker publishes launch-bound heartbeats and a terminal outcome; a receipt alone never marks a still-running worker complete, and any failed image, containment, heartbeat, outcome, or receipt check requires a fresh bundle.
+
+Registration revalidates the current publication, freeze, campaign, full training-code identity, real configuration hash, absent campaign roots, device environment, reports, finite step-2 metrics, strict CUDA qualification, and every checkpoint through weights-only loading. It reads both immutable receipts server-side and snapshots the CUDA live/EMA pair beneath `runs/v3/playground/exploratory-checkpoints/<content-id>`. The exploratory catalog is never merged into the production Evaluation catalog and records production, evaluation, resume, campaign-execution, and promotion eligibility as false. Before activation it uses prospective activation validation without an audit; after activation it remains available only when the exact activated config has a current applicable `PASS` infrastructure audit.
+
+The command argv is displayed only in a transparency disclosure. Manual CLI execution, browser-supplied paths, hash transcription, receipt pasting, resume, and promotion are not part of the workflow. Passive page/catalog/status reads launch no subprocess, import no Torch, initialize no CUDA, and create no directories.
+
 ## Mandatory launch checks
 
 Before any backend `prepare`, `upload`, or `launch` call, the feature verifies:
