@@ -164,6 +164,9 @@ class LocalCheckpointPlaygroundGenerator:
                 sampling_steps=sampling_steps,
                 guidance=guidance,
                 image_count=image_count,
+                expected_sha256=expected_sha256,
+                expected_step=expected_step,
+                expected_variant=expected_variant,
             )
             report = dict((self._sampler or _run_challenger_sampler)(config))
             if report.get("sample_count") != image_count:
@@ -394,10 +397,11 @@ class LocalCheckpointPlaygroundGenerator:
         guidance: float,
         image_count: int,
     ) -> str:
-        normalized = prompt.strip()
-        if not normalized or len(normalized) > _MAX_PROMPT_CHARACTERS:
+        if not isinstance(prompt, str) or prompt != prompt.strip():
+            raise LocalPlaygroundGenerationError("Prompt must already be canonicalized by the Playground request.")
+        if not prompt or len(prompt) > _MAX_PROMPT_CHARACTERS:
             raise LocalPlaygroundGenerationError("Prompt length is outside the local Playground limit.")
-        if any(ord(character) < 32 and character not in "\n\t" for character in normalized):
+        if any(ord(character) < 32 and character not in "\n\t" for character in prompt):
             raise LocalPlaygroundGenerationError("Prompt contains unsupported control characters.")
         if type(seed) is not int or seed < 0:
             raise LocalPlaygroundGenerationError("Seed must be a non-negative integer.")
@@ -409,7 +413,7 @@ class LocalCheckpointPlaygroundGenerator:
             raise LocalPlaygroundGenerationError("Guidance is outside the supported range.")
         if type(image_count) is not int or not 1 <= image_count <= 16:
             raise LocalPlaygroundGenerationError("Image count is outside the supported range.")
-        return normalized
+        return prompt
 
     def _new_invocation_directory(self) -> Path:
         self._ensure_work_root()
@@ -447,6 +451,9 @@ class LocalCheckpointPlaygroundGenerator:
         sampling_steps: int,
         guidance: float,
         image_count: int,
+        expected_sha256: str,
+        expected_step: int,
+        expected_variant: str,
     ) -> Any:
         # Importing the challenger module imports Torch, so keep this behind the
         # explicit Generate action rather than application/router construction.
@@ -456,6 +463,9 @@ class LocalCheckpointPlaygroundGenerator:
             checkpoint=checkpoint,
             prompts=prompts,
             out_dir=output,
+            expected_checkpoint_sha256=expected_sha256,
+            expected_checkpoint_step=expected_step,
+            expected_checkpoint_variant=expected_variant,
             max_samples=image_count,
             steps=sampling_steps,
             cfg_scale=float(guidance),

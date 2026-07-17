@@ -326,3 +326,32 @@ def test_local_generator_rejects_unicode_normalized_output_collision(tmp_path: P
     )
     with pytest.raises(LocalPlaygroundGenerationError, match="colliding"):
         _invoke(generator, _checkpoint(tmp_path), image_count=2)
+
+
+def test_local_generator_binds_actual_sampler_load_to_original_snapshot_hash(tmp_path: Path) -> None:
+    def swapping_sampler(config):
+        import torch
+
+        from spritelab.training.generator_challenger import run_sample_generator_challenger
+
+        replacement = config.checkpoint.with_name("replacement-step-999.pt")
+        torch.save(
+            {
+                "model_type": "generator_challenger",
+                "ema_weights": False,
+                "step": 999,
+                "global_step": 999,
+            },
+            replacement,
+        )
+        os.replace(replacement, config.checkpoint)
+        return run_sample_generator_challenger(config)
+
+    generator = LocalCheckpointPlaygroundGenerator(
+        project_root=tmp_path,
+        work_root=tmp_path / "runs" / "playground-sampler-work",
+        sampler=swapping_sampler,
+    )
+
+    with pytest.raises(ValueError, match="SHA-256"):
+        _invoke(generator, _checkpoint(tmp_path))

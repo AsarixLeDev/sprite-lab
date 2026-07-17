@@ -132,6 +132,28 @@ def test_live_ema_selection_is_passed_to_fake_generator(tmp_path: Path) -> None:
     assert fake.calls[0]["checkpoint"].name == "checkpoint_step_000100.pt"
 
 
+def test_prompt_is_canonical_before_command_state_report_and_sampler_identity(tmp_path: Path) -> None:
+    fake = FakeGenerator()
+    service = PlaygroundService(_catalog(tmp_path), output_root=tmp_path / "playground", generator=fake)
+    request = GenerationRequest(
+        prompt="  blue potion \n",
+        checkpoint_id="checkpoint-ema",
+        image_count=1,
+    )
+
+    result = service.generate(request, explicit_action=True)
+
+    assert request.prompt == "blue potion"
+    assert fake.calls[0]["prompt"] == "blue potion"
+    run_directory = tmp_path / "playground" / result["run_id"]
+    command = json.loads((run_directory / "command.json").read_text(encoding="utf-8"))
+    state = json.loads((run_directory / "state.json").read_text(encoding="utf-8"))
+    report = json.loads((run_directory / "report" / "report.json").read_text(encoding="utf-8"))
+    assert command["request"]["prompt"] == "blue potion"
+    assert state["prompt"] == state["request"]["prompt"] == "blue potion"
+    assert report["request"]["prompt"] == report["results"][0]["prompt"] == "blue potion"
+
+
 def test_billable_generation_requires_confirmation(tmp_path: Path) -> None:
     fake = BillableFakeGenerator()
     service = PlaygroundService(_catalog(tmp_path), output_root=tmp_path / "playground", generator=fake)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
@@ -203,7 +204,8 @@ def test_checkpoint_loader_requires_weights_only_without_unsafe_fallback(
             return {"model_type": "synthetic"}
 
     monkeypatch.setattr(checkpoint_io, "torch", SafeTorch())
-    assert checkpoint_io.load_checkpoint(checkpoint_path) == {"model_type": "synthetic"}
+    expected_hash = sha256(checkpoint_path.read_bytes()).hexdigest()
+    assert checkpoint_io.load_checkpoint(checkpoint_path, expected_sha256=expected_hash) == {"model_type": "synthetic"}
     assert calls == [
         {
             "file_like": True,
@@ -211,6 +213,9 @@ def test_checkpoint_loader_requires_weights_only_without_unsafe_fallback(
             "weights_only": True,
         }
     ]
+    with pytest.raises(ValueError, match="SHA-256"):
+        checkpoint_io.load_checkpoint(checkpoint_path, expected_sha256="0" * 64)
+    assert len(calls) == 1
 
     class UnsupportedTorch:
         @staticmethod

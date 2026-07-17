@@ -317,6 +317,9 @@ class ChallengerSampleConfig:
     checkpoint: Path
     prompts: Path
     out_dir: Path
+    expected_checkpoint_sha256: str | None = None
+    expected_checkpoint_step: int | None = None
+    expected_checkpoint_variant: str | None = None
     export_preset: str | None = None
     max_samples: int = 64
     steps: int = 30
@@ -1752,7 +1755,26 @@ def run_sample_generator_challenger(config: ChallengerSampleConfig) -> dict[str,
             "(see docs/v1_default.md). Pass --checkpoint to point at a different file, "
             "or train the Phase 1 challenger first."
         )
-    ckpt = _load_checkpoint(checkpoint)
+    ckpt = _load_checkpoint(checkpoint, expected_sha256=config.expected_checkpoint_sha256)
+    if config.expected_checkpoint_step is not None:
+        expected_step = config.expected_checkpoint_step
+        step = ckpt.get("step")
+        global_step = ckpt.get("global_step")
+        if (
+            type(expected_step) is not int
+            or expected_step < 0
+            or type(step) is not int
+            or type(global_step) is not int
+            or step != global_step
+            or step != expected_step
+        ):
+            raise ValueError("checkpoint step/global-step metadata does not match the expected artifact")
+    if config.expected_checkpoint_variant is not None:
+        expected_variant = config.expected_checkpoint_variant
+        if expected_variant not in {"live", "ema"} or ckpt.get("ema_weights") is not (expected_variant == "ema"):
+            raise ValueError("checkpoint live/EMA metadata does not match the expected artifact")
+    if ckpt.get("model_type") != "generator_challenger":
+        raise ValueError("checkpoint model type does not match generator_challenger")
     model, tokenizer, conditioning_mode, semantic_max_length = load_challenger_from_checkpoint(
         ckpt, device=device, legacy_evaluation_import=True
     )

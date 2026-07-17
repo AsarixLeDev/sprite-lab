@@ -84,10 +84,14 @@ class GenerationRequest:
     image_count: int = DEFAULT_IMAGE_COUNT
 
     def __post_init__(self) -> None:
-        if not self.prompt.strip() or len(self.prompt.strip()) > 2_000:
+        if not isinstance(self.prompt, str):
+            raise ValueError("Prompt must be text.")
+        normalized_prompt = self.prompt.strip()
+        if not normalized_prompt or len(normalized_prompt) > 2_000:
             raise ValueError("Prompt must contain between 1 and 2,000 characters.")
-        if any(ord(character) < 32 and character not in "\n\t" for character in self.prompt):
+        if any(ord(character) < 32 and character not in "\n\t" for character in normalized_prompt):
             raise ValueError("Prompt contains unsupported control characters.")
+        object.__setattr__(self, "prompt", normalized_prompt)
         if self.weights not in {"live", "ema"}:
             raise ValueError("weights must be 'live' or 'ema'.")
         if type(self.seed) is not int or self.seed < 0:
