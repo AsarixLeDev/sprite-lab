@@ -16,6 +16,7 @@ import pytest
 
 import spritelab.harvest.archive as archive_module
 import spritelab.harvest.download as download_module
+import spritelab.product_features.harvest.catalog as harvest_catalog_module
 import spritelab.product_features.harvest.service as harvest_service_module
 from _harvest_testdata import make_zip_of_pngs
 from spritelab.harvest.archive import ArchiveCancelled, ArchiveSnapshot, archive_member_summary, extract_archive
@@ -312,6 +313,68 @@ def test_append_only_catalog_publication_rejects_staged_inode_substitution(
         load_trusted_catalog(project)
     assert alias.read_bytes() == record.read_bytes()
     assert sentinel.read_bytes() == b"outside bytes must remain unchanged"
+
+
+def test_promotion_retains_stale_verifier_records_and_activates_only_current_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    first = _source(b"first")
+    published, changed = publish_trusted_catalog_source(project, project, first)
+    assert published == (first,)
+    assert changed is True
+    first_record = project / TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH / trusted_catalog_source_filename(first.source_id)
+    first_payload = first_record.read_bytes()
+    first_metadata = first_record.stat()
+
+    current_verifier = "f" * 64
+    monkeypatch.setattr(
+        harvest_catalog_module,
+        "catalog_evidence_verifier_code_identity",
+        lambda: current_verifier,
+    )
+    assert load_trusted_catalog(project) == ()
+
+    provisional = replace(
+        first.evidence_binding,
+        verifier_code_identity_sha256=current_verifier,
+        attestation_identity_sha256="0" * 64,
+    )
+    current_binding = replace(
+        provisional,
+        attestation_identity_sha256=provisional.expected_attestation_identity,
+    )
+    second = replace(
+        first,
+        source_id="open.second",
+        expected_response_sha256=hashlib.sha256(b"second").hexdigest(),
+        evidence_binding=current_binding,
+    )
+
+    catalog, changed = publish_trusted_catalog_source(project, project, second)
+
+    assert catalog == (second,)
+    assert changed is True
+    assert load_trusted_catalog(project) == (second,)
+    assert first_record.read_bytes() == first_payload
+    retained_metadata = first_record.stat()
+    assert (retained_metadata.st_dev, retained_metadata.st_ino) == (
+        first_metadata.st_dev,
+        first_metadata.st_ino,
+    )
+    assert len(list((project / TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH).glob("*.json"))) == 2
+
+    with pytest.raises(CatalogPromotionError, match="different trusted catalog record"):
+        publish_trusted_catalog_source(project, project, replace(second, source_id=first.source_id))
+    assert first_record.read_bytes() == first_payload
+
+    tampered = json.loads(first_payload)
+    tampered["source"]["title"] = "Tampered stale source"
+    first_record.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(TrustedCatalogError, match="identity"):
+        load_trusted_catalog(project)
 
 
 def _write_capability_evidence(project: Path, capabilities: CertifiedBackendCapabilities) -> None:

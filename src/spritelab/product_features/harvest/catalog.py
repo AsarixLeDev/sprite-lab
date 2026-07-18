@@ -10,7 +10,7 @@ import re
 import stat
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -136,11 +136,14 @@ class HarvestSource:
     allowed_download_hosts: tuple[str, ...]
     expected_response_sha256: str
     evidence_binding: CatalogEvidenceBinding
+    _require_current_verifier: InitVar[bool] = True
     zero_cost: bool = True
     permissive: bool = True
     taxonomy_hints: tuple[str, ...] = ()
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _require_current_verifier: bool) -> None:
+        if type(_require_current_verifier) is not bool:
+            raise ValueError("Harvest verifier-currentness policy must be an exact boolean.")
         if SOURCE_ID_PATTERN.fullmatch(self.source_id) is None:
             raise ValueError("Harvest source_id is invalid.")
         _validate_text(self.title, "title", minimum=2, maximum=200)
@@ -153,7 +156,11 @@ class HarvestSource:
         validate_public_evidence_url(self.license_evidence_url)
         if not isinstance(self.evidence_binding, CatalogEvidenceBinding):
             raise ValueError("Harvest source requires a certified source/license evidence binding.")
-        self.evidence_binding.validate(self.source_page, self.license_evidence_url)
+        self.evidence_binding.validate(
+            self.source_page,
+            self.license_evidence_url,
+            _require_current_verifier=_require_current_verifier,
+        )
         if self.normalized_license_id not in INITIAL_LICENSE_POLICY:
             raise ValueError("Harvest initially accepts only CC0-1.0 or explicit public-domain sources.")
         if self.zero_cost is not True or self.permissive is not True:
@@ -266,6 +273,14 @@ class TrustedCatalogSnapshot:
 
     def matches(self, payload: bytes, metadata: os.stat_result) -> bool:
         return self == TrustedCatalogSnapshot.from_payload(payload, metadata)
+
+
+@dataclass(frozen=True)
+class _TrustedCatalogInventory:
+    """Fully validated retained records plus the currently trusted subset."""
+
+    sources: tuple[HarvestSource, ...]
+    retained_sources: tuple[HarvestSource, ...]
 
 
 @dataclass(frozen=True)
@@ -404,10 +419,22 @@ class CatalogEvidenceBinding:
     zero_cost_probe_receipt_identity_sha256: str
     attestation_identity_sha256: str
 
-    def validate(self, source_page: str, license_evidence_url: str, *, now: datetime | None = None) -> None:
+    def validate(
+        self,
+        source_page: str,
+        license_evidence_url: str,
+        *,
+        now: datetime | None = None,
+        _require_current_verifier: bool = True,
+    ) -> None:
+        if type(_require_current_verifier) is not bool:
+            raise ValueError("Harvest verifier-currentness policy must be an exact boolean.")
         if self.verifier_id != CATALOG_EVIDENCE_VERIFIER_ID:
             raise ValueError("Harvest evidence verifier identifier is not trusted.")
-        if self.verifier_code_identity_sha256 != catalog_evidence_verifier_code_identity():
+        if (
+            _require_current_verifier
+            and self.verifier_code_identity_sha256 != catalog_evidence_verifier_code_identity()
+        ):
             raise ValueError("Harvest evidence verifier code identity is not current.")
         for value in (
             self.verifier_code_identity_sha256,
@@ -631,14 +658,7 @@ def load_trusted_catalog(project_root: str | Path) -> tuple[HarvestSource, ...]:
     existing malformed or unsafe catalog fails closed.
     """
 
-    root = Path(os.path.abspath(os.path.expanduser(os.fspath(project_root))))
-    try:
-        sources = _load_merged_catalog(root)
-    except (OSError, UnicodeError, UnsafeFilesystemOperation, ValueError) as exc:
-        if isinstance(exc, TrustedCatalogError):
-            raise
-        raise TrustedCatalogError("Harvest trusted catalog is unsafe or invalid.") from exc
-    return sources
+    return _load_trusted_catalog_inventory(project_root).sources
 
 
 def load_trusted_catalog_snapshot(
@@ -647,23 +667,55 @@ def load_trusted_catalog_snapshot(
     """Load sources plus the exact descriptor-read snapshot that produced them."""
 
     root = Path(os.path.abspath(os.path.expanduser(os.fspath(project_root))))
+    inventory = _load_trusted_catalog_inventory(root)
     try:
         _payload, snapshot = _read_catalog_snapshot(root)
-        return _load_merged_catalog(root), snapshot
     except (OSError, UnicodeError, UnsafeFilesystemOperation, ValueError) as exc:
         if isinstance(exc, TrustedCatalogError):
             raise
         raise TrustedCatalogError("Harvest trusted catalog is unsafe or invalid.") from exc
+    return inventory.sources, snapshot
 
 
 def _read_catalog_bytes(root: Path) -> bytes | None:
     return _read_catalog_snapshot(root)[0]
 
 
-def _load_merged_catalog(root: Path) -> tuple[HarvestSource, ...]:
+def _load_trusted_catalog_inventory(project_root: str | Path) -> _TrustedCatalogInventory:
+    """Load all safe records while activating only current-verifier sources.
+
+    A verifier-code change makes the prior source inactive without making its
+    immutable record disposable. Every other schema, policy, lifetime,
+    identity, link, and confinement check remains mandatory.
+    """
+
+    root = Path(os.path.abspath(os.path.expanduser(os.fspath(project_root))))
+    try:
+        retained = _load_merged_catalog(root, require_current_verifier=False)
+        if not retained:
+            return _TrustedCatalogInventory(sources=(), retained_sources=())
+        current_verifier = catalog_evidence_verifier_code_identity()
+        sources = tuple(
+            source for source in retained if source.evidence_binding.verifier_code_identity_sha256 == current_verifier
+        )
+        return _TrustedCatalogInventory(sources=sources, retained_sources=retained)
+    except (OSError, UnicodeError, UnsafeFilesystemOperation, ValueError) as exc:
+        if isinstance(exc, TrustedCatalogError):
+            raise
+        raise TrustedCatalogError("Harvest trusted catalog is unsafe or invalid.") from exc
+
+
+def _load_merged_catalog(root: Path, *, require_current_verifier: bool) -> tuple[HarvestSource, ...]:
     legacy_payload, _snapshot = _read_catalog_snapshot(root)
-    legacy = () if legacy_payload is None else _parse_trusted_catalog(_strict_catalog_json(legacy_payload))
-    appended = _read_append_only_catalog(root)
+    legacy = (
+        ()
+        if legacy_payload is None
+        else _parse_trusted_catalog(
+            _strict_catalog_json(legacy_payload),
+            require_current_verifier=require_current_verifier,
+        )
+    )
+    appended = _read_append_only_catalog(root, require_current_verifier=require_current_verifier)
     by_id = {source.source_id: source for source in legacy}
     for source in appended:
         prior = by_id.get(source.source_id)
@@ -676,7 +728,7 @@ def _load_merged_catalog(root: Path) -> tuple[HarvestSource, ...]:
     return merged
 
 
-def _read_append_only_catalog(root: Path) -> tuple[HarvestSource, ...]:
+def _read_append_only_catalog(root: Path, *, require_current_verifier: bool) -> tuple[HarvestSource, ...]:
     parts = TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH.parts
     with ExitStack() as stack:
         anchor = stack.enter_context(AnchoredDirectory(root, root))
@@ -730,7 +782,10 @@ def _read_append_only_catalog(root: Path) -> tuple[HarvestSource, ...]:
                     raise TrustedCatalogError("Harvest catalog record lost its retained publication stage.")
             elif metadata.st_nlink != 1:
                 raise TrustedCatalogError("Harvest catalog record has an unsafe hard-link count.")
-            source = _parse_catalog_source_document(_strict_catalog_json(payload))
+            source = _parse_catalog_source_document(
+                _strict_catalog_json(payload),
+                require_current_verifier=require_current_verifier,
+            )
             if name != trusted_catalog_source_filename(source.source_id):
                 raise TrustedCatalogError("Harvest catalog record filename does not bind its source identifier.")
             sources.append(source)
@@ -782,12 +837,15 @@ def _read_append_only_record(anchor: AnchoredDirectory, name: str) -> tuple[byte
     return payload, after
 
 
-def _parse_catalog_source_document(value: Any) -> HarvestSource:
+def _parse_catalog_source_document(value: Any, *, require_current_verifier: bool) -> HarvestSource:
     record = _exact_mapping(value, _CATALOG_SOURCE_DOCUMENT_KEYS, "catalog source document")
     payload = {key: record[key] for key in record if key != "record_identity"}
     if record["schema_version"] != TRUSTED_CATALOG_SOURCE_SCHEMA or record["record_identity"] != _identity(payload):
         raise TrustedCatalogError("Harvest append-only catalog record identity is invalid.")
-    source = _parse_catalog_source(record["source"])
+    source = _parse_catalog_source(
+        record["source"],
+        require_current_verifier=require_current_verifier,
+    )
     if record["source_id"] != source.source_id or record["source_catalog_identity"] != source.catalog_identity:
         raise TrustedCatalogError("Harvest append-only catalog record does not bind its source.")
     return source
@@ -856,14 +914,16 @@ def _strict_catalog_json(payload: bytes) -> Any:
         raise TrustedCatalogError("Harvest trusted catalog is not strict UTF-8 JSON.") from exc
 
 
-def _parse_trusted_catalog(value: Any) -> tuple[HarvestSource, ...]:
+def _parse_trusted_catalog(value: Any, *, require_current_verifier: bool) -> tuple[HarvestSource, ...]:
     record = _exact_mapping(value, _CATALOG_KEYS, "catalog")
     if record["schema_version"] != TRUSTED_CATALOG_SCHEMA:
         raise TrustedCatalogError("Harvest trusted catalog schema version is unsupported.")
     source_values = record["sources"]
     if not isinstance(source_values, list) or not 1 <= len(source_values) <= MAX_TRUSTED_CATALOG_SOURCES:
         raise TrustedCatalogError("Harvest trusted catalog source count is invalid.")
-    sources = tuple(_parse_catalog_source(item) for item in source_values)
+    sources = tuple(
+        _parse_catalog_source(item, require_current_verifier=require_current_verifier) for item in source_values
+    )
     source_ids = [source.source_id for source in sources]
     if source_ids != sorted(source_ids) or len(set(source_ids)) != len(source_ids):
         raise TrustedCatalogError("Harvest trusted catalog sources must be unique and sorted by source_id.")
@@ -872,7 +932,7 @@ def _parse_trusted_catalog(value: Any) -> tuple[HarvestSource, ...]:
     return sources
 
 
-def _parse_catalog_source(value: Any) -> HarvestSource:
+def _parse_catalog_source(value: Any, *, require_current_verifier: bool) -> HarvestSource:
     record = _exact_mapping(value, _SOURCE_KEYS, "source")
     evidence_record = _exact_mapping(record["evidence_binding"], _EVIDENCE_KEYS, "evidence_binding")
     automation_record = _exact_mapping(
@@ -939,7 +999,8 @@ def _parse_catalog_source(value: Any) -> HarvestSource:
             "allowed_download_hosts": tuple(allowed_hosts),
             "evidence_binding": evidence,
             "taxonomy_hints": tuple(taxonomy_hints),
-        }
+        },
+        _require_current_verifier=require_current_verifier,
     )
 
 

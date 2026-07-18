@@ -14,7 +14,7 @@ from spritelab.product_features.harvest.catalog import (
     MAX_TRUSTED_CATALOG_SOURCES,
     TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH,
     HarvestSource,
-    load_trusted_catalog,
+    _load_trusted_catalog_inventory,
     trusted_catalog_source_document,
     trusted_catalog_source_filename,
 )
@@ -49,12 +49,14 @@ def publish_trusted_catalog_source(
     lock = require_confined_path(Path(lock_root), root, allow_root=True)
     lock_context: Any = nullcontext() if lock_held else RepositoryMutationLock(lock)
     with lock_context:
-        existing = load_trusted_catalog(root)
+        source.evidence_binding.validate(source.source_page, source.license_evidence_url)
+        inventory = _load_trusted_catalog_inventory(root)
+        existing = inventory.retained_sources
         by_id = {item.source_id: item for item in existing}
         prior = by_id.get(source.source_id)
         if prior is not None:
             if prior.catalog_identity == source.catalog_identity:
-                return existing, False
+                return inventory.sources, False
             raise CatalogPromotionError("Harvest source_id already belongs to a different trusted catalog record.")
         sources = tuple(sorted((*existing, source), key=lambda item: item.source_id))
         if len(sources) > MAX_TRUSTED_CATALOG_SOURCES:
@@ -88,10 +90,12 @@ def publish_trusted_catalog_source(
             _publish_catalog_record(root, source.source_id, payload)
         except (OSError, UnsafeFilesystemOperation) as exc:
             raise CatalogPromotionError("Harvest append-only catalog record could not be published exactly.") from exc
-        reloaded = load_trusted_catalog(root)
-        if tuple(item.catalog_identity for item in reloaded) != tuple(item.catalog_identity for item in sources):
+        reloaded = _load_trusted_catalog_inventory(root)
+        if tuple(item.catalog_identity for item in reloaded.retained_sources) != tuple(
+            item.catalog_identity for item in sources
+        ) or source.catalog_identity not in {item.catalog_identity for item in reloaded.sources}:
             raise CatalogPromotionError("Harvest trusted catalog did not retain the promoted source exactly.")
-        return reloaded, True
+        return reloaded.sources, True
 
 
 def _publish_catalog_record(

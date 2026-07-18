@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import spritelab.product_features.harvest as harvest_plugin_module
+import spritelab.product_features.harvest.catalog as harvest_catalog_module
 import spritelab.product_features.harvest.onboarding as onboarding_module
 import spritelab.product_features.harvest.service as harvest_service_module
 from spritelab.product_core import ProductStatus, ProjectContext
@@ -422,6 +423,60 @@ def test_probe_is_quarantine_only_and_promotion_is_explicit_idempotent(tmp_path:
     catalog_path.write_text(json.dumps(tampered), encoding="utf-8")
     with pytest.raises(TrustedCatalogError):
         load_trusted_catalog(project)
+
+
+def test_probe_promotion_appends_current_source_without_rewriting_stale_verifier_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service, evidence = _service(project, FakeTransport([*_responses(), *_responses()]))
+    first, _created = service.start_probe(_payload(service, evidence, key="probe-before-code-change-0001"))
+    assert _wait(service, first["probe_id"], {"READY", "FAILED"})["status"] == "READY"
+    service.promote_probe(
+        first["probe_id"],
+        explicit_action=True,
+        authorize_catalog_promotion=True,
+        **_promotion_review(service, first["probe_id"]),
+    )
+    first_record = project / TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH / trusted_catalog_source_filename("verified.pack")
+    first_payload = first_record.read_bytes()
+    first_metadata = first_record.stat()
+
+    changed_verifier_identity = "f" * 64
+    monkeypatch.setattr(
+        harvest_catalog_module,
+        "catalog_evidence_verifier_code_identity",
+        lambda: changed_verifier_identity,
+    )
+    monkeypatch.setattr(
+        onboarding_module,
+        "catalog_evidence_verifier_code_identity",
+        lambda: changed_verifier_identity,
+    )
+    assert load_trusted_catalog(project) == ()
+
+    second_payload = _payload(service, evidence, key="probe-after-code-change-0001")
+    second_payload["source_id"] = "verified.second"
+    second, _created = service.start_probe(second_payload)
+    assert _wait(service, second["probe_id"], {"READY", "FAILED"})["status"] == "READY"
+    promotion = service.promote_probe(
+        second["probe_id"],
+        explicit_action=True,
+        authorize_catalog_promotion=True,
+        **_promotion_review(service, second["probe_id"]),
+    )
+
+    assert promotion["source_id"] == "verified.second"
+    assert [source.source_id for source in load_trusted_catalog(project)] == ["verified.second"]
+    assert [source["source_id"] for source in service.sources()["sources"]] == ["verified.second"]
+    assert first_record.read_bytes() == first_payload
+    retained_metadata = first_record.stat()
+    assert (retained_metadata.st_dev, retained_metadata.st_ino) == (
+        first_metadata.st_dev,
+        first_metadata.st_ino,
+    )
 
 
 def test_promotion_requires_exact_reviewed_zero_cost_evidence_identity(tmp_path: Path) -> None:

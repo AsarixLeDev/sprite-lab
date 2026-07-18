@@ -47,6 +47,10 @@ more than 30 days. The verifier ID is fixed and its code identity is recomputed
 from the live no-follow-read catalog validation modules; an arbitrary
 hash-shaped verifier self-attestation is not authoritative. Private acquisition
 URLs and query strings never enter web responses or durable evidence.
+An otherwise fully valid append-only record whose verifier code identity is no
+longer current remains immutable but is omitted from the active trusted source
+set. Malformed, expired, policy-invalid, identity-invalid, unsafe-linked, or
+conflicting records still fail the whole catalog closed.
 Trusted-catalog v1 records lack automation-terms evidence and fail closed; they
 are never treated as approved compatibility records. Every ordinary acquisition
 revalidates the current source, license, and terms binding before backend
@@ -144,6 +148,10 @@ substitution, an unexpected hard link, or a target that appears concurrently
 fails closed without changing prior trusted sources. POSIX named-fd
 publication retains one validator-bound stage alias when anonymous staging is
 unavailable; Windows moves the exact held handle and leaves a single link.
+Promotion inventories inactive old-verifier records for source-ID conflicts,
+source-count limits, and aggregate byte limits, while allowing a differently
+identified current-verifier source to be appended. The inactive record is
+never rewritten or silently re-attested.
 Idempotent replay does not overwrite a conflicting source ID. A live-view
 refresh callback may be retried without turning a durable successful promotion
 into a failed response.
