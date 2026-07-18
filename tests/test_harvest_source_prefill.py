@@ -19,6 +19,24 @@ from spritelab.product_core import ProjectContext
 from spritelab.product_features.harvest import create_plugin
 from spritelab.product_web import create_app
 
+OGA_SOURCE_URL = "https://opengameart.org/content/behrs-2500-pixel-battle-axes-32x32-archive"
+OGA_LICENSE_URL = "https://creativecommons.org/publicdomain/zero/1.0/"
+OGA_DIRECT_URL = "https://opengameart.org/sites/default/files/battleaxes_01.zip"
+
+
+def _oga_source_html(*, extra_license_link: str = "", extra_file_link: str = "") -> bytes:
+    return (
+        '<div class="node node-art view-mode-full clearfix">'
+        '<div class="field field-name-title"><h1>Behr\'s 2500+ Pixel Battle Axes 32x32 Archive</h1></div>'
+        '<div class="field field-name-author-submitter">Submitted by Behrtron</div>'
+        '<div class="field field-name-field-art-licenses">'
+        f'<a href="{OGA_LICENSE_URL}">CC0 1.0 public domain</a>{extra_license_link}</div>'
+        '<div class="field field-name-body">Totally free in the public domain.</div>'
+        '<div class="field field-name-field-art-files">'
+        f'<a href="{OGA_DIRECT_URL}">battleaxes_01.zip</a>{extra_file_link}</div>'
+        "</div>"
+    ).encode()
+
 
 def test_known_source_profiles_are_useful_without_assuming_pack_specific_licenses() -> None:
     labels = {value["label"] for value in available_source_presets()}
@@ -49,6 +67,41 @@ def test_known_source_profiles_are_useful_without_assuming_pack_specific_license
     assert itch.creator == "Grafxkid"
     assert itch.license_id == ""
     assert itch.terms_evidence_url == "https://itch.io/docs/legal/terms"
+
+
+def test_retained_opengameart_evidence_prefills_exact_bound_fields() -> None:
+    prefill = build_source_prefill(OGA_SOURCE_URL, retained_source_bytes=_oga_source_html())
+
+    assert prefill.title == "Behr's 2500+ Pixel Battle Axes 32x32 Archive"
+    assert prefill.creator == "Behrtron"
+    assert prefill.license_id == "cc0-1.0"
+    assert prefill.license_evidence_url == OGA_LICENSE_URL
+    assert prefill.direct_download_url == OGA_DIRECT_URL
+    assert prefill.attribution_text == "Behrtron"
+    assert prefill.review_fields == ("terms_evidence_url",)
+
+
+def test_retained_opengameart_evidence_does_not_guess_between_file_links() -> None:
+    extra = '<a href="https://opengameart.org/sites/default/files/alternate.zip">alternate.zip</a>'
+    prefill = build_source_prefill(
+        OGA_SOURCE_URL,
+        retained_source_bytes=_oga_source_html(extra_file_link=extra),
+    )
+
+    assert prefill.direct_download_url == ""
+    assert "direct_download_url" in prefill.review_fields
+
+
+def test_retained_opengameart_evidence_does_not_guess_between_license_links() -> None:
+    extra = '<a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>'
+    prefill = build_source_prefill(
+        OGA_SOURCE_URL,
+        retained_source_bytes=_oga_source_html(extra_license_link=extra),
+    )
+
+    assert prefill.license_id == ""
+    assert prefill.license_evidence_url == ""
+    assert {"license_id", "license_evidence_url"} <= set(prefill.review_fields)
 
 
 @pytest.mark.parametrize(
@@ -150,4 +203,5 @@ def test_web_smart_prefill_is_csrf_protected_network_free_and_pathless(tmp_path:
     javascript = client.get("/harvest/static/harvest.js").text
     assert 'request("/harvest/api/source-prefill"' in javascript
     assert 'direct_download_url: "#probe-direct-url"' in javascript
+    assert "Use detected OpenGameArt fields" in javascript
     assert ".innerHTML" not in javascript

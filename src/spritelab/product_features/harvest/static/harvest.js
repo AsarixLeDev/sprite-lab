@@ -334,6 +334,13 @@
         }); cancel.dataset.run = probe.probe_id; controls.append(cancel);
       }
       if (["FAILED", "CANCELLED", "INTERRUPTED"].includes(probe.status)) {
+        if (probe.source_prefill) {
+          const usePrefill = action("Use detected OpenGameArt fields", async () => {
+            applySourcePrefill(probe.source_prefill);
+            probeSummary.textContent = "Detected OpenGameArt fields copied into the form. Review them, then retry.";
+            document.querySelector("#harvest-probe-form")?.scrollIntoView({behavior: "smooth", block: "start"});
+          }); usePrefill.dataset.run = probe.probe_id; controls.append(usePrefill);
+        }
         const retry = action("Retry with form", async () => {
           const form = $("#harvest-probe-form"); if (!form.reportValidity()) return;
           await idempotentRequest(`probe-retry:${probe.probe_id}`, "probe-retry", `/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/retry`, probePayload()); await refresh();

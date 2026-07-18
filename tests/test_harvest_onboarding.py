@@ -619,6 +619,45 @@ def test_probe_whole_deadline_fails_with_durable_terminal_evidence(
     assert len(transport.calls) < len(_responses())
 
 
+def test_failed_opengameart_probe_offers_exact_retained_page_prefill(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
+    transport = FakeTransport(
+        [
+            FakeResponse(ROBOTS_ALLOW),
+            FakeResponse(_oga_source_html(), content_type="text/html"),
+            FakeResponse(ROBOTS_ALLOW),
+            FakeResponse(license_page, content_type="text/html"),
+        ]
+    )
+    service, evidence = _service(project, transport)
+    payload = _payload(service, evidence, key="probe-oga-prefill-recovery")
+    payload.update(
+        {
+            "source_id": "oga.battle-axes",
+            "title": "Behrs Battle Axes",
+            "creator": "OpenGameArt",
+            "source_page": OGA_SOURCE_URL,
+            "license_evidence_url": OGA_LICENSE_URL,
+            "terms_evidence_url": None,
+            "direct_download_url": OGA_DIRECT_URL,
+            "attribution_text": "OpenGameArt",
+        }
+    )
+
+    started, _created = service.start_probe(payload)
+    failed = _wait(service, started["probe_id"], {"FAILED"})
+
+    assert "title field does not exactly identify" in failed["message"]
+    assert failed["source_prefill"]["title"] == "Behr's 2500+ Pixel Battle Axes 32x32 Archive"
+    assert failed["source_prefill"]["creator"] == "Behrtron"
+    assert failed["source_prefill"]["license_id"] == "cc0-1.0"
+    assert failed["source_prefill"]["license_evidence_url"] == OGA_LICENSE_URL
+    assert failed["source_prefill"]["direct_download_url"] == OGA_DIRECT_URL
+    assert len(transport.calls) == 4
+
+
 def test_probe_cancellation_records_durable_terminal_evidence(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()

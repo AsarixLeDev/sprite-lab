@@ -62,7 +62,12 @@ OpenGameArt and itch.io licenses remain deliberately blank because they vary
 by pack. Smart prefill never fetches a page, derives a direct download link,
 confirms a license, checks an authorization, creates `harvest_runs`, or weakens
 the later evidence verifier. Applying another draft clears the prior direct
-link so evidence from two packs cannot be accidentally combined. The web form
+link so evidence from two packs cannot be accidentally combined. After an
+explicitly authorized OpenGameArt probe retained a structurally valid page but
+rejected submitted field bindings, the web form offers an evidence-backed
+recovery prefill. That retry draft uses the exact visible title and submitter,
+fills only an unambiguous supported license and file link, and never changes
+authorization checkboxes or relaxes final verification. The web form
 explains when its probe action is disabled because current independent backend
 capability evidence is missing, invalid, or could not be verified, and directs
 the operator to configure or renew the repository Harvest certificate before
@@ -183,6 +188,23 @@ source API is requested. Every acquisition, source-probe, promotion, handoff,
 and Dataset-import boundary still uses that certified service; mutating actions
 reload current repository evidence into a fresh full snapshot before
 authorization or publication.
+
+Refresh an unchanged implementation's expiry from a clean tracked worktree:
+
+```powershell
+python -m spritelab harvest certificate refresh
+```
+
+If audited source code changed and the operator explicitly chooses to carry the
+existing PASS gate decisions forward, both the report and certificate must be
+rebound with the explicit waiver:
+
+```powershell
+python -m spritelab harvest certificate refresh --rebind-current-implementation --confirm-carry-forward-pass
+```
+
+The command preserves unique recovery copies of both prior artifacts. A
+changed-code rebind requires restarting Sprite Lab before a probe or acquisition.
 
 A certified adapter must provide both:
 

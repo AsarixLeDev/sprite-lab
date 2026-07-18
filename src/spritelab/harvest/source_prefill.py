@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -118,7 +118,12 @@ def source_preset_ids(*, include_auto: bool = True) -> tuple[str, ...]:
     return ("auto", *values) if include_auto else values
 
 
-def build_source_prefill(source_page: str, *, preset_id: str = "auto") -> SourcePrefill:
+def build_source_prefill(
+    source_page: str,
+    *,
+    preset_id: str = "auto",
+    retained_source_bytes: bytes | None = None,
+) -> SourcePrefill:
     """Build a reviewable source draft from one pack-page URL.
 
     Explicit values supplied later by the CLI or browser always take
@@ -169,7 +174,7 @@ def build_source_prefill(source_page: str, *, preset_id: str = "auto") -> Source
             "A generic draft was created. Review provenance, license, terms, and the exact creator-posted file link."
         )
 
-    return SourcePrefill(
+    prefill = SourcePrefill(
         preset_id=resolved,
         preset_label=preset.label,
         recognized_source=detected != "generic",
@@ -187,6 +192,32 @@ def build_source_prefill(source_page: str, *, preset_id: str = "auto") -> Source
         taxonomy_hints=(),
         review_fields=tuple(dict.fromkeys(review_fields)),
         guidance=guidance,
+    )
+    if retained_source_bytes is None or resolved != "opengameart":
+        return prefill
+
+    from spritelab.product_features.harvest.evidence_fetch import extract_opengameart_prefill_fields
+
+    exact = extract_opengameart_prefill_fields(canonical, retained_source_bytes)
+    enriched_review_fields = ["terms_evidence_url"]
+    if not exact.license_id:
+        enriched_review_fields.extend(("license_id", "license_evidence_url"))
+    if not exact.direct_download_url:
+        enriched_review_fields.append("direct_download_url")
+    return replace(
+        prefill,
+        title=exact.title,
+        creator=exact.creator,
+        license_name="cc0" if exact.license_id == "cc0-1.0" else exact.license_id or "unknown",
+        license_id=exact.license_id,
+        license_evidence_url=exact.license_evidence_url,
+        direct_download_url=exact.direct_download_url,
+        attribution_text=exact.creator,
+        review_fields=tuple(enriched_review_fields),
+        guidance=(
+            "Exact OpenGameArt fields were detected from the retained page. "
+            "Review them, keep the authorization choices explicit, then retry."
+        ),
     )
 
 

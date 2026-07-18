@@ -23,6 +23,7 @@ from spritelab.harvest.download import (
     PinnedHTTPTransport,
     download_file_with_receipt,
 )
+from spritelab.harvest.source_prefill import build_source_prefill
 from spritelab.product_core.events import strict_json_dumps, strict_json_loads
 from spritelab.product_features.harvest.catalog import (
     INITIAL_LICENSE_POLICY,
@@ -493,6 +494,12 @@ class CatalogProbeService:
                     status = "INTERRUPTED"
                 result = self._read_optional_json(run_dir / "result.json", run_anchor)
                 promotion = self._read_optional_json(run_dir / "promotion_receipt.json", run_anchor)
+                source_prefill = self._failed_source_prefill(
+                    run_anchor,
+                    request,
+                    status,
+                    str(state["message"]),
+                )
                 return {
                     "schema_version": "spritelab.harvest.catalog-probe-status.v1",
                     "probe_id": probe_id,
@@ -514,9 +521,45 @@ class CatalogProbeService:
                     "promotion_ready": status == "READY",
                     "promoted": status == "PROMOTED" and promotion is not None,
                     "raw_response_sha256": result.get("raw_response_sha256") if result else None,
+                    "source_prefill": source_prefill,
                     "events": self._read_events(run_dir, run_anchor),
                     "paths_exposed": False,
                 }
+
+    @staticmethod
+    def _failed_source_prefill(
+        run_anchor: AnchoredDirectory,
+        request: Mapping[str, Any],
+        status: str,
+        message: str,
+    ) -> dict[str, Any] | None:
+        recoverable_messages = (
+            "OpenGameArt title field does not exactly identify",
+            "OpenGameArt author-submitter field does not identify",
+            "OpenGameArt art-licenses field does not bind",
+            "exact submitted direct download link must appear once",
+        )
+        if (
+            status != "FAILED"
+            or not any(value in message for value in recoverable_messages)
+            or "opengameart.org/content/" not in str(request.get("source_page", "")).casefold()
+        ):
+            return None
+        try:
+            with run_anchor.open_directory("evidence") as evidence_anchor:
+                if not evidence_anchor.lexists("source_page.bin"):
+                    return None
+                source_bytes = read_snapshot_bytes(
+                    evidence_anchor,
+                    "source_page.bin",
+                    max_bytes=MAX_EVIDENCE_PAGE_BYTES,
+                )
+            return build_source_prefill(
+                str(request["source_page"]),
+                retained_source_bytes=source_bytes,
+            ).to_dict()
+        except (EvidenceFetchError, OSError, ValueError, UnsafeFilesystemOperation):
+            return None
 
     def evidence(self, probe_id: str) -> dict[str, Any]:
         run_dir = self._probe_directory(probe_id)

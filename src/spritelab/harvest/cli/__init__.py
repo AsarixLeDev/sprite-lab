@@ -20,6 +20,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
     from spritelab.harvest.cli import (
+        certification_cmds,
         dataset_cmds,
         golden_cmds,
         ingest_cmds,
@@ -32,6 +33,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
 
     ingest_cmds.register(subparsers)
+    certification_cmds.register(subparsers)
     prefill_cmds.register(subparsers)
     label_v2_cmds.register(subparsers)
     label_v3_cmds.register(subparsers)

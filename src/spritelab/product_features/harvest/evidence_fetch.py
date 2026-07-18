@@ -113,6 +113,7 @@ _AUTOMATION_DOUBLE_NEGATIVE_PATTERNS = tuple(
 _OPENGAMEART_HOST = "opengameart.org"
 _OPENGAMEART_DETAIL_PATH = re.compile(r"^/content/[^/]+/?$")
 _OPENGAMEART_ADAPTER_ID = "spritelab.harvest.source-adapter.opengameart.v1"
+_OPENGAMEART_CC0_LICENSE_URL = "https://creativecommons.org/publicdomain/zero/1.0/"
 _OPENGAMEART_LEGACY_ART_LICENSE_LINK_UPGRADES = {
     "http://creativecommons.org/licenses/by/3.0/": "https://creativecommons.org/licenses/by/3.0/",
     "http://creativecommons.org/licenses/by-sa/3.0/": "https://creativecommons.org/licenses/by-sa/3.0/",
@@ -555,6 +556,102 @@ class _OpenGameArtHTMLParser(HTMLParser):
                 self._active_roots = [active for active in self._active_roots if active is not root]
 
 
+@dataclass(frozen=True)
+class OpenGameArtPrefillFields:
+    """Exact, reviewable fields captured from one retained OpenGameArt record."""
+
+    title: str
+    creator: str
+    license_id: str
+    license_evidence_url: str
+    direct_download_url: str
+
+
+def extract_opengameart_prefill_fields(source_url: str, source_bytes: bytes) -> OpenGameArtPrefillFields:
+    """Extract safe retry defaults from retained OpenGameArt HTML.
+
+    This parser performs no network activity. It accepts the same single-record,
+    visible authoritative field structure as the final evidence verifier and
+    leaves ambiguous licenses or file links blank for human review.
+    """
+
+    if not isinstance(source_bytes, bytes) or not 0 < len(source_bytes) <= MAX_EVIDENCE_PAGE_BYTES:
+        raise EvidenceFetchError("OpenGameArt prefill requires one bounded retained HTML page.")
+    parsed = canonical_https_url(source_url, allow_query=False)
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    if (
+        host != _OPENGAMEART_HOST
+        or parsed.port is not None
+        or _OPENGAMEART_DETAIL_PATH.fullmatch(parsed.path or "/") is None
+    ):
+        raise EvidenceFetchError("OpenGameArt prefill requires a canonical content-detail page.")
+    captures, role_text = _parse_opengameart_authoritative_fields(source_url, source_bytes)
+
+    creator_text = role_text["author-submitter"]
+    submitted = re.fullmatch(r"submitted\s+by\s*:?\s*(.+)", creator_text, flags=re.IGNORECASE)
+    creator = _normalize_text(submitted.group(1) if submitted is not None else creator_text)
+    if not 3 <= len(creator) <= 200:
+        raise EvidenceFetchError("The OpenGameArt author-submitter field is not usable as a creator prefill.")
+    if not 4 <= len(role_text["title"]) <= 200:
+        raise EvidenceFetchError("The OpenGameArt title field is not usable as a title prefill.")
+
+    license_capture = captures["art-licenses"]
+    folded_license = role_text["art-licenses"].casefold()
+    license_id = ""
+    license_url = ""
+    license_links = frozenset(license_capture.links)
+    unsupported_license_named = re.search(r"\b(?:cc[- ]?by(?:[- ]sa)?|gpl|oga[- ]?by)\b", folded_license) is not None
+    cc0_bound = _license_declared(folded_license, "cc0-1.0") or (_OPENGAMEART_CC0_LICENSE_URL in license_capture.links)
+    if (
+        cc0_bound
+        and license_links <= {_OPENGAMEART_CC0_LICENSE_URL}
+        and not unsupported_license_named
+        and not _license_conflict(folded_license, "cc0-1.0")
+    ):
+        license_id = "cc0-1.0"
+        license_url = _OPENGAMEART_CC0_LICENSE_URL
+    elif (
+        not license_links
+        and not unsupported_license_named
+        and _license_declared(folded_license, "public-domain")
+        and not _license_conflict(folded_license, "public-domain")
+    ):
+        license_id = "public-domain"
+        license_url = source_url
+
+    file_links = tuple(captures["art-files"].links)
+    direct_download_url = file_links[0] if len(file_links) == 1 else ""
+    return OpenGameArtPrefillFields(
+        title=role_text["title"],
+        creator=creator,
+        license_id=license_id,
+        license_evidence_url=license_url,
+        direct_download_url=direct_download_url,
+    )
+
+
+def _parse_opengameart_authoritative_fields(
+    source_url: str,
+    source_bytes: bytes,
+) -> tuple[dict[str, _OpenGameArtRoleCapture], dict[str, str]]:
+    parser = _OpenGameArtHTMLParser(source_url)
+    try:
+        parser.feed(source_bytes.decode("utf-8", errors="strict"))
+        parser.close()
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise EvidenceFetchError("The OpenGameArt source profile is malformed or unsafe.") from exc
+    if parser.invalid or len(parser.roots) != 1 or parser.roots[0].invalid_nesting:
+        raise EvidenceFetchError("The OpenGameArt source profile requires one visible, nonnested full-art node.")
+    root = parser.roots[0]
+    if any(len(root.roles[role]) != 1 for role, _class_name in _OPENGAMEART_ROLE_CLASSES):
+        raise EvidenceFetchError("The OpenGameArt source profile requires one exact visible field for every role.")
+    captures = {role: root.roles[role][0] for role, _class_name in _OPENGAMEART_ROLE_CLASSES}
+    role_text = {
+        role: _normalize_text(" ".join(captures[role].text_parts)) for role, _class_name in _OPENGAMEART_ROLE_CLASSES
+    }
+    return captures, role_text
+
+
 def _html_element_hidden(attrs: list[tuple[str, str | None]]) -> bool:
     values: dict[str, list[str]] = {}
     for name, value in attrs:
@@ -866,21 +963,7 @@ def _verify_opengameart_evidence(
 ) -> VerifiedPageEvidence:
     if source_snapshot.mime_type != "text/html":
         raise EvidenceFetchError("The OpenGameArt source profile requires retained HTML evidence.")
-    parser = _OpenGameArtHTMLParser(source_url)
-    try:
-        parser.feed(source_bytes.decode("utf-8", errors="strict"))
-        parser.close()
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise EvidenceFetchError("The OpenGameArt source profile is malformed or unsafe.") from exc
-    if parser.invalid or len(parser.roots) != 1 or parser.roots[0].invalid_nesting:
-        raise EvidenceFetchError("The OpenGameArt source profile requires one visible, nonnested full-art node.")
-    root = parser.roots[0]
-    if any(len(root.roles[role]) != 1 for role, _class_name in _OPENGAMEART_ROLE_CLASSES):
-        raise EvidenceFetchError("The OpenGameArt source profile requires one exact visible field for every role.")
-    captures = {role: root.roles[role][0] for role, _class_name in _OPENGAMEART_ROLE_CLASSES}
-    role_text = {
-        role: _normalize_text(" ".join(captures[role].text_parts)) for role, _class_name in _OPENGAMEART_ROLE_CLASSES
-    }
+    captures, role_text = _parse_opengameart_authoritative_fields(source_url, source_bytes)
     if role_text["title"].casefold() != title.casefold():
         raise EvidenceFetchError("The OpenGameArt title field does not exactly identify the submitted title.")
     if not _contains_bound_phrase(role_text["author-submitter"], creator):
@@ -1435,11 +1518,13 @@ __all__ = [
     "AutomationTermsEvidence",
     "EvidenceFetchError",
     "FetchSnapshot",
+    "OpenGameArtPrefillFields",
     "RobotsDecision",
     "RobotsSnapshot",
     "VerifiedPageEvidence",
     "canonical_https_url",
     "canonical_url_string",
+    "extract_opengameart_prefill_fields",
     "fetch_evidence_page",
     "fetch_robots_snapshot",
     "read_snapshot_bytes",
