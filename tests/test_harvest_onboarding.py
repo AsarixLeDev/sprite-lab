@@ -44,6 +44,9 @@ from spritelab.product_web.app import create_app
 from spritelab.utils.safe_fs import AnchoredDirectory
 
 ROBOTS_ALLOW = b"User-agent: spritelab-harvest\nAllow: /\n"
+OGA_ROBOTS_COMMENTED_RULES = (
+    b"User-agent: *\nCrawl-delay: 10\n# CSS, JS, Images\nAllow: /misc/*.css$\nDisallow: /misc/\n"
+)
 SOURCE_URL = "https://catalog.example.test/source"
 LICENSE_URL = "https://catalog.example.test/license"
 TERMS_URL = "https://catalog.example.test/terms"
@@ -1555,6 +1558,24 @@ def test_robots_missing_policy_and_explicit_disallow_are_deterministic(tmp_path:
                 resolver=lambda _host, _port: ("8.8.8.8",),
                 transport=FakeTransport([FakeResponse(malformed)]),
             )
+
+
+def test_robots_comment_after_user_agent_does_not_end_group(tmp_path: Path) -> None:
+    with AnchoredDirectory(tmp_path, tmp_path) as anchor:
+        policy = fetch_robots_snapshot(
+            OGA_SOURCE_URL,
+            anchor,
+            "oga-commented.txt",
+            cancel_requested=lambda: False,
+            resolver=lambda _host, _port: ("8.8.8.8",),
+            transport=FakeTransport([FakeResponse(OGA_ROBOTS_COMMENTED_RULES)]),
+        )
+
+        allowed = policy.evaluate("https://opengameart.org/misc/sprite.css")
+        assert allowed.matched_directive == "allow"
+        assert allowed.matched_pattern == "/misc/*.css$"
+        with pytest.raises(EvidenceFetchError, match="disallows"):
+            policy.evaluate("https://opengameart.org/misc/private.txt")
 
 
 def test_project_wide_single_flight_survives_two_service_instances(tmp_path: Path) -> None:

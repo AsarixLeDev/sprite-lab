@@ -63,6 +63,22 @@ Dataset-v5 receipt slots. Preview the conditioned dataset after every import
 and stop adding weapon shards if near-duplicate or taxonomy concentration is
 excessive. Do not continue merely to fill all eight slots.
 
+### Additional strict-ready attachment contingencies
+
+One more creator-posted family passed the same primary-page review:
+
+- **Behr spears shard 01** — [publisher page](https://opengameart.org/content/behrs-2500-pixel-spears-32x32-archive), [spears_01.zip](https://opengameart.org/sites/default/files/spears_01.zip). The page lists CC0, says the archive is totally free in the public domain, and advertises 2,500 unique 32x32 spears across five individual-sprite archives. Prefer this over a second axes, swords, or staffs shard to improve family diversity.
+
+Verified attachment contingencies from the same creator-posted pages are:
+
+- battle axes: [02](https://opengameart.org/sites/default/files/battleaxes_02.zip), [03](https://opengameart.org/sites/default/files/battleaxes_03.zip), [04](https://opengameart.org/sites/default/files/battleaxes_04.zip), [05](https://opengameart.org/sites/default/files/battleaxes_05.zip);
+- one-hand swords: [02](https://opengameart.org/sites/default/files/1handswords_02.zip), [03](https://opengameart.org/sites/default/files/1handswords_03.zip), [04](https://opengameart.org/sites/default/files/1handswords_04.zip);
+- long swords: [01](https://opengameart.org/sites/default/files/longswords_01.zip), [02](https://opengameart.org/sites/default/files/longswords_02.zip), [03](https://opengameart.org/sites/default/files/longswords_03.zip), [04](https://opengameart.org/sites/default/files/longswords_04.zip), [05](https://opengameart.org/sites/default/files/longswords_05.zip);
+- staffs: [02](https://opengameart.org/sites/default/files/rods_02.zip), [03](https://opengameart.org/sites/default/files/rods_03.zip), [04](https://opengameart.org/sites/default/files/rods_04.zip), [05](https://opengameart.org/sites/default/files/rods_05.zip);
+- spears: [02](https://opengameart.org/sites/default/files/spears_02.zip), [03](https://opengameart.org/sites/default/files/spears_03.zip), [04](https://opengameart.org/sites/default/files/spears_04.zip), [05](https://opengameart.org/sites/default/files/spears_05.zip).
+
+Every attachment remains a separate probe, catalog source, acquisition, and Dataset receipt. Aggregate page counts do not establish per-shard eligible or deduplicated yield.
+
 ## Hold candidates
 
 These are not in the strict queue. They need a policy, provenance, format, or

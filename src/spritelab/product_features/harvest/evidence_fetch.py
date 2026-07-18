@@ -1211,11 +1211,16 @@ def _parse_robots(payload: bytes) -> tuple[RobotsRule, ...]:
     rules: list[RobotsRule] = []
     saw_rule = False
     for raw_line in text.splitlines():
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
+        if not raw_line.strip():
             if agents:
                 groups.append((agents, rules))
                 agents, rules, saw_rule = [], [], False
+            continue
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            # A comment is not a blank group separator. In particular, many
+            # deployed policies put section comments between User-agent and
+            # the rules governed by it.
             continue
         match = _ROBOTS_FIELD.fullmatch(line)
         if match is None:
