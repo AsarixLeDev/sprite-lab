@@ -201,6 +201,37 @@ def test_home_reuses_one_current_run_projection(
     assert current_run_calls == 1
 
 
+def test_current_run_replays_only_the_selected_active_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    active_run_id, _events = _write_run(
+        context,
+        run_id="20260713T090000Z-train-active",
+        terminal=False,
+    )
+    for minute in range(3):
+        _write_run(
+            context,
+            run_id=f"20260714T10{minute:02d}00Z-train-terminal",
+            terminal=True,
+        )
+    snapshot_calls: list[str] = []
+    original_snapshot = EventRepository.snapshot
+
+    def snapshot(repository: EventRepository, run_id: str) -> Any:
+        snapshot_calls.append(run_id)
+        return original_snapshot(repository, run_id)
+
+    monkeypatch.setattr(EventRepository, "snapshot", snapshot)
+    current = EventRepository(context.runs_directory).current_run()
+
+    assert current is not None
+    assert current.run_id == active_run_id
+    assert snapshot_calls == [active_run_id]
+
+
 def _write_run(
     context: ProjectContext,
     *,
@@ -337,7 +368,10 @@ def test_runs_page_reuses_full_projection_for_older_active_run(
     assert terminal_run_ids[-1] in response.text
 
 
-def test_app_starts_on_loopback_and_v3_dispatches_to_web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_app_starts_on_loopback_and_bare_v3_uses_the_explicit_local_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     context = _context(tmp_path)
     app = create_app(context)
     assert app.state.spritelab_settings.host == "127.0.0.1"
@@ -345,12 +379,18 @@ def test_app_starts_on_loopback_and_v3_dispatches_to_web(monkeypatch: pytest.Mon
     monkeypatch.setattr(web_cli, "main", lambda argv=(): dispatched.append(list(argv)))
     package_cli.main(["v3"])
     package_cli.main(["v3", "app", "--no-open"])
-    assert dispatched == [[], ["--no-open"]]
+    assert dispatched == [
+        ["--host", "127.0.0.1", "--port", "8765"],
+        ["--no-open"],
+    ]
 
 
 def test_browser_launch_is_mocked_and_no_open_is_honored(monkeypatch: pytest.MonkeyPatch) -> None:
+    socket_options: list[tuple[Any, ...]] = []
+
     class FakeSocket:
-        def setsockopt(self, *_args: Any) -> None: ...
+        def setsockopt(self, *args: Any) -> None:
+            socket_options.append(args)
 
         def bind(self, address: tuple[str, int]) -> None:
             self.address = address
@@ -370,6 +410,12 @@ def test_browser_launch_is_mocked_and_no_open_is_honored(monkeypatch: pytest.Mon
     web_cli.run_server(object(), settings, open_browser=False)
     assert opened == ["http://127.0.0.1:43123/"]
     assert len(runs) == 2
+    if web_cli.sys.platform == "win32":
+        exclusive = getattr(web_cli.socket, "SO_EXCLUSIVEADDRUSE", None)
+        expected_options = [] if exclusive is None else [(web_cli.socket.SOL_SOCKET, exclusive, 1)] * 2
+    else:
+        expected_options = [(web_cli.socket.SOL_SOCKET, web_cli.socket.SO_REUSEADDR, 1)] * 2
+    assert socket_options == expected_options
 
 
 def test_cli_no_open_and_non_loopback_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

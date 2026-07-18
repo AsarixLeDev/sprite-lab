@@ -10,19 +10,30 @@ The normal interactive command is:
 python -m spritelab v3
 ```
 
-The explicit equivalent is:
+The shortcut expands to the stable local launch below: loopback-only on port
+`8765`, opening the browser in an interactive desktop session.
+
+```text
+python -m spritelab v3 app --host 127.0.0.1 --port 8765
+```
+
+Use the explicit app command when different launch options are needed:
 
 ```text
 python -m spritelab v3 app
 ```
 
-The server binds `127.0.0.1` and selects an available port when `ui.port` is `auto`. In an interactive desktop session it opens the default browser. Automation and terminal-only sessions can suppress that behavior:
+Without overrides, the explicit app command uses the project UI configuration: it binds `127.0.0.1` and selects an available port when `ui.port` is `auto`. In an interactive desktop session it opens the default browser. Automation and terminal-only sessions can suppress that behavior:
 
 ```text
 python -m spritelab v3 app --no-open
 ```
 
 `--host` and `--port` override the project UI configuration. A non-loopback `--host` is rejected unless an authentication token is supplied using the runtime-only `SPRITELAB_WEB_TOKEN` environment variable or `--auth-token`. A non-loopback host from persisted configuration alone is insufficient because the host must be explicit at launch.
+
+On Windows the listening address is exclusive. Starting another Sprite Lab
+process on the same host and port fails instead of distributing requests across
+two app versions.
 
 The command does not start training, generation, a provider, or any feature backend. Existing commands such as `v3 status`, `v3 train`, and `v3 eval` keep their foundation behavior.
 

@@ -1668,6 +1668,8 @@ def test_catalog_onboarding_ui_is_visible_and_rejects_browser_paths(tmp_path: Pa
     page = client.get("/harvest")
     assert page.status_code == 200
     assert "Start bounded source probe" in page.text
+    assert 'aria-describedby="harvest-probe-availability"' in page.text
+    assert "Checking whether the certified source-probe backend is available" in page.text
     assert "Automation terms URL" in page.text
     assert "Leave blank only when no governing Terms or ToS link exists" in page.text
     javascript = client.get("/harvest/static/harvest.js").text
@@ -1679,6 +1681,11 @@ def test_catalog_onboarding_ui_is_visible_and_rejects_browser_paths(tmp_path: Pa
     assert "Automation terms decision" in javascript
     assert "no prohibition observed; not affirmative permission" in javascript
     assert "spritelab.harvest.pending-idempotency.v1:" in javascript
+    assert (
+        "Source probing is unavailable because current independent backend capability evidence is missing or invalid."
+        in javascript
+    )
+    assert "Source probing remains unavailable because backend capability evidence could not be verified:" in javascript
     assert "window.sessionStorage.setItem(storageKey, value)" in javascript
     assert "window.sessionStorage.removeItem(storageKey)" in javascript
     assert "if (error.definitive) clearIdempotency(scope)" in javascript
@@ -1702,8 +1709,14 @@ def test_repository_certificate_bootstraps_first_catalog_probe_without_passive_m
     project.mkdir()
     capabilities = _capabilities()
     evidence = _evidence(capabilities)
+    evidence_loads: list[Path] = []
+
+    def load_evidence(root: Path) -> BackendCapabilityEvidence:
+        evidence_loads.append(root)
+        return evidence
+
     monkeypatch.setattr(harvest_plugin_module, "load_trusted_catalog", lambda _root: ())
-    monkeypatch.setattr(harvest_plugin_module, "load_backend_capability_evidence", lambda _root: evidence)
+    monkeypatch.setattr(harvest_plugin_module, "load_backend_capability_evidence", load_evidence)
     monkeypatch.setattr(
         harvest_service_module,
         "hardened_backend_code_identity",
@@ -1727,9 +1740,14 @@ def test_repository_certificate_bootstraps_first_catalog_probe_without_passive_m
     )
     app = create_app(ProjectContext(project), plugins=(plugin,))
     client = TestClient(app)
+    assert evidence_loads == []
 
     inventory = client.get("/harvest/api/inventory").json()
+    assert evidence_loads == []
     catalog = client.get("/harvest/api/sources").json()
+    assert evidence_loads == [project]
+    assert client.get("/harvest/api/sources").status_code == 200
+    assert evidence_loads == [project]
     assert catalog["sources"] == []
     assert catalog["backend_configured"] is False
     assert catalog["backend_capability_evidence"]["evidence_identity"] == evidence.identity
@@ -1760,6 +1778,7 @@ def test_repository_certificate_bootstraps_first_catalog_probe_without_passive_m
         headers={"X-CSRF-Token": app.state.spritelab_csrf_token},
     )
     assert response.status_code == 202
+    assert evidence_loads == [project, project]
     probe_id = response.json()["probe"]["probe_id"]
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
@@ -1789,7 +1808,8 @@ def test_empty_catalog_rejects_unsafe_repository_capability_evidence_without_mut
     monkeypatch.setattr(harvest_plugin_module, "load_backend_capability_evidence", reject_evidence)
     plugin = create_plugin(load_repository_capabilities=True)
     status = plugin.status_provider(ProjectContext(project))
-    assert status.status is ProductStatus.UNAVAILABLE
+    assert status.status is ProductStatus.READY
+    assert status.data["backend_certification_validation"] == "deferred"
     app = create_app(ProjectContext(project), plugins=(plugin,))
     catalog = TestClient(app).get("/harvest/api/sources").json()
     assert catalog["sources"] == []

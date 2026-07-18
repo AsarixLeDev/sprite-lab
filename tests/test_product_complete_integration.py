@@ -256,7 +256,10 @@ def test_01_no_argument_app_launch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(web_cli, "main", lambda argv=(): dispatched.append(list(argv)))
     package_cli.main(["v3"])
     package_cli.main(["v3", "app", "--no-open"])
-    assert dispatched == [[], ["--no-open"]]
+    assert dispatched == [
+        ["--host", "127.0.0.1", "--port", "8765"],
+        ["--no-open"],
+    ]
 
 
 def test_02_valid_folder_selection(synthetic_project: SyntheticProject) -> None:

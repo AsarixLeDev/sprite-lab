@@ -53,6 +53,15 @@ def _browser_host(host: str) -> str:
     return "127.0.0.1" if host in {"0.0.0.0", "::"} else host
 
 
+def _configure_listener_socket(server_socket: Any) -> None:
+    if sys.platform == "win32":
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive is not None:
+            server_socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+        return
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+
 def run_server(
     app: Any,
     settings: WebServerSettings,
@@ -70,7 +79,7 @@ def run_server(
     shutdown_callback: Any = None
     server: Any = None
     try:
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        _configure_listener_socket(server_socket)
         server_socket.bind((settings.host, settings.resolved_port))
         server_socket.listen(128)
         port = int(server_socket.getsockname()[1])

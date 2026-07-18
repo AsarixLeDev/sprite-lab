@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from importlib.resources import files
 from typing import Any
 
@@ -79,14 +81,29 @@ def create_harvest_router(
     context: ProjectContext,
     *,
     service: HarvestService | None = None,
+    configured_service_factory: Callable[[], HarvestService] | None = None,
 ) -> Any:
-    """Create a router whose GET endpoints remain passive and network-free."""
+    """Create a router whose passive shell does not validate backend certification."""
 
     from fastapi import APIRouter
     from fastapi.responses import HTMLResponse, JSONResponse, Response
 
     router = APIRouter()
     harvest = service or HarvestService(context.project_root)
+    configured_harvest: HarvestService | None = None
+    configuration_lock = threading.Lock()
+
+    def configured_service() -> HarvestService:
+        nonlocal configured_harvest
+        if configured_harvest is not None:
+            return configured_harvest
+        with configuration_lock:
+            if configured_harvest is None:
+                configured_harvest = configured_service_factory() if configured_service_factory is not None else harvest
+            return configured_harvest
+
+    def current_service() -> HarvestService:
+        return configured_harvest or harvest
 
     @router.get("/harvest", response_class=HTMLResponse)
     def harvest_page(request: Request) -> Any:
@@ -120,12 +137,12 @@ def create_harvest_router(
     @router.get("/harvest/api/inventory")
     @product_api
     def inventory() -> Any:
-        return _call(harvest.inventory)
+        return _call(current_service().inventory)
 
     @router.get("/harvest/api/sources")
     @product_api
     def sources() -> dict[str, Any]:
-        return harvest.sources()
+        return configured_service().sources()
 
     @router.post("/harvest/api/source-prefill")
     @product_api
@@ -154,7 +171,7 @@ def create_harvest_router(
         if rejected is not None:
             return rejected
         try:
-            job, created = harvest.start(
+            job, created = configured_service().start(
                 _required_string(payload, "source_id"),
                 idempotency_key=_required_string(payload, "idempotency_key"),
                 explicit_action=payload.get("explicit_action") is True,
@@ -175,7 +192,7 @@ def create_harvest_router(
     @router.get("/harvest/api/jobs/{run_id}")
     @product_api
     def job_status(run_id: str) -> Any:
-        return _call(lambda: harvest.job(run_id))
+        return _call(lambda: current_service().job(run_id))
 
     @router.post("/harvest/api/jobs/{run_id}/retry")
     @product_api
@@ -184,7 +201,7 @@ def create_harvest_router(
         if rejected is not None:
             return rejected
         try:
-            job, created = harvest.retry(
+            job, created = configured_service().retry(
                 run_id,
                 idempotency_key=_required_string(payload, "idempotency_key"),
                 explicit_action=payload.get("explicit_action") is True,
@@ -208,17 +225,17 @@ def create_harvest_router(
         rejected = _validate_payload(payload, _CANCEL_KEYS)
         if rejected is not None:
             return rejected
-        return _call(lambda: harvest.cancel(run_id, explicit_action=payload.get("explicit_action") is True))
+        return _call(lambda: current_service().cancel(run_id, explicit_action=payload.get("explicit_action") is True))
 
     @router.get("/harvest/api/jobs/{run_id}/handoff")
     @product_api
     def dataset_handoff(run_id: str) -> Any:
-        return _call(lambda: harvest.handoff(run_id))
+        return _call(lambda: configured_service().handoff(run_id))
 
     @router.get("/harvest/api/jobs/{run_id}/evidence")
     @product_api
     def durable_evidence(run_id: str) -> Any:
-        return _call(lambda: harvest.evidence(run_id))
+        return _call(lambda: current_service().evidence(run_id))
 
     @router.post("/harvest/api/jobs/{run_id}/import")
     @product_api
@@ -227,7 +244,7 @@ def create_harvest_router(
         if rejected is not None:
             return rejected
         try:
-            return harvest.import_to_dataset(
+            return configured_service().import_to_dataset(
                 run_id,
                 explicit_action=payload.get("explicit_action") is True,
                 idempotency_key=_required_string(payload, "idempotency_key"),
@@ -244,7 +261,7 @@ def create_harvest_router(
         if rejected is not None:
             return rejected
         try:
-            probe, created = harvest.start_probe(payload)
+            probe, created = configured_service().start_probe(payload)
         except HarvestError as exc:
             return _harvest_error(exc)
         except ValueError:
@@ -254,12 +271,12 @@ def create_harvest_router(
     @router.get("/harvest/api/probes/{probe_id}")
     @product_api
     def probe_status(probe_id: str) -> Any:
-        return _call(lambda: harvest.probe(probe_id))
+        return _call(lambda: current_service().probe(probe_id))
 
     @router.get("/harvest/api/probes/{probe_id}/evidence")
     @product_api
     def probe_evidence(probe_id: str) -> Any:
-        return _call(lambda: harvest.probe_evidence(probe_id))
+        return _call(lambda: current_service().probe_evidence(probe_id))
 
     @router.post("/harvest/api/probes/{probe_id}/cancel")
     @product_api
@@ -267,7 +284,12 @@ def create_harvest_router(
         rejected = _validate_payload(payload, _CANCEL_KEYS)
         if rejected is not None:
             return rejected
-        return _call(lambda: harvest.cancel_probe(probe_id, explicit_action=payload.get("explicit_action") is True))
+        return _call(
+            lambda: current_service().cancel_probe(
+                probe_id,
+                explicit_action=payload.get("explicit_action") is True,
+            )
+        )
 
     @router.post("/harvest/api/probes/{probe_id}/retry")
     @product_api
@@ -276,7 +298,7 @@ def create_harvest_router(
         if rejected is not None:
             return rejected
         try:
-            probe, created = harvest.retry_probe(probe_id, payload)
+            probe, created = configured_service().retry_probe(probe_id, payload)
         except HarvestError as exc:
             return _harvest_error(exc)
         except ValueError:
@@ -290,7 +312,7 @@ def create_harvest_router(
         if rejected is not None:
             return rejected
         return _call(
-            lambda: harvest.promote_probe(
+            lambda: configured_service().promote_probe(
                 probe_id,
                 explicit_action=payload.get("explicit_action") is True,
                 authorize_catalog_promotion=payload.get("authorize_catalog_promotion") is True,

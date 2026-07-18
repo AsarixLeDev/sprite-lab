@@ -87,6 +87,8 @@ def create_plugin(
 
     def service_with_configuration(
         context: ProjectContext,
+        *,
+        validate_repository_capabilities: bool = True,
     ) -> tuple[
         HarvestService,
         TrustedCatalogError | BackendCapabilityCertificateError | None,
@@ -104,7 +106,7 @@ def create_plugin(
         active_factory = backend_factory
         active_capabilities = backend_capabilities
         active_evidence: BackendCapabilityEvidence | None = backend_capability_evidence
-        if load_repository_capabilities and configuration_error is None:
+        if load_repository_capabilities and validate_repository_capabilities and configuration_error is None:
             try:
                 active_evidence = load_backend_capability_evidence(context.project_root)
                 active_capabilities = active_evidence.capabilities if active_evidence is not None else None
@@ -146,8 +148,18 @@ def create_plugin(
     def service(context: ProjectContext) -> HarvestService:
         return service_with_configuration(context)[0]
 
+    def passive_service_with_configuration(
+        context: ProjectContext,
+    ) -> tuple[
+        HarvestService,
+        TrustedCatalogError | BackendCapabilityCertificateError | None,
+        CertifiedBackendCapabilities | None,
+    ]:
+        return service_with_configuration(context, validate_repository_capabilities=False)
+
     def status_provider(context: ProjectContext) -> ProductResult:
-        harvest_service, configuration_error, _active_capabilities = service_with_configuration(context)
+        factory = passive_service_with_configuration if load_repository_capabilities else service_with_configuration
+        harvest_service, configuration_error, _active_capabilities = factory(context)
         try:
             inventory = harvest_service.inventory()
         except HarvestError as exc:
@@ -157,12 +169,21 @@ def create_plugin(
                 feature=PLUGIN_ID,
                 blockers=(ProductBlocker(exc.code, str(exc)),),
             )
-        if configuration_error is not None or not harvest_service.acquisition_configured:
+        if configuration_error is not None or (
+            not load_repository_capabilities and not harvest_service.acquisition_configured
+        ):
             return ProductResult(
                 ProductStatus.UNAVAILABLE,
                 "Harvest inventory is available, but no current independently certified acquisition configuration is active.",
                 feature=PLUGIN_ID,
                 data=inventory,
+            )
+        if load_repository_capabilities:
+            return ProductResult(
+                ProductStatus.READY,
+                "Harvest inventory is available. Backend certification is validated only when Harvest is opened.",
+                feature=PLUGIN_ID,
+                data={**inventory, "backend_certification_validation": "deferred"},
             )
         return ProductResult(
             ProductStatus.READY,
@@ -172,7 +193,8 @@ def create_plugin(
         )
 
     def capability_probe(context: ProjectContext) -> tuple[ProductCapability, ...]:
-        harvest_service, configuration_error, active_capabilities = service_with_configuration(context)
+        factory = passive_service_with_configuration if load_repository_capabilities else service_with_configuration
+        harvest_service, configuration_error, active_capabilities = factory(context)
         try:
             inventory = harvest_service.inventory()
         except HarvestError as exc:
@@ -202,14 +224,22 @@ def create_plugin(
                 "harvest.acquisition",
                 "Controlled acquisition",
                 (
-                    ProductStatus.READY
-                    if configuration_error is None and harvest_service.acquisition_configured
-                    else ProductStatus.UNAVAILABLE
+                    ProductStatus.NOT_STARTED
+                    if load_repository_capabilities and configuration_error is None
+                    else (
+                        ProductStatus.READY
+                        if configuration_error is None and harvest_service.acquisition_configured
+                        else ProductStatus.UNAVAILABLE
+                    )
                 ),
                 (
-                    "A separately certified adapter is configured; every run remains explicitly authorized."
-                    if configuration_error is None and harvest_service.acquisition_configured
-                    else "No current independently certified source adapter is configured."
+                    "Repository certification is validated lazily before Harvest exposes acquisition controls."
+                    if load_repository_capabilities and configuration_error is None
+                    else (
+                        "A separately certified adapter is configured; every run remains explicitly authorized."
+                        if configuration_error is None and harvest_service.acquisition_configured
+                        else "No current independently certified source adapter is configured."
+                    )
                 ),
                 details={
                     "explicit_authorization_required": True,
@@ -217,13 +247,27 @@ def create_plugin(
                     "backend_capability_identity": (
                         active_capabilities.identity if active_capabilities is not None else None
                     ),
-                    "configuration_valid": configuration_error is None,
+                    "configuration_valid": (
+                        None
+                        if load_repository_capabilities and configuration_error is None
+                        else configuration_error is None
+                    ),
+                    "configuration_validation": (
+                        "deferred" if load_repository_capabilities and configuration_error is None else "complete"
+                    ),
                     "network_probes": 0,
                 },
             ),
         )
 
     def router_factory(context: ProjectContext) -> object:
+        if load_repository_capabilities:
+            passive_service = passive_service_with_configuration(context)[0]
+            return create_harvest_router(
+                context,
+                service=passive_service,
+                configured_service_factory=lambda: service(context),
+            )
         return create_harvest_router(context, service=service(context))
 
     return ProductPlugin(

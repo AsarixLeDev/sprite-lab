@@ -62,7 +62,8 @@
         <label class="harvest-check"><input id="probe-zero-cost" type="checkbox" required> I confirm this source is zero cost.</label>
         <label class="harvest-check"><input id="probe-license-auth" type="checkbox" required> I authorize only the displayed CC0/public-domain policy.</label>
       </div>
-      <button class="button primary" id="harvest-probe-start" type="submit">Start bounded source probe</button>
+      <button class="button primary" id="harvest-probe-start" type="submit" aria-describedby="harvest-probe-availability">Start bounded source probe</button>
+      <p class="harvest-probe-availability" id="harvest-probe-availability" role="status" aria-live="polite">Checking whether the certified source-probe backend is available…</p>
     </form>
     <p id="harvest-probe-summary" role="status" aria-live="polite">No probe selected.</p>
     <div id="harvest-probes" class="harvest-runs"></div>

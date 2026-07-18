@@ -1220,8 +1220,29 @@ class EventRepository:
         return [self.snapshot(run_id) for _, run_id in candidates[: max(0, min(limit, 100))]]
 
     def current_run(self) -> RunSnapshot | None:
-        runs = self.recent_runs(limit=100)
-        return next((run for run in runs if not run.terminal), runs[0] if runs else None)
+        if self.runs_directory is None or not self.runs_directory.is_dir():
+            return None
+        candidates: list[tuple[str, str, str]] = []
+        try:
+            for child in self.runs_directory.iterdir():
+                if not child.is_dir() or not RUN_ID_PATTERN.fullmatch(child.name):
+                    continue
+                state = self._state(child.name)
+                if state:
+                    candidates.append(
+                        (
+                            str(state.get("started_at") or ""),
+                            child.name,
+                            str(state.get("status") or ProductStatus.NOT_STARTED.value),
+                        )
+                    )
+        except OSError:
+            return None
+        candidates.sort(reverse=True)
+        selected = next((row for row in candidates if row[2] not in TERMINAL_STATUSES), None)
+        if selected is None and candidates:
+            selected = candidates[0]
+        return self.snapshot(selected[1]) if selected is not None else None
 
     def recent_run_ids(self, *, feature: str | None = None, limit: int = 100) -> list[str]:
         if self.runs_directory is None or not self.runs_directory.is_dir():

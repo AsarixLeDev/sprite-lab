@@ -8,6 +8,8 @@ from collections.abc import Callable, Sequence
 
 Handler = Callable[[list[str]], None]
 
+_DEFAULT_V3_APP_ARGS = ("--host", "127.0.0.1", "--port", "8765")
+
 
 def _usage() -> str:
     return "Usage: spritelab <v3|dev|curation|training|train|dataset-maker|harvest|ml|eval> ..."
@@ -41,10 +43,12 @@ def _run_eval(args: list[str]) -> None:
 
 
 def _run_v3(args: list[str]) -> None:
-    if not args or args[0] == "app":
+    if not args:
+        args = ["app", *_DEFAULT_V3_APP_ARGS]
+    if args[0] == "app":
         from spritelab.product_web.cli import main as product_web_main
 
-        product_web_main(args[1:] if args else ())
+        product_web_main(args[1:])
         return
     from spritelab.product_runtime import build_product_runtime
     from spritelab.v3.cli import main as v3_main

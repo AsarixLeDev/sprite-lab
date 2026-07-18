@@ -9,6 +9,7 @@
   const runsNode = $("#harvest-runs");
   const probesNode = $("#harvest-probes");
   const probeSummary = $("#harvest-probe-summary");
+  const probeAvailability = $("#harvest-probe-availability");
   const prefillSummary = $("#harvest-prefill-summary");
   const prefillPreset = $("#probe-prefill-preset");
   const detail = $("#harvest-detail");
@@ -170,7 +171,7 @@
       authorize_permissive_license: $("#probe-license-auth").checked,
     };
   }
-  function renderSources(catalog) {
+  function renderSources(catalog, availabilityChecked = true) {
     state.catalog = catalog;
     sourceSelect.replaceChildren();
     for (const source of catalog.sources || []) {
@@ -179,7 +180,23 @@
     }
     sourceSelect.disabled = !sourceSelect.options.length || !catalog.backend_configured;
     const probeButton = $("#harvest-probe-start");
-    if (probeButton) probeButton.disabled = !catalog.backend_capability_evidence?.evidence_identity;
+    const probeAvailable = availabilityChecked && Boolean(catalog.backend_capability_evidence?.evidence_identity);
+    if (probeButton) {
+      probeButton.disabled = !probeAvailable;
+      probeButton.title = probeAvailable
+        ? ""
+        : availabilityChecked
+          ? "Source probing requires current independent backend capability evidence."
+          : "Checking whether the certified source-probe backend is available.";
+    }
+    if (probeAvailability) {
+      probeAvailability.hidden = probeAvailable;
+      probeAvailability.textContent = probeAvailable
+        ? ""
+        : availabilityChecked
+          ? "Source probing is unavailable because current independent backend capability evidence is missing or invalid. Configure or renew the repository Harvest certificate, then reload this page."
+          : "Checking whether the certified source-probe backend is available…";
+    }
     $("#harvest-limits").textContent = JSON.stringify(catalog.limits || {}, null, 2);
     renderSourceEvidence();
   }
@@ -341,7 +358,13 @@
   });
   sourceSelect.addEventListener("change", renderSourceEvidence);
   renderPrefillPresets();
-  renderSources(state.catalog || {sources: []}); renderInventory(state.inventory || {runs: [], legacy_runs: []});
-  Promise.all([request("/harvest/api/sources"), refresh()]).then(([catalog]) => { renderSources(catalog); }).catch((error) => { summary.textContent = error.message; });
+  renderSources(state.catalog || {sources: []}, false); renderInventory(state.inventory || {runs: [], legacy_runs: []});
+  request("/harvest/api/sources").then(renderSources).catch((error) => {
+    if (probeAvailability) {
+      probeAvailability.hidden = false;
+      probeAvailability.textContent = `Source probing remains unavailable because backend capability evidence could not be verified: ${error.message}`;
+    }
+  });
+  refresh().catch((error) => { summary.textContent = error.message; });
   window.setInterval(() => { if ([...activeJobs, ...(state.inventory.probe_runs || [])].some((run) => ["QUEUED", "RUNNING", "CANCELLING"].includes(run.status) || ["RUNNING", "CANCELLING"].includes(run.dataset_import?.status))) refresh().catch((error) => { summary.textContent = error.message; }); }, 1500);
 })();

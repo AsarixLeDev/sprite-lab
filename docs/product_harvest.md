@@ -62,7 +62,11 @@ OpenGameArt and itch.io licenses remain deliberately blank because they vary
 by pack. Smart prefill never fetches a page, derives a direct download link,
 confirms a license, checks an authorization, creates `harvest_runs`, or weakens
 the later evidence verifier. Applying another draft clears the prior direct
-link so evidence from two packs cannot be accidentally combined.
+link so evidence from two packs cannot be accidentally combined. The web form
+explains when its probe action is disabled because current independent backend
+capability evidence is missing, invalid, or could not be verified, and directs
+the operator to configure or renew the repository Harvest certificate before
+reloading.
 
 An explicit catalog probe fetches only bounded public HTTPS evidence through
 pinned public DNS. Before every distinct source, terms, license, or direct-link
@@ -167,6 +171,13 @@ construction also recomputes current backend and conditioned-callback bindings,
 requires live-reloadable independent evidence, and accepts only the exact
 conditioned callback class bound to the project root. Arbitrary injected
 backends are available only through the explicit test seam.
+
+General product startup, navigation, and passive inventory do not perform this
+runtime-wide attestation. The Harvest page renders from the trusted catalog and
+local inventory first, then validates and caches one certified service when its
+source API is requested. Every acquisition, source-probe, promotion, handoff,
+and Dataset-import boundary still uses that certified service; mutating actions
+also reload current repository evidence before authorization or publication.
 
 A certified adapter must provide both:
 
