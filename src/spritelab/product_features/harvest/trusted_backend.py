@@ -16,6 +16,7 @@ import sysconfig
 import time
 import unicodedata
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -284,6 +285,69 @@ class AcquisitionBackend(Protocol):
 BackendFactory = Callable[[], AcquisitionBackend]
 
 
+@dataclass(frozen=True)
+class HardenedBackendIdentitySnapshot:
+    """One exact identity capture reused throughout a single validation."""
+
+    module_sha256: dict[str, str]
+    runtime_dependencies: dict[str, dict[str, Any]]
+    callback_binding: dict[str, str]
+    code_identity_sha256: str
+
+
+def hardened_backend_identity_snapshot() -> HardenedBackendIdentitySnapshot:
+    """Capture every certified identity once without weakening the hash boundary."""
+
+    from spritelab.product_features.conditioned_v5.identity import (
+        conditioned_callback_runtime_inventory,
+        conditioned_code_inventory,
+    )
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="harvest-identity") as executor:
+        module_future = executor.submit(_read_hardened_backend_modules)
+        conditioned_future = executor.submit(conditioned_code_inventory)
+        python_future = executor.submit(_python_runtime_identity)
+        openssl_future = executor.submit(_openssl_runtime_identity)
+        module_payloads = module_future.result()
+        code_inventory = conditioned_future.result()
+        python_runtime = python_future.result()
+        openssl_runtime = openssl_future.result()
+
+    module_records = [
+        {
+            "module": module_name,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "byte_count": len(payload),
+        }
+        for module_name, payload in module_payloads
+    ]
+    module_sha256 = {str(record["module"]): str(record["sha256"]) for record in module_records}
+
+    callback_binding = _conditioned_callback_binding_from_inventory(
+        code_inventory,
+        conditioned_callback_runtime_inventory(code_inventory),
+    )
+    runtime_dependencies = _hardened_backend_runtime_dependencies(
+        conditioned_runtime_dependencies=code_inventory.get("runtime_dependencies"),
+        python_runtime=python_runtime,
+        openssl_runtime=openssl_runtime,
+    )
+    code_identity_sha256 = _identity(
+        {
+            "schema_version": "spritelab.harvest.hardened-backend-code.v4",
+            "modules": module_records,
+            "runtime_dependencies": runtime_dependencies,
+            "dataset_import_callback": callback_binding,
+        }
+    )
+    return HardenedBackendIdentitySnapshot(
+        module_sha256=module_sha256,
+        runtime_dependencies=runtime_dependencies,
+        callback_binding=callback_binding,
+        code_identity_sha256=code_identity_sha256,
+    )
+
+
 def hardened_backend_code_identity() -> str:
     """Bind certification input to the exact modules enforcing acquisition.
 
@@ -292,22 +356,7 @@ def hardened_backend_code_identity() -> str:
     gates and carry this exact digest before the adapter will run.
     """
 
-    modules = [
-        {
-            "module": module_name,
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "byte_count": len(payload),
-        }
-        for module_name, payload in _read_hardened_backend_modules()
-    ]
-    return _identity(
-        {
-            "schema_version": "spritelab.harvest.hardened-backend-code.v4",
-            "modules": modules,
-            "runtime_dependencies": hardened_backend_runtime_dependencies(),
-            "dataset_import_callback": conditioned_dataset_import_callback_binding(),
-        }
-    )
+    return hardened_backend_identity_snapshot().code_identity_sha256
 
 
 def hardened_backend_module_hashes() -> dict[str, str]:
@@ -330,9 +379,22 @@ def hardened_backend_runtime_dependencies() -> dict[str, dict[str, Any]]:
     a certificate or browser response.
     """
 
-    distributions = {name: _compact_distribution_identity(name) for name in ("NumPy", "Pillow", "PyYAML")}
-    python_runtime = _python_runtime_identity()
-    openssl_runtime = _openssl_runtime_identity()
+    return _hardened_backend_runtime_dependencies()
+
+
+def _hardened_backend_runtime_dependencies(
+    *,
+    conditioned_runtime_dependencies: Any = None,
+    python_runtime: dict[str, Any] | None = None,
+    openssl_runtime: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    inventories = conditioned_runtime_dependencies if isinstance(conditioned_runtime_dependencies, Mapping) else {}
+    distributions = {
+        name: _compact_distribution_identity(name, inventory=inventories.get(name))
+        for name in ("NumPy", "Pillow", "PyYAML")
+    }
+    python_runtime = _python_runtime_identity() if python_runtime is None else python_runtime
+    openssl_runtime = _openssl_runtime_identity() if openssl_runtime is None else openssl_runtime
     return {
         **distributions,
         "OpenSSL": openssl_runtime,
@@ -340,7 +402,11 @@ def hardened_backend_runtime_dependencies() -> dict[str, dict[str, Any]]:
     }
 
 
-def _compact_distribution_identity(distribution_name: str) -> dict[str, Any]:
+def _compact_distribution_identity(
+    distribution_name: str,
+    *,
+    inventory: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Recompute one exact wheel inventory and retain only bounded evidence."""
 
     from spritelab.product_features.conditioned_v5.identity import (
@@ -350,7 +416,7 @@ def _compact_distribution_identity(distribution_name: str) -> dict[str, Any]:
 
     before_path, before_metadata = _installed_distribution_root(distribution_name)
     try:
-        inventory = installed_distribution_inventory(distribution_name)
+        inventory = installed_distribution_inventory(distribution_name) if inventory is None else inventory
     except ConditionedCodeIdentityError as exc:
         raise ValueError(f"Harvest runtime dependency {distribution_name!r} is unsafe.") from exc
     after_path, after_metadata = _installed_distribution_root(distribution_name)
@@ -1005,6 +1071,13 @@ def conditioned_dataset_import_callback_binding() -> dict[str, str]:
 
     code_inventory = conditioned_code_inventory()
     runtime_inventory = conditioned_callback_runtime_inventory(code_inventory)
+    return _conditioned_callback_binding_from_inventory(code_inventory, runtime_inventory)
+
+
+def _conditioned_callback_binding_from_inventory(
+    code_inventory: Mapping[str, Any],
+    runtime_inventory: Mapping[str, Any],
+) -> dict[str, str]:
     code_identity = code_inventory.get("inventory_sha256")
     runtime_identity = runtime_inventory.get("runtime_identity_sha256")
     if (
@@ -1836,10 +1909,12 @@ __all__ = [
     "DatasetImportRequest",
     "DatasetImportResult",
     "HardenedArchiveAcquisitionBackend",
+    "HardenedBackendIdentitySnapshot",
     "HarvestLimits",
     "ProgressCallback",
     "conditioned_dataset_import_callback_binding",
     "hardened_backend_code_identity",
+    "hardened_backend_identity_snapshot",
     "hardened_backend_module_hashes",
     "hardened_backend_runtime_dependencies",
     "validate_callback_identity",

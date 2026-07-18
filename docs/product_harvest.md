@@ -162,13 +162,17 @@ code-inventory identity, and a separate runtime identity covering the exact
 dependency inventory and isolated worker executable, launch policy, and
 dependency roots. Certificate/report v5
 evidence must reproduce those values; any code, callback, worker, or runtime
-drift disables acquisition. The report contains an exact, pathless, bounded
+drift disables acquisition. One validation captures the module, runtime, and
+callback identities in a single coherent snapshot and reuses that loader-sealed
+snapshot during immediate service construction and passive source rendering;
+it does not repeat the same full-tree hashes at each layer. The report contains
+an exact, pathless, bounded
 per-gate map: every original gate and the direct-image, retained-anchor,
 whole-operation deadline, durable import-control, same-pack license/cost,
 exact-pixel usability, and non-self-attestation gates must each record `PASS`.
 An aggregate PASS cannot substitute for a missing or failed gate. Production
-construction also recomputes current backend and conditioned-callback bindings,
-requires live-reloadable independent evidence, and accepts only the exact
+construction requires loader-sealed current backend and conditioned-callback
+bindings plus live-reloadable independent evidence, and accepts only the exact
 conditioned callback class bound to the project root. Arbitrary injected
 backends are available only through the explicit test seam.
 
@@ -177,7 +181,8 @@ runtime-wide attestation. The Harvest page renders from the trusted catalog and
 local inventory first, then validates and caches one certified service when its
 source API is requested. Every acquisition, source-probe, promotion, handoff,
 and Dataset-import boundary still uses that certified service; mutating actions
-also reload current repository evidence before authorization or publication.
+reload current repository evidence into a fresh full snapshot before
+authorization or publication.
 
 A certified adapter must provide both:
 
@@ -266,6 +271,9 @@ The web endpoints are:
 
 All mutations use the real product shell's `X-CSRF-Token`. Payloads have exact
 field allowlists and never accept a path, URL, destination, or output root.
+The two start controls show an immediate indeterminate progress bar while their
+request is accepted, then bind that bar to the returned acquisition or source
+probe and update its durable stage and counters during normal polling.
 
 ## Dataset handoff v2
 

@@ -28,7 +28,10 @@ from spritelab.product_features.harvest.catalog import (
     url_identity,
     validate_download_url,
 )
-from spritelab.product_features.harvest.certification import BackendCapabilityEvidence
+from spritelab.product_features.harvest.certification import (
+    BackendCapabilityEvidence,
+    evidence_has_current_validation_snapshot,
+)
 from spritelab.product_features.harvest.onboarding import (
     ACTIVE_PROBE_STATUSES,
     PROBE_ID_PATTERN,
@@ -3367,6 +3370,8 @@ def _require_current_backend_evidence(
         or evidence.implementation_identity_sha256 != capabilities.code_identity_sha256
     ):
         raise ValueError("Harvest capability evidence identities are invalid.")
+    if evidence_has_current_validation_snapshot(evidence, capabilities):
+        return
     current_implementation_identity = hardened_backend_code_identity()
     current_callback_binding = conditioned_dataset_import_callback_binding()
     if (

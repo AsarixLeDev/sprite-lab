@@ -33,6 +33,76 @@ REQUIRED_HARDENED_MODULES = {
 }
 
 
+def test_hardened_identity_snapshot_captures_each_boundary_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from spritelab.product_features.conditioned_v5 import identity as conditioned_identity
+
+    calls = {"modules": 0, "conditioned": 0, "python": 0, "openssl": 0, "runtime": 0}
+    callback_binding = {
+        "dataset_import_callback_id": "dataset.conditioned-intake",
+        "dataset_import_callback_code_identity_sha256": "a" * 64,
+        "dataset_import_callback_runtime_identity_sha256": "b" * 64,
+    }
+    runtime_dependencies = {
+        "Python": {"runtime_identity_sha256": "c" * 64},
+        "OpenSSL": {"runtime_identity_sha256": "d" * 64},
+    }
+
+    def modules() -> tuple[tuple[str, bytes], ...]:
+        calls["modules"] += 1
+        return (("test.module", b"VALUE = 1\n"),)
+
+    def conditioned() -> dict[str, object]:
+        calls["conditioned"] += 1
+        return {"inventory_sha256": "a" * 64, "runtime_dependencies": {}}
+
+    def python_runtime() -> dict[str, object]:
+        calls["python"] += 1
+        return runtime_dependencies["Python"]
+
+    def openssl_runtime() -> dict[str, object]:
+        calls["openssl"] += 1
+        return runtime_dependencies["OpenSSL"]
+
+    def runtime_dependencies_from_snapshot(**kwargs: object) -> dict[str, dict[str, object]]:
+        calls["runtime"] += 1
+        assert kwargs["python_runtime"] == runtime_dependencies["Python"]
+        assert kwargs["openssl_runtime"] == runtime_dependencies["OpenSSL"]
+        return runtime_dependencies
+
+    monkeypatch.setattr(trusted_backend, "_read_hardened_backend_modules", modules)
+    monkeypatch.setattr(conditioned_identity, "conditioned_code_inventory", conditioned)
+    monkeypatch.setattr(
+        conditioned_identity,
+        "conditioned_callback_runtime_inventory",
+        lambda _inventory: {"runtime_identity_sha256": "b" * 64},
+    )
+    monkeypatch.setattr(trusted_backend, "_python_runtime_identity", python_runtime)
+    monkeypatch.setattr(trusted_backend, "_openssl_runtime_identity", openssl_runtime)
+    monkeypatch.setattr(trusted_backend, "_hardened_backend_runtime_dependencies", runtime_dependencies_from_snapshot)
+
+    snapshot = trusted_backend.hardened_backend_identity_snapshot()
+
+    module_digest = trusted_backend.hashlib.sha256(b"VALUE = 1\n").hexdigest()
+    assert snapshot.module_sha256 == {"test.module": module_digest}
+    assert snapshot.runtime_dependencies == runtime_dependencies
+    assert snapshot.callback_binding == callback_binding
+    assert snapshot.code_identity_sha256 == trusted_backend._identity(
+        {
+            "schema_version": "spritelab.harvest.hardened-backend-code.v4",
+            "modules": [
+                {
+                    "module": "test.module",
+                    "sha256": module_digest,
+                    "byte_count": len(b"VALUE = 1\n"),
+                }
+            ],
+            "runtime_dependencies": runtime_dependencies,
+            "dataset_import_callback": callback_binding,
+        }
+    )
+    assert calls == {"modules": 1, "conditioned": 1, "python": 1, "openssl": 1, "runtime": 1}
+
+
 def test_hardened_identity_covers_transitive_production_boundary_without_unused_pipeline() -> None:
     module_hashes = trusted_backend.hardened_backend_module_hashes()
 

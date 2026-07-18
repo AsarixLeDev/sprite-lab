@@ -8,6 +8,7 @@ import time
 import zipfile
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ import pytest
 
 import spritelab.harvest.archive as archive_module
 import spritelab.harvest.download as download_module
+import spritelab.product_features.harvest.service as harvest_service_module
 from _harvest_testdata import make_zip_of_pngs
 from spritelab.harvest.archive import ArchiveCancelled, ArchiveSnapshot, archive_member_summary, extract_archive
 from spritelab.harvest.download import (
@@ -64,11 +66,9 @@ from spritelab.product_features.harvest.service import HarvestError, HarvestServ
 from spritelab.product_features.harvest.trusted_backend import (
     CertifiedBackendCapabilities,
     HardenedArchiveAcquisitionBackend,
+    HardenedBackendIdentitySnapshot,
     HarvestLimits,
-    conditioned_dataset_import_callback_binding,
-    hardened_backend_code_identity,
-    hardened_backend_module_hashes,
-    hardened_backend_runtime_dependencies,
+    hardened_backend_identity_snapshot,
 )
 from spritelab.utils.safe_fs import AnchoredDirectory, OwnedFileIdentity, UnsafeFilesystemOperation
 
@@ -188,14 +188,22 @@ def _source(response: bytes) -> HarvestSource:
     )
 
 
+@cache
+def _certificate_fixture_snapshot() -> HardenedBackendIdentitySnapshot:
+    """Reuse the immutable baseline while drift tests still load fresh state."""
+
+    return hardened_backend_identity_snapshot()
+
+
 def _capabilities() -> CertifiedBackendCapabilities:
+    snapshot = _certificate_fixture_snapshot()
     return CertifiedBackendCapabilities(
         backend_id="audit.backend",
         backend_version="1.0",
         downloader_id="audit.downloader",
         downloader_version="1.0",
-        code_identity_sha256=hardened_backend_code_identity(),
-        **conditioned_dataset_import_callback_binding(),
+        code_identity_sha256=snapshot.code_identity_sha256,
+        **snapshot.callback_binding,
         enforces_http_success=True,
         enforces_https_direct_url=True,
         resolves_and_blocks_private_networks=True,
@@ -306,16 +314,17 @@ def test_append_only_catalog_publication_rejects_staged_inode_substitution(
 
 
 def _write_capability_evidence(project: Path, capabilities: CertifiedBackendCapabilities) -> None:
-    modules = hardened_backend_module_hashes()
+    snapshot = _certificate_fixture_snapshot()
+    modules = snapshot.module_sha256
     issued = datetime.now(timezone.utc) - timedelta(minutes=5)
     report = {
         "schema_version": BACKEND_AUDIT_REPORT_SCHEMA,
         "outcome": "PASS",
         "auditor_id": "independent.audit",
         "audited_at": (issued - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
-        "implementation_identity_sha256": hardened_backend_code_identity(),
+        "implementation_identity_sha256": snapshot.code_identity_sha256,
         "module_sha256": modules,
-        "runtime_dependencies": hardened_backend_runtime_dependencies(),
+        "runtime_dependencies": snapshot.runtime_dependencies,
         "gate_results": dict.fromkeys(sorted(REQUIRED_BACKEND_AUDIT_GATES), "PASS"),
     }
     report["report_identity"] = _identity(report)
@@ -331,7 +340,7 @@ def _write_capability_evidence(project: Path, capabilities: CertifiedBackendCapa
         "audit_report_relative_path": BACKEND_AUDIT_REPORT_RELATIVE_PATH.as_posix(),
         "audit_report_sha256": hashlib.sha256(report_bytes).hexdigest(),
         "module_sha256": modules,
-        "runtime_dependencies": hardened_backend_runtime_dependencies(),
+        "runtime_dependencies": snapshot.runtime_dependencies,
         "capabilities": asdict(capabilities),
     }
     certificate["certificate_identity"] = _identity(certificate)
@@ -809,8 +818,29 @@ def test_independent_certificate_activates_default_plugin_without_network(tmp_pa
     _write_catalog(project, source)
     capabilities = _capabilities()
     _write_capability_evidence(project, capabilities)
-    loaded = load_backend_capability_certificate(project)
-    assert loaded == capabilities
+    evidence = load_backend_capability_evidence(project)
+    assert evidence is not None
+    assert evidence.capabilities == capabilities
+
+    monkeypatch.setattr(
+        harvest_service_module,
+        "hardened_backend_code_identity",
+        lambda: pytest.fail("loader-validated evidence must not be rehashed immediately"),
+    )
+    monkeypatch.setattr(
+        harvest_service_module,
+        "conditioned_dataset_import_callback_binding",
+        lambda: pytest.fail("loader-validated callback evidence must not be rehashed immediately"),
+    )
+    service = HarvestService(
+        project,
+        sources=(source,),
+        backend_factory=lambda: pytest.fail("passive source rendering must not construct the backend"),
+        backend_capabilities=capabilities,
+        backend_capability_evidence=evidence,
+        live_configuration_loader=lambda: ((source,), evidence),
+    )
+    assert service.sources()["backend_configured"] is True
 
     monkeypatch.setattr("socket.create_connection", lambda *_args, **_kwargs: pytest.fail("network access"))
     result = build_plugin().status_provider(ProjectContext(project))

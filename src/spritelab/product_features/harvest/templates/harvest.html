@@ -30,7 +30,11 @@
       <label class="harvest-check"><input id="harvest-inventory-reviewed" type="checkbox" required> I reviewed the exact managed and legacy inventory shown above.</label>
       <label class="harvest-check"><input id="harvest-zero-cost" type="checkbox" required> I authorize this confirmed zero-cost source.</label>
       <label class="harvest-check"><input id="harvest-license" type="checkbox" required> I authorize the displayed CC0/public-domain evidence.</label>
-      <button class="button primary" id="harvest-start" type="submit">Start certified Harvest</button>
+      <button class="button primary" id="harvest-start" type="submit" aria-describedby="harvest-start-progress-status">Start certified Harvest</button>
+      <div class="harvest-launch-progress" id="harvest-start-progress" hidden>
+        <progress id="harvest-start-progress-bar" aria-labelledby="harvest-start-progress-status"></progress>
+        <p id="harvest-start-progress-status" role="status" aria-live="polite">Ready to start a certified Harvest.</p>
+      </div>
     </form>
   </section>
 
@@ -62,7 +66,11 @@
         <label class="harvest-check"><input id="probe-zero-cost" type="checkbox" required> I confirm this source is zero cost.</label>
         <label class="harvest-check"><input id="probe-license-auth" type="checkbox" required> I authorize only the displayed CC0/public-domain policy.</label>
       </div>
-      <button class="button primary" id="harvest-probe-start" type="submit" aria-describedby="harvest-probe-availability">Start bounded source probe</button>
+      <button class="button primary" id="harvest-probe-start" type="submit" aria-describedby="harvest-probe-availability harvest-probe-progress-status">Start bounded source probe</button>
+      <div class="harvest-launch-progress" id="harvest-probe-progress" hidden>
+        <progress id="harvest-probe-progress-bar" aria-labelledby="harvest-probe-progress-status"></progress>
+        <p id="harvest-probe-progress-status" role="status" aria-live="polite">Ready to start a bounded source probe.</p>
+      </div>
       <p class="harvest-probe-availability" id="harvest-probe-availability" role="status" aria-live="polite">Checking whether the certified source-probe backend is available…</p>
     </form>
     <p id="harvest-probe-summary" role="status" aria-live="polite">No probe selected.</p>

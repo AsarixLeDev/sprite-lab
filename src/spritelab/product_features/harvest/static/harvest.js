@@ -18,6 +18,16 @@
   const idempotencyStoragePrefix = "spritelab.harvest.pending-idempotency.v1:";
   let state = {inventory: {runs: [], probe_runs: [], legacy_runs: []}, catalog: {sources: []}, source_prefill_presets: []};
   let activeJobs = [];
+  const launchIndicators = {
+    harvest: {
+      root: $("#harvest-start-progress"), bar: $("#harvest-start-progress-bar"),
+      status: $("#harvest-start-progress-status"), label: "Certified Harvest", trackedId: null,
+    },
+    probe: {
+      root: $("#harvest-probe-progress"), bar: $("#harvest-probe-progress-bar"),
+      status: $("#harvest-probe-progress-status"), label: "Bounded source probe", trackedId: null,
+    },
+  };
   try { state = JSON.parse($("#harvest-initial-state")?.textContent || "{}"); } catch (_error) { /* safe defaults */ }
 
   const newIdempotency = (prefix) => `${prefix}-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
@@ -54,6 +64,48 @@
     control.disabled = busy;
     control.setAttribute("aria-busy", String(busy));
   };
+  function beginLaunchProgress(kind) {
+    const indicator = launchIndicators[kind];
+    if (!indicator?.root || !indicator.bar || !indicator.status) return;
+    indicator.trackedId = null;
+    indicator.root.hidden = false;
+    indicator.root.dataset.state = "active";
+    indicator.bar.removeAttribute("value");
+    indicator.status.textContent = `${indicator.label}: submitting the start request…`;
+  }
+  function updateLaunchProgress(kind, record, idKey) {
+    const indicator = launchIndicators[kind];
+    if (!indicator?.root || !indicator.bar || !indicator.status || !record) return;
+    indicator.trackedId = record[idKey] || indicator.trackedId;
+    indicator.root.hidden = false;
+    const current = Number(record.current);
+    const total = Number(record.total);
+    const hasTotal = Number.isFinite(current) && Number.isFinite(total) && total > 0;
+    const terminalSuccess = ["COMPLETE", "READY"].includes(record.status);
+    const terminalFailure = ["FAILED", "CANCELLED", "INTERRUPTED"].includes(record.status);
+    if (hasTotal) {
+      indicator.bar.max = total;
+      indicator.bar.value = Math.max(0, Math.min(current, total));
+    } else if (terminalSuccess || terminalFailure) {
+      indicator.bar.max = 1;
+      indicator.bar.value = 1;
+    } else {
+      indicator.bar.removeAttribute("value");
+    }
+    indicator.root.dataset.state = terminalFailure ? "failed" : terminalSuccess ? "complete" : "active";
+    const stage = String(record.stage || record.status || "starting").replaceAll("_", " ").toLowerCase();
+    const count = hasTotal ? ` — ${Math.max(0, Math.min(current, total))} of ${total}` : "";
+    indicator.status.textContent = `${indicator.label}: ${stage}${count}.`;
+  }
+  function failLaunchProgress(kind, message) {
+    const indicator = launchIndicators[kind];
+    if (!indicator?.root || !indicator.bar || !indicator.status) return;
+    indicator.root.hidden = false;
+    indicator.root.dataset.state = "failed";
+    indicator.bar.max = 1;
+    indicator.bar.value = 1;
+    indicator.status.textContent = `${indicator.label} could not start: ${message}`;
+  }
   async function request(url, options = {}) {
     const response = await fetch(url, {
       ...options,
@@ -314,15 +366,22 @@
     }));
     inventory.probe_runs = probes;
     renderInventory(inventory, jobs);
+    const trackedHarvest = jobs.find((job) => job.run_id === launchIndicators.harvest.trackedId);
+    if (trackedHarvest) updateLaunchProgress("harvest", trackedHarvest, "run_id");
+    const trackedProbe = probes.find((probe) => probe.probe_id === launchIndicators.probe.trackedId);
+    if (trackedProbe) updateLaunchProgress("probe", trackedProbe, "probe_id");
     const active = [...jobs, ...(inventory.probe_runs || [])].some((run) => ["QUEUED", "RUNNING", "CANCELLING"].includes(run.status) || ["RUNNING", "CANCELLING"].includes(run.dataset_import?.status));
     $("#harvest-poll-state").textContent = active ? "Polling active work" : "No active work";
   }
   $("#harvest-start-form").addEventListener("submit", (event) => {
     event.preventDefault(); const button = $("#harvest-start");
+    beginLaunchProgress("harvest");
     once("start", button, async () => {
       const payload = {source_id: sourceSelect.value, ...authorization()};
-      await idempotentRequest(`start:${sourceSelect.value}`, "start", "/harvest/api/jobs", payload); await refresh();
-    }).catch((error) => { summary.textContent = error.message; });
+      const value = await idempotentRequest(`start:${sourceSelect.value}`, "start", "/harvest/api/jobs", payload);
+      updateLaunchProgress("harvest", value.job, "run_id");
+      await refresh();
+    }).catch((error) => { failLaunchProgress("harvest", error.message); summary.textContent = error.message; });
   });
   $("#harvest-refresh").addEventListener("click", (event) => once("refresh", event.currentTarget, refresh).catch((error) => { summary.textContent = error.message; }));
   $("#harvest-smart-prefill")?.addEventListener("click", (event) => {
@@ -350,11 +409,13 @@
   $("#harvest-probe-form")?.addEventListener("submit", (event) => {
     event.preventDefault(); const form = event.currentTarget; const button = $("#harvest-probe-start");
     if (!form.reportValidity()) return;
+    beginLaunchProgress("probe");
     once("probe-start", button, async () => {
       const sourceId = $("#probe-source-id").value.trim();
       const value = await idempotentRequest(`probe-start:${sourceId}`, "probe-start", "/harvest/api/probes", probePayload());
+      updateLaunchProgress("probe", value.probe, "probe_id");
       probeSummary.textContent = `Probe ${value.probe.probe_id} recorded. Progress is durable and safe to reload.`; await refresh();
-    }).catch((error) => { probeSummary.textContent = error.message; });
+    }).catch((error) => { failLaunchProgress("probe", error.message); probeSummary.textContent = error.message; });
   });
   sourceSelect.addEventListener("change", renderSourceEvidence);
   renderPrefillPresets();

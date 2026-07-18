@@ -1668,7 +1668,9 @@ def test_catalog_onboarding_ui_is_visible_and_rejects_browser_paths(tmp_path: Pa
     page = client.get("/harvest")
     assert page.status_code == 200
     assert "Start bounded source probe" in page.text
-    assert 'aria-describedby="harvest-probe-availability"' in page.text
+    assert 'aria-describedby="harvest-probe-availability harvest-probe-progress-status"' in page.text
+    assert 'id="harvest-probe-progress-bar"' in page.text
+    assert 'aria-labelledby="harvest-probe-progress-status"' in page.text
     assert "Checking whether the certified source-probe backend is available" in page.text
     assert "Automation terms URL" in page.text
     assert "Leave blank only when no governing Terms or ToS link exists" in page.text
@@ -1679,6 +1681,9 @@ def test_catalog_onboarding_ui_is_visible_and_rejects_browser_paths(tmp_path: Pa
     assert "reviewed_verification_identity" in javascript
     assert "reviewed_source_pack_evidence_sha256" in javascript
     assert "Automation terms decision" in javascript
+    assert 'beginLaunchProgress("probe")' in javascript
+    assert 'updateLaunchProgress("probe", value.probe, "probe_id")' in javascript
+    assert 'failLaunchProgress("probe", error.message)' in javascript
     assert "no prohibition observed; not affirmative permission" in javascript
     assert "spritelab.harvest.pending-idempotency.v1:" in javascript
     assert (

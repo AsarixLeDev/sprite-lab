@@ -401,6 +401,8 @@ def test_real_product_shell_requires_csrf_and_js_supplies_it(tmp_path: Path) -> 
     page = client.get("/harvest")
     assert page.status_code == 200
     assert "Authorize a measured deficit" in page.text
+    assert 'id="harvest-start-progress-bar"' in page.text
+    assert 'aria-labelledby="harvest-start-progress-status"' in page.text
     inventory = client.get("/harvest/api/inventory").json()
     payload = {
         "source_id": "open.source",
@@ -447,6 +449,9 @@ def test_real_product_shell_requires_csrf_and_js_supplies_it(tmp_path: Path) -> 
     assert "sessionStorage" in javascript
     assert "Cancel Dataset import" in javascript
     assert "run.dataset_import?.status" in javascript
+    assert 'beginLaunchProgress("harvest")' in javascript
+    assert 'updateLaunchProgress("harvest", value.job, "run_id")' in javascript
+    assert 'failLaunchProgress("harvest", error.message)' in javascript
     assert "fresh-browser-session" not in javascript
 
 

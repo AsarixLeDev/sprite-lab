@@ -8,7 +8,7 @@ import os
 import stat
 from collections.abc import Mapping
 from contextlib import ExitStack
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -17,10 +17,8 @@ from spritelab.product_core.events import strict_json_dumps
 from spritelab.product_features.harvest.catalog import SHA256_PATTERN, SOURCE_ID_PATTERN
 from spritelab.product_features.harvest.trusted_backend import (
     CertifiedBackendCapabilities,
-    conditioned_dataset_import_callback_binding,
-    hardened_backend_code_identity,
-    hardened_backend_module_hashes,
-    hardened_backend_runtime_dependencies,
+    HardenedBackendIdentitySnapshot,
+    hardened_backend_identity_snapshot,
 )
 from spritelab.utils.safe_fs import AnchoredDirectory, UnsafeFilesystemOperation
 
@@ -119,6 +117,12 @@ class BackendCapabilityEvidence:
     audit_report_identity: str
     certificate_identity: str
     implementation_identity_sha256: str
+    _validation_snapshot: HardenedBackendIdentitySnapshot | None = field(
+        default=None,
+        init=False,
+        compare=False,
+        repr=False,
+    )
 
     @property
     def identity(self) -> str:
@@ -221,7 +225,8 @@ def _validate_certificate(
     if expires - issued > MAX_CERTIFICATE_VALIDITY:
         raise BackendCapabilityCertificateError("Harvest backend capability certificate validity is too long.")
 
-    current_modules = hardened_backend_module_hashes()
+    snapshot = hardened_backend_identity_snapshot()
+    current_modules = snapshot.module_sha256
     expected_module_names = set(current_modules)
     certificate_modules = _module_hashes(
         certificate["module_sha256"],
@@ -233,13 +238,13 @@ def _validate_certificate(
     )
     if certificate_modules != current_modules or report_modules != current_modules:
         raise BackendCapabilityCertificateError("Harvest backend implementation changed after the PASS audit.")
-    current_dependencies = hardened_backend_runtime_dependencies()
+    current_dependencies = snapshot.runtime_dependencies
     if (
         certificate["runtime_dependencies"] != current_dependencies
         or report["runtime_dependencies"] != current_dependencies
     ):
         raise BackendCapabilityCertificateError("Harvest backend runtime dependencies changed after the PASS audit.")
-    current_identity = hardened_backend_code_identity()
+    current_identity = snapshot.code_identity_sha256
     if report["implementation_identity_sha256"] != current_identity:
         raise BackendCapabilityCertificateError("Harvest backend aggregate code identity changed after audit.")
 
@@ -260,13 +265,13 @@ def _validate_certificate(
             raise BackendCapabilityCertificateError("Harvest backend capability field types are invalid.")
     if capability_record["code_identity_sha256"] != current_identity:
         raise BackendCapabilityCertificateError("Harvest backend capability is not bound to current code.")
-    current_callback_binding = conditioned_dataset_import_callback_binding()
+    current_callback_binding = snapshot.callback_binding
     if any(capability_record[key] != value for key, value in current_callback_binding.items()):
         raise BackendCapabilityCertificateError(
             "Harvest backend capability is not bound to the current Dataset import callback runtime."
         )
     capabilities = CertifiedBackendCapabilities(**capability_record)
-    return BackendCapabilityEvidence(
+    evidence = BackendCapabilityEvidence(
         capabilities=capabilities,
         auditor_id=auditor_id,
         audited_at=report["audited_at"],
@@ -276,6 +281,24 @@ def _validate_certificate(
         audit_report_identity=report["report_identity"],
         certificate_identity=certificate["certificate_identity"],
         implementation_identity_sha256=current_identity,
+    )
+    object.__setattr__(evidence, "_validation_snapshot", snapshot)
+    return evidence
+
+
+def evidence_has_current_validation_snapshot(
+    evidence: BackendCapabilityEvidence,
+    capabilities: CertifiedBackendCapabilities,
+) -> bool:
+    """Return whether evidence came from one complete loader validation."""
+
+    snapshot = evidence._validation_snapshot
+    return bool(
+        snapshot is not None
+        and evidence.capabilities == capabilities
+        and evidence.implementation_identity_sha256 == snapshot.code_identity_sha256
+        and capabilities.code_identity_sha256 == snapshot.code_identity_sha256
+        and all(getattr(capabilities, key) == value for key, value in snapshot.callback_binding.items())
     )
 
 
@@ -419,6 +442,7 @@ __all__ = [
     "REQUIRED_BACKEND_AUDIT_GATES",
     "BackendCapabilityCertificateError",
     "BackendCapabilityEvidence",
+    "evidence_has_current_validation_snapshot",
     "load_backend_capability_certificate",
     "load_backend_capability_evidence",
 ]
