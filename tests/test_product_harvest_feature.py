@@ -1497,12 +1497,13 @@ class ScalingBackend(FixtureBackend):
         digest = hashlib.sha256(PNG).hexdigest()
         files: list[AcquiredFile] = []
         total = 2501
+        sprites_directory = destination / "sprites"
+        sprites_directory.mkdir(parents=True, exist_ok=True)
         for index in range(total):
             if cancel_requested():
                 raise RuntimeError("cancelled")
             name = f"sprites/sprite-{index:04d}.png"
-            path = destination / name
-            path.parent.mkdir(parents=True, exist_ok=True)
+            path = sprites_directory / f"sprite-{index:04d}.png"
             path.write_bytes(PNG)
             files.append(AcquiredFile(name, len(PNG), digest, "image/png", taxonomy=("item",)))
             progress("validating", index + 1, total)
