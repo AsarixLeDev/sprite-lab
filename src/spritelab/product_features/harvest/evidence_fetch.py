@@ -60,6 +60,9 @@ _BLOCK_HTML_ELEMENTS = frozenset(
     }
 )
 _UNIT_HTML_ELEMENTS = frozenset({"article", "dd", "dt", "li", "section"})
+_VOID_HTML_ELEMENTS = frozenset(
+    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+)
 _SPACE = re.compile(r"\s+")
 _PLAIN_URL = re.compile(r"https://[^\s<>\"']+")
 _ROBOTS_FIELD = re.compile(r"^([A-Za-z][A-Za-z-]*):[ \t]*(.*)$")
@@ -106,6 +109,30 @@ _AUTOMATION_DOUBLE_NEGATIVE_PATTERNS = tuple(
         r"\b(?:we\s+)?do not (?:prohibit|forbid|disallow|block)\s+(?:(?:systematic|bulk) downloading|automated data (?:collection|extraction|mining)|the use of scripts to download)\b",
     )
 )
+
+_OPENGAMEART_HOST = "opengameart.org"
+_OPENGAMEART_DETAIL_PATH = re.compile(r"^/content/[^/]+/?$")
+_OPENGAMEART_ADAPTER_ID = "spritelab.harvest.source-adapter.opengameart.v1"
+_OPENGAMEART_LEGACY_ART_LICENSE_LINK_UPGRADES = {
+    "http://creativecommons.org/licenses/by/3.0/": "https://creativecommons.org/licenses/by/3.0/",
+    "http://creativecommons.org/licenses/by-sa/3.0/": "https://creativecommons.org/licenses/by-sa/3.0/",
+    "http://www.gnu.org/licenses/gpl-3.0.html": "https://www.gnu.org/licenses/gpl-3.0.html",
+    "http://www.gnu.org/licenses/old-licenses/gpl-2.0.html": "https://www.gnu.org/licenses/old-licenses/gpl-2.0.html",
+    "http://opengameart.org/content/oga-by-30-faq": "https://opengameart.org/content/oga-by-30-faq",
+    "http://creativecommons.org/publicdomain/zero/1.0/": "https://creativecommons.org/publicdomain/zero/1.0/",
+}
+_OPENGAMEART_LEGACY_OPP_WEBSITES = frozenset({"http://openpixelproject.com", "http://openpixelproject.com/"})
+_OPENGAMEART_CANONICAL_OPP_WEBSITE = "https://openpixelproject.com/"
+_OPENGAMEART_ROOT_CLASSES = frozenset({"node", "node-art", "view-mode-full"})
+_OPENGAMEART_ROLE_CLASSES = (
+    ("title", "field-name-title"),
+    ("author-submitter", "field-name-author-submitter"),
+    ("art-licenses", "field-name-field-art-licenses"),
+    ("body", "field-name-body"),
+    ("art-files", "field-name-field-art-files"),
+)
+_OPENGAMEART_ROLE_MANIFEST = "|".join(f"{role}=.{class_name}" for role, class_name in _OPENGAMEART_ROLE_CLASSES)
+_HIDDEN_CLASS_TOKENS = frozenset({"element-invisible", "hidden", "sr-only", "visually-hidden"})
 
 
 class EvidenceFetchError(ValueError):
@@ -383,6 +410,173 @@ class _InertHTMLParser(HTMLParser):
         return _normalize_text(" ".join((*self._title, *self._text)))
 
 
+@dataclass
+class _OpenGameArtRoleCapture:
+    role: str
+    class_name: str
+    text_parts: list[str]
+    links: list[str]
+
+
+@dataclass
+class _OpenGameArtRootCapture:
+    roles: dict[str, list[_OpenGameArtRoleCapture]]
+    invalid_nesting: bool = False
+
+
+@dataclass
+class _OpenGameArtFrame:
+    tag: str
+    hidden: bool
+    roots_started: tuple[_OpenGameArtRootCapture, ...]
+    roles_started: tuple[tuple[_OpenGameArtRootCapture, _OpenGameArtRoleCapture], ...]
+
+
+class _OpenGameArtHTMLParser(HTMLParser):
+    """Capture only visible authoritative fields from one OGA full-art node."""
+
+    def __init__(self, base_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.roots: list[_OpenGameArtRootCapture] = []
+        self.invalid = False
+        self._frames: list[_OpenGameArtFrame] = []
+        self._active_roots: list[_OpenGameArtRootCapture] = []
+        self._active_roles: list[tuple[_OpenGameArtRootCapture, _OpenGameArtRoleCapture]] = []
+        self._visible_characters = 0
+        self._visible_links = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized_tag = tag.casefold()
+        parent_hidden = bool(self._frames and self._frames[-1].hidden)
+        hidden = parent_hidden or normalized_tag in _IGNORED_HTML_ELEMENTS or _html_element_hidden(attrs)
+        class_values = [value for name, value in attrs if name.casefold() == "class" and value is not None]
+        if len(class_values) > 1:
+            self.invalid = True
+        classes = frozenset(token.casefold() for value in class_values for token in value.split())
+
+        roots_started: list[_OpenGameArtRootCapture] = []
+        if not hidden and _OPENGAMEART_ROOT_CLASSES.issubset(classes):
+            root = _OpenGameArtRootCapture(roles={role: [] for role, _class_name in _OPENGAMEART_ROLE_CLASSES})
+            if self._active_roots:
+                root.invalid_nesting = True
+                for active_root in self._active_roots:
+                    active_root.invalid_nesting = True
+            self.roots.append(root)
+            self._active_roots.append(root)
+            roots_started.append(root)
+
+        roles_started: list[tuple[_OpenGameArtRootCapture, _OpenGameArtRoleCapture]] = []
+        matching_roles = [(role, class_name) for role, class_name in _OPENGAMEART_ROLE_CLASSES if class_name in classes]
+        if not hidden and matching_roles:
+            if len(matching_roles) != 1 or len(self._active_roots) != 1:
+                self.invalid = True
+            else:
+                root = self._active_roots[0]
+                if any(active_root is root for active_root, _capture in self._active_roles):
+                    root.invalid_nesting = True
+                role, class_name = matching_roles[0]
+                capture = _OpenGameArtRoleCapture(role, class_name, [], [])
+                root.roles[role].append(capture)
+                self._active_roles.append((root, capture))
+                roles_started.append((root, capture))
+
+        if not hidden and normalized_tag == "a":
+            self._visible_links += 1
+            if self._visible_links > MAX_PAGE_LINKS:
+                self.invalid = True
+                return
+        if not hidden and normalized_tag == "a" and self._active_roles:
+            hrefs = [value for name, value in attrs if name.casefold() == "href" and value]
+            if len(hrefs) != 1:
+                self.invalid = True
+            else:
+                try:
+                    joined_link = urljoin(self.base_url, hrefs[0])
+                    active_role_names = {capture.role for _root, capture in self._active_roles}
+                    if joined_link in _OPENGAMEART_LEGACY_ART_LICENSE_LINK_UPGRADES and active_role_names == {
+                        "art-licenses"
+                    }:
+                        joined_link = _OPENGAMEART_LEGACY_ART_LICENSE_LINK_UPGRADES[joined_link]
+                    elif joined_link in _OPENGAMEART_LEGACY_OPP_WEBSITES and active_role_names == {"body"}:
+                        joined_link = _OPENGAMEART_CANONICAL_OPP_WEBSITE
+                    link = canonical_url_string(joined_link, allow_query=True)
+                except ValueError:
+                    self.invalid = True
+                else:
+                    for _root, capture in self._active_roles:
+                        capture.links.append(link)
+
+        frame = _OpenGameArtFrame(normalized_tag, hidden, tuple(roots_started), tuple(roles_started))
+        self._frames.append(frame)
+        if normalized_tag in _VOID_HTML_ELEMENTS:
+            self._close_frames(len(self._frames) - 1)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        normalized_tag = tag.casefold()
+        if normalized_tag not in _VOID_HTML_ELEMENTS and self._frames and self._frames[-1].tag == normalized_tag:
+            self._close_frames(len(self._frames) - 1)
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized_tag = tag.casefold()
+        matching_indices = [index for index, frame in enumerate(self._frames) if frame.tag == normalized_tag]
+        if not matching_indices:
+            self.invalid = True
+            return
+        if matching_indices[-1] != len(self._frames) - 1:
+            self.invalid = True
+        self._close_frames(matching_indices[-1])
+
+    def handle_data(self, data: str) -> None:
+        if not self._active_roles or (self._frames and self._frames[-1].hidden):
+            return
+        self._visible_characters += len(data)
+        if self._visible_characters > MAX_VISIBLE_TEXT_CHARACTERS:
+            self.invalid = True
+            return
+        for _root, capture in self._active_roles:
+            capture.text_parts.append(data)
+
+    def close(self) -> None:
+        super().close()
+        if self._active_roots or self._active_roles:
+            self.invalid = True
+
+    def _close_frames(self, first_index: int) -> None:
+        frames = self._frames[first_index:]
+        del self._frames[first_index:]
+        for frame in reversed(frames):
+            for pair in reversed(frame.roles_started):
+                self._active_roles = [
+                    active for active in self._active_roles if not (active[0] is pair[0] and active[1] is pair[1])
+                ]
+            for root in reversed(frame.roots_started):
+                self._active_roots = [active for active in self._active_roots if active is not root]
+
+
+def _html_element_hidden(attrs: list[tuple[str, str | None]]) -> bool:
+    values: dict[str, list[str]] = {}
+    for name, value in attrs:
+        values.setdefault(name.casefold(), []).append((value or "").casefold())
+    if "hidden" in values or "inert" in values:
+        return True
+    if any(value.strip() == "true" for value in values.get("aria-hidden", [])):
+        return True
+    if any(
+        re.search(
+            r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)",
+            value,
+        )
+        is not None
+        for value in values.get("style", [])
+    ):
+        return True
+    return any(
+        token in _HIDDEN_CLASS_TOKENS for class_value in values.get("class", []) for token in class_value.split()
+    )
+
+
 def canonical_https_url(value: str, *, allow_query: bool) -> SplitResult:
     parsed = validate_public_evidence_url(value)
     if parsed.scheme.casefold() != "https":
@@ -496,6 +690,7 @@ def verify_evidence_pages(
     license_id: str,
     direct_download_url: str,
 ) -> VerifiedPageEvidence:
+    opengameart_profile = _opengameart_profile_required(source_url, source_snapshot)
     _source_text, source_links, source_segments, _source_link_labels, source_blocks = _parse_page(
         source_bytes, source_snapshot.mime_type, source_url
     )
@@ -504,9 +699,11 @@ def verify_evidence_pages(
     )
     normalized_title = _normalize_text(title)
     normalized_creator = _normalize_text(creator)
-    if not _provenance_segment_matches(normalized_title, source_segments, label="title"):
+    if not opengameart_profile and not _provenance_segment_matches(normalized_title, source_segments, label="title"):
         raise EvidenceFetchError("The source page does not visibly identify the submitted title.")
-    if not _provenance_segment_matches(normalized_creator, source_segments, label="creator"):
+    if not opengameart_profile and not _provenance_segment_matches(
+        normalized_creator, source_segments, label="creator"
+    ):
         raise EvidenceFetchError("The source page does not visibly identify the submitted creator.")
     normalized_license = license_id.strip().casefold()
     if normalized_license not in INITIAL_LICENSE_POLICY:
@@ -519,6 +716,19 @@ def verify_evidence_pages(
         raise EvidenceFetchError("The retained license page does not declare the selected permissive license.")
     canonical_license_url = canonical_url_string(license_url, allow_query=False)
     canonical_direct = canonical_url_string(direct_download_url, allow_query=True)
+    if opengameart_profile:
+        return _verify_opengameart_evidence(
+            source_url=source_url,
+            source_snapshot=source_snapshot,
+            source_bytes=source_bytes,
+            license_snapshot=license_snapshot,
+            license_excerpt=license_text[:4000].strip(),
+            title=normalized_title,
+            creator=normalized_creator,
+            license_id=normalized_license,
+            license_url=canonical_license_url,
+            direct_download_url=canonical_direct,
+        )
     if canonical_direct not in source_links:
         raise EvidenceFetchError("The creator source page does not contain the exact submitted direct download link.")
     link_block_indices = {index for index, block in enumerate(source_blocks) if canonical_direct in block.links}
@@ -612,6 +822,124 @@ def verify_evidence_pages(
         license_snapshot=license_snapshot,
         license_evidence_text=license_excerpt,
         direct_download_url=canonical_direct,
+        direct_download_host=host,
+        source_pack_evidence_text=source_pack_excerpt,
+        zero_cost_verified=True,
+        license_conflict_checked=True,
+        verification_identity=hashlib.sha256(identity_payload.encode("utf-8")).hexdigest(),
+    )
+
+
+def _opengameart_profile_required(source_url: str, source_snapshot: FetchSnapshot) -> bool:
+    request = canonical_https_url(source_url, allow_query=False)
+    request_host = (request.hostname or "").casefold().rstrip(".")
+    request_is_profile = (
+        request_host == _OPENGAMEART_HOST
+        and request.port is None
+        and _OPENGAMEART_DETAIL_PATH.fullmatch(request.path or "/") is not None
+    )
+    if not request_is_profile:
+        return False
+    final = canonical_https_url(source_snapshot.final_url, allow_query=False)
+    final_host = (final.hostname or "").casefold().rstrip(".")
+    if (
+        final_host != _OPENGAMEART_HOST
+        or final.port is not None
+        or _OPENGAMEART_DETAIL_PATH.fullmatch(final.path or "/") is None
+    ):
+        raise EvidenceFetchError("The OpenGameArt source profile final URL is not a canonical content-detail page.")
+    return True
+
+
+def _verify_opengameart_evidence(
+    *,
+    source_url: str,
+    source_snapshot: FetchSnapshot,
+    source_bytes: bytes,
+    license_snapshot: FetchSnapshot,
+    license_excerpt: str,
+    title: str,
+    creator: str,
+    license_id: str,
+    license_url: str,
+    direct_download_url: str,
+) -> VerifiedPageEvidence:
+    if source_snapshot.mime_type != "text/html":
+        raise EvidenceFetchError("The OpenGameArt source profile requires retained HTML evidence.")
+    parser = _OpenGameArtHTMLParser(source_url)
+    try:
+        parser.feed(source_bytes.decode("utf-8", errors="strict"))
+        parser.close()
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise EvidenceFetchError("The OpenGameArt source profile is malformed or unsafe.") from exc
+    if parser.invalid or len(parser.roots) != 1 or parser.roots[0].invalid_nesting:
+        raise EvidenceFetchError("The OpenGameArt source profile requires one visible, nonnested full-art node.")
+    root = parser.roots[0]
+    if any(len(root.roles[role]) != 1 for role, _class_name in _OPENGAMEART_ROLE_CLASSES):
+        raise EvidenceFetchError("The OpenGameArt source profile requires one exact visible field for every role.")
+    captures = {role: root.roles[role][0] for role, _class_name in _OPENGAMEART_ROLE_CLASSES}
+    role_text = {
+        role: _normalize_text(" ".join(captures[role].text_parts)) for role, _class_name in _OPENGAMEART_ROLE_CLASSES
+    }
+    if role_text["title"].casefold() != title.casefold():
+        raise EvidenceFetchError("The OpenGameArt title field does not exactly identify the submitted title.")
+    if not _contains_bound_phrase(role_text["author-submitter"], creator):
+        raise EvidenceFetchError("The OpenGameArt author-submitter field does not identify the submitted creator.")
+
+    license_capture = captures["art-licenses"]
+    folded_license_role = role_text["art-licenses"].casefold()
+    if _license_conflict(folded_license_role, license_id):
+        raise EvidenceFetchError("The OpenGameArt art-licenses field contains conflicting rights language.")
+    if not _license_declared(folded_license_role, license_id) and license_url not in license_capture.links:
+        raise EvidenceFetchError("The OpenGameArt art-licenses field does not bind the selected license.")
+
+    direct_occurrences = {
+        role: captures[role].links.count(direct_download_url) for role, _class_name in _OPENGAMEART_ROLE_CLASSES
+    }
+    if direct_occurrences["art-files"] != 1 or sum(direct_occurrences.values()) != 1:
+        raise EvidenceFetchError("The exact submitted direct download link must appear once and only in art-files.")
+
+    authoritative_text = " ".join(role_text[role] for role, _class_name in _OPENGAMEART_ROLE_CLASSES).casefold()
+    if _license_conflict(authoritative_text, license_id):
+        raise EvidenceFetchError("The OpenGameArt authoritative fields contain conflicting rights language.")
+    if _paid_conflict(authoritative_text) or not _zero_cost_declared(role_text["body"].casefold()):
+        raise EvidenceFetchError(
+            "The OpenGameArt authoritative fields do not provide conflict-free explicit zero-cost evidence."
+        )
+    if len(license_excerpt) < 2:
+        raise EvidenceFetchError("The retained license evidence text is empty.")
+
+    source_pack_excerpt = "\n".join(
+        (
+            f"source-adapter: {_OPENGAMEART_ADAPTER_ID}",
+            f"source-role-manifest: {_OPENGAMEART_ROLE_MANIFEST}",
+            *(f"{role}: {role_text[role]}" for role, _class_name in _OPENGAMEART_ROLE_CLASSES),
+        )
+    )
+    direct = canonical_https_url(direct_download_url, allow_query=True)
+    host = (direct.hostname or "").casefold().rstrip(".")
+    validate_public_hostname(host)
+    identity_payload = "\n".join(
+        (
+            source_snapshot.content_sha256,
+            license_snapshot.content_sha256,
+            title,
+            creator,
+            license_id,
+            url_identity(direct_download_url),
+            license_excerpt,
+            source_pack_excerpt,
+            _OPENGAMEART_ADAPTER_ID,
+            _OPENGAMEART_ROLE_MANIFEST,
+            "zero_cost_verified",
+            "license_conflict_checked",
+        )
+    )
+    return VerifiedPageEvidence(
+        source_snapshot=source_snapshot,
+        license_snapshot=license_snapshot,
+        license_evidence_text=license_excerpt,
+        direct_download_url=direct_download_url,
         direct_download_host=host,
         source_pack_evidence_text=source_pack_excerpt,
         zero_cost_verified=True,
@@ -1022,7 +1350,9 @@ def _paid_conflict(folded_text: str) -> bool:
             r"\b(?:surcharge applies|handling (?:is )?required|tips? (?:is |are )?required|contributions? (?:is |are )?(?:mandatory|required))\b",
             r"\b(?:must|need to|required to) pay\b|\bpay at checkout\b",
             r"\baccess (?:is )?limited to\b|\bpremium account (?:is )?required\b",
-            r"\b(?:redeem\s+)?(?:[a-z]+|[1-9][0-9,]*) (?:tokens?|points?)\b|\bcoupon(?: code)? (?:is )?required\b",
+            r"\b(?:redeem\s+)?(?:one|two|three|four|five|six|seven|eight|nine|ten|[1-9][0-9,]*) "
+            r"(?:tokens?|points?)\b|\b(?:tokens?|points?) (?:are )?required\b|"
+            r"\bcoupon(?: code)? (?:is )?required\b",
             r"\b(?:purchase|required purchase|paid|subscription|trial)\b",
             r"\b(?:buy|purchase) (?:now|this|the|pack|asset|dataset)\b",
             r"\b(?:now )?costs?\s+(?:[1-9][0-9]*(?:\.[0-9]{1,2})?|[a-z]+ credits?)\b",

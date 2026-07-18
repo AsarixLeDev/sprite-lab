@@ -31,6 +31,7 @@ from spritelab.evaluation.memorization import (
     resolve_training_context_identities,
     training_record_context_identities,
 )
+from spritelab.evaluation.strict_json import strict_json_loads
 
 CANDIDATE_SCHEMA_VERSION = "sprite_lab_memorization_candidate_evidence_v2"
 CANDIDATE_CONTRACT_VERSION = "sprite_lab_memorization_candidate_bundle_contract_v2.2"
@@ -142,8 +143,8 @@ def _valid_sha256(value: Any) -> bool:
 
 def _read_object(path: Path, label: str, reasons: list[str]) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        value = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         reasons.append(f"{label} is missing or malformed: {error}")
         return {}
     if not isinstance(value, dict):
@@ -156,9 +157,9 @@ def _read_manifest(path: Path, label: str, reasons: list[str]) -> list[dict[str,
     try:
         text = path.read_text(encoding="utf-8")
         try:
-            value = json.loads(text)
+            value = strict_json_loads(text)
         except json.JSONDecodeError:
-            return [json.loads(line) for line in text.splitlines() if line.strip()]
+            return [strict_json_loads(line) for line in text.splitlines() if line.strip()]
         if isinstance(value, list):
             return [row for row in value if isinstance(row, dict)]
         if isinstance(value, dict):
@@ -166,7 +167,7 @@ def _read_manifest(path: Path, label: str, reasons: list[str]) -> list[dict[str,
                 if isinstance(value.get(key), list):
                     return [row for row in value[key] if isinstance(row, dict)]
             return [value]
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         reasons.append(f"{label} is missing or malformed: {error}")
     return []
 

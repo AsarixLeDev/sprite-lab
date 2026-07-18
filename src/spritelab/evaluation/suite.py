@@ -5,8 +5,11 @@ from __future__ import annotations
 import csv
 import html
 import json
+import math
+import os
 import random
 import shutil
+import stat
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -37,7 +40,9 @@ from spritelab.evaluation.memorization import (
     retrieve_neighbors,
     suspicious_kind,
 )
+from spritelab.evaluation.metric_definitions import IncompatibleMetricDefinitions, metric_definition_identity
 from spritelab.evaluation.metrics import batch_metrics, duplicate_groups, score_image
+from spritelab.evaluation.strict_json import strict_json_loads
 from spritelab.harvest.label_v4.training_quality import (
     evaluation_uncertainty_report,
     extract_training_quality,
@@ -54,6 +59,156 @@ DEFAULT_GATES: dict[str, float] = {
     "max_repeated_template_rate": 0.25,
     "max_conditional_regression": 0.03,
 }
+
+_MAX_COMPARISON_REPORT_BYTES = 4 * 1024 * 1024
+_MAX_COMPARISON_JSONL_BYTES = 64 * 1024 * 1024
+_MAX_COMPARISON_ROWS = 100_000
+
+
+def _stable_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int | None]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        int(getattr(metadata, "st_nlink", 1)),
+        metadata.st_size,
+        getattr(metadata, "st_mtime_ns", None),
+    )
+
+
+def _load_comparison_report(directory: Path) -> dict[str, Any]:
+    """Read one stable, bounded benchmark summary before authoring output."""
+
+    path = directory / "summary.json"
+    descriptor = -1
+    try:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or int(getattr(info, "st_nlink", 1)) != 1
+            or info.st_size > _MAX_COMPARISON_REPORT_BYTES
+        ):
+            raise ValueError("Evaluation summary is not one bounded regular file.")
+        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, _MAX_COMPARISON_REPORT_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _MAX_COMPARISON_REPORT_BYTES:
+                raise ValueError("Evaluation summary exceeds its byte limit.")
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        identities = {_stable_file_identity(entry) for entry in (info, before, after, current)}
+        if len(identities) != 1:
+            raise ValueError("Evaluation summary changed while it was read.")
+        value = strict_json_loads(b"".join(chunks))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("Evaluation summary could not be read safely.") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not isinstance(value, dict):
+        raise ValueError("Evaluation summary root must be an object.")
+    if value.get("schema_version") != "generation_benchmark_v1.0":
+        raise ValueError("Evaluation summary schema is unsupported.")
+    return value
+
+
+def _comparison_key(item: Mapping[str, Any]) -> tuple[str, int]:
+    identity: str | None = None
+    for field in ("prompt_id", "prompt", "sample_id"):
+        if field not in item:
+            continue
+        value = item[field]
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise ValueError(f"Per-image metric field {field} is malformed.")
+        identity = value
+        break
+    if identity is None:
+        raise ValueError("Per-image metric row has no comparison identity.")
+    seed_field = "noise_seed" if "noise_seed" in item else "seed"
+    seed = item.get(seed_field)
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError(f"Per-image metric field {seed_field} is malformed.")
+    return identity, seed
+
+
+def _load_comparison_rows(directory: Path) -> list[dict[str, Any]]:
+    """Load a complete stable JSONL comparison input before output exists."""
+
+    path = directory / "per_image_metrics.jsonl"
+    descriptor = -1
+    try:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or int(getattr(info, "st_nlink", 1)) != 1
+            or info.st_size > _MAX_COMPARISON_JSONL_BYTES
+        ):
+            raise ValueError("Per-image metrics are not one bounded regular file.")
+        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, _MAX_COMPARISON_JSONL_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _MAX_COMPARISON_JSONL_BYTES:
+                raise ValueError("Per-image metrics exceed their byte limit.")
+        after = os.fstat(descriptor)
+        current = os.stat(path, follow_symlinks=False)
+        if len({_stable_file_identity(entry) for entry in (info, before, after, current)}) != 1:
+            raise ValueError("Per-image metrics changed while they were read.")
+        text = b"".join(chunks).decode("utf-8", errors="strict")
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("Per-image metrics could not be read safely.") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    lines = text.splitlines()
+    if not lines or len(lines) > _MAX_COMPARISON_ROWS or any(not line.strip() for line in lines):
+        raise ValueError("Per-image metrics must contain bounded nonblank JSONL rows.")
+    rows: list[dict[str, Any]] = []
+    keys: set[tuple[str, int]] = set()
+    for line in lines:
+        value = strict_json_loads(line)
+        if not isinstance(value, dict) or not value:
+            raise ValueError("Every per-image metric row must be a nonempty object.")
+        key = _comparison_key(value)
+        metrics = value.get("metrics")
+        pixel_art = metrics.get("pixel_art") if isinstance(metrics, Mapping) else None
+        if not isinstance(pixel_art, Mapping):
+            raise ValueError("Per-image metric row is missing its typed comparison metrics.")
+        for field in (
+            "unique_palette_size",
+            "silhouette_occupancy",
+            "foreground_fragmentation",
+            "high_frequency_pixel_noise",
+        ):
+            number = pixel_art.get(field)
+            if field not in pixel_art or (
+                number is not None
+                and (isinstance(number, bool) or not isinstance(number, (int, float)) or not math.isfinite(number))
+            ):
+                raise ValueError(f"Per-image metric field {field} is missing or malformed.")
+        if key in keys:
+            raise ValueError("Per-image metrics contain a duplicate comparison identity.")
+        keys.add(key)
+        rows.append(value)
+    return rows
 
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -672,13 +827,18 @@ def _apply_production_evidence_contract(promotion: dict[str, Any], memorization:
 
 
 def compare_reports(baseline: Path, candidate: Path, out: Path, *, architecture_change: bool = False) -> dict[str, Any]:
-    out.mkdir(parents=True, exist_ok=True)
-    base_report = json.loads((baseline / "summary.json").read_text(encoding="utf-8"))
-    cand_report = json.loads((candidate / "summary.json").read_text(encoding="utf-8"))
-    base_items = read_jsonl(baseline / "per_image_metrics.jsonl")
-    cand_items = read_jsonl(candidate / "per_image_metrics.jsonl")
+    base_report = _load_comparison_report(baseline)
+    cand_report = _load_comparison_report(candidate)
+    definition_identity = metric_definition_identity(base_report)
+    if definition_identity != metric_definition_identity(cand_report):
+        raise IncompatibleMetricDefinitions(
+            "Evaluation reports use incompatible metric definitions; no averages or deltas were computed."
+        )
+    base_items = _load_comparison_rows(baseline)
+    cand_items = _load_comparison_rows(candidate)
     base_index = {_pair_key(item): item for item in base_items}
     cand_index = {_pair_key(item): item for item in cand_items}
+    out.mkdir(parents=True, exist_ok=True)
     keys = sorted(base_index.keys() & cand_index.keys())
     deltas: list[dict[str, Any]] = []
     for key in keys:
@@ -700,6 +860,7 @@ def compare_reports(baseline: Path, candidate: Path, out: Path, *, architecture_
         "paired_count": len(keys),
         "baseline": str(baseline),
         "candidate": str(candidate),
+        "metric_definition_identity": definition_identity,
         "paired_deltas": deltas,
         "promotion": gates,
     }
@@ -717,9 +878,7 @@ def compare_reports(baseline: Path, candidate: Path, out: Path, *, architecture_
 
 
 def _pair_key(item: Mapping[str, Any]) -> tuple[str, int]:
-    return str(item.get("prompt_id") or item.get("prompt") or item.get("sample_id")), int(
-        item.get("noise_seed") or item.get("seed") or 0
-    )
+    return _comparison_key(item)
 
 
 def _delta(a: Mapping[str, Any], b: Mapping[str, Any], key: str) -> float | None:

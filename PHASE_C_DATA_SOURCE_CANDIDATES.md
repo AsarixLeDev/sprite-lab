@@ -9,6 +9,16 @@ advertised counts are leads, not intake evidence. A source becomes usable only
 after the certified Harvest backend records and validates the complete receipt
 described at the end of this document.
 
+Live pre-probe verification update (2026-07-18): the current deterministic
+verifier now accepts the publisher HTML, selected CC0 deed, exact attachment
+link, and explicit zero-cost evidence for OPP receipts 1, 3, 4, and 5, Behr
+battle-axes shard 01, Behr swords shard 01, and Behr staffs shard 01. All seven
+pages independently report
+`NO_PROHIBITION_OBSERVED` with no governing terms link and limited evidence.
+This is still passive research, not a probe, promotion, acquisition, or Dataset
+import. OPP receipt 2 remains on hold because its page lacks an accepted
+acquisition-price declaration.
+
 “CC0”, “CC-BY”, dimensions, cost, and yields below report what the linked
 publisher page says. They are not new legal conclusions and do not override the
 license text bound by a future receipt. “Strict-Harvest-ready” means only that
@@ -22,28 +32,36 @@ Canonical license reference used by the source pages:
 CC0 does not supply trademark, patent, privacy, publicity, warranty, or
 endorsement rights, so those boundaries still need review.
 
-## Strict eight-receipt queue
+## Initial receipt queue
 
 Dataset-v5 accepts at most eight selected managed dataset receipts. The queue
 therefore treats every attachment as a separate source and never combines
-shards under one receipt.
+shards under one receipt. Receipt 2 is retained only as a documented hold; do
+not spend one of the eight production receipt slots on it unless its publisher
+evidence changes and a fresh verifier check passes.
 
 | Receipt | Publisher page | Unprobed direct ZIP | Page evidence: license and cost | Advertised dimensions and nominal yield | Required caveat |
 |---|---|---|---|---|---|
-| 1 — OPP2017 Jungle and temple | [OpenGameArt page](https://opengameart.org/content/opp2017-jungle-and-temple-set) | [opp1_jungle_tiles.zip](https://opengameart.org/sites/default/files/opp1_jungle_tiles.zip) | The page offers CC0 among several selectable licenses, says the work is public domain, and explicitly says it is free to use, modify, and sell. Use CC0 only if the future receipt binds that exact choice and the attachment evidence agrees. Cost candidate: `free`. | Page says 32×32 and “over 500 tiles.” | The page describes grid tiles, not necessarily more than 500 independent exact-32 PNG files; some platforms extend beyond one 32×32 cell. Strict dimension inventory and any approved frame/crop derivation determine the eligible yield. |
-| 2 — OPP2017 Sprites, characters, objects, effects | [OpenGameArt page](https://opengameart.org/content/opp2017-sprites-characters-objects-effects) | [opp2_sprites.zip](https://opengameart.org/sites/default/files/opp2_sprites.zip) | Same OPP public-domain/free-to-use-modify-sell statement and selectable CC0 evidence as above. Cost candidate: `free`. | Page advertises “over 100 sprites and animations”; it is part of the 32×32 OPP family. | Animations, sheets, icons, and objects can have different file/canvas shapes. Do not equate an advertised sprite or animation with one exact-32 eligible image. |
-| 3 — OPP2017 Cave and mine cart | [OpenGameArt page](https://opengameart.org/content/opp2017-cave-and-mine-cart) | [opp3_cave_tiles.zip](https://opengameart.org/sites/default/files/opp3_cave_tiles.zip) | The author says everything is public domain, CC0 is among the selectable licenses, and the page says it is free to use, modify, and sell. Cost candidate: `free`. | Page says 32×32 and “over 400 tiles.” | Multi-cell/platform pieces and sheets may not be exact-32 files. Bind the attachment’s embedded license/readme and count only strict inventory results. |
-| 4 — OPP2017 Village and room | [OpenGameArt page](https://opengameart.org/content/opp2017-village-and-room) | [opp4_village_tiles.zip](https://opengameart.org/sites/default/files/opp4_village_tiles.zip) | Same OPP page-level public-domain/selectable-CC0 and explicit free-use evidence. Cost candidate: `free`. | Page says 32×32 and “over 400 tiles.” | Houses, rooms, clouds, and platform pieces may span cells or be sheets. Advertised count is not an eligible-file count. |
-| 5 — OPP2017 Castle tiles | [OpenGameArt page](https://opengameart.org/content/opp2017-castle-tiles) | [opp5_castle_tiles.zip](https://opengameart.org/sites/default/files/opp5_castle_tiles.zip) | Same OPP page-level public-domain/selectable-CC0 and explicit free-use evidence. Cost candidate: `free`. | Page says 32×32 and “over 400 tiles.” | Floors, walls, waterfalls, stairs, and other platform pieces can span cells. Require exact dimensions, deduplication, and source-grounded labels. |
+| 1 — OPP2017 Jungle and temple | [OpenGameArt page](https://opengameart.org/content/opp2017-jungle-and-temple-set) | [opp1_jungle_tiles.zip](https://opengameart.org/sites/default/files/opp1_jungle_tiles.zip) | The page offers CC0 among alternative selectable licenses, says the work is public domain, and states `Free high quality pixel art tiles, 32x32.` Use CC0 only if the future receipt binds that exact choice and the attachment evidence agrees. | Page says 32×32 and “over 500 tiles.” | The page describes grid tiles, not necessarily more than 500 independent exact-32 PNG files; some platforms extend beyond one 32×32 cell. Strict dimension inventory and any approved frame/crop derivation determine the eligible yield. |
+| 2 — OPP2017 Sprites, characters, objects, effects — **HOLD** | [OpenGameArt page](https://opengameart.org/content/opp2017-sprites-characters-objects-effects) | [opp2_sprites.zip](https://opengameart.org/sites/default/files/opp2_sprites.zip) | CC0 is selectable, but `free to use` is permission language rather than explicit acquisition-price evidence under the current policy. Do not probe it. | Page advertises “over 100 sprites and animations”; it does not make an exact 32×32 claim for every item. | Animations, sheets, icons, and objects can have different file/canvas shapes. Reconsider only after fresh qualifying cost evidence and strict dimension review. |
+| 3 — OPP2017 Cave and mine cart | [OpenGameArt page](https://opengameart.org/content/opp2017-cave-and-mine-cart) | [opp3_cave_tiles.zip](https://opengameart.org/sites/default/files/opp3_cave_tiles.zip) | The page offers CC0 among alternative selectable licenses, says the work is public domain, and states `Free high quality pixel art tiles, 32x32.` | Page says 32×32 and “over 400 tiles.” | Multi-cell/platform pieces and sheets may not be exact-32 files. Bind the attachment’s embedded license/readme and count only strict inventory results. |
+| 4 — OPP2017 Village and room | [OpenGameArt page](https://opengameart.org/content/opp2017-village-and-room) | [opp4_village_tiles.zip](https://opengameart.org/sites/default/files/opp4_village_tiles.zip) | The page offers CC0 among alternative selectable licenses, says the work is public domain, and states `Free high quality pixel art tiles, 32x32.` | Page says 32×32 and “over 400 tiles.” | Houses, rooms, clouds, and platform pieces may span cells or be sheets. Advertised count is not an eligible-file count. |
+| 5 — OPP2017 Castle tiles | [OpenGameArt page](https://opengameart.org/content/opp2017-castle-tiles) | [opp5_castle_tiles.zip](https://opengameart.org/sites/default/files/opp5_castle_tiles.zip) | The page offers CC0 among alternative selectable licenses, says the work is public domain, and states `Free high quality pixel art tiles, 32x32.` | Page says 32×32 and “over 400 tiles.” | Floors, walls, waterfalls, stairs, and other platform pieces can span cells. Require exact dimensions, deduplication, and source-grounded labels. |
 | 6 — Behr battle axes shard 01 | [OpenGameArt page](https://opengameart.org/content/behrs-2500-pixel-battle-axes-32x32-archive) | [battleaxes_01.zip](https://opengameart.org/sites/default/files/battleaxes_01.zip) | Page lists CC0, says “totally free in the public domain,” and identifies Public Domain in its attribution notice. Cost candidate: `free`. | The five-shard page advertises 2,500 individual 32×32 axes; nominally about 500 per shard, but no per-shard count is claimed. | High near-duplicate risk: page discussion notes repeated recognizable shapes and color/detail variants. Near-duplicate clustering and diversity caps must run before selection. |
 | 7 — Behr battle axes shard 02 | [OpenGameArt page](https://opengameart.org/content/behrs-2500-pixel-battle-axes-32x32-archive) | [battleaxes_02.zip](https://opengameart.org/sites/default/files/battleaxes_02.zip) | Same CC0/public-domain/explicit-free page evidence. Cost candidate: `free`. | Same five-shard 2,500 exact-32 advertisement; per-shard yield unknown until inventory. | Separate source, probe, hash, receipt, import, and preview. Do not infer disjointness or eligible yield from the filename. Same near-duplicate risk. |
 | 8 — Behr battle axes shard 03 | [OpenGameArt page](https://opengameart.org/content/behrs-2500-pixel-battle-axes-32x32-archive) | [battleaxes_03.zip](https://opengameart.org/sites/default/files/battleaxes_03.zip) | Same CC0/public-domain/explicit-free page evidence. Cost candidate: `free`. | Same five-shard 2,500 exact-32 advertisement; per-shard yield unknown until inventory. | Separate source, probe, hash, receipt, import, and preview. Same near-duplicate risk. Stop early if shards 01–02 already overconcentrate the taxonomy. |
+| 9 — Behr swords shard 01 | [OpenGameArt page](https://opengameart.org/content/behrs-4500-pixel-swords-32x32-archive) | [1handswords_01.zip](https://opengameart.org/sites/default/files/1handswords_01.zip) | Page lists CC0 and describes the archive as totally free in the public domain. Cost candidate: `free`. | Page advertises 4,500 unique exact-32 swords across nine individual archives; nominally about 500 per shard, but no per-shard count is claimed. | Prefer this over a second axe shard when an item-yield contingency is necessary. It still has high procedural-variant and near-duplicate risk and does not add a new broad taxonomy category. |
+| 10 — Behr magic staffs shard 01 | [OpenGameArt page](https://opengameart.org/content/behrs-2500-pixel-staffs-32x32-archive) | [rods_01.zip](https://opengameart.org/sites/default/files/rods_01.zip) | Page lists CC0 and describes the archive as totally free in the public domain. Cost candidate: `free`. | Page advertises 2,500 unique exact-32 magic staffs across five individual archives; nominally about 500 per shard, but no per-shard count is claimed. | Last initial contingency. Preview first: staffs, swords, and axes can overconcentrate item/weapon semantics despite distinct source receipts. |
 
-The queue intentionally leaves battle-axe shards 04 and 05 outside the first
-eight receipts. It prioritizes five thematic OPP packs for breadth, then uses
-only as many disjoint weapon shards as the eight-receipt limit permits. Preview
-the conditioned dataset after every import; do not continue merely to fill all
-eight slots.
+The initial production order is OPP receipts 1, 3, 4, and 5, followed by Behr
+battle-axes shard 01 only if the exact retained count needs it. If the preview
+is still below the hard minimum, prefer swords shard 01 and then staffs shard
+01 over further axe shards. OPP receipt 2 is a hold, not a production slot.
+Battle-axes shards 02 and 03 remain last-resort contingencies; shards 04 and 05
+remain outside the initial queue. This ordering uses at most seven of the eight
+Dataset-v5 receipt slots. Preview the conditioned dataset after every import
+and stop adding weapon shards if near-duplicate or taxonomy concentration is
+excessive. Do not continue merely to fill all eight slots.
 
 ## Hold candidates
 

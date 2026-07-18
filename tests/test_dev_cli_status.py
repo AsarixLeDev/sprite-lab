@@ -123,6 +123,27 @@ def test_applicable_pass_is_eligible_but_does_not_authorize_by_itself(tmp_path: 
     assert state.stage("training-campaign").production_authorized is False
 
 
+@pytest.mark.parametrize(
+    "payload",
+    (
+        '{"schema_version":"old","schema_version":"spritelab.memorization.independent-audit-report.v1"}',
+        '{"schema_version":"spritelab.memorization.independent-audit-report.v1","score":NaN}',
+    ),
+)
+def test_developer_memorization_projection_uses_strict_shared_loader(tmp_path: Path, payload: str) -> None:
+    config = _config(tmp_path)
+    report = tmp_path / "memorization-audit.json"
+    report.write_text(payload, encoding="utf-8")
+    config.values["evaluation"]["memorization_audit"] = report.name
+
+    audit = next(item for item in collect_audits(config, _state(tmp_path)) if item["subsystem"] == "memorization")
+
+    assert audit["verdict"] == "NOT_COMPARABLE"
+    assert audit["applicable"] is False
+    assert audit["current_certification"] is False
+    assert audit["staleness_reasons"] == ["audit_report_json_invalid"]
+
+
 def test_user_projection_hides_hashes_branches_commits_and_audit_matrices(tmp_path: Path) -> None:
     config = _config(tmp_path)
     state = _state(tmp_path, evidence=[Evidence("audit.json", "f" * 64, "deadbeef")])

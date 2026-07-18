@@ -224,10 +224,75 @@ def _product_training_run(
 
 def test_no_checkpoint_has_no_eligible_candidate(tmp_path: Path) -> None:
     _run(tmp_path, "train-empty")
-    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+    catalog = discover_checkpoint_candidates(
+        tmp_path / "runs",
+        project_root=tmp_path,
+        active_dataset_identity="dataset-v1",
+        active_view_identity="view-v1",
+    )
     assert catalog.eligible == ()
     assert catalog.default_checkpoint_id is None
     assert catalog.unavailable[0].availability is CheckpointAvailability.MISSING
+
+
+@pytest.mark.parametrize(
+    ("dataset_identity", "view_identity", "reason"),
+    [
+        (None, "view-v1", "dataset identity"),
+        ("dataset-v1", None, "view identity"),
+        ("", "view-v1", "dataset identity"),
+        ("dataset-v1", " padded ", "view identity"),
+    ],
+)
+def test_complete_checkpoint_is_ineligible_without_exact_active_identities(
+    tmp_path: Path,
+    dataset_identity: str | None,
+    view_identity: str | None,
+    reason: str,
+) -> None:
+    run = _run(tmp_path, "train-complete")
+    _checkpoint_evidence(run)
+
+    catalog = discover_checkpoint_candidates(
+        tmp_path / "runs",
+        project_root=tmp_path,
+        active_dataset_identity=dataset_identity,
+        active_view_identity=view_identity,
+        require_active_identities=True,
+    )
+
+    assert catalog.eligible == ()
+    assert catalog.unavailable[0].availability is CheckpointAvailability.INVALID
+    assert reason in " ".join(catalog.unavailable[0].unavailable_reasons).lower()
+
+
+def test_generic_checkpoint_discovery_preserves_diagnostics_without_active_context(tmp_path: Path) -> None:
+    run = _run(tmp_path, "generic-discovery")
+    _checkpoint_evidence(run)
+
+    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+
+    assert len(catalog.eligible) == 1
+    assert catalog.eligible[0].dataset_identity == "dataset-v1"
+    assert catalog.eligible[0].view_identity == "view-v1"
+
+
+def test_checkpoint_state_with_duplicate_authority_key_is_invalid(tmp_path: Path) -> None:
+    run = _run(tmp_path, "duplicate-state")
+    _checkpoint_evidence(run)
+    state_path = run / "state.json"
+    payload = state_path.read_text(encoding="utf-8")
+    state_path.write_text('{"status":"RUNNING",' + payload[1:], encoding="utf-8")
+
+    catalog = discover_checkpoint_candidates(
+        tmp_path / "runs",
+        project_root=tmp_path,
+        active_dataset_identity="dataset-v1",
+        active_view_identity="view-v1",
+    )
+
+    assert catalog.eligible == ()
+    assert catalog.unavailable[0].availability is CheckpointAvailability.INVALID
 
 
 def test_current_v3_writer_event_authority_remains_checkpoint_compatible(tmp_path: Path) -> None:
@@ -260,7 +325,12 @@ def test_current_v3_writer_event_authority_remains_checkpoint_compatible(tmp_pat
 def test_incomplete_checkpoint_is_hidden_from_normal_selection(tmp_path: Path) -> None:
     run = _run(tmp_path, "train-running", status="RUNNING")
     (run / "checkpoints" / "checkpoint_step_000100_ema.pt").write_bytes(b"checkpoint")
-    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+    catalog = discover_checkpoint_candidates(
+        tmp_path / "runs",
+        project_root=tmp_path,
+        active_dataset_identity="dataset-v1",
+        active_view_identity="view-v1",
+    )
     assert catalog.eligible == ()
     assert catalog.unavailable[0].availability is CheckpointAvailability.INCOMPLETE
     assert catalog.to_dict()["eligible"] == []
@@ -269,7 +339,12 @@ def test_incomplete_checkpoint_is_hidden_from_normal_selection(tmp_path: Path) -
 def test_unsafe_checkpoint_is_hidden_and_explainable(tmp_path: Path) -> None:
     run = _run(tmp_path, "unsafe-run", unsafe=True)
     (run / "checkpoints" / "checkpoint_step_000200.pt").write_bytes(b"checkpoint")
-    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+    catalog = discover_checkpoint_candidates(
+        tmp_path / "runs",
+        project_root=tmp_path,
+        active_dataset_identity="dataset-v1",
+        active_view_identity="view-v1",
+    )
     assert catalog.eligible == ()
     unavailable = catalog.to_dict(include_unavailable=True)["unavailable"][0]
     assert unavailable["availability"] == "UNSAFE_RESUME"
@@ -687,7 +762,12 @@ def test_latest_complete_checkpoint_is_default_and_public_view_redacts_paths(tmp
         durable_state = json.loads((run / "state.json").read_text(encoding="utf-8"))
         durable_state["checkpoints"] = rows
         _write_json(run / "state.json", durable_state)
-    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+    catalog = discover_checkpoint_candidates(
+        tmp_path / "runs",
+        project_root=tmp_path,
+        active_dataset_identity="dataset-v1",
+        active_view_identity="view-v1",
+    )
     default = catalog.find(None)
     assert default is not None
     assert default.run_id == "newer"
@@ -713,7 +793,12 @@ def test_catalog_projection_sanitizes_state_derived_text_and_keeps_technical_row
     _write_json(state_path, state)
     _checkpoint_evidence(run)
 
-    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+    catalog = discover_checkpoint_candidates(
+        tmp_path / "runs",
+        project_root=tmp_path,
+        active_dataset_identity="dataset-v1",
+        active_view_identity="view-v1",
+    )
     public = catalog.to_dict(include_unavailable=True, private_roots=(tmp_path,))
     serialized = json.dumps(public)
 
@@ -766,7 +851,12 @@ def test_schema_or_verdict_without_per_file_hash_is_never_eligible(tmp_path: Pat
     state["checkpoints"] = [{"path": "checkpoints/checkpoint.pt", "verified": True}]
     _write_json(run / "state.json", state)
 
-    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+    catalog = discover_checkpoint_candidates(
+        tmp_path / "runs",
+        project_root=tmp_path,
+        active_dataset_identity="dataset-v1",
+        active_view_identity="view-v1",
+    )
 
     assert catalog.eligible == ()
     assert catalog.unavailable[0].availability is CheckpointAvailability.UNVERIFIED

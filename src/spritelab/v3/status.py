@@ -16,9 +16,12 @@ from spritelab.evaluation.audit_identity import (
 )
 from spritelab.evaluation.audit_identity import (
     MEMORIZATION_AUDIT_CODE_IDENTITY_VERSION,
+    MEMORIZATION_AUDIT_REPORT_SCHEMA,
     MEMORIZATION_AUDIT_SUBSYSTEM,
     MemorizationAuditIdentityError,
+    load_memorization_audit_report,
     memorization_audit_code_identity,
+    recorded_audit_report_errors,
     recorded_identity_errors,
 )
 from spritelab.product_core.audit_evidence import (
@@ -134,6 +137,7 @@ class MemorizationAuditApplicability:
     reasons: tuple[str, ...]
     report_verdict: str | None
     current_identity: Mapping[str, Any] | None
+    report: Mapping[str, Any] | None = None
 
     @property
     def applicable(self) -> bool:
@@ -194,6 +198,21 @@ def verify_memorization_audit_applicability(
             str(report.get("overall_verdict") or "").upper() or None,
             current,
         )
+    if report.get("schema_version") != MEMORIZATION_AUDIT_REPORT_SCHEMA:
+        return MemorizationAuditApplicability(
+            AuditStatus.STALE,
+            ("legacy_or_incomplete_audit_report_contract",),
+            str(report.get("overall_verdict") or "").upper() or None,
+            current,
+        )
+    report_errors = recorded_audit_report_errors(report)
+    if report_errors:
+        return MemorizationAuditApplicability(
+            AuditStatus.NOT_COMPARABLE,
+            report_errors,
+            str(report.get("overall_verdict") or "").upper() or None,
+            current,
+        )
     verdict = str(report.get("overall_verdict") or "").upper()
     if verdict not in {"PASS", "FAIL", "INCONCLUSIVE"}:
         return MemorizationAuditApplicability(
@@ -202,7 +221,40 @@ def verify_memorization_audit_applicability(
             verdict or None,
             current,
         )
-    return MemorizationAuditApplicability(AuditStatus(verdict), (), verdict, current)
+    return MemorizationAuditApplicability(
+        AuditStatus.NOT_COMPARABLE,
+        ("trusted_audit_receipt_unavailable",),
+        verdict,
+        current,
+    )
+
+
+def verify_memorization_audit_path(
+    root: Path,
+    report_path: Path | None,
+) -> MemorizationAuditApplicability:
+    """Strict-load and verify one configured memorization audit path."""
+
+    loaded = load_memorization_audit_report(report_path)
+    if loaded.report is None:
+        status = AuditStatus.NOT_AUDITED if not loaded.present else AuditStatus.NOT_COMPARABLE
+        return MemorizationAuditApplicability(status, loaded.errors, None, None, None)
+    if loaded.errors:
+        return MemorizationAuditApplicability(
+            AuditStatus.STALE,
+            ("legacy_or_incomplete_audit_report_contract",),
+            str(loaded.report.get("overall_verdict") or "").upper() or None,
+            None,
+            loaded.report,
+        )
+    verification = verify_memorization_audit_applicability(root, loaded.report)
+    return MemorizationAuditApplicability(
+        verification.status,
+        verification.reasons,
+        verification.report_verdict,
+        verification.current_identity,
+        loaded.report,
+    )
 
 
 def _memorization_audit_status(config: ProjectConfig, report: dict[str, Any] | None) -> AuditStatus:
@@ -258,7 +310,8 @@ def build_project_state(
     labels = _read_json(label_path)
     label_audit = _read_json(label_audit_path)
     training = _read_json(training_path)
-    mem = _read_json(mem_path)
+    mem_verification = verify_memorization_audit_path(config.root, mem_path)
+    mem = dict(mem_verification.report) if mem_verification.report is not None else None
     source_commit = _source_commit(config.root)
     labeling_verification = labeling_audit_verification(
         ProjectContext(config.root, config.values, config.path, config.runs_dir)
@@ -650,8 +703,7 @@ def build_project_state(
         )
     )
 
-    mem_verification = verify_memorization_audit_applicability(config.root, mem)
-    mem_audit = _memorization_audit_status(config, mem)
+    mem_audit = mem_verification.status
     mem_verdict_failed = mem_audit == AuditStatus.FAIL
     mem_findings = [
         {"id": item.get("id"), "severity": item.get("severity"), "summary": item.get("summary")}

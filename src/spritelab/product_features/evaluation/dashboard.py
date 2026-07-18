@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -10,12 +9,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from spritelab.product_core import finite_json_copy, strict_json_bytes, validate_finite_json
+from spritelab.evaluation.metric_definitions import IncompatibleMetricDefinitions, metric_definition_identity
+from spritelab.product_core import finite_json_copy, validate_finite_json
 from spritelab.product_web.events import sanitize_public_text
-
-
-class IncompatibleMetricDefinitions(ValueError):
-    """Raised before incompatible metrics could be averaged or compared."""
 
 
 @dataclass(frozen=True)
@@ -395,6 +391,7 @@ _DASHBOARD_SPEC = {
     "report_data_download": _OPTIONAL_TEXT,
     **_same_spec(("run_id", "status", "message"), _OPTIONAL_TEXT),
     "stale": _BOOLEAN,
+    "stale_reasons": (_TEXT,),
     "memorization": _MEMORIZATION_SPEC,
 }
 _RUN_DATA_SPEC = {
@@ -546,18 +543,22 @@ def _project_public_value(value: Any, spec: Any, private_roots: tuple[Path, ...]
                 projected[key] = child
         if spec is _REPORT_SPEC and value.get("metric_definitions") is not None:
             try:
-                identity = hashlib.sha256(
-                    strict_json_bytes(
-                        {"metric_definitions": value["metric_definitions"]},
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=True,
-                    )
-                ).hexdigest()
-            except (TypeError, ValueError):
+                identity = metric_definition_identity(value)
+            except IncompatibleMetricDefinitions:
                 projected.pop("metric_definitions_sha256", None)
             else:
                 projected["metric_definitions_sha256"] = identity
+                # The verified digest is the complete public definition
+                # envelope.  Do not retain a second, partial policy envelope
+                # that could later drift while reusing the digest.
+                for field in (
+                    "thresholds",
+                    "detector_policy_version",
+                    "detector_policy_sha256",
+                    "comparison_method",
+                    "comparison_parameters_sha256",
+                ):
+                    projected.pop(field, None)
         return projected
     return _OMIT
 
@@ -810,35 +811,6 @@ def build_dashboard(
         "report_data_download": "/evaluation/api/report-data",
     }
     return public_evaluation_projection(payload, surface="dashboard", private_roots=private_roots)
-
-
-def _definition_payload(report: Mapping[str, Any]) -> dict[str, Any]:
-    explicit = report.get("metric_definitions")
-    if explicit is not None:
-        return {"metric_definitions": explicit}
-    public_identity = report.get("metric_definitions_sha256")
-    if (
-        isinstance(public_identity, str)
-        and len(public_identity) == 64
-        and all(character in "0123456789abcdefABCDEF" for character in public_identity)
-    ):
-        return {"metric_definitions_sha256": public_identity.lower()}
-    return {
-        "schema_version": report.get("schema_version"),
-        "thresholds": report.get("thresholds"),
-        "detector_policy_version": report.get("detector_policy_version"),
-        "comparison_method": report.get("comparison_method"),
-        "comparison_parameters_sha256": report.get("comparison_parameters_sha256"),
-    }
-
-
-def metric_definition_identity(report: Mapping[str, Any]) -> str:
-    payload = _definition_payload(report)
-    public_identity = payload.get("metric_definitions_sha256")
-    if isinstance(public_identity, str):
-        return public_identity
-    encoded = strict_json_bytes(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _numeric_summary(summary: Mapping[str, Any], prefix: str = "") -> dict[str, float]:

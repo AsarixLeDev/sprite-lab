@@ -539,6 +539,31 @@ def test_v2_authoring_appends_a_signed_event(tmp_path: Path) -> None:
     assert replay.chains[state["pair"]["pair_id"]].chain_status == "valid"
 
 
+def test_duplicate_review_outcome_is_never_authoritative(tmp_path: Path) -> None:
+    state = _fixture(tmp_path)
+    state["outcome"] = None
+    _finalize(state)
+    append_bound_review_event(
+        state["paths"]["candidate.json"],
+        state["paths"]["reviews.jsonl"],
+        pair_id=state["pair"]["pair_id"],
+        review_outcome="different_sprite",
+        reviewer_id="reviewer-test",
+        created_at_utc="2026-07-13T10:00:00+00:00",
+    )
+    review_path = state["paths"]["reviews.jsonl"]
+    payload = review_path.read_text(encoding="utf-8")
+    marker = '"review_outcome":"different_sprite"'
+    if marker not in payload:
+        marker = '"review_outcome": "different_sprite"'
+    review_path.write_text(payload.replace(marker, '"review_outcome":"blocked",' + marker, 1), encoding="utf-8")
+
+    replay = replay_review_events(review_path)
+
+    assert replay.global_invalid_events
+    assert state["pair"]["pair_id"] not in replay.chains
+
+
 def test_missing_empty_malformed_and_disappeared_review_logs_are_controlled(tmp_path: Path) -> None:
     missing_root = tmp_path / "missing"
     missing_root.mkdir()

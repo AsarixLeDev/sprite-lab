@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
+from spritelab.evaluation import suite as evaluation_suite_module
 from spritelab.evaluation.cli import main
 from spritelab.evaluation.conditional import score_conditions
 from spritelab.evaluation.memorization import TrainingImage, retrieve_neighbors
+from spritelab.evaluation.metric_definitions import IncompatibleMetricDefinitions
 from spritelab.evaluation.metrics import batch_metrics, score_image, score_rgba
 from spritelab.evaluation.suite import compare_reports, human_package, score_suite
 
@@ -129,6 +133,170 @@ def test_paired_seed_comparison(tmp_path: Path) -> None:
     result = compare_reports(base_score, cand_score, tmp_path / "compare")
     assert result["paired_count"] == 1
     assert (tmp_path / "compare" / "paired_contact_sheet.html").is_file()
+
+
+def test_paired_comparison_rejects_incompatible_metric_definitions_before_output(tmp_path: Path) -> None:
+    base_run = _run(tmp_path / "base_run", _sprite())
+    cand_run = _run(tmp_path / "cand_run", _sprite((30, 90, 220)))
+    base_score = tmp_path / "base_score"
+    cand_score = tmp_path / "cand_score"
+    score_suite(base_run, base_score)
+    score_suite(cand_run, cand_score)
+    summary_path = cand_score / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["thresholds"]["near_train_pixel_distance"] = 999
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    comparison = tmp_path / "compare"
+
+    with pytest.raises(IncompatibleMetricDefinitions, match="incompatible"):
+        compare_reports(base_score, cand_score, comparison)
+
+    assert not comparison.exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b'{"schema_version":"generation_benchmark_v1.0","schema_version":"generation_benchmark_v1.0"}',
+        b'{"schema_version":"generation_benchmark_v1.0","thresholds":NaN}',
+        b"[]",
+        b'{"schema_version":"unsupported.v0"}',
+    ),
+)
+def test_paired_comparison_strictly_rejects_malformed_report_before_output(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    base_run = _run(tmp_path / "base_run", _sprite())
+    candidate_run = _run(tmp_path / "candidate_run", _sprite())
+    base_score = tmp_path / "base_score"
+    candidate_score = tmp_path / "candidate_score"
+    score_suite(base_run, base_score)
+    score_suite(candidate_run, candidate_score)
+    (candidate_score / "summary.json").write_bytes(payload)
+    output = tmp_path / "compare"
+
+    with pytest.raises(ValueError):
+        compare_reports(base_score, candidate_score, output)
+
+    assert not output.exists()
+
+
+def test_paired_comparison_rejects_preopen_report_substitution_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run = _run(tmp_path / "run", _sprite())
+    score = tmp_path / "score"
+    score_suite(run, score)
+    summary_path = score / "summary.json"
+    original_lstat = Path.lstat
+
+    def substituted_lstat(path: Path):
+        metadata = original_lstat(path)
+        if path == summary_path:
+            values = list(metadata)
+            values[1] = int(metadata.st_ino) + 1
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", substituted_lstat)
+
+    with pytest.raises(ValueError, match="changed"):
+        compare_reports(score, score, tmp_path / "compare")
+
+    assert not (tmp_path / "compare").exists()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("duplicate", "nonfinite", "nonobject", "numeric_identity", "whitespace_identity", "collision"),
+)
+def test_paired_comparison_strictly_rejects_malformed_metric_rows_before_output(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    run = _run(tmp_path / "run", _sprite())
+    score = tmp_path / "score"
+    score_suite(run, score)
+    row = {
+        "prompt_id": "p0",
+        "noise_seed": 10,
+        "metrics": {
+            "pixel_art": {
+                "unique_palette_size": 2,
+                "silhouette_occupancy": 0.2,
+                "foreground_fragmentation": 0.1,
+                "high_frequency_pixel_noise": 0.0,
+            }
+        },
+    }
+    if kind == "duplicate":
+        payload = json.dumps(row).replace('"prompt_id": "p0"', '"prompt_id":"p0","prompt_id":"other"')
+    elif kind == "nonfinite":
+        payload = json.dumps(row).replace('"silhouette_occupancy": 0.2', '"silhouette_occupancy": NaN')
+    elif kind == "nonobject":
+        payload = "[]"
+    elif kind == "numeric_identity":
+        row["prompt_id"] = 7
+        row["prompt"] = "fallback must not mask malformed prompt_id"
+        payload = json.dumps(row)
+    elif kind == "whitespace_identity":
+        row["prompt_id"] = " padded "
+        payload = json.dumps(row)
+    else:
+        payload = json.dumps(row) + "\n" + json.dumps(row)
+    (score / "per_image_metrics.jsonl").write_text(payload + "\n", encoding="utf-8")
+    output = tmp_path / "compare"
+
+    with pytest.raises(ValueError):
+        compare_reports(score, score, output)
+
+    assert not output.exists()
+
+
+def test_paired_comparison_rejects_oversize_metric_rows_before_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run = _run(tmp_path / "run", _sprite())
+    score = tmp_path / "score"
+    score_suite(run, score)
+    monkeypatch.setattr(evaluation_suite_module, "_MAX_COMPARISON_JSONL_BYTES", 128)
+    (score / "per_image_metrics.jsonl").write_bytes(b"x" * 129)
+    output = tmp_path / "compare"
+
+    with pytest.raises(ValueError, match="bounded"):
+        compare_reports(score, score, output)
+
+    assert not output.exists()
+
+
+def test_paired_comparison_rejects_preopen_metric_row_substitution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run = _run(tmp_path / "run", _sprite())
+    score = tmp_path / "score"
+    score_suite(run, score)
+    metrics_path = score / "per_image_metrics.jsonl"
+    original_lstat = Path.lstat
+
+    def substituted_lstat(path: Path):
+        metadata = original_lstat(path)
+        if path == metrics_path:
+            values = list(metadata)
+            values[1] = int(metadata.st_ino) + 1
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", substituted_lstat)
+    output = tmp_path / "compare"
+
+    with pytest.raises(ValueError, match="changed"):
+        compare_reports(score, score, output)
+
+    assert not output.exists()
 
 
 def test_human_package_randomization_is_deterministic(tmp_path: Path) -> None:

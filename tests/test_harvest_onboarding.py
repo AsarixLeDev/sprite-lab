@@ -48,6 +48,9 @@ SOURCE_URL = "https://catalog.example.test/source"
 LICENSE_URL = "https://catalog.example.test/license"
 TERMS_URL = "https://catalog.example.test/terms"
 DIRECT_URL = "https://downloads.example.test/pack.zip?token=private"
+OGA_SOURCE_URL = "https://opengameart.org/content/behrs-2500-pixel-battle-axes-32x32-archive"
+OGA_LICENSE_URL = "https://creativecommons.org/publicdomain/zero/1.0/"
+OGA_DIRECT_URL = "https://opengameart.org/sites/default/files/battleaxes_01.zip"
 RAW = b"PK\x03\x04raw-probe-only"
 
 
@@ -173,6 +176,47 @@ def _source_html(*, automation: str = "", include_terms: bool = True, extra_term
         "</article>"
         "</body></html>"
     ).encode()
+
+
+def _oga_source_html() -> bytes:
+    return (
+        "<html><body>"
+        '<div class="node node-art view-mode-full clearfix">'
+        '<div class="field field-name-title field-type-ds field-label-hidden">'
+        "<h1>Behr's 2500+ Pixel Battle Axes 32x32 Archive</h1></div>"
+        '<div class="field field-name-author-submitter field-type-ds field-label-hidden">'
+        "Submitted by Behrtron</div>"
+        '<div class="field field-name-field-art-licenses field-type-taxonomy-term-reference">'
+        f'<a href="{OGA_LICENSE_URL}">CC0 1.0 public domain</a></div>'
+        '<div class="field field-name-body field-type-text-with-summary">'
+        "Hey guys, I have been spriting for some years now, im uploading my archive totally free "
+        "in the public domain.</div>"
+        '<div class="field field-name-field-art-files field-type-file">'
+        f'<a href="{OGA_DIRECT_URL}">battleaxes_01.zip</a></div>'
+        "</div>"
+        "</body></html>"
+    ).encode()
+
+
+def _verify_oga_source(
+    source: bytes,
+    *,
+    source_url: str = OGA_SOURCE_URL,
+    source_snapshot: FetchSnapshot | None = None,
+) -> Any:
+    license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
+    return verify_evidence_pages(
+        source_url=source_url,
+        source_snapshot=source_snapshot or _snapshot(source_url, source),
+        source_bytes=source,
+        license_url=OGA_LICENSE_URL,
+        license_snapshot=_snapshot(OGA_LICENSE_URL, license_page),
+        license_bytes=license_page,
+        title="Behr's 2500+ Pixel Battle Axes 32x32 Archive",
+        creator="Behrtron",
+        license_id="cc0-1.0",
+        direct_download_url=OGA_DIRECT_URL,
+    )
 
 
 def _responses() -> list[FakeResponse]:
@@ -748,13 +792,16 @@ def test_evidence_verification_rejects_oga_cc0_and_direct_file_when_price_is_sil
     license_url = "https://creativecommons.org/publicdomain/zero/1.0/"
     direct_url = "https://opengameart.org/sites/default/files/Dungeon%20Crawl%20Stone%20Soup%20Supplemental.zip"
     source = (
-        "<html><body><article>"
-        "<h1>Dungeon Crawl 32x32 tiles supplemental</h1>"
-        "<p>by MedicineStorm</p>"
-        "<p>You can use these tilesets in your program freely. No attribution is required.</p>"
-        f'<a href="{license_url}">CC0 1.0 public domain</a>'
-        f'<a href="{direct_url}">Dungeon Crawl Stone Soup Supplemental.zip</a>'
-        "</article></body></html>"
+        '<html><body><div class="node node-art view-mode-full clearfix">'
+        '<div class="field field-name-title">Dungeon Crawl 32x32 tiles supplemental</div>'
+        '<div class="field field-name-author-submitter">Submitted by MedicineStorm</div>'
+        '<div class="field field-name-field-art-licenses">'
+        f'<a href="{license_url}">CC0 1.0 public domain</a></div>'
+        '<div class="field field-name-body">'
+        "You can use these tilesets in your program freely. No attribution is required.</div>"
+        '<div class="field field-name-field-art-files">'
+        f'<a href="{direct_url}">Dungeon Crawl Stone Soup Supplemental.zip</a></div>'
+        "</div></body></html>"
     ).encode()
     license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
 
@@ -773,6 +820,213 @@ def test_evidence_verification_rejects_oga_cc0_and_direct_file_when_price_is_sil
         )
 
 
+def test_opengameart_adapter_accepts_one_live_shaped_record_and_binds_manifest() -> None:
+    source = _oga_source_html().replace(
+        b"</body>",
+        b'<aside class="patreon">Support us on Patreon for $5.</aside>'
+        b'<section class="collections">Other collection: all rights reserved.</section>'
+        b'<section class="comments">A commenter says this costs 500 points.</section></body>',
+    )
+
+    first = _verify_oga_source(source)
+    second = _verify_oga_source(source)
+
+    assert first.zero_cost_verified is True
+    assert first.verification_identity == second.verification_identity
+    assert "source-adapter: spritelab.harvest.source-adapter.opengameart.v1" in first.source_pack_evidence_text
+    assert (
+        "source-role-manifest: title=.field-name-title|author-submitter=.field-name-author-submitter|"
+        "art-licenses=.field-name-field-art-licenses|body=.field-name-body|"
+        "art-files=.field-name-field-art-files" in first.source_pack_evidence_text
+    )
+    assert "Patreon" not in first.source_pack_evidence_text
+    assert "collection" not in first.source_pack_evidence_text
+    assert "commenter" not in first.source_pack_evidence_text
+
+
+def test_opengameart_adapter_upgrades_only_the_live_legacy_cc0_deed_link() -> None:
+    source = _oga_source_html().replace(
+        OGA_LICENSE_URL.encode(),
+        b"http://creativecommons.org/publicdomain/zero/1.0/",
+        1,
+    )
+
+    verified = _verify_oga_source(source)
+
+    assert verified.zero_cost_verified is True
+
+
+def test_opengameart_adapter_accepts_the_closed_live_legacy_license_selector() -> None:
+    selector = (
+        b'<a href="http://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>'
+        b'<a href="http://creativecommons.org/licenses/by-sa/3.0/">CC BY-SA 3.0</a>'
+        b'<a href="http://www.gnu.org/licenses/gpl-3.0.html">GPL 3.0</a>'
+        b'<a href="http://www.gnu.org/licenses/old-licenses/gpl-2.0.html">GPL 2.0</a>'
+        b'<a href="http://opengameart.org/content/oga-by-30-faq">OGA-BY 3.0</a>'
+        b'<a href="http://creativecommons.org/publicdomain/zero/1.0/">CC0 1.0 public domain</a>'
+    )
+    source = _oga_source_html().replace(
+        f'<a href="{OGA_LICENSE_URL}">CC0 1.0 public domain</a>'.encode(),
+        selector,
+        1,
+    )
+
+    verified = _verify_oga_source(source)
+
+    assert verified.zero_cost_verified is True
+
+
+def test_opengameart_adapter_allows_only_the_live_legacy_opp_body_link() -> None:
+    source = _oga_source_html().replace(
+        b"in the public domain.</div>",
+        b'in the public domain. <a href="http://openpixelproject.com">Open Pixel Project</a></div>',
+        1,
+    )
+
+    verified = _verify_oga_source(source)
+
+    assert verified.zero_cost_verified is True
+
+
+def test_opengameart_adapter_rejects_other_insecure_role_links() -> None:
+    source = _oga_source_html().replace(
+        OGA_LICENSE_URL.encode(),
+        b"http://creativecommons.org/licenses/by/4.0/",
+        1,
+    )
+
+    with pytest.raises(EvidenceFetchError, match="one visible, nonnested full-art node"):
+        _verify_oga_source(source)
+
+
+def test_opengameart_adapter_does_not_take_positive_evidence_from_unknown_fields() -> None:
+    source = _oga_source_html().replace(
+        b"Hey guys, I have been spriting for some years now, im uploading my archive totally free "
+        b"in the public domain.</div>",
+        b"Visible neutral description.</div>"
+        b'<div class="field field-name-comments">The assets are available for free.</div>',
+        1,
+    )
+
+    with pytest.raises(EvidenceFetchError, match="conflict-free explicit zero-cost"):
+        _verify_oga_source(source)
+
+
+def test_opengameart_adapter_fails_closed_above_the_visible_link_limit() -> None:
+    excess_links = b"".join(b'<a href="https://example.test/preview">preview</a>' for _ in range(20_001))
+    source = _oga_source_html().replace(b"</body>", excess_links + b"</body>", 1)
+
+    with pytest.raises(EvidenceFetchError, match="one visible, nonnested full-art node"):
+        _verify_oga_source(source)
+
+
+def test_opengameart_adapter_rejects_duplicate_full_art_roots() -> None:
+    source = _oga_source_html()
+    node = source.removeprefix(b"<html><body>").removesuffix(b"</body></html>")
+    duplicate = b"<html><body>" + node + node + b"</body></html>"
+
+    with pytest.raises(EvidenceFetchError, match="one visible, nonnested full-art node"):
+        _verify_oga_source(duplicate)
+
+
+def test_opengameart_adapter_rejects_cross_record_role_composition() -> None:
+    source = _oga_source_html()
+    first = source.replace(
+        b"field-name-field-art-files field-type-file",
+        b"field-name-field-art-files-missing field-type-file",
+    )
+    second = source.replace(b"field-name-title field-type-ds", b"field-name-title-missing field-type-ds")
+    first_node = first.removeprefix(b"<html><body>").removesuffix(b"</body></html>")
+    second_node = second.removeprefix(b"<html><body>").removesuffix(b"</body></html>")
+    cross_record = b"<html><body>" + first_node + second_node + b"</body></html>"
+
+    with pytest.raises(EvidenceFetchError, match="one visible, nonnested full-art node"):
+        _verify_oga_source(cross_record)
+
+
+def test_opengameart_adapter_rejects_duplicate_authoritative_role() -> None:
+    source = _oga_source_html().replace(
+        b'<div class="field field-name-title field-type-ds field-label-hidden">',
+        b'<div class="field field-name-title field-type-ds">Attacker title</div>'
+        b'<div class="field field-name-title field-type-ds field-label-hidden">',
+        1,
+    )
+
+    with pytest.raises(EvidenceFetchError, match="one exact visible field for every role"):
+        _verify_oga_source(source)
+
+
+def test_opengameart_adapter_uses_only_visible_positive_evidence() -> None:
+    source = (
+        _oga_source_html()
+        .replace(
+            b'<div class="field field-name-body field-type-text-with-summary">',
+            b'<div class="field field-name-body field-type-text-with-summary">Visible description.'
+            b'<span style="display: none">',
+            1,
+        )
+        .replace(b"in the public domain.</div>", b"in the public domain.</span></div>", 1)
+    )
+
+    with pytest.raises(EvidenceFetchError, match="conflict-free explicit zero-cost"):
+        _verify_oga_source(source)
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement", "message"),
+    (
+        (
+            b"in the public domain.</div>",
+            b"in the public domain. Price: $5.</div>",
+            "conflict-free explicit zero-cost",
+        ),
+        (
+            b"CC0 1.0 public domain</a>",
+            b"CC0 1.0 public domain; all rights reserved</a>",
+            "art-licenses field contains conflicting",
+        ),
+    ),
+)
+def test_opengameart_adapter_rejects_conflicts_in_authoritative_roles(
+    needle: bytes,
+    replacement: bytes,
+    message: str,
+) -> None:
+    source = _oga_source_html().replace(needle, replacement, 1)
+
+    with pytest.raises(EvidenceFetchError, match=message):
+        _verify_oga_source(source)
+
+
+def test_opengameart_adapter_rejects_repeated_direct_link_in_files() -> None:
+    repeated = _oga_source_html().replace(
+        b"</a></div></div></body></html>",
+        f'</a><a href="{OGA_DIRECT_URL}">mirror</a></div></div></body></html>'.encode(),
+        1,
+    )
+
+    with pytest.raises(EvidenceFetchError, match="once and only in art-files"):
+        _verify_oga_source(repeated)
+
+
+def test_opengameart_profile_rejects_noncanonical_final_host_without_fallback() -> None:
+    source = _oga_source_html()
+    snapshot = _snapshot(OGA_SOURCE_URL, source)
+    attacker_snapshot = replace(snapshot, final_url="https://opengameart.org.attacker.test/content/forged")
+
+    with pytest.raises(EvidenceFetchError, match="final URL is not a canonical content-detail page"):
+        _verify_oga_source(source, source_snapshot=attacker_snapshot)
+
+
+def test_opengameart_adapter_is_not_selected_by_an_attacker_hostname() -> None:
+    source = _oga_source_html()
+    attacker_url = "https://opengameart.org.attacker.test/content/forged"
+
+    verified = _verify_oga_source(source, source_url=attacker_url)
+
+    assert "source-adapter:" not in verified.source_pack_evidence_text
+
+
 @pytest.mark.parametrize(
     "declaration",
     (
@@ -784,6 +1038,7 @@ def test_evidence_verification_rejects_oga_cc0_and_direct_file_when_price_is_sil
         "Included are 50 FREE high quality epic weapon sprites.",
         "im uploading my archive totally free in the public domain.",
         "Hey guys, I have been spriting for some years now, im uploading my archive totally free in the public domain.",
+        "The assets are available for free. Focal points guide the sprite composition.",
     ),
 )
 def test_evidence_verification_accepts_explicit_gratis_pack_wording(declaration: str) -> None:

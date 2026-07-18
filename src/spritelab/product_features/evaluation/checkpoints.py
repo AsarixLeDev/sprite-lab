@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from spritelab.evaluation.strict_json import strict_json_loads
 from spritelab.product_features.evaluation.models import (
     CheckpointAvailability,
     CheckpointCandidate,
@@ -132,8 +133,8 @@ def _read_object(path: Path) -> dict[str, Any]:
         )
         if before_identity != after_identity or after_identity != current_identity:
             return {}
-        value = json.loads(b"".join(chunks).decode("utf-8", errors="strict"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        value = strict_json_loads(b"".join(chunks).decode("utf-8", errors="strict"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         return {}
     finally:
         if descriptor >= 0:
@@ -976,6 +977,7 @@ def _availability(
     project_root: Path,
     expected_dataset: str | None,
     expected_view: str | None,
+    require_active_identities: bool,
 ) -> tuple[CheckpointAvailability, str, tuple[str, ...]]:
     reasons: list[str] = []
     status = str(state.get("status") or "UNKNOWN").upper()
@@ -1008,6 +1010,16 @@ def _availability(
         )
     if status != "COMPLETE":
         return CheckpointAvailability.INCOMPLETE, "INCOMPLETE", (f"Training run state is {status}.",)
+    if path is None:
+        return CheckpointAvailability.MISSING, "MISSING", ("Checkpoint file is missing.",)
+    if (require_active_identities or expected_dataset is not None) and (
+        not isinstance(expected_dataset, str) or not expected_dataset or expected_dataset != expected_dataset.strip()
+    ):
+        return (
+            CheckpointAvailability.INVALID,
+            "FAILED",
+            ("Active training dataset identity is missing or malformed.",),
+        )
     verification = "UNVERIFIED"
     dataset_values, malformed_dataset = _dataset_identity_values(state, row)
     if malformed_dataset:
@@ -1028,6 +1040,14 @@ def _availability(
             CheckpointAvailability.STALE_DATASET,
             verification,
             ("Checkpoint dataset identity does not match the active dataset identity.",),
+        )
+    if (require_active_identities or expected_view is not None) and (
+        not isinstance(expected_view, str) or not expected_view or expected_view != expected_view.strip()
+    ):
+        return (
+            CheckpointAvailability.INVALID,
+            "FAILED",
+            ("Active training view identity is missing or malformed.",),
         )
     view_values, malformed_view = _view_identity_values(state, row)
     if malformed_view:
@@ -1071,8 +1091,9 @@ def discover_checkpoint_candidates(
     project_root: Path,
     active_dataset_identity: str | None = None,
     active_view_identity: str | None = None,
+    require_active_identities: bool = False,
 ) -> CheckpointCatalog:
-    """Discover eligible checkpoints and preserve fail-closed reasons for advanced inspection."""
+    """Discover checkpoints, optionally enforcing the production active context."""
 
     eligible: list[CheckpointCandidate] = []
     unavailable: list[CheckpointCandidate] = []
@@ -1115,6 +1136,7 @@ def discover_checkpoint_candidates(
                 project_root=project_root,
                 expected_dataset=active_dataset_identity,
                 expected_view=active_view_identity,
+                require_active_identities=require_active_identities,
             )
             candidate = CheckpointCandidate(
                 checkpoint_id=_candidate_id(run_id, step, weights, path),

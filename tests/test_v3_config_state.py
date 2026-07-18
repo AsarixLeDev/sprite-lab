@@ -206,10 +206,9 @@ def test_environment_override_missing_file_fails(monkeypatch: pytest.MonkeyPatch
         discover_config(tmp_path)
 
 
-def test_state_parses_counts_instead_of_hardcoding(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_state_parses_counts_instead_of_hardcoding(tmp_path: Path) -> None:
     config = _project(tmp_path)
     _authoritative_artifacts(tmp_path, count=47)
-    monkeypatch.setattr("spritelab.v3.status._memorization_audit_status", lambda *_: AuditStatus.FAIL)
     state = build_project_state(config)
     raw = state.stage("provenance")
     assert raw.status == StageStatus.COMPLETE
@@ -217,10 +216,9 @@ def test_state_parses_counts_instead_of_hardcoding(monkeypatch: pytest.MonkeyPat
     assert raw.metrics["newly_eligible_record_count"] == 470
 
 
-def test_label_health_failure_is_review_not_truth(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_label_health_failure_is_review_not_truth(tmp_path: Path) -> None:
     config = _project(tmp_path)
     _authoritative_artifacts(tmp_path)
-    monkeypatch.setattr("spritelab.v3.status._memorization_audit_status", lambda *_: AuditStatus.FAIL)
     state = build_project_state(config)
     stage = state.stage("labeling")
     assert stage.status == StageStatus.NEEDS_REVIEW
@@ -229,33 +227,33 @@ def test_label_health_failure_is_review_not_truth(monkeypatch: pytest.MonkeyPatc
     assert stage.resume_available is False
 
 
-def test_training_and_memorization_failures_remain_blocking(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_training_failure_and_untrusted_memorization_report_remain_blocking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     config = _project(tmp_path)
     _authoritative_artifacts(tmp_path)
     monkeypatch.setattr("spritelab.v3.status._training_audit_status", lambda *_: AuditStatus.FAIL)
-    monkeypatch.setattr("spritelab.v3.status._memorization_audit_status", lambda *_: AuditStatus.FAIL)
     state = build_project_state(config)
     assert state.stage("training-audit").audit == AuditStatus.FAIL
     assert state.stage("training").status == StageStatus.BLOCKED
-    assert state.stage("memorization").audit == AuditStatus.FAIL
+    assert state.stage("memorization").audit == AuditStatus.STALE
     assert state.stage("promotion").production_authorized is False
 
 
-def test_changed_training_identity_marks_audit_stale(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_changed_training_identity_marks_audit_stale(tmp_path: Path) -> None:
     config = _project(tmp_path)
     _authoritative_artifacts(tmp_path)
     (tmp_path / "src/spritelab/training/synthetic.py").write_text("SAFE = False\n", encoding="utf-8")
-    monkeypatch.setattr("spritelab.v3.status._memorization_audit_status", lambda *_: AuditStatus.FAIL)
     state = build_project_state(config)
     assert state.stage("training-audit").audit == AuditStatus.STALE
     assert state.stage("training-audit").status == StageStatus.STALE
 
 
-def test_missing_audit_is_not_audited(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_missing_audit_is_not_audited(tmp_path: Path) -> None:
     config = _project(tmp_path)
     _authoritative_artifacts(tmp_path)
     (tmp_path / DEFAULT_CONFIG["training"]["audit_report"]).unlink()
-    monkeypatch.setattr("spritelab.v3.status._memorization_audit_status", lambda *_: AuditStatus.NOT_AUDITED)
+    (tmp_path / DEFAULT_CONFIG["evaluation"]["memorization_audit"]).unlink()
     state = build_project_state(config)
     assert state.stage("training-audit").audit == AuditStatus.NOT_AUDITED
     assert state.stage("memorization").audit == AuditStatus.NOT_AUDITED
@@ -268,8 +266,8 @@ def test_directory_existence_does_not_imply_freeze(tmp_path: Path) -> None:
     assert state.stage("freeze").status == StageStatus.BLOCKED
 
 
-def test_evaluation_and_promotion_readiness_require_training_identity_binding(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_evaluation_readiness_requires_training_identity_and_promotion_requires_trusted_audit(
+    tmp_path: Path,
 ) -> None:
     config = _project(tmp_path)
     run_directory = tmp_path / "runs" / "v3" / "train-identity"
@@ -324,8 +322,6 @@ def test_evaluation_and_promotion_readiness_require_training_identity_binding(
         DEFAULT_CONFIG["evaluation"]["memorization_audit"],
         {"authorization": {"checkpoint_promotion": True}},
     )
-    monkeypatch.setattr("spritelab.v3.status._memorization_audit_status", lambda *_: AuditStatus.PASS)
-
     missing = build_project_state(config)
 
     assert missing.stage("evaluation").status == StageStatus.BLOCKED
@@ -343,8 +339,9 @@ def test_evaluation_and_promotion_readiness_require_training_identity_binding(
 
     assert bound.stage("evaluation").status == StageStatus.READY
     assert bound.stage("evaluation").metrics["identity_binding_complete"] is True
-    assert bound.stage("promotion").status == StageStatus.READY
-    assert bound.stage("promotion").production_authorized is True
+    assert bound.stage("promotion").status == StageStatus.BLOCKED
+    assert bound.stage("promotion").production_authorized is False
+    assert any("memorization audit" in blocker.casefold() for blocker in bound.stage("promotion").blockers)
     assert bound.stage("promotion").metrics["training_dataset_identity"] == "synthetic-training-dataset-v1"
     assert bound.stage("promotion").metrics["training_view_identity"] == "synthetic-training-view-v1"
 

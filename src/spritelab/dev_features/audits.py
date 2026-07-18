@@ -14,7 +14,7 @@ from spritelab.product_core.audit_evidence import (
 from spritelab.product_features.dataset.certification import labeling_downstream_consequences
 from spritelab.v3.config import ProjectConfig
 from spritelab.v3.model import AuditStatus, ProjectState, StageState
-from spritelab.v3.status import verify_memorization_audit_applicability
+from spritelab.v3.status import verify_memorization_audit_path
 
 _AUDIT_SOURCES = (
     ("semantic-labeling", "semantic-labeling", "labeling", "audit_report", "BLOCKS_LABELING_AND_FREEZE"),
@@ -96,7 +96,7 @@ def collect_audits(config: ProjectConfig, state: ProjectState) -> list[dict[str,
             report_path = config.path_for(section, key)
         except KeyError:
             report_path = None
-        report = _read_json(report_path)
+        report = None if subsystem == "memorization" else _read_json(report_path)
         if subsystem == "semantic-labeling":
             try:
                 manifest_path = config.path_for("labeling", "audit_hashes")
@@ -148,7 +148,8 @@ def collect_audits(config: ProjectConfig, state: ProjectState) -> list[dict[str,
             )
             continue
         if subsystem == "memorization":
-            verification = verify_memorization_audit_applicability(config.root, report)
+            verification = verify_memorization_audit_path(config.root, report_path)
+            report = dict(verification.report) if verification.report is not None else None
             applicable = verification.applicable
             if applicable and verification.status == AuditStatus.PASS:
                 consequence = "ELIGIBLE_FOR_DEPENDENT_AUTHORIZATION"

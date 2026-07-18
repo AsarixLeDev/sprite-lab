@@ -741,19 +741,29 @@ def test_malformed_bundle_has_no_actionable_product_review(tmp_path: Path) -> No
     assert display["review_action_available"] is False
 
 
+def test_candidate_bundle_with_duplicate_authority_key_is_not_actionable(tmp_path: Path) -> None:
+    state = _production_run(tmp_path)
+    candidate = state["candidate"]
+    payload = candidate.read_text(encoding="utf-8")
+    marker = '"schema_version": "sprite_lab_memorization_candidate_evidence_v2"'
+    candidate.write_text(
+        payload.replace(marker, '"schema_version": "foreign", ' + marker, 1),
+        encoding="utf-8",
+    )
+
+    display = memorization_display(candidate)
+
+    assert display["evidence_state"] == "incomplete"
+    assert display["review_action_available"] is False
+
+
 def test_code_identity_binds_every_semantic_product_adapter(tmp_path: Path) -> None:
     for relative in MEMORIZATION_AUDIT_BOUND_FILES:
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"semantic:{relative}\n", encoding="utf-8")
-    report = {
-        "commit": "synthetic",
-        "subsystem": "memorization",
-        "overall_verdict": "PASS",
-        "code_identity": memorization_audit_code_identity(tmp_path),
-    }
-    config = ProjectConfig(tmp_path, None, {})
-    assert _memorization_audit_status(config, report) is AuditStatus.PASS
+    identity = memorization_audit_code_identity(tmp_path)
+    recorded_paths = {item["path"] for item in identity["bound_files"]}
     required = {
         "src/spritelab/evaluation/candidate_bundle.py",
         "src/spritelab/product_features/dataset/web.py",
@@ -763,6 +773,7 @@ def test_code_identity_binds_every_semantic_product_adapter(tmp_path: Path) -> N
         "src/spritelab/product_features/evaluation/service.py",
     }
     assert required <= set(MEMORIZATION_AUDIT_BOUND_FILES)
+    assert required <= recorded_paths
 
 
 def test_pre_product_audit_without_versioned_code_identity_is_stale(tmp_path: Path) -> None:
@@ -803,16 +814,11 @@ def test_unrelated_documentation_and_css_do_not_stale_audit(tmp_path: Path, rela
         path = tmp_path / bound
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("before\n", encoding="utf-8")
-    report = {
-        "commit": "synthetic",
-        "subsystem": "memorization",
-        "overall_verdict": "PASS",
-        "code_identity": memorization_audit_code_identity(tmp_path),
-    }
+    before = memorization_audit_code_identity(tmp_path)
     cosmetic = tmp_path / relative
     cosmetic.parent.mkdir(parents=True, exist_ok=True)
     cosmetic.write_text("cosmetic\n", encoding="utf-8")
-    assert _memorization_audit_status(ProjectConfig(tmp_path, None, {}), report) is AuditStatus.PASS
+    assert memorization_audit_code_identity(tmp_path) == before
 
 
 def test_synthetic_eligible_decision_performs_no_mutation(tmp_path: Path) -> None:

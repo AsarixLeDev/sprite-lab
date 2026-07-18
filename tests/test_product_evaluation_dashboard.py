@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from spritelab.evaluation.metric_definitions import metric_definition_identity
 from spritelab.product_features.evaluation import (
     IncompatibleMetricDefinitions,
     build_dashboard,
@@ -151,6 +152,68 @@ def test_side_by_side_comparison_reports_metric_category_and_sample_changes() ->
 def test_incompatible_metric_definitions_are_rejected_before_averaging() -> None:
     with pytest.raises(IncompatibleMetricDefinitions, match="incompatible"):
         compare_evaluations(_report(definition="v1"), _report(definition="v2"))
+
+
+def test_explicit_metric_definitions_are_bound_to_report_schema() -> None:
+    left = _report()
+    right = _report()
+    right["schema_version"] = "generation_benchmark_v2.0"
+
+    with pytest.raises(IncompatibleMetricDefinitions, match="incompatible"):
+        compare_evaluations(left, right)
+
+
+def test_missing_metric_definitions_are_never_treated_as_compatible() -> None:
+    with pytest.raises(IncompatibleMetricDefinitions, match="no complete"):
+        compare_evaluations({}, {})
+
+
+def test_detector_policy_identity_is_comparison_relevant() -> None:
+    def report(detector_sha256: str) -> dict:
+        return {
+            "schema_version": "generation_benchmark_v1.0",
+            "thresholds": {"near": 0.1},
+            "detector_policy_version": "detector-v1",
+            "detector_policy_sha256": detector_sha256,
+            "comparison_method": "rgba-v1",
+            "comparison_parameters_sha256": "c" * 64,
+            "summary": {},
+        }
+
+    with pytest.raises(IncompatibleMetricDefinitions, match="incompatible"):
+        compare_evaluations(report("a" * 64), report("b" * 64))
+
+
+def test_explicit_metric_definition_hash_must_agree_with_all_definition_fields() -> None:
+    report = _report()
+    report.update(
+        detector_policy_version="detector-v1",
+        detector_policy_sha256="a" * 64,
+        comparison_method="rgba-v1",
+        comparison_parameters_sha256="b" * 64,
+        thresholds={"near": 0.1},
+    )
+    report["metric_definitions_sha256"] = metric_definition_identity(report)
+    drifted = json.loads(json.dumps(report))
+    drifted["detector_policy_sha256"] = "c" * 64
+
+    with pytest.raises(IncompatibleMetricDefinitions, match="does not agree"):
+        compare_evaluations(report, drifted)
+
+
+def test_embedded_comparison_parameter_hash_must_agree_with_fields() -> None:
+    report = {
+        "schema_version": "generation_benchmark_v1.0",
+        "thresholds": {"near": 0.1},
+        "detector_policy_version": "detector-v1",
+        "detector_policy_sha256": "a" * 64,
+        "comparison_method": "rgba-v1",
+        "comparison_parameters": {"near": 0.1},
+        "comparison_parameters_sha256": "b" * 64,
+    }
+
+    with pytest.raises(IncompatibleMetricDefinitions, match="Comparison-parameter"):
+        metric_definition_identity(report)
 
 
 def test_public_reports_preserve_metric_definition_compatibility_identity() -> None:

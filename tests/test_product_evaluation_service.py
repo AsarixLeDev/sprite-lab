@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from contextlib import contextmanager
 from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
@@ -21,6 +23,7 @@ from spritelab.product_features.evaluation import plugin as evaluation_plugin
 from spritelab.product_features.evaluation import service as evaluation_service_module
 from spritelab.product_features.evaluation.playground import GenerationTimedOutError
 from spritelab.product_features.evaluation.web import create_evaluation_router
+from spritelab.utils.safe_fs import UnsafeFilesystemOperation
 from spritelab.v3 import cli as product_cli
 
 
@@ -150,6 +153,17 @@ def test_benchmark_missing_blocks_without_generation(tmp_path: Path) -> None:
     result = service.run(EvaluationRequest(dry_run=True))
     assert result.status.value == "BLOCKED"
     assert fake.calls == 0
+
+
+def test_benchmark_duplicate_authority_key_is_rejected(tmp_path: Path) -> None:
+    config, benchmark = _project(tmp_path)
+    benchmark.write_text('{"prompt_id":"p1","prompt_id":"p2","prompt":"sword"}\n', encoding="utf-8")
+    service = EvaluationService(project_root=tmp_path, config=config, evaluator=_fake_evaluator())
+
+    valid, message = service._validate_benchmark(benchmark)
+
+    assert valid is False
+    assert "malformed" in message.lower()
 
 
 def test_missing_active_training_view_blocks_service_before_generation(tmp_path: Path) -> None:
@@ -919,6 +933,8 @@ def test_incomplete_evaluation_reconstructs_without_recomputation_and_changes_be
 
     generated = output / run_id / "generated"
     generated.rmdir()
+    state_path = output / run_id / "state.json"
+    state_before = state_path.read_bytes()
     stale = EvaluationService(
         project_root=tmp_path,
         config=config,
@@ -929,6 +945,38 @@ def test_incomplete_evaluation_reconstructs_without_recomputation_and_changes_be
     assert stale.latest_status == "STALE"
     assert stale.dashboard()["stale"] is True
     assert generator.calls == 1
+    assert state_path.read_bytes() == state_before
+
+
+def test_malformed_hash_consistent_product_report_reconstructs_stale(tmp_path: Path) -> None:
+    config, _benchmark = _project(tmp_path)
+    output = tmp_path / "evaluation-output"
+    first = EvaluationService(
+        project_root=tmp_path,
+        config=config,
+        generator=FakeEvaluationGenerator(),
+        evaluator=_fake_evaluator(),
+        output_root=output,
+    )
+    result = first.run(EvaluationRequest(explicit_action=True))
+    assert result.run is not None
+    run_directory = output / result.run.run_id
+    report_path = run_directory / "product_report.json"
+    report_path.write_text('{"summary":{},"summary":{}}\n', encoding="utf-8")
+    state_path = run_directory / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["expected_artifacts"]["report"]["sha256"] = sha256(report_path.read_bytes()).hexdigest()
+    _write_json(state_path, state)
+
+    restored = EvaluationService(
+        project_root=tmp_path,
+        config=config,
+        evaluator=_fake_evaluator(),
+        output_root=output,
+    )
+
+    assert restored.latest_status == "STALE"
+    assert "product report is malformed or unsafe" in restored.latest_stale_reasons
 
 
 def test_default_candidate_authoring_uses_context_persisted_before_generation(tmp_path: Path) -> None:
@@ -987,8 +1035,7 @@ def test_reconstruction_fails_closed_when_active_training_context_drifts(
     )
 
     assert restored.latest_status == "STALE"
-    state = restored.events.state(result.run.run_id)
-    assert any(reason in item for item in state["stale_reasons"])
+    assert any(reason in item for item in restored.latest_stale_reasons)
 
 
 def test_reconstruction_fails_closed_when_checkpoint_view_provenance_drifts(tmp_path: Path) -> None:
@@ -1019,8 +1066,7 @@ def test_reconstruction_fails_closed_when_checkpoint_view_provenance_drifts(tmp_
     )
 
     assert restored.latest_status == "STALE"
-    state = restored.events.state(result.run.run_id)
-    assert "checkpoint training view identity changed after evaluation" in state["stale_reasons"]
+    assert "checkpoint training view identity changed after evaluation" in restored.latest_stale_reasons
 
 
 @pytest.mark.parametrize(
@@ -1065,8 +1111,7 @@ def test_reconstruction_fails_closed_when_checkpoint_loses_eligibility(
     )
 
     assert restored.latest_status == "STALE"
-    state = restored.events.state(result.run.run_id)
-    assert "checkpoint is no longer eligible under the persisted dataset/view identity" in state["stale_reasons"]
+    assert "checkpoint is no longer eligible under the persisted dataset/view identity" in restored.latest_stale_reasons
 
 
 @pytest.mark.parametrize("field", ("training_dataset_identity", "training_view_identity"))
@@ -1098,8 +1143,7 @@ def test_reconstruction_fails_closed_when_persisted_training_identity_is_deleted
     )
 
     assert restored.latest_status == "STALE"
-    stale_state = restored.events.state(result.run.run_id)
-    assert f"persisted {field} is missing" in stale_state["stale_reasons"]
+    assert f"persisted {field} is missing" in restored.latest_stale_reasons
 
 
 @pytest.mark.parametrize("field", ("training_dataset_identity", "training_view_identity"))
@@ -1133,8 +1177,7 @@ def test_reconstruction_fails_closed_when_persisted_training_identity_is_malform
     )
 
     assert restored.latest_status == "STALE"
-    stale_state = restored.events.state(result.run.run_id)
-    assert f"persisted {field} is malformed" in stale_state["stale_reasons"]
+    assert f"persisted {field} is malformed" in restored.latest_stale_reasons
 
 
 def test_reconstruction_validates_candidate_against_persisted_training_context(
@@ -1165,9 +1208,11 @@ def test_reconstruction_validates_candidate_against_persisted_training_context(
     first.events.update_state(run_id, expected_artifacts=expected_artifacts)
     observed_context: dict = {}
 
+    private_reason = f"private adapter diagnostic: {tmp_path / 'secret.txt'}"
+
     def reject_candidate(_path: Path, *, expected_context):
         observed_context.update(expected_context)
-        return SimpleNamespace(valid=False, reasons=("training view identity mismatch",))
+        return SimpleNamespace(valid=False, reasons=("training view identity mismatch", private_reason))
 
     monkeypatch.setattr(evaluation_service_module, "load_candidate_bundle", reject_candidate)
     restored = EvaluationService(
@@ -1180,8 +1225,158 @@ def test_reconstruction_validates_candidate_against_persisted_training_context(
     assert restored.latest_status == "STALE"
     assert observed_context["training_dataset_identity"] == "dataset-v1"
     assert observed_context["training_view_identity"] == "view-v1"
-    stale_state = restored.events.state(run_id)
-    assert "candidate evidence identity invalid: training view identity mismatch" in stale_state["stale_reasons"]
+    assert "candidate evidence identity invalid: training view identity mismatch" in restored.latest_stale_reasons
+    assert str(tmp_path) not in json.dumps(restored.latest_stale_reasons)
+    public_dashboard = restored.dashboard()
+    assert public_dashboard["stale_reasons"]
+    assert str(tmp_path) not in json.dumps(public_dashboard)
+
+
+def test_reconstruction_never_hashes_or_loads_unanchored_persisted_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config, _benchmark = _project(tmp_path)
+    output = tmp_path / "evaluation-output"
+    first = EvaluationService(
+        project_root=tmp_path,
+        config=config,
+        generator=FakeEvaluationGenerator(),
+        evaluator=_fake_evaluator(),
+        output_root=output,
+    )
+    result = first.run(EvaluationRequest(explicit_action=True))
+    assert result.run is not None
+    state_path = output / result.run.run_id / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    outside_file = tmp_path / "outside-secret.bin"
+    outside_file.write_bytes(b"outside")
+    outside_tree = tmp_path / "outside-tree"
+    outside_tree.mkdir()
+    (outside_tree / "secret.bin").write_bytes(b"secret")
+    state["checkpoint_path"] = str(outside_file)
+    state["expected_artifacts"]["checkpoint"]["path"] = str(outside_file)
+    state["expected_artifacts"]["attacker_tree"] = {
+        "path": str(outside_tree),
+        "kind": "tree",
+        "sha256": "a" * 64,
+    }
+    state["expected_artifacts"]["candidate_evidence"] = {
+        "path": str(outside_file),
+        "kind": "file",
+        "sha256": "b" * 64,
+    }
+    _write_json(state_path, state)
+
+    original_file_hash = evaluation_service_module._file_sha256
+    original_tree_hash = evaluation_service_module._tree_sha256
+    observed_hashes: list[Path] = []
+
+    def file_hash(path: Path, **kwargs) -> str:
+        observed_hashes.append(path)
+        assert path != outside_file
+        return original_file_hash(path, **kwargs)
+
+    def tree_hash(path: Path) -> str:
+        observed_hashes.append(path)
+        assert path != outside_tree
+        return original_tree_hash(path)
+
+    def reject_load(_path: Path, **_kwargs):
+        raise AssertionError("unanchored candidate evidence must not be loaded")
+
+    monkeypatch.setattr(evaluation_service_module, "_file_sha256", file_hash)
+    monkeypatch.setattr(evaluation_service_module, "_tree_sha256", tree_hash)
+    monkeypatch.setattr(evaluation_service_module, "load_candidate_bundle", reject_load)
+
+    restored = EvaluationService(
+        project_root=tmp_path,
+        config=config,
+        evaluator=_fake_evaluator(),
+        output_root=output,
+    )
+
+    assert restored.latest_status == "STALE"
+    assert outside_file not in observed_hashes
+    assert outside_tree not in observed_hashes
+    assert any("validated checkpoint catalog" in reason for reason in restored.latest_stale_reasons)
+
+
+@pytest.mark.parametrize("reference", (r"C:outside-secret.bin", r"\outside-secret.bin"))
+def test_run_artifact_rejects_windows_anchored_forms_before_metadata_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    reference: str,
+) -> None:
+    observed: list[Path] = []
+    original_lstat = Path.lstat
+
+    def tracked_lstat(path: Path):
+        observed.append(path)
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", tracked_lstat)
+
+    assert evaluation_service_module._safe_run_artifact(tmp_path, reference, "file") is None
+    assert observed == []
+
+
+def test_descriptor_hash_rejects_postopen_hard_link_count_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "artifact.bin"
+    path.write_bytes(b"artifact")
+    descriptor = os.open(path, os.O_RDONLY)
+    expected = os.fstat(descriptor)
+    original_fstat = os.fstat
+    calls = 0
+
+    def raced_fstat(fd: int):
+        nonlocal calls
+        metadata = original_fstat(fd)
+        calls += 1
+        if calls == 2:
+            values = list(metadata)
+            values[3] = int(metadata.st_nlink) + 1
+            return os.stat_result(values)
+        return metadata
+
+    monkeypatch.setattr(os, "fstat", raced_fstat)
+    try:
+        with pytest.raises(OSError, match="changed"):
+            evaluation_service_module._descriptor_sha256(descriptor, expected)
+    finally:
+        os.close(descriptor)
+
+
+def test_run_artifact_parent_reparse_rejection_prevents_unanchored_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    artifact = run / "artifact.bin"
+    artifact.write_bytes(b"artifact")
+    opened = False
+
+    @contextmanager
+    def reject_reparse(_directory: Path, _root: Path):
+        raise UnsafeFilesystemOperation("mutable parent identity changed while anchored")
+        yield
+
+    def unexpected_open(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("artifact must not be opened after parent reparse rejection")
+
+    monkeypatch.setattr(evaluation_service_module, "open_anchored_directory", reject_reparse)
+    monkeypatch.setattr(evaluation_service_module, "_anchored_file_sha256", unexpected_open)
+
+    with pytest.raises(UnsafeFilesystemOperation, match="identity changed"):
+        evaluation_service_module._run_artifact_sha256(run, artifact, "file")
+
+    assert opened is False
 
 
 @pytest.mark.parametrize(
@@ -1219,8 +1414,7 @@ def test_reconstruction_fails_closed_when_active_training_identity_is_deleted(
     )
 
     assert restored.latest_status == "STALE"
-    state = restored.events.state(result.run.run_id)
-    assert reason in state["stale_reasons"]
+    assert reason in restored.latest_stale_reasons
 
 
 @pytest.mark.parametrize(
@@ -1272,8 +1466,7 @@ def test_reconstruction_enforces_checkpoint_launch_identity(
     )
 
     assert restored.latest_status == "STALE"
-    stale_state = restored.events.state(result.run.run_id)
-    assert reason in stale_state["stale_reasons"]
+    assert reason in restored.latest_stale_reasons
 
 
 @pytest.mark.parametrize(
@@ -1314,8 +1507,7 @@ def test_malformed_persisted_evaluation_stage_is_controlled_stale(
     )
 
     assert restored.latest_status == "STALE"
-    stale_state = restored.events.state(result.run.run_id)
-    assert "persisted evaluation stages are malformed" in stale_state["stale_reasons"]
+    assert "persisted evaluation stages are malformed" in restored.latest_stale_reasons
     assert all(stage.status == "BLOCKED" for stage in restored.latest_stages[:3])
 
 

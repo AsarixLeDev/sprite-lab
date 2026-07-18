@@ -27,6 +27,7 @@ from spritelab.evaluation.memorization import (
     parse_evidence_class,
     reconstruct_rgba,
 )
+from spritelab.evaluation.strict_json import strict_json_loads
 from spritelab.evaluation.suite import read_jsonl
 from spritelab.utils.safe_fs import atomic_write_text
 
@@ -305,10 +306,10 @@ def replay_review_events(
         if not line.strip():
             continue
         try:
-            raw = json.loads(line)
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raw = strict_json_loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
             global_invalid.append(
-                {"line_number": line_number, "reason": f"line {line_number}: malformed JSON: {error.msg}"}
+                {"line_number": line_number, "reason": f"line {line_number}: malformed JSON: {error}"}
             )
             continue
         if not isinstance(raw, dict):

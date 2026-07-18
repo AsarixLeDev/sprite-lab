@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from spritelab.evaluation.audit_identity import load_memorization_audit_report
 from spritelab.evaluation.candidate_bundle import load_candidate_bundle
 from spritelab.evaluation.memorization import (
     HARD_EVIDENCE_CLASSES,
@@ -262,30 +262,26 @@ def promotion_integrity_display(
     repository_root: Path | None = None,
 ) -> dict[str, Any]:
     """Display authorization state only when the complete semantic code identity is current."""
-    audit: dict[str, Any] = {}
-    if audit_path and audit_path.is_file():
-        try:
-            value = json.loads(audit_path.read_text(encoding="utf-8"))
-            audit = value if isinstance(value, dict) else {}
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            audit = {}
-    verdict = str(audit.get("overall_verdict") or audit.get("verdict") or audit.get("status") or "NOT_AUDITED").upper()
     root = (
         repository_root.resolve()
         if repository_root is not None
         else (_repository_root(audit_path.parent) if audit_path else None)
     )
     if root is not None:
-        from spritelab.v3.status import verify_memorization_audit_applicability
+        from spritelab.v3.status import verify_memorization_audit_path
 
-        verification = verify_memorization_audit_applicability(root, audit or None)
+        verification = verify_memorization_audit_path(root, audit_path)
+        audit = dict(verification.report) if verification.report is not None else {}
         identity_current = verification.identity_current
         applicability = verification.status.value
         applicability_reasons = list(verification.reasons)
     else:
+        loaded = load_memorization_audit_report(audit_path)
+        audit = dict(loaded.report) if loaded.report is not None else {}
         identity_current = False
         applicability = "NOT_COMPARABLE"
-        applicability_reasons = ["repository_root_unavailable"]
+        applicability_reasons = [*loaded.errors, "repository_root_unavailable"]
+    verdict = str(audit.get("overall_verdict") or audit.get("verdict") or audit.get("status") or "NOT_AUDITED").upper()
     authorized_by_audit = (
         verdict in {"PASS", "PASSED"}
         and identity_current

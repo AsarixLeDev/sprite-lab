@@ -342,6 +342,49 @@ def test_evaluation_and_checkpoint_schedules_include_final_without_disappearing(
         evaluation_steps(0, 1000)
 
 
+def test_campaign_schema_declares_every_required_property_and_schedule_matrix() -> None:
+    schema = campaign_module.campaign_schema()
+
+    assert set(schema["required"]) <= set(schema["properties"])
+    assert {"evaluation_schedule", "checkpoint_schedule"} <= set(schema["required"])
+    for matrix_name in ("evaluation_schedule", "checkpoint_schedule"):
+        assert schema["properties"][matrix_name] == {
+            "type": "object",
+            "additionalProperties": {"type": "array", "items": {"type": "integer"}},
+        }
+
+
+@pytest.mark.parametrize("matrix_name", ["evaluation_schedule", "checkpoint_schedule"])
+@pytest.mark.parametrize("drift", ["missing", "extra", "float", "bool", "equal_value"])
+def test_top_level_schedule_matrix_must_be_type_exact_and_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    matrix_name: str,
+    drift: str,
+) -> None:
+    code_identity = {"schema_version": "synthetic_test_code_identity_v1", "identity_sha256": "1" * 64}
+    monkeypatch.setattr(campaign_module, "_code_identity", lambda: deepcopy(code_identity))
+    plan = _plan(tmp_path)
+    first_run_id = plan["expected_run_ids"][0]
+    if drift == "missing":
+        plan[matrix_name].pop(first_run_id)
+    elif drift == "extra":
+        plan[matrix_name]["unexpected-run"] = list(plan[matrix_name][first_run_id])
+    elif drift == "float":
+        plan[matrix_name][first_run_id][0] = float(plan[matrix_name][first_run_id][0])
+    elif drift == "bool":
+        plan[matrix_name][first_run_id][0] = True
+    else:
+        plan[matrix_name][first_run_id] = tuple(plan[matrix_name][first_run_id])
+    plan["campaign_identity"] = stable_hash(campaign_module._campaign_identity_payload(plan))
+
+    report = validate_campaign(plan)
+
+    assert report["errors"] == [f"{matrix_name} does not exactly match the expected run schedule matrix"]
+    assert report["valid"] is False
+    assert report["launch_ready"] is False
+
+
 def test_deterministic_repeated_planning(tmp_path: Path) -> None:
     spec = _spec(tmp_path)
     assert plan_campaign(spec) == plan_campaign(deepcopy(spec))

@@ -4,24 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Protocol
 
 from spritelab.evaluation.candidate_bundle import load_candidate_bundle
 from spritelab.evaluation.memorization import resolve_training_context_identities
+from spritelab.evaluation.strict_json import strict_json_loads
 from spritelab.product_core import (
     ProductBlocker,
     ProductEvent,
     ProductResult,
     ProductRun,
     ProductStatus,
-    StrictJSONError,
     strict_json_dumps,
-    strict_json_loads,
 )
 from spritelab.product_features.evaluation.checkpoints import (
     discover_checkpoint_candidates,
@@ -41,10 +42,14 @@ from spritelab.product_features.evaluation.models import (
     new_evaluation_stages,
 )
 from spritelab.product_features.evaluation.playground import GenerationSafetyError
-from spritelab.product_web.events import EventRepository
+from spritelab.product_web.events import EventRepository, sanitize_public_text
+from spritelab.utils.safe_fs import AnchoredDirectory, UnsafeFilesystemOperation, open_anchored_directory
 
 EVALUATION_STATE_SCHEMA = "spritelab.product.evaluation-state.v2"
 _UNSET = object()
+_MAX_ARTIFACT_TREE_ENTRIES = 10_000
+_MAX_ARTIFACT_TREE_BYTES = 512 * 1024 * 1024
+_MAX_PRODUCT_REPORT_BYTES = 4 * 1024 * 1024
 
 
 class EvaluationGenerator(Protocol):
@@ -121,22 +126,264 @@ def _stage(stages: list[EvaluationStage], key: str) -> EvaluationStage:
     return next(item for item in stages if item.key == key)
 
 
-def _file_sha256(path: Path) -> str:
+def _stable_file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int | None]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        int(getattr(metadata, "st_nlink", 1)),
+        metadata.st_size,
+        getattr(metadata, "st_mtime_ns", None),
+    )
+
+
+def _descriptor_sha256(
+    descriptor: int,
+    expected: os.stat_result,
+    *,
+    maximum_bytes: int | None = None,
+) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    before = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or int(getattr(before, "st_nlink", 1)) != 1
+        or (maximum_bytes is not None and before.st_size > maximum_bytes)
+        or _stable_file_identity(before) != _stable_file_identity(expected)
+    ):
+        raise OSError("artifact is not one stable bounded regular file")
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    after = os.fstat(descriptor)
+    if _stable_file_identity(after) != _stable_file_identity(before):
+        raise OSError("artifact changed while hashing")
+    return digest.hexdigest()
+
+
+def _anchored_file_sha256(
+    parent: AnchoredDirectory,
+    name: str,
+    *,
+    expected: os.stat_result | None = None,
+    maximum_bytes: int | None = None,
+) -> str:
+    before = parent.lstat(name)
+    if expected is not None and _stable_file_identity(before) != _stable_file_identity(expected):
+        raise OSError("artifact was substituted before it was opened")
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    descriptor = parent.open_file_immovable(name, flags)
+    try:
+        identity = _descriptor_sha256(descriptor, before, maximum_bytes=maximum_bytes)
+        after = parent.lstat(name)
+        parent.verify()
+        if _stable_file_identity(after) != _stable_file_identity(before):
+            raise OSError("artifact changed while hashing")
+        return identity
+    finally:
+        os.close(descriptor)
+
+
+def _file_sha256(path: Path, *, maximum_bytes: int | None = None) -> str:
+    with open_anchored_directory(path.parent, path.parent) as parent:
+        return _anchored_file_sha256(parent, path.name, maximum_bytes=maximum_bytes)
+
+
+def _confined_file_sha256(path: Path, root: Path, *, maximum_bytes: int | None = None) -> str:
+    with open_anchored_directory(path.parent, root) as parent:
+        return _anchored_file_sha256(parent, path.name, maximum_bytes=maximum_bytes)
+
+
+def _load_anchored_json_object(directory: Path, path: Path, *, maximum_bytes: int) -> dict[str, Any]:
+    with open_anchored_directory(path.parent, directory) as parent:
+        before = parent.lstat(path.name)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or int(getattr(before, "st_nlink", 1)) != 1
+            or before.st_size > maximum_bytes
+        ):
+            raise ValueError("durable JSON artifact is not one bounded regular file")
+        descriptor = parent.open_file_immovable(path.name, os.O_RDONLY | int(getattr(os, "O_BINARY", 0)))
+        try:
+            opened = os.fstat(descriptor)
+            if _stable_file_identity(opened) != _stable_file_identity(before):
+                raise ValueError("durable JSON artifact changed before opening")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(descriptor, min(1024 * 1024, maximum_bytes + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > maximum_bytes:
+                    raise ValueError("durable JSON artifact exceeds its byte limit")
+            after = os.fstat(descriptor)
+            current = parent.lstat(path.name)
+            parent.verify()
+            if len({_stable_file_identity(item) for item in (before, opened, after, current)}) != 1:
+                raise ValueError("durable JSON artifact changed while reading")
+        finally:
+            os.close(descriptor)
+    value = strict_json_loads(b"".join(chunks))
+    if not isinstance(value, dict) or not value:
+        raise ValueError("durable JSON artifact root must be a nonempty object")
+    return value
+
+
+def _anchored_tree_rows(
+    anchor: AnchoredDirectory,
+    prefix: str,
+    rows: list[tuple[str, str]],
+    limits: dict[str, int],
+) -> None:
+    parent_metadata = anchor.directory_metadata()
+    for name in anchor.names():
+        limits["entries"] += 1
+        if limits["entries"] > _MAX_ARTIFACT_TREE_ENTRIES:
+            raise OSError("artifact tree exceeds its entry limit")
+        info = anchor.lstat(name)
+        if stat.S_ISLNK(info.st_mode) or _is_reparse(info):
+            raise OSError("artifact tree crosses an unsafe filesystem seam")
+        relative = f"{prefix}/{name}" if prefix else name
+        if stat.S_ISDIR(info.st_mode):
+            if info.st_dev != parent_metadata.st_dev:
+                raise OSError("artifact tree crosses a filesystem boundary")
+            with anchor.open_directory_immovable(name) as child:
+                _anchored_tree_rows(child, relative, rows, limits)
+        elif stat.S_ISREG(info.st_mode):
+            limits["bytes"] += info.st_size
+            if limits["bytes"] > _MAX_ARTIFACT_TREE_BYTES:
+                raise OSError("artifact tree exceeds its byte limit")
+            rows.append(
+                (
+                    relative,
+                    _anchored_file_sha256(
+                        anchor,
+                        name,
+                        expected=info,
+                        maximum_bytes=_MAX_ARTIFACT_TREE_BYTES,
+                    ),
+                )
+            )
+        else:
+            raise OSError("artifact tree contains a special filesystem entry")
+    anchor.verify()
+
+
+def _anchored_tree_sha256(anchor: AnchoredDirectory) -> str:
+    rows: list[tuple[str, str]] = []
+    _anchored_tree_rows(anchor, "", rows, {"entries": 0, "bytes": 0})
+    digest = hashlib.sha256()
+    for relative, file_identity in sorted(rows):
+        digest.update(relative.replace("\\", "/").encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file_identity.encode("ascii"))
+        digest.update(b"\n")
     return digest.hexdigest()
 
 
 def _tree_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    for child in sorted((item for item in path.rglob("*") if item.is_file()), key=lambda item: item.as_posix()):
-        digest.update(child.relative_to(path).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(_file_sha256(child).encode("ascii"))
-        digest.update(b"\n")
-    return digest.hexdigest()
+    with open_anchored_directory(path, path) as anchor:
+        return _anchored_tree_sha256(anchor)
+
+
+def _is_reparse(info: os.stat_result) -> bool:
+    flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+    return bool(flag and int(getattr(info, "st_file_attributes", 0)) & flag)
+
+
+def _safe_run_artifact(directory: Path, reference: str, kind: str) -> Path | None:
+    """Lexically resolve one run-relative artifact before anchored access."""
+
+    relative = Path(reference)
+    windows_reference = PureWindowsPath(reference)
+    if (
+        relative.is_absolute()
+        or relative.drive
+        or relative.root
+        or relative.anchor
+        or windows_reference.drive
+        or windows_reference.root
+        or windows_reference.anchor
+        or not relative.parts
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        return None
+    root = Path(os.path.abspath(directory))
+    candidate = root.joinpath(relative)
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate if kind in {"file", "tree"} else None
+
+
+def _run_artifact_sha256(directory: Path, artifact: Path, kind: str) -> str:
+    if kind == "file":
+        return _confined_file_sha256(artifact, directory)
+    if kind == "tree":
+        with open_anchored_directory(artifact, directory) as anchor:
+            return _anchored_tree_sha256(anchor)
+    raise OSError("unsupported artifact kind")
+
+
+def _load_anchored_candidate_bundle(
+    directory: Path,
+    path: Path,
+    *,
+    expected_context: Mapping[str, Any],
+) -> Any:
+    with open_anchored_directory(path.parent, directory) as parent:
+        before = parent.lstat(path.name)
+        descriptor = parent.open_file_immovable(path.name, os.O_RDONLY | int(getattr(os, "O_BINARY", 0)))
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or int(getattr(opened, "st_nlink", 1)) != 1
+                or _stable_file_identity(opened) != _stable_file_identity(before)
+            ):
+                raise OSError("candidate evidence changed before validation")
+            if os.name == "nt":
+                held_path = parent.fixed_directory_path() / path.name
+            else:
+                held_path = next(
+                    (
+                        candidate
+                        for root in (Path("/proc/self/fd"), Path("/dev/fd"))
+                        if (candidate := root / str(descriptor)).exists()
+                    ),
+                    None,
+                )
+                if held_path is None:
+                    raise OSError("platform has no stable held-file path for candidate validation")
+            validation = load_candidate_bundle(held_path, expected_context=expected_context)
+            after = os.fstat(descriptor)
+            current = parent.lstat(path.name)
+            parent.verify()
+            if {
+                _stable_file_identity(before),
+                _stable_file_identity(opened),
+                _stable_file_identity(after),
+                _stable_file_identity(current),
+            } != {_stable_file_identity(before)}:
+                raise OSError("candidate evidence changed during validation")
+            return validation
+        finally:
+            os.close(descriptor)
+
+
+def _same_lexical_absolute(raw: str, expected: Path) -> bool:
+    try:
+        reference = Path(raw)
+        if not reference.is_absolute():
+            return False
+        return os.path.normcase(os.path.abspath(reference)) == os.path.normcase(os.path.abspath(expected))
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _valid_sha256(value: object) -> bool:
@@ -205,6 +452,7 @@ class EvaluationService:
         self.latest_run_id: str | None = None
         self.latest_status: str = ProductStatus.NOT_STARTED.value
         self.latest_message = "No durable evaluation run is available."
+        self.latest_stale_reasons: tuple[str, ...] = ()
         self._reconstruct_latest()
 
     @property
@@ -214,6 +462,7 @@ class EvaluationService:
             project_root=self.project_root,
             active_dataset_identity=expected_dataset_identity(self.config),
             active_view_identity=expected_training_view_identity(self.config),
+            require_active_identities=True,
         )
 
     @property
@@ -296,7 +545,7 @@ class EvaluationService:
                     dataset_values.append(str(raw_dataset))
                 if raw_view:
                     view_values.append(str(raw_view))
-        except (OSError, UnicodeError, StrictJSONError, json.JSONDecodeError):
+        except (OSError, UnicodeError, ValueError):
             dataset_values = []
             view_values = []
         return resolve_training_context_identities(
@@ -322,12 +571,12 @@ class EvaluationService:
             try:
                 if not all(isinstance(strict_json_loads(line), dict) for line in content.splitlines() if line.strip()):
                     return False, "Standard Sprite Lab benchmark records must be objects."
-            except (StrictJSONError, json.JSONDecodeError):
+            except ValueError:
                 return False, "Standard Sprite Lab benchmark is malformed."
         elif path.suffix.lower() == ".json":
             try:
                 value = strict_json_loads(content)
-            except (StrictJSONError, json.JSONDecodeError):
+            except ValueError:
                 return False, "Standard Sprite Lab benchmark is malformed."
             if not isinstance(value, dict):
                 return False, "Standard Sprite Lab benchmark document must be an object."
@@ -812,14 +1061,11 @@ class EvaluationService:
             stale_reasons = self._artifact_reasons(run_id, state)
             if stale_reasons:
                 self.latest_status = "STALE"
+                self.latest_stale_reasons = tuple(
+                    sanitize_public_text(str(reason), (self.project_root,)) for reason in stale_reasons
+                )
                 self.latest_message = (
                     "Evaluation artifacts are missing or changed; results are stale and not comparable."
-                )
-                self.events.update_state(
-                    run_id,
-                    status="STALE",
-                    message=self.latest_message,
-                    stale_reasons=stale_reasons,
                 )
                 for stage in self.latest_stages:
                     if stage.key in {"checkpoint_validation", "benchmark_validation", "generation"}:
@@ -831,11 +1077,13 @@ class EvaluationService:
                 return
             report_path = directory / "product_report.json"
             try:
-                report = strict_json_loads(report_path.read_bytes())
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                report = None
-            if isinstance(report, dict):
-                self.latest_report = report
+                self.latest_report = _load_anchored_json_object(
+                    directory,
+                    report_path,
+                    maximum_bytes=_MAX_PRODUCT_REPORT_BYTES,
+                )
+            except (OSError, UnicodeError, ValueError):
+                self.latest_report = None
             metrics_directory = directory / "metrics"
             self.latest_rows = _read_jsonl(metrics_directory / "per_image_metrics.jsonl")
             candidate_path = metrics_directory / "candidate_evidence.json"
@@ -913,50 +1161,63 @@ class EvaluationService:
         elif persisted_view != current_view:
             reasons.append("active training view identity changed after evaluation")
 
+        directory = self.events.run_directory(run_id)
+        if directory is None:
+            return [*reasons, "durable run directory is unavailable"]
+        try:
+            catalog = discover_checkpoint_candidates(
+                self.runs_directory,
+                project_root=self.project_root,
+                active_dataset_identity=persisted_dataset if isinstance(persisted_dataset, str) else None,
+                active_view_identity=persisted_view if isinstance(persisted_view, str) else None,
+                require_active_identities=True,
+            )
+        except (OSError, RuntimeError, ValueError):
+            catalog = CheckpointCatalog((), (), None)
+
         checkpoint_path = state.get("checkpoint_path")
         checkpoint_sha256 = state.get("checkpoint_sha256")
         selected_path: Path | None = None
         if not isinstance(checkpoint_path, str) or not checkpoint_path or checkpoint_path != checkpoint_path.strip():
             reasons.append("persisted checkpoint_path is missing or malformed")
         else:
-            try:
-                selected_path = Path(checkpoint_path).resolve()
-            except (OSError, RuntimeError, ValueError):
-                reasons.append("persisted checkpoint_path cannot be resolved")
+            current_checkpoint = next(
+                (
+                    item
+                    for item in (*catalog.eligible, *catalog.unavailable)
+                    if item.path is not None and _same_lexical_absolute(checkpoint_path, item.path)
+                ),
+                None,
+            )
+            if current_checkpoint is None or current_checkpoint.path is None:
+                reasons.append("persisted checkpoint_path is outside the validated checkpoint catalog")
+            else:
+                selected_path = current_checkpoint.path
         if not _valid_sha256(checkpoint_sha256):
             reasons.append("persisted checkpoint_sha256 is missing or malformed")
         elif selected_path is not None:
             try:
-                if not selected_path.is_file():
-                    reasons.append("persisted checkpoint artifact is missing")
-                elif _file_sha256(selected_path) != checkpoint_sha256:
+                if _confined_file_sha256(selected_path, self.runs_directory) != checkpoint_sha256:
                     reasons.append("persisted checkpoint SHA-256 changed after evaluation")
-            except OSError:
+            except FileNotFoundError:
+                reasons.append("persisted checkpoint artifact is missing")
+            except (OSError, UnsafeFilesystemOperation):
                 reasons.append("persisted checkpoint artifact cannot be read")
 
         if selected_path is not None:
-            try:
-                catalog = discover_checkpoint_candidates(
-                    self.runs_directory,
-                    project_root=self.project_root,
-                    active_dataset_identity=persisted_dataset if isinstance(persisted_dataset, str) else None,
-                    active_view_identity=persisted_view if isinstance(persisted_view, str) else None,
-                )
-                current_checkpoint = next(
-                    (
-                        item
-                        for item in (*catalog.eligible, *catalog.unavailable)
-                        if item.path is not None and item.path.resolve() == selected_path
-                    ),
-                    None,
-                )
-            except (OSError, RuntimeError, ValueError):
-                current_checkpoint = None
+            current_checkpoint = next(
+                (
+                    item
+                    for item in (*catalog.eligible, *catalog.unavailable)
+                    if item.path is not None and item.path == selected_path
+                ),
+                None,
+            )
             if current_checkpoint is None:
                 reasons.append("checkpoint durable identity is unavailable")
             else:
                 remains_eligible = any(
-                    item.path is not None and item.path.resolve() == selected_path for item in catalog.eligible
+                    item.path is not None and item.path == selected_path for item in catalog.eligible
                 )
                 if not remains_eligible:
                     reasons.append("checkpoint is no longer eligible under the persisted dataset/view identity")
@@ -971,28 +1232,26 @@ class EvaluationService:
         if not isinstance(benchmark_path, str) or not benchmark_path or benchmark_path != benchmark_path.strip():
             reasons.append("persisted benchmark_path is missing or malformed")
         else:
-            try:
-                selected_benchmark = Path(benchmark_path).resolve()
-            except (OSError, RuntimeError, ValueError):
-                reasons.append("persisted benchmark_path cannot be resolved")
+            configured_benchmark = self.configured_benchmark
+            if configured_benchmark is None or not _same_lexical_absolute(benchmark_path, configured_benchmark):
+                reasons.append("persisted benchmark_path disagrees with the configured benchmark")
+            else:
+                selected_benchmark = configured_benchmark
         if not _valid_sha256(benchmark_sha256):
             reasons.append("persisted benchmark_sha256 is missing or malformed")
         elif selected_benchmark is not None:
             try:
-                if not selected_benchmark.is_file():
-                    reasons.append("persisted benchmark artifact is missing")
-                elif _file_sha256(selected_benchmark) != benchmark_sha256:
+                if _confined_file_sha256(selected_benchmark, selected_benchmark.parent) != benchmark_sha256:
                     reasons.append("persisted benchmark SHA-256 changed after evaluation")
-            except OSError:
+            except FileNotFoundError:
+                reasons.append("persisted benchmark artifact is missing")
+            except (OSError, UnsafeFilesystemOperation):
                 reasons.append("persisted benchmark artifact cannot be read")
 
         expected = state.get("expected_artifacts")
         if not isinstance(expected, Mapping):
             reasons.append("artifact identity manifest is missing")
             return reasons
-        directory = self.events.run_directory(run_id)
-        if directory is None:
-            return [*reasons, "durable run directory is unavailable"]
 
         def require_expected_file(
             name: str,
@@ -1006,16 +1265,8 @@ class EvaluationService:
             raw_path = raw.get("path")
             if not isinstance(raw_path, str) or not raw_path or raw_path != raw_path.strip():
                 reasons.append(f"expected {name} path is missing or malformed")
-            else:
-                try:
-                    reference = Path(raw_path)
-                    expected_path = (
-                        reference.resolve() if reference.is_absolute() else (directory / reference).resolve()
-                    )
-                    if persisted_path is not None and expected_path != persisted_path:
-                        reasons.append(f"expected {name} path disagrees with persisted launch identity")
-                except (OSError, RuntimeError, ValueError):
-                    reasons.append(f"expected {name} path cannot be resolved")
+            elif persisted_path is None or not _same_lexical_absolute(raw_path, persisted_path):
+                reasons.append(f"expected {name} path disagrees with persisted launch identity")
             if raw.get("kind") != "file":
                 reasons.append(f"expected {name} kind is malformed")
             expected_sha256 = raw.get("sha256")
@@ -1026,7 +1277,10 @@ class EvaluationService:
 
         require_expected_file("checkpoint", selected_path, checkpoint_sha256)
         require_expected_file("benchmark", selected_benchmark, benchmark_sha256)
+        validated_artifacts: dict[str, Path] = {}
         for name, raw in expected.items():
+            if name in {"checkpoint", "benchmark"}:
+                continue
             if not isinstance(raw, Mapping):
                 reasons.append(f"{name} identity is malformed")
                 continue
@@ -1034,14 +1288,6 @@ class EvaluationService:
             if not isinstance(raw_reference, str) or not raw_reference or raw_reference != raw_reference.strip():
                 reasons.append(f"{name} reference is malformed")
                 continue
-            reference = Path(raw_reference)
-            path = reference.resolve() if reference.is_absolute() else (directory / reference).resolve()
-            if not reference.is_absolute():
-                try:
-                    path.relative_to(directory)
-                except ValueError:
-                    reasons.append(f"{name} reference escapes the run directory")
-                    continue
             kind = raw.get("kind")
             if kind not in {"file", "tree"}:
                 reasons.append(f"{name} artifact kind is malformed")
@@ -1049,40 +1295,58 @@ class EvaluationService:
             if not _valid_sha256(raw.get("sha256")):
                 reasons.append(f"{name} artifact SHA-256 is malformed")
                 continue
-            if (kind == "tree" and not path.is_dir()) or (kind == "file" and not path.is_file()):
-                reasons.append(f"{name} artifact is missing")
+            path = _safe_run_artifact(directory, raw_reference, kind)
+            if path is None:
+                reasons.append(f"{name} reference is not a safe run-relative {kind}")
                 continue
             try:
-                actual = _tree_sha256(path) if kind == "tree" else _file_sha256(path)
-            except OSError:
+                actual = _run_artifact_sha256(directory, path, kind)
+            except (OSError, UnsafeFilesystemOperation):
                 reasons.append(f"{name} artifact cannot be read")
                 continue
             if actual != raw.get("sha256"):
                 reasons.append(f"{name} artifact identity changed")
+                continue
+            validated_artifacts[name] = path
+
+        report_artifact = validated_artifacts.get("report")
+        if report_artifact is not None:
+            try:
+                _load_anchored_json_object(
+                    directory,
+                    report_artifact,
+                    maximum_bytes=_MAX_PRODUCT_REPORT_BYTES,
+                )
+            except (OSError, UnicodeError, ValueError):
+                reasons.append("product report is malformed or unsafe")
 
         candidate_raw = expected.get("candidate_evidence")
         if isinstance(candidate_raw, Mapping):
-            candidate_reference = Path(str(candidate_raw.get("path") or ""))
-            candidate_path = (
-                candidate_reference.resolve()
-                if candidate_reference.is_absolute()
-                else (directory / candidate_reference).resolve()
-            )
+            candidate_path = validated_artifacts.get("candidate_evidence")
             if not persisted_dataset or not persisted_view:
                 reasons.append("candidate evidence lacks persisted training dataset/view authority")
-            elif candidate_path.is_file():
+            elif candidate_path is not None:
                 candidate_context: dict[str, Any] = {
                     "training_dataset_identity": persisted_dataset,
                     "training_view_identity": persisted_view,
                 }
-                if checkpoint_path:
-                    candidate_context["checkpoint_path"] = Path(str(checkpoint_path))
-                benchmark_path = state.get("benchmark_path")
-                if benchmark_path:
-                    candidate_context["benchmark_manifest_path"] = Path(str(benchmark_path))
-                validation = load_candidate_bundle(candidate_path, expected_context=candidate_context)
-                if not validation.valid:
-                    reasons.extend(f"candidate evidence identity invalid: {reason}" for reason in validation.reasons)
+                if selected_path is not None:
+                    candidate_context["checkpoint_path"] = selected_path
+                if selected_benchmark is not None:
+                    candidate_context["benchmark_manifest_path"] = selected_benchmark
+                try:
+                    validation = _load_anchored_candidate_bundle(
+                        directory,
+                        candidate_path,
+                        expected_context=candidate_context,
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    reasons.append("candidate evidence identity cannot be validated")
+                else:
+                    if not validation.valid:
+                        reasons.extend(
+                            f"candidate evidence identity invalid: {reason}" for reason in validation.reasons
+                        )
         return reasons
 
     def dashboard(self, *, allow_source_results: bool = False) -> dict[str, Any]:
@@ -1098,6 +1362,7 @@ class EvaluationService:
                 "status": self.latest_status,
                 "message": self.latest_message,
                 "stale": self.latest_status == "STALE",
+                "stale_reasons": list(self.latest_stale_reasons),
                 "memorization": self.latest_memorization,
             }
         )

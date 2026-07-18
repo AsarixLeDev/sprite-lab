@@ -345,6 +345,23 @@ def stable_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _canonical_json_type_exact_equal(actual: Any, expected: Any) -> bool:
+    """Compare canonical JSON values without Python's bool/int/float equality aliases."""
+
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _canonical_json_type_exact_equal(actual[key], expected[key]) for key in expected
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _canonical_json_type_exact_equal(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected, strict=True)
+        )
+    return bool(actual == expected)
+
+
 def file_sha256(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -482,6 +499,8 @@ def campaign_schema() -> dict[str, Any]:
             "determinism",
             "evaluation",
             "checkpoint",
+            "evaluation_schedule",
+            "checkpoint_schedule",
             "expected_runs",
             "expected_artifact_contract",
             "abort_conditions",
@@ -495,6 +514,9 @@ def campaign_schema() -> dict[str, Any]:
         "properties": {
             "schema_version": {"const": CAMPAIGN_SCHEMA_VERSION},
             "campaign_id": {"type": "string", "minLength": 1},
+            "purpose": {"type": "string", "minLength": 1},
+            "architecture_cells": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+            "identities": {"type": "object"},
             "seeds": {
                 "type": "array",
                 "minItems": REQUIRED_SEED_COUNT,
@@ -502,10 +524,32 @@ def campaign_schema() -> dict[str, Any]:
                 "uniqueItems": True,
                 "items": {"type": "integer"},
             },
+            "training": {"type": "object"},
+            "optimizer": {"type": "object"},
+            "schedule": {"type": "object"},
+            "loss": {"type": "object"},
+            "determinism": {"type": "object"},
+            "evaluation": {"type": "object"},
+            "checkpoint": {"type": "object"},
+            "evaluation_schedule": {
+                "type": "object",
+                "additionalProperties": {"type": "array", "items": {"type": "integer"}},
+            },
+            "checkpoint_schedule": {
+                "type": "object",
+                "additionalProperties": {"type": "array", "items": {"type": "integer"}},
+            },
+            "expected_runs": {"type": "array", "items": {"type": "object"}},
+            "expected_artifact_contract": {"type": "object"},
+            "abort_conditions": {"type": "array", "items": {"type": "string"}},
+            "promotion_restrictions": {"type": "array", "items": {"type": "string"}},
+            "plan_status": {"enum": ["ready", "blocked"]},
             "experimental_variables": {"type": "array", "items": {"type": "string"}, "uniqueItems": True},
             "fixed_epoch_fallback": {"const": False},
             "executable": {"type": "boolean"},
             "launch_authorized": {"type": "boolean"},
+            "code_identity": {"type": "object"},
+            "campaign_identity": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
         },
         "additionalProperties": True,
     }
@@ -600,16 +644,16 @@ def plan_campaign(
                 "resolved_config_sha256": stable_hash(resolved_run_config),
                 "experiment_command": command,
                 "code_identity": code_identity,
-                "expected_evaluation_steps": eval_schedule,
-                "expected_checkpoint_steps": save_schedule,
+                "expected_evaluation_steps": list(eval_schedule),
+                "expected_checkpoint_steps": list(save_schedule),
                 "effective_passes": _passes_from_training(training, max_steps),
                 "expected_artifacts": list(PER_RUN_ARTIFACTS),
             }
             run["execution_contract_sha256"] = stable_hash(_execution_contract_payload(run))
             run["run_identity"] = stable_hash(_run_identity_payload(raw, cell, run, training, evaluation, checkpoint))
             expected_runs.append(run)
-            eval_matrix[run_id] = eval_schedule
-            checkpoint_matrix[run_id] = save_schedule
+            eval_matrix[run_id] = list(eval_schedule)
+            checkpoint_matrix[run_id] = list(save_schedule)
 
     manifest: dict[str, Any] = {
         "schema_version": CAMPAIGN_SCHEMA_VERSION,
@@ -788,15 +832,27 @@ def validate_campaign(
         errors.append(str(exc))
         expected_eval, expected_checkpoints = [], []
     for run in campaign.get("expected_runs") or []:
-        if list(run.get("expected_evaluation_steps") or []) != expected_eval:
+        if not _canonical_json_type_exact_equal(run.get("expected_evaluation_steps"), expected_eval):
             errors.append(f"run {run.get('run_id')} has a missing or altered evaluation schedule point")
-        if list(run.get("expected_checkpoint_steps") or []) != expected_checkpoints:
+        if not _canonical_json_type_exact_equal(run.get("expected_checkpoint_steps"), expected_checkpoints):
             errors.append(f"run {run.get('run_id')} has a missing or altered checkpoint schedule point")
 
     fairness = validate_fixed_step_fairness(campaign)
     errors.extend(fairness["errors"])
     expected_count = len(cells) * len(seeds)
     runs = list(campaign.get("expected_runs") or [])
+    expected_schedule_matrices = {
+        "evaluation_schedule": {
+            str(run.get("run_id") or ""): list(expected_eval) for run in runs if isinstance(run, Mapping)
+        },
+        "checkpoint_schedule": {
+            str(run.get("run_id") or ""): list(expected_checkpoints) for run in runs if isinstance(run, Mapping)
+        },
+    }
+    for field, expected_matrix in expected_schedule_matrices.items():
+        actual_matrix = campaign.get(field)
+        if not _canonical_json_type_exact_equal(actual_matrix, expected_matrix):
+            errors.append(f"{field} does not exactly match the expected run schedule matrix")
     if len(runs) != expected_count:
         errors.append(f"expected_runs must contain {expected_count} cell/seed runs; found {len(runs)}")
     run_ids = [str(run.get("run_id") or "") for run in runs]

@@ -10,16 +10,19 @@ import pytest
 from spritelab.evaluation.audit_identity import (
     MEMORIZATION_AUDIT_BOUND_FILES,
     MEMORIZATION_AUDIT_CODE_IDENTITY_VERSION,
+    MEMORIZATION_AUDIT_RECEIPT_SCHEMA,
+    MEMORIZATION_AUDIT_REPORT_SCHEMA,
     MEMORIZATION_AUDIT_SEMANTIC_FILES,
+    MEMORIZATION_AUDIT_SUBJECT_SCHEMA,
     MemorizationAuditIdentityError,
+    load_memorization_audit_report,
     memorization_audit_code_identity,
 )
 from spritelab.product_features.evaluation.memorization_display import promotion_integrity_display
-from spritelab.v3.config import ProjectConfig
 from spritelab.v3.model import AuditStatus
 from spritelab.v3.status import (
-    _memorization_audit_status,
     verify_memorization_audit_applicability,
+    verify_memorization_audit_path,
 )
 
 
@@ -31,12 +34,64 @@ def _materialize(root: Path) -> None:
 
 
 def _report(root: Path, *, verdict: str = "PASS") -> dict[str, object]:
-    return {
-        "subsystem": "memorization",
-        "overall_verdict": verdict,
-        "authorization": {"checkpoint_promotion": True},
-        "code_identity": memorization_audit_code_identity(root),
+    code_identity = memorization_audit_code_identity(root)
+    subject: dict[str, object] = {
+        "schema_version": MEMORIZATION_AUDIT_SUBJECT_SCHEMA,
+        "dataset_identity": "dataset-v5-synthetic",
+        "training_view_identity": "training-view-synthetic",
+        "freeze_manifest_sha256": "1" * 64,
+        "campaign_identity_sha256": "2" * 64,
+        "checkpoint_id": "checkpoint-synthetic",
+        "checkpoint_weights": "ema",
+        "checkpoint_sha256": "3" * 64,
+        "benchmark_manifest_sha256": "4" * 64,
+        "metric_definition_sha256": "5" * 64,
+        "policy_identity_sha256": "6" * 64,
+        "candidate_evidence_sha256": "7" * 64,
+        "review_log_identity_sha256": "8" * 64,
+        "code_identity_sha256": code_identity["code_identity_sha256"],
     }
+    subject["audit_subject_sha256"] = hashlib.sha256(
+        json.dumps(subject, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    auditor = {
+        "auditor_id": "synthetic-independent-auditor",
+        "implementation_identity_sha256": "9" * 64,
+        "review_identity_sha256": "a" * 64,
+    }
+    report: dict[str, object] = {
+        "schema_version": MEMORIZATION_AUDIT_REPORT_SCHEMA,
+        "subsystem": "memorization",
+        "audit_kind": "independent_memorization_integration",
+        "evidence_role": "production_authority",
+        "independent_audit": True,
+        "overall_verdict": verdict,
+        "authorization": {"checkpoint_promotion": verdict == "PASS"},
+        "audit_subject": subject,
+        "code_identity": code_identity,
+        "auditor": auditor,
+        "operation_identity_sha256": "b" * 64,
+    }
+    report_payload_sha256 = hashlib.sha256(
+        json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    receipt: dict[str, object] = {
+        "schema_version": MEMORIZATION_AUDIT_RECEIPT_SCHEMA,
+        "audit_subject_sha256": subject["audit_subject_sha256"],
+        "report_payload_sha256": report_payload_sha256,
+        "operation_identity_sha256": report["operation_identity_sha256"],
+        "auditor_id": auditor["auditor_id"],
+        "server_managed": True,
+        "terminal_status": "COMPLETE",
+    }
+    receipt["receipt_identity_sha256"] = hashlib.sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    report["receipt"] = receipt
+    report["audit_report_identity_sha256"] = hashlib.sha256(
+        json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return report
 
 
 def _rehash_identity(identity: dict[str, object]) -> None:
@@ -58,7 +113,9 @@ def test_v4_inventory_is_complete_deterministic_and_descriptive(tmp_path: Path) 
     assert {
         "src/spritelab/__main__.py",
         "src/spritelab/evaluation/conditional.py",
+        "src/spritelab/evaluation/metric_definitions.py",
         "src/spritelab/evaluation/metrics.py",
+        "src/spritelab/evaluation/strict_json.py",
         "src/spritelab/harvest/label_v4/risk.py",
         "src/spritelab/harvest/label_v4/training_quality.py",
         "src/spritelab/product_core/__init__.py",
@@ -87,7 +144,7 @@ def test_v4_inventory_is_complete_deterministic_and_descriptive(tmp_path: Path) 
         "src/spritelab/v3/report.py",
         "src/spritelab/v3/run_state.py",
     } <= set(paths)
-    assert len(paths) == 65
+    assert len(paths) == 67
 
 
 MUTATION_MATRIX = (
@@ -169,13 +226,18 @@ def test_every_inventory_file_mutation_changes_identity(tmp_path: Path, relative
         "src/spritelab/product_features/providers/web.py",
     ),
 )
-def test_nonsemantic_change_remains_applicable(tmp_path: Path, relative: str) -> None:
+def test_nonsemantic_change_keeps_identity_current_but_cannot_trust_embedded_receipt(
+    tmp_path: Path, relative: str
+) -> None:
     _materialize(tmp_path)
     report = _report(tmp_path)
     path = tmp_path / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("unrelated\n", encoding="utf-8")
-    assert _memorization_audit_status(ProjectConfig(tmp_path, None, {}), report) is AuditStatus.PASS
+    verification = verify_memorization_audit_applicability(tmp_path, report)
+    assert verification.status is AuditStatus.NOT_COMPARABLE
+    assert verification.reasons == ("trusted_audit_receipt_unavailable",)
+    assert verification.identity_current is True
 
 
 @pytest.mark.parametrize(
@@ -324,8 +386,10 @@ def test_product_projection_uses_shared_verifier_and_blocks_stale_wording(tmp_pa
     audit_path.parent.mkdir(parents=True)
     audit_path.write_text(json.dumps(_report(tmp_path)), encoding="utf-8")
     current = promotion_integrity_display(audit_path, repository_root=tmp_path)
-    assert current["audit_applicability"] == "PASS"
-    assert current["integrity_certified"] is True
+    assert current["audit_applicability"] == "NOT_COMPARABLE"
+    assert current["audit_applicability_reasons"] == ["trusted_audit_receipt_unavailable"]
+    assert current["audit_code_identity_current"] is True
+    assert current["integrity_certified"] is False
     with (tmp_path / "src/spritelab/evaluation/metrics.py").open("ab") as handle:
         handle.write(b"# semantic change\n")
     stale = promotion_integrity_display(audit_path, repository_root=tmp_path)
@@ -336,15 +400,57 @@ def test_product_projection_uses_shared_verifier_and_blocks_stale_wording(tmp_pa
     assert "not currently certified" in stale["message"].lower()
 
 
+def test_minimal_or_non_exact_pass_never_becomes_applicable_or_certified(tmp_path: Path) -> None:
+    _materialize(tmp_path)
+    minimal = {
+        "subsystem": "memorization",
+        "overall_verdict": "PASS",
+        "authorization": {"checkpoint_promotion": True},
+        "code_identity": memorization_audit_code_identity(tmp_path),
+    }
+    verification = verify_memorization_audit_applicability(tmp_path, minimal)
+    assert verification.status is AuditStatus.STALE
+    assert verification.reasons == ("legacy_or_incomplete_audit_report_contract",)
+    report = _report(tmp_path)
+    report["authorization"] = {"checkpoint_promotion": "true"}
+    verification = verify_memorization_audit_applicability(tmp_path, report)
+    assert verification.status is AuditStatus.NOT_COMPARABLE
+    assert "audit_authorization_boolean_invalid" in verification.reasons
+
+
+def test_duplicate_or_nonfinite_audit_json_is_not_certified(tmp_path: Path) -> None:
+    _materialize(tmp_path)
+    audit_path = tmp_path / "experiments/audit_report.json"
+    audit_path.parent.mkdir(parents=True)
+    audit_path.write_text('{"overall_verdict":"FAIL","overall_verdict":"PASS"}', encoding="utf-8")
+    duplicate = promotion_integrity_display(audit_path, repository_root=tmp_path)
+    assert duplicate["integrity_certified"] is False
+    assert duplicate["audit_applicability"] == "NOT_COMPARABLE"
+    assert duplicate["audit_applicability_reasons"] == ["audit_report_json_invalid"]
+    audit_path.write_text('{"overall_verdict":NaN}', encoding="utf-8")
+    nonfinite = promotion_integrity_display(audit_path, repository_root=tmp_path)
+    assert nonfinite["integrity_certified"] is False
+    assert nonfinite["audit_applicability"] == "NOT_COMPARABLE"
+    assert nonfinite["audit_applicability_reasons"] == ["audit_report_json_invalid"]
+
+
+def test_shared_path_loader_rejects_non_object_and_bounds_input(tmp_path: Path) -> None:
+    audit_path = tmp_path / "audit.json"
+    audit_path.write_text("[]", encoding="utf-8")
+    root = load_memorization_audit_report(audit_path)
+    assert root.errors == ("audit_report_root_invalid",)
+    audit_path.write_bytes(b" " * 1_000_001)
+    bounded = verify_memorization_audit_path(tmp_path, audit_path)
+    assert bounded.status is AuditStatus.NOT_COMPARABLE
+    assert bounded.reasons == ("audit_report_too_large",)
+
+
 def test_product_and_developer_status_share_the_memorization_applicability_verifier() -> None:
     import inspect
 
     import spritelab.dev_features.audits as developer_audits
     import spritelab.v3.status as status_module
 
-    assert (
-        developer_audits.verify_memorization_audit_applicability
-        is status_module.verify_memorization_audit_applicability
-    )
+    assert developer_audits.verify_memorization_audit_path is status_module.verify_memorization_audit_path
     product_source = inspect.getsource(promotion_integrity_display)
-    assert "from spritelab.v3.status import verify_memorization_audit_applicability" in product_source
+    assert "from spritelab.v3.status import verify_memorization_audit_path" in product_source
