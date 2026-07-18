@@ -255,11 +255,13 @@ format, MIME, dimensions, frame count, recipe, and whether derivation occurred.
 Animated or multi-frame direct responses fail closed.
 
 Only exact 32x32, static, single-frame, technically usable PNG files are usable.
-Animated or multi-frame PNG/APNG files, non-32x32 images, invalid PNGs, fully
-transparent images, and constant-RGBA images are retained with explicit
-quarantine reasons. Usable uniqueness is computed from exact decoded RGBA
-pixels, not encoded bytes, so differently encoded duplicates count once and
-later copies are quarantined as `duplicate_exact_pixels`.
+Archive members whose `.png` names do not contain the PNG file signature are
+ignored before extraction and never enter the artifact receipt. Files with a
+real PNG signature that are animated, non-32x32, corrupt, fully transparent, or
+constant-RGBA are retained with explicit quarantine reasons. Usable uniqueness
+is computed from exact decoded RGBA pixels, not encoded bytes, so differently
+encoded duplicates count once and later copies are quarantined as
+`duplicate_exact_pixels`.
 
 ## Durable run and API
 

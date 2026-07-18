@@ -22,6 +22,7 @@ from spritelab.utils.safe_fs import AnchoredDirectory, OwnedFileIdentity, Unsafe
 
 APPLEDOUBLE_MAGIC = b"\x00\x05\x16\x07"
 APPLESINGLE_MAGIC = b"\x00\x05\x16\x00"
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 DEFAULT_MAX_ARCHIVE_MEMBERS = 10_000
 DEFAULT_MAX_MEMBER_BYTES = 256 * 1024 * 1024
@@ -587,6 +588,7 @@ def archive_member_summary(
     *,
     include_member_globs: Sequence[str] = (),
     exclude_member_globs: Sequence[str] = (),
+    require_selected_png_magic: bool = False,
     max_members: int = DEFAULT_MAX_ARCHIVE_MEMBERS,
     max_member_bytes: int = DEFAULT_MAX_MEMBER_BYTES,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
@@ -595,7 +597,12 @@ def archive_member_summary(
     cancel_requested: Callable[[], bool] | None = None,
     deadline_monotonic: float | None = None,
 ) -> dict[str, Any]:
-    """Describe deterministic ZIP member selection after full validation."""
+    """Describe deterministic ZIP member selection after full validation.
+
+    When requested, extension-matched PNG members must also carry the exact PNG
+    signature; mismatches are reported separately so callers can exclude them
+    before extraction.
+    """
 
     _check_archive_abort(cancel_requested, deadline_monotonic)
     limits = _validated_limits(
@@ -628,30 +635,51 @@ def archive_member_summary(
                 exclude_member_globs,
                 limits,
             )
+            files = [member for member in members if not member.is_dir]
+            resource_forks = [member for member in files if member.resource_fork]
+            eligible_files = [member for member in files if not member.resource_fork]
+            selected = [member for member in eligible_files if member.selected]
+            selected_pngs = [member for member in selected if member.name.lower().endswith(".png")]
+            ignored_non_png_members: list[_ValidatedMember] = []
+            if require_selected_png_magic:
+                selected_images: list[str] = []
+                for member in selected_pngs:
+                    _check_archive_abort(cancel_requested, deadline_monotonic)
+                    try:
+                        with archive.open(member.raw, "r") as source:
+                            prefix = source.read(len(PNG_MAGIC))
+                    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                        raise ArchiveSecurityError(f"could not inspect archive member {member.name!r}") from exc
+                    if prefix == PNG_MAGIC:
+                        selected_images.append(member.name)
+                    else:
+                        ignored_non_png_members.append(member)
+            else:
+                selected_images = [member.name for member in selected_pngs]
         _check_archive_abort(cancel_requested, deadline_monotonic)
         snapshot.verify_final()
     finally:
         if owns_snapshot:
             snapshot.close()
-    files = [member for member in members if not member.is_dir]
-    resource_forks = [member for member in files if member.resource_fork]
-    eligible_files = [member for member in files if not member.resource_fork]
-    selected = [member for member in eligible_files if member.selected]
-    selected_images = [member.name for member in selected if member.name.lower().endswith(".png")]
     _require_selected_images(include_member_globs, exclude_member_globs, selected_images)
-    return {
+    ignored_names = {member.name for member in ignored_non_png_members}
+    included = [member for member in selected if member.name not in ignored_names]
+    result = {
         "total_archive_members": len(members),
         "total_uncompressed_bytes": sum(member.size for member in files),
-        "included_members": [member.name for member in selected],
-        "excluded_members": [member.name for member in files if member not in selected],
+        "included_members": [member.name for member in included],
+        "excluded_members": [member.name for member in files if member not in included],
         "resource_fork_members": [member.name for member in resource_forks],
         "unsupported_members": [member.name for member in selected if not member.name.lower().endswith(".png")],
         "selected_image_members": selected_images,
-        "selected_uncompressed_bytes": sum(member.size for member in selected),
+        "selected_uncompressed_bytes": sum(member.size for member in included),
         "unsafe_members": [],
         "include_member_globs": list(include_member_globs),
         "exclude_member_globs": list(exclude_member_globs),
     }
+    if require_selected_png_magic:
+        result["ignored_non_png_members"] = [member.name for member in ignored_non_png_members]
+    return result
 
 
 def _member_selected(name: str, includes: Sequence[str], excludes: Sequence[str]) -> bool:

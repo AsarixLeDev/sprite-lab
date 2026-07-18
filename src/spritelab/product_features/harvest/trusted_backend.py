@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import glob
 import hashlib
 import importlib.metadata
 import io
@@ -1452,6 +1453,7 @@ class HardenedArchiveAcquisitionBackend:
                 summary = archive_member_summary(
                     archive_snapshot,
                     include_member_globs=("*.png",),
+                    require_selected_png_magic=True,
                     max_members=limits.max_archive_members,
                     max_member_bytes=limits.max_file_bytes,
                     max_total_bytes=limits.max_archive_uncompressed_bytes,
@@ -1461,6 +1463,7 @@ class HardenedArchiveAcquisitionBackend:
                 )
                 selected_images = tuple(summary["selected_image_members"])
                 selected_image_set = set(selected_images)
+                ignored_non_png_members = tuple(summary["ignored_non_png_members"])
                 _check_backend_abort(cancel_requested, deadline)
                 progress("extracting", 0, len(selected_images))
                 extract_archive(
@@ -1468,6 +1471,7 @@ class HardenedArchiveAcquisitionBackend:
                     destination,
                     overwrite=False,
                     include_member_globs=("*.png",),
+                    exclude_member_globs=tuple(glob.escape(name) for name in ignored_non_png_members),
                     max_members=limits.max_archive_members,
                     max_member_bytes=limits.max_file_bytes,
                     max_total_bytes=limits.max_archive_uncompressed_bytes,

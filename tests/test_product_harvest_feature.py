@@ -42,6 +42,7 @@ from spritelab.product_features.harvest.storage import (
     RepositoryMutationLock,
     append_stable_single_link_bytes,
     read_stable_single_link_bytes,
+    scan_artifacts,
     write_atomic_stable_bytes,
     write_exclusive_stable_bytes,
 )
@@ -736,7 +737,7 @@ def test_dataset_callback_must_support_deadline_and_cancellation_even_in_test_se
         )
 
 
-def test_hardened_backend_quarantines_non_32_and_animated_pngs(
+def test_hardened_backend_ignores_non_png_bytes_and_quarantines_unusable_pngs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -757,6 +758,7 @@ def test_hardened_backend_quarantines_non_32_and_animated_pngs(
         archive.writestr("exact.png", png(32))
         archive.writestr("large.png", png(64))
         archive.writestr("animated.png", png(32, animated=True))
+        archive.writestr("traveler/spr_m_aviator[1].png", b"<!DOCTYPE html><html>not an image</html>")
     archive_bytes = archive_output.getvalue()
     source = replace(_source(), expected_response_sha256=hashlib.sha256(archive_bytes).hexdigest())
     capabilities = _capabilities()
@@ -804,8 +806,18 @@ def test_hardened_backend_quarantines_non_32_and_animated_pngs(
     assert files["large.png"].quarantine_reason == "not_exact_32x32"
     assert files["animated.png"].usable is False
     assert files["animated.png"].quarantine_reason == "animated_png_unsupported"
+    assert "traveler/spr_m_aviator[1].png" not in files
+    assert not (artifacts / "traveler" / "spr_m_aviator[1].png").exists()
     assert sum(item.usable for item in result.receipt.files) == 1
     assert sum(not item.usable for item in result.receipt.files) == 2
+    with AnchoredDirectory(artifacts, artifacts) as artifacts_anchor:
+        manifest = scan_artifacts(
+            artifacts,
+            HarvestLimits(max_files=10, max_total_bytes=1 << 20),
+            expected_files=result.receipt.files,
+            artifacts_anchor=artifacts_anchor,
+        )
+    assert manifest["artifact_count"] == 3
 
 
 @pytest.mark.parametrize(
