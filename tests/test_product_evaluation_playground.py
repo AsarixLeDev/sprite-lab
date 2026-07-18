@@ -498,7 +498,10 @@ def test_changed_metadata_duplicate_events_and_malformed_state_fail_closed(tmp_p
     last = events.read_text(encoding="utf-8").splitlines()[-1]
     with events.open("a", encoding="utf-8") as handle:
         handle.write(last + "\n")
-    assert service.reconstruct(created["run_id"])["event_count"] == before
+    tampered = service.reconstruct(created["run_id"])
+    assert before == 5
+    assert tampered["status"] == "NOT_COMPARABLE"
+    assert tampered["event_count"] == 0
 
     command = json.loads((directory / "command.json").read_text(encoding="utf-8"))
     command["request"]["prompt"] = "modified prompt"

@@ -1049,10 +1049,11 @@ def _installed_distribution_inventory(distribution_name: str) -> dict[str, Any]:
         raise ConditionedCodeIdentityError("A runtime dependency RECORD exceeds its file-count bound.")
 
     declared_bindings: dict[str, tuple[str | None, int | None]] = {}
-    owned_roots: dict[str, tuple[Path, str]] = {}
+    owned_roots: dict[str, tuple[Path, str, bool]] = {}
     for record_name, declaration in sorted(declarations.items()):
-        canonical, parent_escapes = _canonical_distribution_record_path(record_name)
-        path = _located_distribution_record_file(root, canonical, parent_escapes)
+        record_relative_path, parent_escapes = _canonical_distribution_record_path(record_name)
+        path = _located_distribution_record_file(root, record_relative_path, parent_escapes)
+        canonical = _public_distribution_inventory_path(record_relative_path, parent_escapes)
         if canonical in declared_bindings:
             raise ConditionedCodeIdentityError("A runtime dependency RECORD contains a canonical path collision.")
         declared_bindings[canonical] = declaration
@@ -1071,10 +1072,11 @@ def _installed_distribution_inventory(distribution_name: str) -> dict[str, Any]:
             kind = "file"
         else:
             raise ConditionedCodeIdentityError("A runtime dependency owned root is not regular and unlinked.")
+        inside_installation = parent_escapes == 0
         existing = owned_roots.get(root_relative)
-        if existing is not None and (existing[0] != owned_path or existing[1] != kind):
+        if existing is not None and existing != (owned_path, kind, inside_installation):
             raise ConditionedCodeIdentityError("A runtime dependency owned root is ambiguous.")
-        owned_roots[root_relative] = (owned_path, kind)
+        owned_roots[root_relative] = (owned_path, kind, inside_installation)
 
     files: dict[str, dict[str, Any]] = {}
     collision_keys: set[str] = set()
@@ -1082,9 +1084,8 @@ def _installed_distribution_inventory(distribution_name: str) -> dict[str, Any]:
     owned_root_evidence: list[dict[str, str]] = []
     try:
         with AnchoredDirectory(root, root) as installation_anchor:
-            for root_relative, (owned_path, kind) in sorted(owned_roots.items()):
+            for root_relative, (owned_path, kind, inside_installation) in sorted(owned_roots.items()):
                 owned_root_evidence.append({"relative_path": root_relative, "kind": kind})
-                inside_installation = not root_relative.startswith("../")
                 scanned = _scan_distribution_owned_root(
                     owned_path,
                     root_relative=root_relative,
@@ -1330,6 +1331,17 @@ def _canonical_distribution_record_path(value: str) -> tuple[str, int]:
     if not saw_name or parent_escapes > _MAX_DISTRIBUTION_PARENT_ESCAPES:
         raise ConditionedCodeIdentityError("A runtime dependency RECORD path escapes its bounded installation root.")
     return value, parent_escapes
+
+
+def _public_distribution_inventory_path(value: str, parent_escapes: int) -> str:
+    """Encode bounded RECORD parent entries without publishing traversal paths."""
+
+    if parent_escapes == 0:
+        return value
+    parts = PurePosixPath(value).parts[parent_escapes:]
+    if not parts:
+        raise ConditionedCodeIdentityError("A runtime dependency RECORD path has no public file name.")
+    return PurePosixPath("external", f"parent-{parent_escapes}", *parts).as_posix()
 
 
 def _located_distribution_record_file(root: Path, relative: str, parent_escapes: int) -> Path:

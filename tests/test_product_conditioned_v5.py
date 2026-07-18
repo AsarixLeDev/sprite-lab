@@ -17,6 +17,7 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
+from functools import cache
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
@@ -82,7 +83,6 @@ from spritelab.product_features.harvest.certification import (
     BACKEND_CAPABILITY_CERTIFICATE_SCHEMA,
     REQUIRED_BACKEND_AUDIT_GATES,
     BackendCapabilityEvidence,
-    load_backend_capability_evidence,
 )
 from spritelab.product_features.harvest.storage import scan_artifacts
 from spritelab.product_features.harvest.trusted_backend import (
@@ -127,6 +127,51 @@ def _png(path: Path, color: tuple[int, int, int, int], marker: int) -> None:
 
 def _identity(value: Any) -> str:
     return stable_hash(value)
+
+
+@cache
+def _cached_catalog_verifier_identity(identity_reader: Any) -> str:
+    """Reuse one exact live verifier identity for stable synthetic fixtures."""
+
+    return str(identity_reader())
+
+
+@cache
+def _cached_backend_fixture_identity(
+    code_identity_reader: Any,
+    module_hash_reader: Any,
+    runtime_dependency_reader: Any,
+    callback_binding_reader: Any,
+) -> str:
+    """Cache immutable live identities without patching production verifiers."""
+
+    snapshot = {
+        "code_identity_sha256": code_identity_reader(),
+        "module_sha256": module_hash_reader(),
+        "runtime_dependencies": runtime_dependency_reader(),
+        "dataset_import_callback": callback_binding_reader(),
+    }
+    return json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+
+
+def _backend_fixture_identity() -> dict[str, Any]:
+    encoded = _cached_backend_fixture_identity(
+        hardened_backend_code_identity,
+        hardened_backend_module_hashes,
+        hardened_backend_runtime_dependencies,
+        conditioned_dataset_import_callback_binding,
+    )
+    return json.loads(encoded)
+
+
+@cache
+def _cached_conditioned_fixture_runtime(code_reader: Any, runtime_reader: Any) -> str:
+    code_inventory = code_reader()
+    snapshot = {
+        "code_inventory": code_inventory,
+        "runtime_inventory": runtime_reader(code_inventory),
+    }
+    return json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
 
 
 def _assert_strict_retained_stage_tree(root: Path) -> None:
@@ -192,7 +237,7 @@ def _source(source_id: str) -> HarvestSource:
     )
     provisional = CatalogEvidenceBinding(
         verifier_id=CATALOG_EVIDENCE_VERIFIER_ID,
-        verifier_code_identity_sha256=catalog_evidence_verifier_code_identity(),
+        verifier_code_identity_sha256=_cached_catalog_verifier_identity(catalog_evidence_verifier_code_identity),
         verified_at=verified_at,
         expires_at=expires_at,
         source_request_url_sha256=url_identity(source_url),
@@ -250,13 +295,14 @@ def _source_record(source: HarvestSource) -> dict[str, Any]:
 
 
 def _capabilities() -> CertifiedBackendCapabilities:
+    identity = _backend_fixture_identity()
     return CertifiedBackendCapabilities(
         backend_id="audit.backend",
         backend_version="1.0",
         downloader_id="audit.downloader",
         downloader_version="1.0",
-        code_identity_sha256=hardened_backend_code_identity(),
-        **conditioned_dataset_import_callback_binding(),
+        code_identity_sha256=identity["code_identity_sha256"],
+        **identity["dataset_import_callback"],
         enforces_http_success=True,
         enforces_https_direct_url=True,
         resolves_and_blocks_private_networks=True,
@@ -292,16 +338,17 @@ def _write_trust(project: Path, sources: tuple[HarvestSource, ...]) -> None:
         "catalog_identity": trusted_catalog_identity(sources),
     }
     catalog_path.write_text(json.dumps(catalog, sort_keys=True), encoding="utf-8")
+    identity = _backend_fixture_identity()
     capabilities = _capabilities()
-    modules = hardened_backend_module_hashes()
-    runtime_dependencies = hardened_backend_runtime_dependencies()
+    modules = identity["module_sha256"]
+    runtime_dependencies = identity["runtime_dependencies"]
     issued = datetime.now(timezone.utc) - timedelta(minutes=5)
     report = {
         "schema_version": BACKEND_AUDIT_REPORT_SCHEMA,
         "outcome": "PASS",
         "auditor_id": "independent.audit",
         "audited_at": (issued - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
-        "implementation_identity_sha256": hardened_backend_code_identity(),
+        "implementation_identity_sha256": identity["code_identity_sha256"],
         "module_sha256": modules,
         "runtime_dependencies": runtime_dependencies,
         "gate_results": dict.fromkeys(sorted(REQUIRED_BACKEND_AUDIT_GATES), "PASS"),
@@ -324,6 +371,25 @@ def _write_trust(project: Path, sources: tuple[HarvestSource, ...]) -> None:
     certificate["certificate_identity"] = _identity(certificate)
     (project / BACKEND_CAPABILITIES_RELATIVE_PATH).write_text(
         json.dumps(certificate, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+
+
+def _fixture_backend_capability_evidence(project: Path) -> BackendCapabilityEvidence:
+    """Load synthetic evidence without repeating the live production rehash."""
+
+    report_bytes = (project / BACKEND_AUDIT_REPORT_RELATIVE_PATH).read_bytes()
+    report = json.loads(report_bytes)
+    certificate = json.loads((project / BACKEND_CAPABILITIES_RELATIVE_PATH).read_bytes())
+    return BackendCapabilityEvidence(
+        capabilities=_capabilities(),
+        auditor_id=str(report["auditor_id"]),
+        audited_at=str(report["audited_at"]),
+        issued_at=str(certificate["issued_at"]),
+        expires_at=str(certificate["expires_at"]),
+        audit_report_sha256=hashlib.sha256(report_bytes).hexdigest(),
+        audit_report_identity=str(report["report_identity"]),
+        certificate_identity=str(certificate["certificate_identity"]),
+        implementation_identity_sha256=str(report["implementation_identity_sha256"]),
     )
 
 
@@ -363,8 +429,7 @@ def _handoff(
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     source_snapshot = source.to_public_dict()
     license_value = source_snapshot["license"]
-    capability_evidence = capability_evidence or load_backend_capability_evidence(project)
-    assert capability_evidence is not None
+    capability_evidence = capability_evidence or _fixture_backend_capability_evidence(project)
     capabilities = capability_evidence.capabilities
     backend_evidence = {**capability_evidence.to_dict(), "evidence_identity": capability_evidence.identity}
     limits = HarvestLimits(max_files=32, max_total_bytes=8 * 1024 * 1024)
@@ -471,6 +536,7 @@ def _service(
     project: Path,
     *,
     activation_loader: Any = None,
+    managed_intake_loader: Any = None,
     independent_audit_runner: Any = _fake_independent_audit_runner,
 ) -> ConditionedDatasetService:
     def campaign_builder(*_args: Any, **_kwargs: Any) -> Any:
@@ -492,6 +558,7 @@ def _service(
         project,
         campaign_builder=campaign_builder,
         activation_loader=activation_loader,
+        managed_intake_loader=managed_intake_loader,
         independent_audit_runner=independent_audit_runner,
         policy=CandidatePolicy(min_images=4, target_images=8, max_images=10, max_source_files=32),
     )
@@ -513,7 +580,12 @@ def _import_handoff(
         for path in sorted((run / "artifacts").rglob("*"))
         if path.is_file()
     }
-    adapter = adapter or ConditionedDatasetImportAdapter(project)
+    if adapter is None:
+        evidence = _fixture_backend_capability_evidence(project)
+        adapter = ConditionedDatasetImportAdapter(
+            project,
+            capability_evidence_loader=lambda _project_root: evidence,
+        )
     result = adapter.import_harvest(
         DatasetImportRequest(run_id, run / "artifacts", handoff, manifest),
         idempotency_key=f"dataset-import-{run_id}",
@@ -550,6 +622,108 @@ def _import_handoff(
     assert loaded["dataset_reference"] == result.dataset_reference
     assert loaded["accepted_relative_paths"] or loaded["derived_sheet_records"]
     return result.dataset_reference
+
+
+def _run_fixture_intake_in_process(
+    work: Path,
+    *,
+    strategy: str,
+    workspace_identity: Any,
+    request_payload: dict[str, Any],
+    **_kwargs: Any,
+) -> dict[str, Any]:
+    """Exercise real intake publication without retesting child confinement."""
+
+    result = conditioned_intake_module._run_legacy_intake_in_process(
+        work=work,
+        source_root=work / "source",
+        output_root=work / "datasets" / "managed",
+        source=request_payload["source"],
+        license_record=request_payload["license"],
+        artifact_sha256=request_payload["artifact_sha256"],
+        run_id=request_payload["run_id"],
+    )
+    windows = strategy == conditioned_intake_module.WINDOWS_PARENT_ANCHORS_STRATEGY
+    evidence = {
+        "schema_version": "spritelab.write-confinement-evidence.v3",
+        "strategy": strategy,
+        "platform": "windows" if windows else "linux",
+        "kernel_abi": 0 if windows else 3,
+        "root_identity_sha256": workspace_identity.identity_sha256,
+        "handled_access_fs": 0 if windows else 1,
+        "allowed_access_fs": 0 if windows else 1,
+        "no_new_privileges": not windows,
+        "restricted_token": False,
+        "integrity_level_rid": 0,
+        "mandatory_no_write_up": windows,
+        "workspace_integrity_level_rid": 0,
+        "startup_integrity_level_rid": 4096 if windows else 0,
+        "bootstrap_lowered_before_worker_import": windows,
+        "new_thread_integrity_level_rid": 0,
+        "raise_to_low_denied": windows,
+        "medium_probe_write_denied": windows,
+        "low_world_probe_write_denied": windows,
+        "untrusted_world_outside_guaranteed": False,
+        "job_kill_on_close": windows,
+        "job_active_process_limit": 1 if windows else 0,
+        "paths_exposed": False,
+    }
+    return {
+        "schema_version": conditioned_intake_module._LEGACY_RESPONSE_SCHEMA,
+        "ok": True,
+        "result": result,
+        "write_confinement": evidence,
+        "paths_exposed": False,
+    }
+
+
+@contextmanager
+def _stable_conditioned_fixture_runtime():
+    """Reuse exact live identities while stable fixtures exercise other gates."""
+
+    encoded = _cached_conditioned_fixture_runtime(
+        conditioned_identity_module.conditioned_code_inventory,
+        conditioned_identity_module.conditioned_callback_runtime_inventory,
+    )
+    snapshot = json.loads(encoded)
+    code_inventory_json = json.dumps(snapshot["code_inventory"], sort_keys=True, separators=(",", ":"))
+    runtime_inventory_json = json.dumps(snapshot["runtime_inventory"], sort_keys=True, separators=(",", ":"))
+    worker_runtime_json = json.dumps(
+        snapshot["code_inventory"]["worker_runtime"],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    def code_inventory_reader() -> dict[str, Any]:
+        return json.loads(code_inventory_json)
+
+    def runtime_inventory_reader(_inventory: Any) -> dict[str, Any]:
+        return json.loads(runtime_inventory_json)
+
+    def worker_runtime_reader() -> dict[str, Any]:
+        return json.loads(worker_runtime_json)
+
+    with pytest.MonkeyPatch.context() as fixture_patch:
+        fixture_patch.setattr(conditioned_identity_module, "conditioned_code_inventory", code_inventory_reader)
+        fixture_patch.setattr(
+            conditioned_identity_module,
+            "conditioned_callback_runtime_inventory",
+            runtime_inventory_reader,
+        )
+        fixture_patch.setattr(conditioned_intake_module, "conditioned_code_inventory", code_inventory_reader)
+        fixture_patch.setattr(
+            conditioned_intake_module,
+            "conditioned_callback_runtime_inventory",
+            runtime_inventory_reader,
+        )
+        fixture_patch.setattr(conditioned_intake_module, "controlled_worker_runtime", worker_runtime_reader)
+        fixture_patch.setattr(
+            conditioned_intake_module,
+            "_run_legacy_intake_child",
+            _run_fixture_intake_in_process,
+        )
+        fixture_patch.setattr(conditioned_service_module, "conditioned_code_inventory", code_inventory_reader)
+        yield snapshot
 
 
 def _derived_sheet_fixture(root: Path, *, derived_name: str = "derived") -> dict[str, Any]:
@@ -711,38 +885,51 @@ def _built_candidate(
     project.mkdir()
     if write_config:
         _write_config(project)
-    sources = (_source("source.one"), _source("source.two"))
-    _write_trust(project, sources)
-    references = [
-        _import_handoff(project, run_id, _handoff(project, run_id, source, offset))
-        for run_id, source, offset in (
-            ("harvest-source-one", sources[0], 1),
-            ("harvest-source-two", sources[1], 20),
-        )
-    ]
-    conditioned = (
-        ConditionedDatasetService(
+    with _stable_conditioned_fixture_runtime():
+        sources = (_source("source.one"), _source("source.two"))
+        _write_trust(project, sources)
+        capability_evidence = _fixture_backend_capability_evidence(project)
+        adapter = ConditionedDatasetImportAdapter(
             project,
-            independent_audit_runner=independent_audit_runner,
-            policy=CandidatePolicy(min_images=4, target_images=8, max_images=10, max_source_files=32),
+            capability_evidence_loader=lambda _project_root: capability_evidence,
         )
-        if production_builder
-        else _service(
-            project,
-            activation_loader=activation_loader,
-            independent_audit_runner=independent_audit_runner,
+        references = [
+            _import_handoff(
+                project,
+                run_id,
+                _handoff(project, run_id, source, offset, capability_evidence=capability_evidence),
+                adapter=adapter,
+            )
+            for run_id, source, offset in (
+                ("harvest-source-one", sources[0], 1),
+                ("harvest-source-two", sources[1], 20),
+            )
+        ]
+        conditioned = (
+            ConditionedDatasetService(
+                project,
+                managed_intake_loader=adapter.load_managed_intake,
+                independent_audit_runner=independent_audit_runner,
+                policy=CandidatePolicy(min_images=4, target_images=8, max_images=10, max_source_files=32),
+            )
+            if production_builder
+            else _service(
+                project,
+                activation_loader=activation_loader,
+                managed_intake_loader=adapter.load_managed_intake,
+                independent_audit_runner=independent_audit_runner,
+            )
         )
-    )
-    started, created = conditioned.start_build(
-        references,
-        idempotency_key="conditioned-build-fixture-0001",
-        explicit_action=True,
-    )
-    assert created is True
-    job = _wait(conditioned, started["job_id"])
-    assert job["status"] == "NEEDS_REVIEW", job["message"]
-    root = project / "runs" / "v3" / "conditioned-dataset-v5" / started["job_id"]
-    candidate = json.loads((root / "candidate_manifest.json").read_text(encoding="utf-8"))
+        started, created = conditioned.start_build(
+            references,
+            idempotency_key="conditioned-build-fixture-0001",
+            explicit_action=True,
+        )
+        assert created is True
+        job = _wait(conditioned, started["job_id"])
+        assert job["status"] == "NEEDS_REVIEW", job["message"]
+        root = project / "runs" / "v3" / "conditioned-dataset-v5" / started["job_id"]
+        candidate = json.loads((root / "candidate_manifest.json").read_text(encoding="utf-8"))
     return conditioned, started["job_id"], candidate
 
 
@@ -942,6 +1129,7 @@ def test_conditioned_code_inventory_closes_direct_imports_parents_integrations_a
         assert len(dependency["record_sha256"]) == 64
         assert len(dependency["inventory_sha256"]) == 64
         assert dependency["paths_exposed"] is False
+        assert not conditioned_service_module._contains_private_or_absolute_path(dependency)
     assert {
         "product_features/conditioned_v5/legacy_worker.py",
         "utils/write_confinement.py",
@@ -2109,58 +2297,11 @@ def test_conditioned_sheet_intake_publishes_direct_final_tree_without_directory_
         lambda: code_inventory,
     )
     monkeypatch.setattr(conditioned_intake_module, "controlled_worker_runtime", lambda: worker_runtime)
-
-    def run_bound_intake_in_process(
-        work: Path,
-        *,
-        strategy: str,
-        workspace_identity: Any,
-        request_payload: dict[str, Any],
-        **_kwargs: Any,
-    ) -> dict[str, Any]:
-        result = conditioned_intake_module._run_legacy_intake_in_process(
-            work=work,
-            source_root=work / "source",
-            output_root=work / "datasets" / "managed",
-            source=request_payload["source"],
-            license_record=request_payload["license"],
-            artifact_sha256=request_payload["artifact_sha256"],
-            run_id=request_payload["run_id"],
-        )
-        windows = strategy == conditioned_intake_module.WINDOWS_PARENT_ANCHORS_STRATEGY
-        evidence = {
-            "schema_version": "spritelab.write-confinement-evidence.v3",
-            "strategy": strategy,
-            "platform": "windows" if windows else "linux",
-            "kernel_abi": 0 if windows else 3,
-            "root_identity_sha256": workspace_identity.identity_sha256,
-            "handled_access_fs": 0 if windows else 1,
-            "allowed_access_fs": 0 if windows else 1,
-            "no_new_privileges": not windows,
-            "restricted_token": False,
-            "integrity_level_rid": 0,
-            "mandatory_no_write_up": windows,
-            "workspace_integrity_level_rid": 0,
-            "startup_integrity_level_rid": 4096 if windows else 0,
-            "bootstrap_lowered_before_worker_import": windows,
-            "new_thread_integrity_level_rid": 0,
-            "raise_to_low_denied": windows,
-            "medium_probe_write_denied": windows,
-            "low_world_probe_write_denied": windows,
-            "untrusted_world_outside_guaranteed": False,
-            "job_kill_on_close": windows,
-            "job_active_process_limit": 1 if windows else 0,
-            "paths_exposed": False,
-        }
-        return {
-            "schema_version": conditioned_intake_module._LEGACY_RESPONSE_SCHEMA,
-            "ok": True,
-            "result": result,
-            "write_confinement": evidence,
-            "paths_exposed": False,
-        }
-
-    monkeypatch.setattr(conditioned_intake_module, "_run_legacy_intake_child", run_bound_intake_in_process)
+    monkeypatch.setattr(
+        conditioned_intake_module,
+        "_run_legacy_intake_child",
+        _run_fixture_intake_in_process,
+    )
     monkeypatch.setattr(
         conditioned_intake_module.AnchoredDirectory,
         "rename_held_directory_noreplace",
@@ -2321,17 +2462,76 @@ def test_conditioned_intake_receipt_exact_publication_is_commit_point_for_retry(
     )
 
 
-def test_preview_build_evidence_and_publication_are_bound_and_portable(tmp_path: Path) -> None:
+def test_preview_build_evidence_and_publication_are_bound_and_portable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
+    capability_evidence_holder: dict[str, BackendCapabilityEvidence] = {}
+    adapter = ConditionedDatasetImportAdapter(
+        project,
+        capability_evidence_loader=lambda _project_root: capability_evidence_holder["value"],
+    )
+    code_inventory_json = json.dumps(adapter.code_inventory, sort_keys=True, separators=(",", ":"))
+    runtime_inventory_json = json.dumps(adapter.runtime_inventory, sort_keys=True, separators=(",", ":"))
+    worker_runtime_json = json.dumps(
+        adapter.code_inventory["worker_runtime"],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    def code_inventory_reader() -> dict[str, Any]:
+        return json.loads(code_inventory_json)
+
+    def runtime_inventory_reader(_inventory: Any) -> dict[str, Any]:
+        return json.loads(runtime_inventory_json)
+
+    def worker_runtime_reader() -> dict[str, Any]:
+        return json.loads(worker_runtime_json)
+
+    monkeypatch.setattr(conditioned_identity_module, "conditioned_code_inventory", code_inventory_reader)
+    monkeypatch.setattr(
+        conditioned_identity_module,
+        "conditioned_callback_runtime_inventory",
+        runtime_inventory_reader,
+    )
+    monkeypatch.setattr(conditioned_intake_module, "conditioned_code_inventory", code_inventory_reader)
+    monkeypatch.setattr(
+        conditioned_intake_module,
+        "conditioned_callback_runtime_inventory",
+        runtime_inventory_reader,
+    )
+    monkeypatch.setattr(conditioned_intake_module, "controlled_worker_runtime", worker_runtime_reader)
+    monkeypatch.setattr(
+        conditioned_intake_module,
+        "_run_legacy_intake_child",
+        _run_fixture_intake_in_process,
+    )
+    monkeypatch.setattr(conditioned_service_module, "conditioned_code_inventory", code_inventory_reader)
+
     sources = (_source("source.one"), _source("source.two"))
     _write_trust(project, sources)
+    capability_evidence = _fixture_backend_capability_evidence(project)
+    capability_evidence_holder["value"] = capability_evidence
     handoffs = {
-        "harvest-source-one": _handoff(project, "harvest-source-one", sources[0], 1),
-        "harvest-source-two": _handoff(project, "harvest-source-two", sources[1], 20),
+        "harvest-source-one": _handoff(
+            project,
+            "harvest-source-one",
+            sources[0],
+            1,
+            capability_evidence=capability_evidence,
+        ),
+        "harvest-source-two": _handoff(
+            project,
+            "harvest-source-two",
+            sources[1],
+            20,
+            capability_evidence=capability_evidence,
+        ),
     }
-    references = [_import_handoff(project, run_id, handoff) for run_id, handoff in handoffs.items()]
-    service = _service(project)
+    references = [_import_handoff(project, run_id, handoff, adapter=adapter) for run_id, handoff in handoffs.items()]
+    service = _service(project, managed_intake_loader=adapter.load_managed_intake)
 
     preview = service.preview(references)
     assert preview["ready_to_build"] is True
