@@ -24,6 +24,7 @@ from spritelab.product_features.harvest.catalog import (
 from spritelab.product_features.harvest.certification import (
     BackendCapabilityCertificateError,
     BackendCapabilityEvidence,
+    current_validation_snapshot,
     load_backend_capability_certificate,
     load_backend_capability_evidence,
 )
@@ -115,9 +116,10 @@ def create_plugin(
                 configuration_error = exc
             if active_capabilities is not None:
                 certified = active_capabilities
+                identity_snapshot = current_validation_snapshot(active_evidence, certified)
 
                 def repository_backend_factory() -> HardenedArchiveAcquisitionBackend:
-                    return HardenedArchiveAcquisitionBackend(certified)
+                    return HardenedArchiveAcquisitionBackend(certified, _identity_snapshot=identity_snapshot)
 
                 active_factory = repository_backend_factory
             else:

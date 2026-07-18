@@ -19,6 +19,7 @@ from spritelab.product_features.harvest.trusted_backend import (
     CertifiedBackendCapabilities,
     HardenedBackendIdentitySnapshot,
     hardened_backend_identity_snapshot,
+    identity_snapshot_matches_capabilities,
 )
 from spritelab.utils.safe_fs import AnchoredDirectory, UnsafeFilesystemOperation
 
@@ -292,14 +293,22 @@ def evidence_has_current_validation_snapshot(
 ) -> bool:
     """Return whether evidence came from one complete loader validation."""
 
-    snapshot = evidence._validation_snapshot
     return bool(
-        snapshot is not None
+        identity_snapshot_matches_capabilities(evidence._validation_snapshot, capabilities)
         and evidence.capabilities == capabilities
-        and evidence.implementation_identity_sha256 == snapshot.code_identity_sha256
-        and capabilities.code_identity_sha256 == snapshot.code_identity_sha256
-        and all(getattr(capabilities, key) == value for key, value in snapshot.callback_binding.items())
+        and evidence.implementation_identity_sha256 == capabilities.code_identity_sha256
     )
+
+
+def current_validation_snapshot(
+    evidence: BackendCapabilityEvidence | None,
+    capabilities: CertifiedBackendCapabilities,
+) -> HardenedBackendIdentitySnapshot | None:
+    """Return only an opaque snapshot issued by the full evidence loader."""
+
+    if evidence is None or not evidence_has_current_validation_snapshot(evidence, capabilities):
+        return None
+    return evidence._validation_snapshot
 
 
 def _module_hashes(value: Any, *, expected_names: set[str]) -> dict[str, str]:
@@ -442,6 +451,7 @@ __all__ = [
     "REQUIRED_BACKEND_AUDIT_GATES",
     "BackendCapabilityCertificateError",
     "BackendCapabilityEvidence",
+    "current_validation_snapshot",
     "evidence_has_current_validation_snapshot",
     "load_backend_capability_certificate",
     "load_backend_capability_evidence",

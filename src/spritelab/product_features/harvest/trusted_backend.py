@@ -18,7 +18,7 @@ import unicodedata
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -283,6 +283,7 @@ class AcquisitionBackend(Protocol):
 
 
 BackendFactory = Callable[[], AcquisitionBackend]
+_HARDENED_BACKEND_SNAPSHOT_SEAL = object()
 
 
 @dataclass(frozen=True)
@@ -293,6 +294,7 @@ class HardenedBackendIdentitySnapshot:
     runtime_dependencies: dict[str, dict[str, Any]]
     callback_binding: dict[str, str]
     code_identity_sha256: str
+    _seal: object | None = field(default=None, init=False, compare=False, repr=False)
 
 
 def hardened_backend_identity_snapshot() -> HardenedBackendIdentitySnapshot:
@@ -340,11 +342,27 @@ def hardened_backend_identity_snapshot() -> HardenedBackendIdentitySnapshot:
             "dataset_import_callback": callback_binding,
         }
     )
-    return HardenedBackendIdentitySnapshot(
+    snapshot = HardenedBackendIdentitySnapshot(
         module_sha256=module_sha256,
         runtime_dependencies=runtime_dependencies,
         callback_binding=callback_binding,
         code_identity_sha256=code_identity_sha256,
+    )
+    object.__setattr__(snapshot, "_seal", _HARDENED_BACKEND_SNAPSHOT_SEAL)
+    return snapshot
+
+
+def identity_snapshot_matches_capabilities(
+    snapshot: HardenedBackendIdentitySnapshot | None,
+    capabilities: CertifiedBackendCapabilities,
+) -> bool:
+    """Verify an opaque snapshot captured by this process for these capabilities."""
+
+    return bool(
+        snapshot is not None
+        and snapshot._seal is _HARDENED_BACKEND_SNAPSHOT_SEAL
+        and capabilities.code_identity_sha256 == snapshot.code_identity_sha256
+        and all(getattr(capabilities, key) == value for key, value in snapshot.callback_binding.items())
     )
 
 
@@ -1303,12 +1321,16 @@ class HardenedArchiveAcquisitionBackend:
         capabilities: CertifiedBackendCapabilities,
         *,
         downloader: Any | None = None,
+        _identity_snapshot: HardenedBackendIdentitySnapshot | None = None,
     ) -> None:
-        if capabilities.code_identity_sha256 != hardened_backend_code_identity():
-            raise ValueError("Harvest backend capability is not bound to the exact implementation modules.")
-        callback_binding = conditioned_dataset_import_callback_binding()
-        if any(getattr(capabilities, key) != value for key, value in callback_binding.items()):
-            raise ValueError("Harvest backend capability is not bound to the exact Dataset import callback runtime.")
+        if not identity_snapshot_matches_capabilities(_identity_snapshot, capabilities):
+            if capabilities.code_identity_sha256 != hardened_backend_code_identity():
+                raise ValueError("Harvest backend capability is not bound to the exact implementation modules.")
+            callback_binding = conditioned_dataset_import_callback_binding()
+            if any(getattr(capabilities, key) != value for key, value in callback_binding.items()):
+                raise ValueError(
+                    "Harvest backend capability is not bound to the exact Dataset import callback runtime."
+                )
         from spritelab.harvest.download import download_file_with_receipt
 
         if downloader is None:
@@ -1917,5 +1939,6 @@ __all__ = [
     "hardened_backend_identity_snapshot",
     "hardened_backend_module_hashes",
     "hardened_backend_runtime_dependencies",
+    "identity_snapshot_matches_capabilities",
     "validate_callback_identity",
 ]
