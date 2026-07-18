@@ -403,7 +403,10 @@ def test_legacy_product_events_migrate_once_and_malformed_rows_fail_safely(tmp_p
         "not-json\n" + json.dumps(malformed_first.to_dict()) + "\n",
         encoding="utf-8",
     )
-    assert [item.event.event_type for item in repository.events(malformed_id)] == ["started"]
+    replay = repository.replay(malformed_id)
+    assert replay.events == ()
+    assert replay.invalid_event_count == 1
+    assert replay.integrity_status != "VALID"
     with pytest.raises(LegacyEventMigrationError, match="malformed"):
         repository.append(replace(second, run_id=malformed_id))
     assert not (malformed_directory / EVENT_FILENAME).exists()

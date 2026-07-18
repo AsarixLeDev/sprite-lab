@@ -118,6 +118,14 @@ _TRANSITION_MUTABLE_FIELDS = {
     "receipt_identity",
     "confinement",
 }
+_PREFLIGHT_CHECKPOINT_MUTABLE_FIELDS = {
+    "status",
+    "updated_at",
+    "exit_code",
+    "transition_sequence",
+    "logs",
+    _STATE_IDENTITY_FIELD,
+}
 _LIVE_PROCESS_LOCK = threading.RLock()
 _LIVE_PROCESSES: dict[tuple[str, str, str], tuple[str, Any]] = {}
 
@@ -285,7 +293,18 @@ class ExploratorySmokeRunner:
             try:
 
                 def operation_check() -> None:
+                    current = self._read_preflight_checkpoint_state(
+                        smoke_id,
+                        normalized,
+                        expected=state,
+                    )
+                    require_starting(current)
+
+                def launch_boundary_check() -> None:
                     current = self._read_state(smoke_id, normalized, plan)
+                    require_starting(current)
+
+                def require_starting(current: Mapping[str, Any]) -> None:
                     if current["status"] == "CANCELLED":
                         raise SmokeExecutionError("smoke_cancelled", "The smoke was cancelled before process launch.")
                     if current["status"] == "TIMED_OUT" or _deadline_expired(current):
@@ -306,7 +325,7 @@ class ExploratorySmokeRunner:
                     plan,
                     operation_check=operation_check,
                 )
-                operation_check()
+                launch_boundary_check()
                 preflight_complete = True
                 writable_fds: tuple[int, ...] = ()
                 launch_environment = dict(child_environment)
@@ -325,7 +344,7 @@ class ExploratorySmokeRunner:
                     launch_environment["SPRITELAB_WRITABLE_ROOT_FDS"] = ",".join(str(value) for value in writable_fds)
                 with pinned_smoke_interpreter(plan) as interpreter:
                     argv = [interpreter.launch_path, *launched_argv[1:]]
-                    operation_check()
+                    launch_boundary_check()
                     if os.name == "nt":
                         launch_environment["SPRITELAB_CONFINEMENT_PROJECT_ROOT"] = os.fspath(self.project_root)
                         process = self._windows_process_factory(
@@ -358,7 +377,7 @@ class ExploratorySmokeRunner:
                             process_options["preexec_fn"] = linux_parent_death_signal(os.getpid())
                         process = self._process_factory(argv, **process_options)
                         verify_pinned_process_image(process, interpreter)
-                    operation_check()
+                    launch_boundary_check()
             except BaseException as exc:
                 if process is not None:
                     _terminate_worker_process(process)
@@ -880,6 +899,76 @@ class ExploratorySmokeRunner:
             or value["plan_identity"] != plan["plan_identity"]
         ):
             raise SmokeExecutionError("smoke_execution_changed", "Smoke execution state belongs to another plan.")
+        return value
+
+    def _read_preflight_checkpoint_state(
+        self,
+        smoke_id: str,
+        device: str,
+        *,
+        expected: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Read cancellation/deadline state without rebuilding the runtime contract.
+
+        Execution-guard scanners call their operation callback at byte-level
+        granularity.  Those callbacks must remain prompt, but the complete plan
+        and runtime-derived validation belongs at the surrounding launch
+        boundaries.  Bind every immutable field to the already fully validated
+        STARTING state and accept only the two durable preflight transitions.
+        """
+
+        payload = read_stable_single_link_bytes(
+            self._state_path(smoke_id, device),
+            boundary=self._state_path(smoke_id, device).parent,
+            max_bytes=4 * 1024 * 1024,
+        )
+        try:
+            value = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SmokeExecutionError("smoke_execution_state", "Smoke execution state is invalid.") from exc
+        if not isinstance(value, dict):
+            raise SmokeExecutionError("smoke_execution_state", "Smoke execution state is invalid.")
+        immutable_fields = _STATE_KEYS - _PREFLIGHT_CHECKPOINT_MUTABLE_FIELDS
+        started = _parse_utc(value.get("started_at"))
+        deadline = _parse_utc(value.get("deadline_at"))
+        updated = _parse_utc(value.get("updated_at"))
+        status = value.get("status")
+        exit_code = value.get("exit_code")
+        if (
+            set(value) != _STATE_KEYS
+            or any(type(value.get(key)) not in allowed for key, allowed in _STATE_FIELD_TYPES.items())
+            or value.get("schema_version") != SMOKE_EXECUTION_SCHEMA
+            or value.get("smoke_id") != smoke_id
+            or value.get("device") != device
+            or status not in {"STARTING", "CANCELLED", "TIMED_OUT"}
+            or any(value.get(key) != expected.get(key) for key in immutable_fields)
+            or not _valid_state_identity(value)
+            or value.get("transition_sequence", -1) < 0
+            or not 1 <= len(value.get("logs") or ()) <= 50
+            or any(
+                type(line) is not str
+                or not line
+                or len(line) > 1_000
+                or line != line.strip()
+                or "\r" in line
+                or "\n" in line
+                for line in value.get("logs") or ()
+            )
+            or started is None
+            or deadline is None
+            or updated is None
+            or updated < started
+            or (
+                status == "STARTING"
+                and (value.get("transition_sequence") != 0 or updated != started or exit_code is not None)
+            )
+            or (status == "CANCELLED" and (value.get("transition_sequence", 0) <= 0 or exit_code != 130))
+            or (
+                status == "TIMED_OUT"
+                and (value.get("transition_sequence", 0) <= 0 or exit_code != 124 or updated < deadline)
+            )
+        ):
+            raise SmokeExecutionError("smoke_execution_state", "Smoke execution state is invalid.")
         return value
 
     def _validate_state(self, value: Mapping[str, Any]) -> None:

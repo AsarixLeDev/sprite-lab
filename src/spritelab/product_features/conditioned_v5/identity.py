@@ -88,22 +88,21 @@ def _runtime_manifest_path(runtime_root,relative):
         raise RuntimeError("audited dependency path is invalid")
     parts=relative.split("/")
     leading=0
-    saw_name=False
-    for part in parts:
-        if part=="..":
-            if saw_name:
-                raise RuntimeError("audited dependency path has embedded traversal")
-            leading+=1
-        elif part in ("", "."):
-            raise RuntimeError("audited dependency path is invalid")
-        else:
-            saw_name=True
-    if not saw_name or leading>4:
-        raise RuntimeError("audited dependency path escapes its bounded root")
+    if len(parts)>=2 and parts[0]=="external" and parts[1].startswith("parent-"):
+        parent_value=parts[1][len("parent-"):]
+        if parent_value not in ("1","2","3","4"):
+            raise RuntimeError("audited dependency path escapes its bounded root")
+        leading=int(parent_value)
+        parts=parts[2:]
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise RuntimeError("audited dependency path is invalid")
     allowed=runtime_root
     for _index in range(leading):
-        allowed=os.path.dirname(allowed)
-    value=os.path.abspath(os.path.join(runtime_root,*parts))
+        parent=os.path.dirname(allowed)
+        if parent==allowed:
+            raise RuntimeError("audited dependency path escapes its bounded root")
+        allowed=parent
+    value=os.path.abspath(os.path.join(allowed,*parts))
     if os.path.commonpath((allowed,value))!=allowed:
         raise RuntimeError("audited dependency path escapes its bounded root")
     return value
@@ -1330,6 +1329,13 @@ def _canonical_distribution_record_path(value: str) -> tuple[str, int]:
             saw_name = True
     if not saw_name or parent_escapes > _MAX_DISTRIBUTION_PARENT_ESCAPES:
         raise ConditionedCodeIdentityError("A runtime dependency RECORD path escapes its bounded installation root.")
+    if (
+        parent_escapes == 0
+        and len(path.parts) >= 2
+        and path.parts[0] == "external"
+        and path.parts[1].startswith("parent-")
+    ):
+        raise ConditionedCodeIdentityError("A runtime dependency RECORD path uses a reserved external namespace.")
     return value, parent_escapes
 
 

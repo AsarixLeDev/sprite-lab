@@ -146,6 +146,34 @@ python -m ruff check <changed paths>
 python -m ruff format --check <changed paths>
 ```
 
+- Before running any broad, release, or historically slow test suite, optimize
+  the test path first. Inspect prior `--durations` output or profile one
+  representative slow test; identify repeated hashing, process startup,
+  fixture construction, polling, and full-tree scans; remove or safely reuse
+  avoidable work; then benchmark the representative test again before
+  launching the broad suite. Do not spend a full-suite run merely to discover
+  a known performance problem.
+- Test optimization must preserve the contract. Keep dedicated drift, tamper,
+  confinement, cancellation, and live-reload tests on fresh/live state; cache
+  or snapshot only inputs that the scenario declares immutable. A faster test
+  is not acceptable if it can conceal a production change or weaken a gate.
+- Never launch a monolithic broad suite when its measured or reasonably
+  expected runtime can exceed 10 minutes. Inventory the test modules first,
+  partition them deterministically into disjoint exhaustive shards, and fail
+  closed on any overlap or gap. Balance historically slow modules separately;
+  do not assume equal file counts mean equal workloads.
+- Keep each shard below a 10-minute target and below the command/tool timeout.
+  Cap native math-library threads (`OMP_NUM_THREADS`, `MKL_NUM_THREADS`,
+  `OPENBLAS_NUM_THREADS`, `NUMEXPR_NUM_THREADS`, and
+  `VECLIB_MAXIMUM_THREADS`) at `1` during parallel pytest work, and disable
+  tokenizer parallelism unless the test specifically requires it. Give every
+  worker unique process `TEMP`/`TMP` and `--basetemp` roots.
+- Record each shard's module inventory, elapsed time, pass/fail/skip counts,
+  failed node IDs, and reviewed skip reasons as soon as it completes. A slow
+  worker must not hide already completed results. After a timeout, terminate
+  only the verified process owned by that shard, preserve completed evidence,
+  split the unfinished shard further, and resume only the uncovered portion;
+  never repeat the same long monolith with a larger timeout.
 - Use a unique basetemp for concurrent agents.
 - `python -m spritelab dev test <quick|dataset|labeling|training|evaluation|full> --dry-run`
   shows curated profiles.

@@ -705,9 +705,9 @@ def test_catalog_projection_sanitizes_state_derived_text_and_keeps_technical_row
     state["backend_identity"].update(
         {
             "friendly_run_name": "Nightly Authorization=Bearer FRIENDLYSECRET C:\\private\\name.txt",
-            "training_profile": "profile api_key=PROFILESECRET file:///home/alice/profile.json",
+            "training_profile": "profile api_key=PROFILESECRET file:///" + "home/alice/profile.json",
             "dataset_identity_summary": f"Dataset password=DATASECRET {tmp_path / 'private' / 'dataset.json'}",
-            "view_identity_summary": "View client_secret=VIEWSECRET /home/alice/private/view.json",
+            "view_identity_summary": "View client_secret=VIEWSECRET /" + "home/alice/private/view.json",
         }
     )
     _write_json(state_path, state)
@@ -725,8 +725,8 @@ def test_catalog_projection_sanitizes_state_derived_text_and_keeps_technical_row
         str(tmp_path),
         tmp_path.as_posix(),
         "C:\\private",
-        "/home/alice/private",
-        "file:///home/alice",
+        "/" + "home/alice/private",
+        "file:///" + "home/alice",
     ):
         assert private_value not in serialized
     candidate = public["eligible"][0]

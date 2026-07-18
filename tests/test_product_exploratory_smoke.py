@@ -1495,6 +1495,121 @@ def test_smoke_orchestration_source_change_stales_plan_before_launch(smoke_fixtu
     assert calls == []
 
 
+def test_server_runner_revalidates_plan_after_operation_checked_preflight(
+    smoke_fixture: SmokeFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = smoke_fixture.prepare("nonce-mid-preflight-plan-drift")
+    original_load_plan = smoke_runner_module.load_plan
+    changed_plan = copy.deepcopy(original_load_plan(smoke_fixture.root, prepared["smoke_id"]))
+    changed_plan["preparation_nonce"] = "nonce-changed-during-preflight"
+    changed_plan.pop("plan_identity")
+    changed_plan["plan_identity"] = stable_hash(changed_plan)
+    plan_changed = False
+    load_calls = 0
+
+    def controlled_load_plan(project_root: str | Path, smoke_id: str) -> dict[str, Any]:
+        nonlocal load_calls
+        load_calls += 1
+        if plan_changed:
+            return copy.deepcopy(changed_plan)
+        return original_load_plan(project_root, smoke_id)
+
+    def operation_checked_preflight(
+        _project_root: str | Path,
+        _plan: dict[str, Any],
+        *,
+        operation_check: Any,
+    ) -> None:
+        nonlocal plan_changed
+        for _ in range(500):
+            operation_check()
+        plan_changed = True
+
+    monkeypatch.setattr(smoke_runner_module, "load_plan", controlled_load_plan)
+    monkeypatch.setattr(smoke_runner_module, "verify_execution_guards", operation_checked_preflight)
+    runner, calls = _controlled_runner(smoke_fixture.root)
+
+    with pytest.raises(SmokeExecutionError, match="execution state is invalid"):
+        runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
+
+    assert calls == []
+    assert load_calls < 20
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "exit_code"),
+    (("CANCELLED", 130), ("TIMED_OUT", 124)),
+)
+def test_preflight_checkpoint_accepts_exact_durable_terminal_state(
+    smoke_fixture: SmokeFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_status: str,
+    exit_code: int,
+) -> None:
+    prepared = smoke_fixture.prepare(f"nonce-checkpoint-{terminal_status.lower()}")
+    runner, calls = _controlled_runner(smoke_fixture.root)
+
+    def terminal_preflight(
+        _project_root: str | Path,
+        plan: dict[str, Any],
+        *,
+        operation_check: Any,
+    ) -> None:
+        starting = runner._read_state(prepared["smoke_id"], "cpu", plan)
+        if terminal_status == "TIMED_OUT":
+            deadline = datetime.fromisoformat(str(starting["deadline_at"]))
+            monkeypatch.setattr(
+                smoke_runner_module,
+                "_now",
+                lambda: (deadline + timedelta(seconds=1)).isoformat(),
+            )
+        runner._transition(
+            starting,
+            status=terminal_status,
+            exit_code=exit_code,
+            message="Injected exact durable preflight terminal state.",
+        )
+        operation_check()
+
+    monkeypatch.setattr(smoke_runner_module, "verify_execution_guards", terminal_preflight)
+
+    state = runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
+
+    assert state["status"] == terminal_status
+    assert state["exit_code"] == exit_code
+    assert calls == []
+
+
+def test_preflight_checkpoint_rejects_identity_valid_immutable_state_tamper(
+    smoke_fixture: SmokeFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = smoke_fixture.prepare("nonce-checkpoint-immutable-tamper")
+    runner, calls = _controlled_runner(smoke_fixture.root)
+
+    def tampering_preflight(
+        _project_root: str | Path,
+        _plan: dict[str, Any],
+        *,
+        operation_check: Any,
+    ) -> None:
+        state_path = artifact_bundle_directory(smoke_fixture.root, prepared["smoke_id"]) / "execution/cpu/state.json"
+        changed = json.loads(state_path.read_text(encoding="utf-8"))
+        changed["environment_identity"] = _sha("changed-preflight-environment")
+        changed.pop("state_identity")
+        changed = smoke_runner_module._finalize_state_identity(changed)
+        state_path.write_bytes(smoke_runner_module.canonical_json_bytes(changed, pretty=True))
+        operation_check()
+
+    monkeypatch.setattr(smoke_runner_module, "verify_execution_guards", tampering_preflight)
+
+    with pytest.raises(SmokeExecutionError, match="execution state is invalid"):
+        runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
+
+    assert calls == []
+
+
 def test_non_orchestration_training_source_change_stales_full_code_identity(
     smoke_fixture: SmokeFixture,
 ) -> None:

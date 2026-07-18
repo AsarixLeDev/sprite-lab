@@ -194,7 +194,10 @@ def _execute_test_campaign_directly(campaign, **kwargs):
                 dataset_identity=str(identities.get("dataset_identity_hash", view_identity)),
                 view_identity=view_identity,
             ),
-            validator_context=SimpleNamespace(launch_authorization_evidence_sha256=evidence),
+            validator_context=SimpleNamespace(
+                launch_authorization_evidence_sha256=evidence,
+                project_root=Path(kwargs["project_root"]),
+            ),
             campaign=campaign,
             run=run,
             argv=("python", "-m", "spritelab", "train", str(run["run_id"])),

@@ -3099,6 +3099,11 @@ def _interprocess_lock(
 def _process_is_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    # The caller itself is necessarily live.  Avoid an OS-level zero-signal
+    # probe for this common legacy-lease case: on Windows that probe can fail
+    # transiently under a heavily concurrent test/process workload.
+    if pid == os.getpid():
+        return True
     try:
         os.kill(pid, 0)
     except PermissionError:

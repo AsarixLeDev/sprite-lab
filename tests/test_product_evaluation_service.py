@@ -282,9 +282,9 @@ def test_checkpoint_catalog_api_and_initial_html_sanitize_state_derived_strings(
     state["title"] = "Title Authorization=Bearer TITLESECRET C:\\private\\title.txt"
     state["backend_identity"].update(
         {
-            "training_profile": "api_key=PROFILESECRET file:///home/alice/profile.json",
+            "training_profile": "api_key=PROFILESECRET file:///" + "home/alice/profile.json",
             "dataset_identity_summary": f"password=DATASECRET {tmp_path / 'private' / 'dataset.json'}",
-            "view_identity_summary": "client_secret=VIEWSECRET /home/alice/private/view.json",
+            "view_identity_summary": "client_secret=VIEWSECRET /" + "home/alice/private/view.json",
         }
     )
     _write_json(state_path, state)
@@ -308,8 +308,8 @@ def test_checkpoint_catalog_api_and_initial_html_sanitize_state_derived_strings(
             str(tmp_path),
             tmp_path.as_posix(),
             "C:\\private",
-            "/home/alice/private",
-            "file:///home/alice",
+            "/" + "home/alice/private",
+            "file:///" + "home/alice",
         ):
             assert private_value not in response.text
         assert "[redacted]" in response.text

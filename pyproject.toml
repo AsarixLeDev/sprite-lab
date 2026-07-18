@@ -87,6 +87,14 @@ ignore_missing_imports = true
 pretty = true
 show_error_codes = true
 warn_unused_configs = true
+follow_imports_for_stubs = true
 check_untyped_defs = false
 disallow_untyped_defs = false
 disable_error_code = ["arg-type", "assignment", "misc", "union-attr", "attr-defined", "call-overload", "type-arg", "return-value", "index", "operator", "no-any-return", "valid-type", "var-annotated", "no-redef", "func-returns-value"]
+
+[[tool.mypy.overrides]]
+# NumPy releases that support the host Python may ship stubs using syntax newer
+# than the project's Python 3.10 compatibility target. Treat NumPy as an
+# external typed boundary so mypy continues checking Sprite Lab at 3.10.
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"

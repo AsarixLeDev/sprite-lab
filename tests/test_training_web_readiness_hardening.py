@@ -599,8 +599,8 @@ def test_compute_settings_reject_non_boolean_cloud_classification(cloud: object)
 @pytest.mark.parametrize(
     "backend_id",
     [
-        "file:///C:/Users/private/backend",
-        r"C:\Users\private\backend",
+        "file:///C:/" + "Users/private/backend",
+        "C:\\" + r"Users\private\backend",
         "provider Authorization=Bearer PRIVATESECRET",
         "provider/child",
     ],

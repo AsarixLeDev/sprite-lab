@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,9 +28,16 @@ def _config(tmp_path: Path) -> ProjectConfig:
     return ProjectConfig(root=tmp_path, path=tmp_path / "spritelab.yaml", values=values)
 
 
-def _configure_valid_campaign(config: ProjectConfig, tmp_path: Path) -> None:
+def _configure_valid_campaign(config: ProjectConfig, tmp_path: Path) -> SimpleNamespace:
     launch = validated_launch(tmp_path, "local")
     config.values["training"]["campaign_config"] = str(launch.validator_context.campaign_config_path)
+    config.values["execution"]["allow_training"] = True
+    return SimpleNamespace(
+        campaign=launch.campaign,
+        manifest={"image_count": 2_500},
+        audit_status=AuditStatus.PASS,
+        config=config,
+    )
 
 
 def _stage(
@@ -125,9 +133,12 @@ def test_training_stale_audit_uses_stale_exit(monkeypatch, tmp_path: Path) -> No
 
 def test_valid_training_dry_run_never_initializes_or_launches(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
-    _configure_valid_campaign(config, tmp_path)
+    activation = _configure_valid_campaign(config, tmp_path)
     monkeypatch.setattr("spritelab.v3.orchestration.build_project_state", lambda *_: _state(tmp_path))
-    monkeypatch.setattr("spritelab.product_features.training.plans.build_project_state", lambda *_: _state(tmp_path))
+    monkeypatch.setattr(
+        "spritelab.product_features.training.service.load_conditioned_training_activation",
+        lambda *_args, **_kwargs: activation,
+    )
     monkeypatch.setattr(
         "spritelab.v3.orchestration._run_backend", lambda *_args, **_kwargs: pytest.fail("backend launched")
     )
@@ -139,10 +150,13 @@ def test_valid_training_dry_run_never_initializes_or_launches(monkeypatch, tmp_p
 
 def test_interactive_confirmation_defaults_to_no(monkeypatch, tmp_path: Path) -> None:
     config = _config(tmp_path)
-    _configure_valid_campaign(config, tmp_path)
+    activation = _configure_valid_campaign(config, tmp_path)
     config.values["execution"]["training_command"] = ["never-run"]
     monkeypatch.setattr("spritelab.v3.orchestration.build_project_state", lambda *_: _state(tmp_path))
-    monkeypatch.setattr("spritelab.product_features.training.plans.build_project_state", lambda *_: _state(tmp_path))
+    monkeypatch.setattr(
+        "spritelab.product_features.training.service.load_conditioned_training_activation",
+        lambda *_args, **_kwargs: activation,
+    )
     monkeypatch.setattr("spritelab.v3.orchestration.sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _: "")
     monkeypatch.setattr(

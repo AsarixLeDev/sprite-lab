@@ -174,6 +174,27 @@ def _cached_conditioned_fixture_runtime(code_reader: Any, runtime_reader: Any) -
     return json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
 
 
+@cache
+def _cached_trusted_auditor_fixture_inventory(inventory_reader: Any, kind: str) -> str:
+    """Reuse one exact live auditor closure for stable workflow fixtures."""
+
+    return json.dumps(inventory_reader(kind), sort_keys=True, separators=(",", ":"))
+
+
+@cache
+def _cached_installed_distribution_fixture_inventory(inventory_reader: Any, name: str) -> str:
+    """Hash each stable installed distribution once across overlapping closures."""
+
+    return json.dumps(inventory_reader(name), sort_keys=True, separators=(",", ":"))
+
+
+@cache
+def _cached_backend_runtime_fixture_inventory(runtime_reader: Any) -> str:
+    """Reuse the exact Harvest runtime closure in stable conditioned fixtures."""
+
+    return json.dumps(runtime_reader(), sort_keys=True, separators=(",", ":"))
+
+
 def _assert_strict_retained_stage_tree(root: Path) -> None:
     files = [path for path in root.rglob("*") if path.is_file()]
     aliases: dict[Path, list[Path]] = {}
@@ -206,6 +227,17 @@ def _controlled_worker_work(tmp_path: Path) -> Path:
         conditioned_intake_module.prepare_windows_untrusted_integrity_workspace(work)
     (work / "tmp").mkdir()
     return work
+
+
+def _bootstrap_runtime_manifest_path() -> Any:
+    tree = ast.parse(conditioned_identity_module.WORKER_BOOTSTRAP_SOURCE)
+    function = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_runtime_manifest_path"
+    )
+    module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
+    namespace: dict[str, Any] = {"os": os}
+    exec(compile(module, "<conditioned-bootstrap-path-test>", "exec"), namespace)
+    return namespace["_runtime_manifest_path"]
 
 
 def _source(source_id: str) -> HarvestSource:
@@ -681,29 +713,55 @@ def _run_fixture_intake_in_process(
 def _stable_conditioned_fixture_runtime():
     """Reuse exact live identities while stable fixtures exercise other gates."""
 
-    encoded = _cached_conditioned_fixture_runtime(
-        conditioned_identity_module.conditioned_code_inventory,
-        conditioned_identity_module.conditioned_callback_runtime_inventory,
-    )
-    snapshot = json.loads(encoded)
-    code_inventory_json = json.dumps(snapshot["code_inventory"], sort_keys=True, separators=(",", ":"))
-    runtime_inventory_json = json.dumps(snapshot["runtime_inventory"], sort_keys=True, separators=(",", ":"))
-    worker_runtime_json = json.dumps(
-        snapshot["code_inventory"]["worker_runtime"],
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    installed_distribution_reader = conditioned_identity_module._installed_distribution_inventory
 
-    def code_inventory_reader() -> dict[str, Any]:
-        return json.loads(code_inventory_json)
-
-    def runtime_inventory_reader(_inventory: Any) -> dict[str, Any]:
-        return json.loads(runtime_inventory_json)
-
-    def worker_runtime_reader() -> dict[str, Any]:
-        return json.loads(worker_runtime_json)
+    def stable_distribution_reader(name: str) -> dict[str, Any]:
+        encoded_inventory = _cached_installed_distribution_fixture_inventory(installed_distribution_reader, name)
+        return json.loads(encoded_inventory)
 
     with pytest.MonkeyPatch.context() as fixture_patch:
+        fixture_patch.setattr(
+            conditioned_identity_module,
+            "_installed_distribution_inventory",
+            stable_distribution_reader,
+        )
+        backend_runtime_json = _cached_backend_runtime_fixture_inventory(hardened_backend_runtime_dependencies)
+
+        def backend_runtime_reader() -> dict[str, Any]:
+            return json.loads(backend_runtime_json)
+
+        backend_module = sys.modules[hardened_backend_code_identity.__module__]
+        fixture_patch.setattr(backend_module, "hardened_backend_runtime_dependencies", backend_runtime_reader)
+        fixture_patch.setattr(sys.modules[__name__], "hardened_backend_runtime_dependencies", backend_runtime_reader)
+        encoded = _cached_conditioned_fixture_runtime(
+            conditioned_identity_module.conditioned_code_inventory,
+            conditioned_identity_module.conditioned_callback_runtime_inventory,
+        )
+        snapshot = json.loads(encoded)
+        code_inventory_json = json.dumps(snapshot["code_inventory"], sort_keys=True, separators=(",", ":"))
+        runtime_inventory_json = json.dumps(snapshot["runtime_inventory"], sort_keys=True, separators=(",", ":"))
+        worker_runtime_json = json.dumps(
+            snapshot["code_inventory"]["worker_runtime"],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        auditor_inventory_json = {
+            kind: _cached_trusted_auditor_fixture_inventory(trusted_auditor_inventory, kind)
+            for kind in ("label_audit", "dataset_validation")
+        }
+
+        def code_inventory_reader() -> dict[str, Any]:
+            return json.loads(code_inventory_json)
+
+        def runtime_inventory_reader(_inventory: Any) -> dict[str, Any]:
+            return json.loads(runtime_inventory_json)
+
+        def worker_runtime_reader() -> dict[str, Any]:
+            return json.loads(worker_runtime_json)
+
+        def auditor_inventory_reader(kind: str) -> dict[str, Any]:
+            return json.loads(auditor_inventory_json[kind])
+
         fixture_patch.setattr(conditioned_identity_module, "conditioned_code_inventory", code_inventory_reader)
         fixture_patch.setattr(
             conditioned_identity_module,
@@ -723,6 +781,20 @@ def _stable_conditioned_fixture_runtime():
             _run_fixture_intake_in_process,
         )
         fixture_patch.setattr(conditioned_service_module, "conditioned_code_inventory", code_inventory_reader)
+        fixture_patch.setattr(conditioned_service_module, "trusted_auditor_inventory", auditor_inventory_reader)
+        fixture_patch.setattr(conditioned_audit_module, "trusted_auditor_inventory", auditor_inventory_reader)
+        from spritelab.product_features.training import activation as training_activation_module
+
+        fixture_patch.setattr(training_activation_module, "trusted_auditor_inventory", auditor_inventory_reader)
+        fixture_patch.setattr(sys.modules[__name__], "trusted_auditor_inventory", auditor_inventory_reader)
+        yield snapshot
+
+
+@pytest.fixture
+def stable_conditioned_fixture_runtime() -> Any:
+    """Keep stable end-to-end fixtures on one exact, immutable live snapshot."""
+
+    with _stable_conditioned_fixture_runtime() as snapshot:
         yield snapshot
 
 
@@ -1187,6 +1259,22 @@ def test_runtime_dependency_inventory_detects_same_size_installed_file_drift(
     )
 
 
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "external/parent-1/Scripts/tool.exe",
+        "external/parent-4/data.bin",
+        "external/parent-x/file.bin",
+    ),
+)
+def test_runtime_dependency_inventory_rejects_reserved_external_parent_namespace(relative: str) -> None:
+    with pytest.raises(
+        conditioned_identity_module.ConditionedCodeIdentityError,
+        match="reserved external namespace",
+    ):
+        conditioned_identity_module._canonical_distribution_record_path(relative)
+
+
 def test_runtime_dependency_inventory_binds_unrecorded_valid_pyc_and_supplemental_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1359,6 +1447,64 @@ def test_controlled_worker_bootstrap_transport_is_exact_and_fits_windows_command
     ]
     wrapped = write_confinement_module._windows_untrusted_bootstrap_arguments(command)
     assert len(subprocess.list2cmdline(list(wrapped))) < 32_767
+
+
+def test_controlled_worker_runtime_manifest_path_decodes_bounded_external_inventory_paths(
+    tmp_path: Path,
+) -> None:
+    installation = tmp_path / "installation"
+    runtime_root = installation / "site-packages"
+    script = installation / "Scripts" / "idna.exe"
+    ordinary = runtime_root / "external" / "data.bin"
+    script.parent.mkdir(parents=True)
+    runtime_root.mkdir()
+    ordinary.parent.mkdir()
+    script.write_bytes(b"console-script")
+    ordinary.write_bytes(b"ordinary-runtime-data")
+    resolve = _bootstrap_runtime_manifest_path()
+
+    assert Path(resolve(os.fspath(runtime_root), "external/parent-1/Scripts/idna.exe")) == script
+    assert Path(resolve(os.fspath(runtime_root), "external/data.bin")) == ordinary
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "../Scripts/idna.exe",
+        "external/parent-0/Scripts/idna.exe",
+        "external/parent-5/Scripts/idna.exe",
+        "external/parent-01/Scripts/idna.exe",
+        "external/parent-x/Scripts/idna.exe",
+        "external/parent-1",
+        "external/parent-1//idna.exe",
+        "external/parent-1/../idna.exe",
+        "external/parent-1/Scripts\\idna.exe",
+        "external/parent-1/C:/idna.exe",
+        "external/parent-1/idna\x00.exe",
+    ),
+    ids=(
+        "raw-parent",
+        "parent-zero",
+        "parent-over-bound",
+        "parent-noncanonical",
+        "parent-nonnumeric",
+        "missing-file",
+        "empty-component",
+        "embedded-traversal",
+        "backslash",
+        "colon",
+        "nul",
+    ),
+)
+def test_controlled_worker_runtime_manifest_path_rejects_malformed_external_inventory_paths(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    runtime_root = tmp_path / "installation" / "site-packages"
+    runtime_root.mkdir(parents=True)
+
+    with pytest.raises(RuntimeError):
+        _bootstrap_runtime_manifest_path()(os.fspath(runtime_root), relative)
 
 
 def test_controlled_worker_launch_policy_rejects_runtime_source_substitution(
@@ -2462,6 +2608,7 @@ def test_conditioned_intake_receipt_exact_publication_is_commit_point_for_retry(
     )
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_preview_build_evidence_and_publication_are_bound_and_portable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2607,6 +2754,7 @@ def test_preview_build_evidence_and_publication_are_bound_and_portable(
     assert not (project / "spritelab.yaml").exists()
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_plugin_and_api_reject_browser_paths_and_expose_navigation(tmp_path: Path) -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -2671,6 +2819,7 @@ def test_plugin_and_api_reject_browser_paths_and_expose_navigation(tmp_path: Pat
     assert rejected.json()["error_code"] == "invalid_conditioned_v5_payload"
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_independent_audit_is_server_managed_explicit_and_receipt_bound(tmp_path: Path) -> None:
     calls: list[tuple[str, str]] = []
 
@@ -2804,6 +2953,7 @@ def test_independent_audit_is_server_managed_explicit_and_receipt_bound(tmp_path
         )
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_independent_audit_runner_failure_terminalizes_without_evidence(tmp_path: Path) -> None:
     calls: list[str] = []
 
@@ -2839,6 +2989,7 @@ def test_independent_audit_runner_failure_terminalizes_without_evidence(tmp_path
     assert not list((root / "evidence").glob("*"))
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_independent_audit_live_ownership_and_orphan_recovery(tmp_path: Path) -> None:
     entered = threading.Event()
     release = threading.Event()
@@ -2903,6 +3054,7 @@ def test_independent_audit_live_ownership_and_orphan_recovery(tmp_path: Path) ->
     assert recovered["audit_operation_history"][-1]["operation_id"] == orphan["operation_id"]
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_independent_audit_reuses_identical_report_and_refuses_conflicting_bytes(tmp_path: Path) -> None:
     inject_conflict = False
 
@@ -2958,6 +3110,7 @@ def test_independent_audit_reuses_identical_report_and_refuses_conflicting_bytes
     assert first_receipt.read_bytes() == first_receipt_bytes
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_publication_retains_exact_outputs_after_campaign_marker_fault_and_retry_adopts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2995,6 +3148,7 @@ def test_publication_retains_exact_outputs_after_campaign_marker_fault_and_retry
     assert retried["stage"] == "published"
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_publication_final_state_failure_retains_exact_pair_for_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3022,6 +3176,7 @@ def test_publication_final_state_failure_retains_exact_pair_for_retry(
     assert retried["stage"] == "published"
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_direct_production_campaign_builder_publishes_bound_launch_ready_campaign(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3037,6 +3192,14 @@ def test_direct_production_campaign_builder_publishes_bound_launch_ready_campaig
         anonymous_files_unsupported,
     )
     monkeypatch.setattr(training_activation, "MIN_CONDITIONED_IMAGES", 4)
+    # This integration test exercises the real publication/campaign/activation
+    # binding. Phase-I report generation and applicability are covered by the
+    # dedicated training-audit tests, so isolate that independently tested gate.
+    monkeypatch.setattr(
+        training_activation,
+        "training_audit_status",
+        lambda *_args, **_kwargs: training_activation.AuditStatus.PASS,
+    )
     project = tmp_path / "project"
     service, job_id, candidate = _built_candidate(
         project,
@@ -3089,6 +3252,7 @@ def test_direct_production_campaign_builder_publishes_bound_launch_ready_campaig
         _assert_strict_retained_stage_tree(root)
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_activation_is_explicit_cas_and_does_not_start_training(tmp_path: Path) -> None:
     project = tmp_path / "project"
     service, job_id, candidate, publication, before_config = _published_configured_candidate(project)
@@ -3124,6 +3288,7 @@ def test_activation_is_explicit_cas_and_does_not_start_training(tmp_path: Path) 
     assert consumed.value.code == "activation_recovery_mismatch"
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_activation_refuses_stale_config_without_mutation(tmp_path: Path) -> None:
     project = tmp_path / "project"
     service, job_id, candidate, publication, before_config = _published_configured_candidate(project)
@@ -3613,6 +3778,7 @@ def test_activation_config_exact_replace_refuses_source_name_substitution(
     assert outside.read_bytes() == b"preserve-outside"
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_activation_recovers_prepared_records_after_state_checkpoint_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3655,6 +3821,7 @@ def test_activation_recovers_prepared_records_after_state_checkpoint_failure(
     assert recovered["publication"]["configuration_activated"] is True
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_activation_projects_exact_commit_after_post_cas_process_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3688,6 +3855,7 @@ def test_activation_projects_exact_commit_after_post_cas_process_checkpoint(
     assert projected["publication"]["training_started"] is False
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_activation_recovers_after_config_boundary_before_project_marker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3802,6 +3970,7 @@ def _direct_publication_identity(
     return conditioned_service_module._inventory_identity(files)
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_direct_final_publication_plans_production_campaign_against_absent_leaf(
     tmp_path: Path,
 ) -> None:
@@ -3820,6 +3989,7 @@ def test_direct_final_publication_plans_production_campaign_against_absent_leaf(
 
 
 @pytest.mark.parametrize("fault_step", ["dataset_marker_committed", "campaign_marker_committed"])
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_direct_final_publication_retry_converges_after_durable_marker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3855,6 +4025,7 @@ def test_direct_final_publication_retry_converges_after_durable_marker(
     assert outside.read_bytes() == b"preserve-outside"
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_direct_final_publication_refuses_unknown_directory_without_overwrite(
     tmp_path: Path,
 ) -> None:
@@ -3877,6 +4048,7 @@ def test_direct_final_publication_refuses_unknown_directory_without_overwrite(
     assert not (job_root / "publication-journal.json").exists()
 
 
+@pytest.mark.usefixtures("stable_conditioned_fixture_runtime")
 def test_direct_final_publication_refuses_unknown_campaign_before_markers(
     tmp_path: Path,
 ) -> None:
