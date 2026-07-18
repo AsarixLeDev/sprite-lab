@@ -24,6 +24,7 @@ from spritelab.harvest.download import (
     DownloadReceipt,
     DownloadSecurityError,
     ReceiptDownloadResult,
+    download_bytes_with_receipt,
     download_file_with_receipt,
 )
 from spritelab.product_core import ProductStatus, ProjectContext
@@ -372,6 +373,32 @@ def test_receipt_downloader_pins_one_dns_result_and_preserves_tls_hostname(tmp_p
     assert transport.calls[0]["pinned_ip"] == "8.8.8.8"
     assert transport.calls[0]["server_hostname"] == "downloads.example.test"
     assert result.receipt.response_sha256 == hashlib.sha256(body).hexdigest()
+
+
+def test_receipt_bytes_downloader_uses_pinned_bounded_policy_without_filesystem_output() -> None:
+    body = b"<html>prefill evidence</html>"
+    transport = FakeTransport(
+        [
+            FakeResponse(
+                body,
+                headers={"Content-Type": "text/html; charset=utf-8", "Content-Length": str(len(body))},
+            )
+        ]
+    )
+
+    result = download_bytes_with_receipt(
+        SOURCE_PAGE,
+        allowed_hosts=("catalog.example.test",),
+        allowed_content_types=("text/html",),
+        max_bytes=1024,
+        resolver=lambda _host, _port: ("8.8.8.8",),
+        transport=transport,
+    )
+
+    assert result.data == body
+    assert result.receipt.response_sha256 == hashlib.sha256(body).hexdigest()
+    assert transport.calls[0]["pinned_ip"] == "8.8.8.8"
+    assert transport.calls[0]["server_hostname"] == "catalog.example.test"
 
 
 def test_receipt_downloader_rejects_any_non_global_answer_and_peer_change(tmp_path: Path) -> None:

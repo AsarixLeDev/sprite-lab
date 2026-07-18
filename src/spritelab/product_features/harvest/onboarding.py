@@ -55,6 +55,7 @@ from spritelab.product_features.harvest.evidence_fetch import (
     RobotsSnapshot,
     canonical_url_string,
     fetch_evidence_page,
+    fetch_opengameart_prefill_page,
     fetch_robots_snapshot,
     read_snapshot_bytes,
     rebuild_robots_snapshot,
@@ -330,6 +331,49 @@ class CatalogProbeService:
         self._heartbeat_stops: dict[str, threading.Event] = {}
         self._heartbeat_failures: dict[str, threading.Event] = {}
         self._instance_id = uuid.uuid4().hex
+
+    def source_prefill(
+        self,
+        source_page: str,
+        *,
+        preset_id: str,
+        authorize_network: bool,
+    ) -> Any:
+        """Build URL-only defaults, enriching OpenGameArt after explicit authorization."""
+
+        try:
+            prefill = build_source_prefill(source_page, preset_id=preset_id)
+        except ValueError as exc:
+            raise CatalogProbeError(
+                "invalid_harvest_source_prefill",
+                "The source page or selected preset is not valid for smart prefill.",
+                status_code=422,
+            ) from exc
+        if prefill.preset_id != "opengameart":
+            return prefill
+        if authorize_network is not True:
+            raise CatalogProbeError(
+                "source_prefill_network_authorization_required",
+                "OpenGameArt exact-field prefill requires explicit bounded network authorization.",
+                status_code=422,
+            )
+        try:
+            source_bytes = fetch_opengameart_prefill_page(
+                prefill.source_page,
+                resolver=self._resolver,
+                transport=self._transport,
+            )
+            return build_source_prefill(
+                prefill.source_page,
+                preset_id="opengameart",
+                retained_source_bytes=source_bytes,
+            )
+        except (DownloadSecurityError, EvidenceFetchError, OSError, ValueError) as exc:
+            raise CatalogProbeError(
+                "opengameart_source_prefill_failed",
+                "OpenGameArt exact fields could not be read through the bounded public-page policy.",
+                status_code=422,
+            ) from exc
 
     def start(
         self,

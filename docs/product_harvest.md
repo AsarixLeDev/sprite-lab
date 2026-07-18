@@ -54,15 +54,19 @@ construction, including after a live catalog reload.
 
 ## Bounded source onboarding
 
-The CLI and web app share a deterministic, network-free smart-prefill layer.
-One public HTTPS pack-page URL produces a reviewable title, stable source ID,
+The CLI and web app share a deterministic URL-only smart-prefill layer. One
+public HTTPS pack-page URL produces a reviewable title, stable source ID,
 platform defaults, and known evidence links for OpenGameArt, Kenney, itch.io,
 or a generic creator page. Kenney supplies CC0 and linked site-terms defaults;
-OpenGameArt and itch.io licenses remain deliberately blank because they vary
-by pack. Smart prefill never fetches a page, derives a direct download link,
-confirms a license, checks an authorization, creates `harvest_runs`, or weakens
-the later evidence verifier. Applying another draft clears the prior direct
-link so evidence from two packs cannot be accidentally combined. After an
+itch.io licenses remain deliberately blank because they vary by pack. In the
+web app, checking bounded network authorization lets OpenGameArt smart prefill
+read only the canonical detail page after its robots policy. The retained-page
+parser then fills the exact visible title and submitter plus an unambiguous
+supported license and single file link before any probe starts. It does not
+fetch asset bytes, infer among multiple license/file choices, check any
+authorization box, create `harvest_runs`, or weaken the later verifier.
+Applying another draft clears the prior direct link so evidence from two packs
+cannot be accidentally combined. After an
 explicitly authorized OpenGameArt probe retained a structurally valid page but
 rejected submitted field bindings, the web form offers an evidence-backed
 recovery prefill. That retry draft uses the exact visible title and submitter,

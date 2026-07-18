@@ -64,6 +64,14 @@ class ReceiptDownloadResult:
     receipt: DownloadReceipt
 
 
+@dataclass(frozen=True)
+class ReceiptBytesResult:
+    """A bounded in-memory response plus the same pinned-network receipt."""
+
+    data: bytes
+    receipt: DownloadReceipt
+
+
 class PinnedHTTPResponse(Protocol):
     status: int
     headers: Any
@@ -309,6 +317,158 @@ def download_file_with_receipt(
                     response_mime_type=content_type,
                     response_bytes=received,
                     response_sha256=actual_digest,
+                    elapsed_seconds=elapsed,
+                ),
+            )
+        finally:
+            response.close()
+
+
+def download_bytes_with_receipt(
+    url: str,
+    *,
+    allowed_hosts: Sequence[str],
+    timeout_seconds: float = 60.0,
+    max_duration_seconds: float | None = None,
+    allowed_content_types: Sequence[str] = (),
+    accepted_http_statuses: Sequence[int] = (),
+    max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+    max_redirects: int = 5,
+    require_https: bool = True,
+    allow_private_hosts: bool = False,
+    cancel_requested: CancelProbe | None = None,
+    progress: DownloadProgress | None = None,
+    resolver: HostResolver | None = None,
+    transport: PinnedHTTPTransport | None = None,
+) -> ReceiptBytesResult:
+    """Read a small response into memory through the pinned download policy.
+
+    This is intended for bounded metadata pages that should not be published to
+    the filesystem. It deliberately shares the file downloader's exact-host,
+    public-address, peer-pinning, redirect, MIME, byte, deadline, and
+    cancellation checks.
+    """
+
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    duration_limit = timeout_seconds if max_duration_seconds is None else max_duration_seconds
+    if duration_limit <= 0:
+        raise ValueError("max_duration_seconds must be positive")
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+    if type(max_redirects) is not int or max_redirects < 0:
+        raise ValueError("max_redirects must be a non-negative integer")
+    accepted_statuses = tuple(accepted_http_statuses)
+    if any(type(value) is not int or not 100 <= value <= 599 for value in accepted_statuses):
+        raise ValueError("accepted_http_statuses must contain exact HTTP status integers")
+    if len(set(accepted_statuses)) != len(accepted_statuses):
+        raise ValueError("accepted_http_statuses must be unique")
+    normalized_hosts = tuple(host.casefold().rstrip(".") for host in allowed_hosts)
+    if not normalized_hosts or len(set(normalized_hosts)) != len(normalized_hosts):
+        raise ValueError("allowed_hosts must contain unique exact hostnames")
+
+    started = time.monotonic()
+    deadline = started + duration_limit
+    current_url = url
+    redirect_chain: list[str] = []
+    resolve = resolver or _resolve_host_addresses
+    pinned_transport = transport or _StdlibPinnedTransport()
+    while True:
+        _check_download_abort(cancel_requested, deadline)
+        _parsed, host, port = _validate_pinned_url(
+            current_url,
+            normalized_hosts,
+            require_https=require_https,
+        )
+        addresses = tuple(
+            _bounded_call(
+                lambda host=host, port=port: tuple(resolve(host, port)),
+                cancel_requested=cancel_requested,
+                deadline=deadline,
+                label="hostname resolution",
+            )
+        )
+        selected_ip = _select_pinned_address(host, addresses, allow_private_hosts=allow_private_hosts)
+        _check_download_abort(cancel_requested, deadline)
+        remaining = max(0.001, min(timeout_seconds, deadline - time.monotonic()))
+        response = _bounded_call(
+            lambda current_url=current_url, selected_ip=selected_ip, host=host, port=port, remaining=remaining: (
+                pinned_transport.open(
+                    url=current_url,
+                    pinned_ip=selected_ip,
+                    server_hostname=host,
+                    port=port,
+                    timeout_seconds=remaining,
+                )
+            ),
+            cancel_requested=cancel_requested,
+            deadline=deadline,
+            label="connection open",
+            late_result_cleanup=lambda late_response: late_response.close(),
+        )
+        try:
+            _verify_peer_address(response.peer_ip, selected_ip)
+            status = int(response.status)
+            if status in {301, 302, 303, 307, 308}:
+                locations = _header_values(response.headers, "Location")
+                if len(locations) != 1 or not locations[0].strip():
+                    raise DownloadSecurityError("redirect response must contain exactly one Location header")
+                if len(redirect_chain) >= max_redirects:
+                    raise DownloadSecurityError(f"download exceeded the {max_redirects}-redirect limit")
+                redirect_chain.append(current_url)
+                current_url = urllib.parse.urljoin(current_url, locations[0].strip())
+                continue
+            if not 200 <= status < 300 and status not in accepted_statuses:
+                raise DownloadSecurityError(f"download returned HTTP status {status}")
+
+            content_types = _header_values(response.headers, "Content-Type")
+            if len(content_types) != 1:
+                raise DownloadSecurityError("download response must contain exactly one Content-Type header")
+            content_type = content_types[0].split(";", 1)[0].strip().lower()
+            allowed_types = {value.strip().lower() for value in allowed_content_types}
+            if content_type == "text/html" and content_type not in allowed_types:
+                raise DownloadSecurityError("download returned HTML instead of an allowed artifact")
+            if allowed_types and content_type not in allowed_types:
+                raise DownloadSecurityError(f"download returned unsupported content type {content_type!r}")
+            lengths = _header_values(response.headers, "Content-Length")
+            if len(lengths) > 1:
+                raise DownloadSecurityError("download response contains multiple Content-Length headers")
+            declared_length = _parse_content_length(lengths[0] if lengths else None)
+            if declared_length is not None and declared_length > max_bytes:
+                raise DownloadSecurityError(
+                    f"download declares {declared_length} bytes, exceeding the {max_bytes}-byte limit"
+                )
+
+            digest = hashlib.sha256()
+            payload = bytearray()
+            received = 0
+            for chunk in _bounded_response_chunks(
+                response,
+                cancel_requested=cancel_requested,
+                deadline=deadline,
+            ):
+                if received + len(chunk) > max_bytes:
+                    raise DownloadSecurityError(f"download exceeded the {max_bytes}-byte limit")
+                payload.extend(chunk)
+                digest.update(chunk)
+                received += len(chunk)
+                if progress is not None:
+                    progress(received, declared_length)
+            if declared_length is not None and received != declared_length:
+                raise DownloadSecurityError(
+                    f"download length mismatch: expected {declared_length} bytes, received {received}"
+                )
+            _check_download_abort(cancel_requested, deadline)
+            elapsed = time.monotonic() - started
+            return ReceiptBytesResult(
+                data=bytes(payload),
+                receipt=DownloadReceipt(
+                    final_url=current_url,
+                    redirect_chain=tuple(redirect_chain),
+                    http_status=status,
+                    response_mime_type=content_type,
+                    response_bytes=received,
+                    response_sha256=digest.hexdigest(),
                     elapsed_seconds=elapsed,
                 ),
             )
@@ -1166,8 +1326,10 @@ __all__ = [
     "DownloadSecurityError",
     "PinnedHTTPResponse",
     "PinnedHTTPTransport",
+    "ReceiptBytesResult",
     "ReceiptDownloadResult",
     "compute_sha256",
+    "download_bytes_with_receipt",
     "download_file",
     "download_file_with_receipt",
 ]

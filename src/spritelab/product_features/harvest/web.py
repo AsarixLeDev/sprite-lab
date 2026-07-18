@@ -9,7 +9,7 @@ from typing import Any
 
 from starlette.requests import Request
 
-from spritelab.harvest.source_prefill import available_source_presets, build_source_prefill
+from spritelab.harvest.source_prefill import available_source_presets
 from spritelab.product_core import ProjectContext, api_error, product_api, strict_json_dumps
 from spritelab.product_features.harvest.service import HarvestError, HarvestService
 
@@ -59,7 +59,7 @@ _PROBE_KEYS = frozenset(
     }
 )
 _PROBE_URL_KEYS = frozenset({"source_page", "license_evidence_url", "terms_evidence_url", "direct_download_url"})
-_PREFILL_KEYS = frozenset({"source_page", "preset"})
+_PREFILL_KEYS = frozenset({"source_page", "preset", "authorize_network"})
 _PREFILL_URL_KEYS = frozenset({"source_page"})
 _PROMOTE_KEYS = frozenset(
     {
@@ -151,18 +151,21 @@ def create_harvest_router(
         if rejected is not None:
             return rejected
         try:
-            prefill = build_source_prefill(
-                _required_string(payload, "source_page"),
-                preset_id=_required_string(payload, "preset"),
-            )
+            source_page = _required_string(payload, "source_page")
+            preset_id = _required_string(payload, "preset")
         except ValueError:
-            return api_error(
-                422,
-                "invalid_harvest_source_prefill",
-                "The source page or selected preset is not valid for smart prefill.",
-                next_action="Paste a public HTTPS pack page without a query or fragment, then choose Auto-detect.",
-            )
-        return {"prefill": prefill.to_dict()}
+            return _invalid_payload()
+        return _call(
+            lambda: {
+                "prefill": current_service()
+                .source_prefill(
+                    source_page,
+                    preset_id=preset_id,
+                    authorize_network=payload.get("authorize_network") is True,
+                )
+                .to_dict()
+            }
+        )
 
     @router.post("/harvest/api/jobs")
     @product_api

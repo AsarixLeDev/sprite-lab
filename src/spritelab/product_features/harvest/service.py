@@ -178,6 +178,7 @@ LiveConfigurationLoader = Callable[
     [],
     tuple[tuple[HarvestSource, ...], BackendCapabilityEvidence | None],
 ]
+LiveCapabilityEvidenceLoader = Callable[[], BackendCapabilityEvidence | None]
 
 
 class HarvestError(RuntimeError):
@@ -317,6 +318,7 @@ class HarvestService:
         backend_capabilities: CertifiedBackendCapabilities | None = None,
         backend_capability_evidence: BackendCapabilityEvidence | None = None,
         live_configuration_loader: LiveConfigurationLoader | None = None,
+        live_capability_evidence_loader: LiveCapabilityEvidenceLoader | None = None,
         limits: HarvestLimits | None = None,
         run_id_factory: Any | None = None,
         dataset_import_callback: DatasetImportCallback | None = None,
@@ -365,6 +367,7 @@ class HarvestService:
         self._backend_capabilities = backend_capabilities
         self._backend_capability_evidence = backend_capability_evidence
         self._live_configuration_loader = live_configuration_loader
+        self._live_capability_evidence_loader = live_capability_evidence_loader
         self._allow_unverified_test_backend = allow_unverified_test_backend
         self.limits = limits or HarvestLimits()
         self._run_id_factory = run_id_factory or _default_run_id
@@ -541,7 +544,22 @@ class HarvestService:
 
     def _current_probe_capability_evidence(self) -> BackendCapabilityEvidence:
         evidence = self._backend_capability_evidence
-        if self._live_configuration_loader is not None:
+        if self._live_capability_evidence_loader is not None:
+            try:
+                evidence = self._live_capability_evidence_loader()
+            except Exception as exc:
+                raise HarvestError(
+                    "catalog_probe_capability_evidence_required",
+                    "Current independent Harvest capability evidence could not be loaded.",
+                ) from exc
+            if self._live_configuration_loader is not None:
+                try:
+                    live_sources, _live_evidence = self._live_configuration_loader()
+                except Exception:
+                    pass
+                else:
+                    self._refresh_catalog_sources(live_sources)
+        elif self._live_configuration_loader is not None:
             try:
                 live_sources, evidence = self._live_configuration_loader()
             except Exception as exc:
@@ -561,6 +579,22 @@ class HarvestService:
                 "Current independent capability evidence is required before catalog onboarding.",
             )
         return evidence
+
+    def source_prefill(
+        self,
+        source_page: str,
+        *,
+        preset_id: str,
+        authorize_network: bool,
+    ) -> Any:
+        try:
+            return self._probe_service.source_prefill(
+                source_page,
+                preset_id=preset_id,
+                authorize_network=authorize_network,
+            )
+        except CatalogProbeError as exc:
+            raise HarvestError(exc.code, str(exc), status_code=exc.status_code) from exc
 
     def start_probe(self, payload: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
         with self._lock:

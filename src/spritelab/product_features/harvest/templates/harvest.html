@@ -43,7 +43,7 @@
     <p>Probe only a public HTTPS creator page, its exact license and optional automation-terms link, and the exact direct link posted there. Robots must allow the paths and retained source terms must not prohibit automated downloading. Silence is recorded only as limited “no prohibition observed” evidence, never affirmative permission. Raw bytes remain quarantined; probing never opens, decodes, extracts, discovers, or imports them.</p>
     <form id="harvest-probe-form" class="harvest-probe-form" novalidate>
       <div class="harvest-smart-prefill">
-        <div><p class="eyebrow">Smart prefill</p><h3>Paste one pack page</h3><p>Auto-detect fills safe metadata for OpenGameArt, Kenney, itch.io, and other public creator pages. It never downloads, assumes a license, or checks an authorization box.</p></div>
+        <div><p class="eyebrow">Smart prefill</p><h3>Paste one pack page</h3><p>Auto-detect fills safe metadata for OpenGameArt, Kenney, itch.io, and other public creator pages. With bounded network requests authorized, OpenGameArt reads the page and robots policy to fill its exact visible fields before probing. It never downloads asset files, assumes an ambiguous license, or checks an authorization box.</p></div>
         <div class="harvest-prefill-controls">
           <label>Source family <select id="probe-prefill-preset"><option value="auto">Auto-detect from URL</option></select></label>
           <label>Pack page URL <input id="probe-source-page" type="url" inputmode="url" placeholder="https://creator.example/pack" required></label>

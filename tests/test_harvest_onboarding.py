@@ -658,6 +658,45 @@ def test_failed_opengameart_probe_offers_exact_retained_page_prefill(tmp_path: P
     assert len(transport.calls) == 4
 
 
+def test_opengameart_exact_prefill_runs_before_probe_after_network_authorization(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    transport = FakeTransport(
+        [
+            FakeResponse(ROBOTS_ALLOW),
+            FakeResponse(_oga_source_html(), content_type="text/html"),
+        ]
+    )
+    service, _evidence_record = _service(project, transport)
+
+    with pytest.raises(HarvestError, match="explicit bounded network authorization"):
+        service.source_prefill(OGA_SOURCE_URL, preset_id="auto", authorize_network=False)
+    assert transport.calls == []
+
+    prefill = service.source_prefill(OGA_SOURCE_URL, preset_id="auto", authorize_network=True)
+
+    assert prefill.title == "Behr's 2500+ Pixel Battle Axes 32x32 Archive"
+    assert prefill.creator == "Behrtron"
+    assert prefill.license_id == "cc0-1.0"
+    assert prefill.license_evidence_url == OGA_LICENSE_URL
+    assert prefill.direct_download_url == OGA_DIRECT_URL
+    assert len(transport.calls) == 2
+    assert not (project / "harvest_runs").exists()
+
+
+def test_opengameart_exact_prefill_respects_robots_before_reading_page(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    transport = FakeTransport([FakeResponse(b"User-agent: spritelab-harvest\nDisallow: /content/\n")])
+    service, _evidence_record = _service(project, transport)
+
+    with pytest.raises(HarvestError, match="could not be read through the bounded public-page policy"):
+        service.source_prefill(OGA_SOURCE_URL, preset_id="auto", authorize_network=True)
+
+    assert len(transport.calls) == 1
+    assert not (project / "harvest_runs").exists()
+
+
 def test_probe_cancellation_records_durable_terminal_evidence(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
@@ -1834,6 +1873,75 @@ def test_repository_certificate_bootstraps_first_catalog_probe_without_passive_m
         raise AssertionError("repository-backed first-source probe did not finish")
     assert probe["status"] == "READY"
     assert load_trusted_catalog(project) == ()
+
+
+def test_repository_certificate_bootstraps_probe_when_existing_catalog_is_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    capabilities = _capabilities()
+    evidence = _evidence(capabilities)
+
+    def stale_catalog(_root: Path) -> tuple[()]:
+        raise TrustedCatalogError("stale verifier identity")
+
+    monkeypatch.setattr(harvest_plugin_module, "load_trusted_catalog", stale_catalog)
+    monkeypatch.setattr(harvest_plugin_module, "load_backend_capability_evidence", lambda _root: evidence)
+    monkeypatch.setattr(
+        harvest_service_module,
+        "hardened_backend_code_identity",
+        lambda: capabilities.code_identity_sha256,
+    )
+    monkeypatch.setattr(
+        harvest_service_module,
+        "conditioned_dataset_import_callback_binding",
+        lambda: {
+            "dataset_import_callback_id": capabilities.dataset_import_callback_id,
+            "dataset_import_callback_code_identity_sha256": capabilities.dataset_import_callback_code_identity_sha256,
+            "dataset_import_callback_runtime_identity_sha256": (
+                capabilities.dataset_import_callback_runtime_identity_sha256
+            ),
+        },
+    )
+    plugin = create_plugin(
+        load_repository_capabilities=True,
+        probe_resolver=lambda _host, _port: ("8.8.8.8",),
+        probe_transport=FakeTransport(_responses()),
+    )
+    app = create_app(ProjectContext(project), plugins=(plugin,))
+    client = TestClient(app)
+    inventory = client.get("/harvest/api/inventory").json()
+    sources = client.get("/harvest/api/sources").json()
+
+    assert sources["sources"] == []
+    assert sources["backend_capability_evidence"]["evidence_identity"] == evidence.identity
+    response = client.post(
+        "/harvest/api/probes",
+        json={
+            "source_id": "verified.pack",
+            "title": "Verified Sprite Pack",
+            "creator": "Example Artist",
+            "source_page": SOURCE_URL,
+            "license_id": "cc0-1.0",
+            "license_evidence_url": LICENSE_URL,
+            "terms_evidence_url": TERMS_URL,
+            "direct_download_url": DIRECT_URL,
+            "attribution_text": "Example Artist - Verified Sprite Pack",
+            "taxonomy_hints": ["item"],
+            "inventory_identity": inventory["inventory_identity"],
+            "backend_capability_evidence_identity": evidence.identity,
+            "idempotency_key": "repository-stale-catalog-probe-0001",
+            "explicit_action": True,
+            "authorize_network": True,
+            "authorize_hash_probe": True,
+            "authorize_zero_cost": True,
+            "authorize_permissive_license": True,
+        },
+        headers={"X-CSRF-Token": app.state.spritelab_csrf_token},
+    )
+    assert response.status_code == 202
 
 
 @pytest.mark.parametrize("reason", ["invalid", "stale", "mismatched"])

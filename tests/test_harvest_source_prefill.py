@@ -38,6 +38,34 @@ def _oga_source_html(*, extra_license_link: str = "", extra_file_link: str = "")
     ).encode()
 
 
+class _PrefillResponse:
+    def __init__(self, body: bytes, *, content_type: str = "text/plain") -> None:
+        self.status = 200
+        self.headers = {"Content-Type": content_type, "Content-Length": str(len(body))}
+        self.peer_ip = "8.8.8.8"
+        self._body = body
+        self._offset = 0
+
+    def read(self, size: int = -1) -> bytes:
+        end = len(self._body) if size < 0 else min(self._offset + size, len(self._body))
+        chunk = self._body[self._offset : end]
+        self._offset = end
+        return chunk
+
+    def close(self) -> None:
+        pass
+
+
+class _PrefillTransport:
+    def __init__(self, responses: list[_PrefillResponse]) -> None:
+        self.responses = responses
+        self.calls: list[dict[str, object]] = []
+
+    def open(self, **kwargs: object) -> _PrefillResponse:
+        self.calls.append(kwargs)
+        return self.responses.pop(0)
+
+
 def test_known_source_profiles_are_useful_without_assuming_pack_specific_licenses() -> None:
     labels = {value["label"] for value in available_source_presets()}
     assert {"OpenGameArt", "Kenney", "itch.io"} <= labels
@@ -202,6 +230,51 @@ def test_web_smart_prefill_is_csrf_protected_network_free_and_pathless(tmp_path:
 
     javascript = client.get("/harvest/static/harvest.js").text
     assert 'request("/harvest/api/source-prefill"' in javascript
+    assert 'authorize_network: $("#probe-network").checked' in javascript
     assert 'direct_download_url: "#probe-direct-url"' in javascript
     assert "Use detected OpenGameArt fields" in javascript
     assert ".innerHTML" not in javascript
+
+
+def test_web_opengameart_prefill_reads_exact_fields_before_probe(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    transport = _PrefillTransport(
+        [
+            _PrefillResponse(b"User-agent: spritelab-harvest\nAllow: /\n"),
+            _PrefillResponse(_oga_source_html(), content_type="text/html"),
+        ]
+    )
+    app = create_app(
+        ProjectContext(project),
+        plugins=(
+            create_plugin(
+                sources=(),
+                probe_resolver=lambda _host, _port: ("8.8.8.8",),
+                probe_transport=transport,
+            ),
+        ),
+    )
+    client = TestClient(app)
+    headers = {"X-CSRF-Token": app.state.spritelab_csrf_token}
+    payload = {"source_page": OGA_SOURCE_URL, "preset": "auto", "authorize_network": False}
+
+    denied = client.post("/harvest/api/source-prefill", json=payload, headers=headers)
+    assert denied.status_code == 422
+    assert denied.json()["error_code"] == "source_prefill_network_authorization_required"
+    assert transport.calls == []
+
+    response = client.post(
+        "/harvest/api/source-prefill",
+        json={**payload, "authorize_network": True},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    prefill = response.json()["prefill"]
+    assert prefill["title"] == "Behr's 2500+ Pixel Battle Axes 32x32 Archive"
+    assert prefill["creator"] == "Behrtron"
+    assert prefill["license_id"] == "cc0-1.0"
+    assert prefill["direct_download_url"] == OGA_DIRECT_URL
+    assert len(transport.calls) == 2
+    assert not (project / "harvest_runs").exists()

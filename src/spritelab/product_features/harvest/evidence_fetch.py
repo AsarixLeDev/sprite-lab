@@ -16,7 +16,9 @@ from spritelab.harvest.download import (
     DownloadSecurityError,
     HostResolver,
     PinnedHTTPTransport,
+    ReceiptBytesResult,
     ReceiptDownloadResult,
+    download_bytes_with_receipt,
     download_file_with_receipt,
 )
 from spritelab.product_features.harvest.catalog import (
@@ -153,7 +155,12 @@ class FetchSnapshot:
     relative_file: str
 
     @classmethod
-    def from_result(cls, request_url: str, relative_file: str, result: ReceiptDownloadResult) -> FetchSnapshot:
+    def from_result(
+        cls,
+        request_url: str,
+        relative_file: str,
+        result: ReceiptDownloadResult | ReceiptBytesResult,
+    ) -> FetchSnapshot:
         receipt = result.receipt
         return cls(
             request_url_sha256=url_identity(request_url),
@@ -772,6 +779,66 @@ def fetch_evidence_page(
         transport=transport,
     )
     return FetchSnapshot.from_result(request_url, destination_name, result)
+
+
+def fetch_opengameart_prefill_page(
+    source_url: str,
+    *,
+    resolver: HostResolver | None = None,
+    transport: PinnedHTTPTransport | None = None,
+    timeout_seconds: float = 30.0,
+    downloader: Any = download_bytes_with_receipt,
+) -> bytes:
+    """Fetch one robots-approved OpenGameArt detail page without filesystem writes."""
+
+    parsed = canonical_https_url(source_url, allow_query=False)
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    if (
+        host != _OPENGAMEART_HOST
+        or parsed.port is not None
+        or _OPENGAMEART_DETAIL_PATH.fullmatch(parsed.path or "/") is None
+    ):
+        raise EvidenceFetchError("OpenGameArt smart prefill requires a canonical content-detail page.")
+    origin = url_origin(parsed)
+    robots_url = f"{origin}/robots.txt"
+    try:
+        robots_result = downloader(
+            robots_url,
+            allowed_hosts=(host,),
+            timeout_seconds=timeout_seconds,
+            max_duration_seconds=timeout_seconds,
+            allowed_content_types=("text/plain", "text/html"),
+            accepted_http_statuses=tuple(sorted(ROBOTS_MISSING_STATUSES)),
+            max_bytes=MAX_ROBOTS_BYTES,
+            max_redirects=0,
+            require_https=True,
+            allow_private_hosts=False,
+            resolver=resolver,
+            transport=transport,
+        )
+        robots_fetch = FetchSnapshot.from_result(robots_url, "", robots_result)
+        robots = rebuild_robots_snapshot(origin, robots_fetch, robots_result.data)
+        robots.evaluate(source_url)
+        page_result = downloader(
+            source_url,
+            allowed_hosts=(host,),
+            timeout_seconds=timeout_seconds,
+            max_duration_seconds=timeout_seconds,
+            allowed_content_types=("text/html",),
+            accepted_http_statuses=(),
+            max_bytes=MAX_EVIDENCE_PAGE_BYTES,
+            max_redirects=0,
+            require_https=True,
+            allow_private_hosts=False,
+            resolver=resolver,
+            transport=transport,
+        )
+    except DownloadCancelled:
+        raise
+    except (DownloadSecurityError, OSError, ValueError) as exc:
+        raise EvidenceFetchError("The bounded OpenGameArt smart-prefill request failed.") from exc
+    extract_opengameart_prefill_fields(source_url, page_result.data)
+    return page_result.data
 
 
 def verify_evidence_pages(
@@ -1526,6 +1593,7 @@ __all__ = [
     "canonical_url_string",
     "extract_opengameart_prefill_fields",
     "fetch_evidence_page",
+    "fetch_opengameart_prefill_page",
     "fetch_robots_snapshot",
     "read_snapshot_bytes",
     "rebuild_robots_snapshot",

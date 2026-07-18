@@ -397,7 +397,11 @@
     once("source-prefill", event.currentTarget, async () => {
       const value = await request("/harvest/api/source-prefill", {
         method: "POST",
-        body: JSON.stringify({source_page: sourcePage.value.trim(), preset: prefillPreset.value}),
+        body: JSON.stringify({
+          source_page: sourcePage.value.trim(),
+          preset: prefillPreset.value,
+          authorize_network: $("#probe-network").checked,
+        }),
       });
       applySourcePrefill(value.prefill);
     }).catch((error) => { prefillSummary.textContent = error.message; });

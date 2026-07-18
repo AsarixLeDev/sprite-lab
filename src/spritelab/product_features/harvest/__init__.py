@@ -107,7 +107,7 @@ def create_plugin(
         active_factory = backend_factory
         active_capabilities = backend_capabilities
         active_evidence: BackendCapabilityEvidence | None = backend_capability_evidence
-        if load_repository_capabilities and validate_repository_capabilities and configuration_error is None:
+        if load_repository_capabilities and validate_repository_capabilities:
             try:
                 active_evidence = load_backend_capability_evidence(context.project_root)
                 active_capabilities = active_evidence.capabilities if active_evidence is not None else None
@@ -136,6 +136,11 @@ def create_plugin(
             backend_capability_evidence=active_evidence,
             live_configuration_loader=(
                 (lambda: repository_configuration(context)) if load_repository_capabilities else None
+            ),
+            live_capability_evidence_loader=(
+                (lambda: load_backend_capability_evidence(context.project_root))
+                if load_repository_capabilities
+                else None
             ),
             limits=limits,
             dataset_import_callback=dataset_import_callback,
