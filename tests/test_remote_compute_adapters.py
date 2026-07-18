@@ -19,6 +19,7 @@ from spritelab.remote_compute import (
     LocalComputeBackend,
     RunPodComputeBackend,
     RunPodSettings,
+    TrainingLaunchRejected,
 )
 from spritelab.remote_compute.utils import redact
 from training_launch_test_utils import compute_request
@@ -116,12 +117,48 @@ def test_local_backend_launch_uses_argument_array_and_no_shell(tmp_path: Path) -
         assert command[1:3] == ["-I", "-c"]
         assert command[4:] == list(request.command[1:])
         assert captured["shell"] is False
+        assert captured["cwd"] == request.validator_context.project_root.resolve(strict=True)
         assert set(captured["env"]) == set(request.environment) | {
             "SPRITELAB_VALIDATED_TRAINING_BOUNDARY",
             "SPRITELAB_VALIDATED_TRAINING_CODE_BUNDLE",
         }
     finally:
         backend.cleanup(prepared)
+
+
+@pytest.mark.parametrize("hostile_root_kind", ["ancestor", "outside"])
+def test_local_backend_rejects_unbound_project_root_before_filesystem_mutation(
+    tmp_path: Path,
+    hostile_root_kind: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    request = _request(project, "local")
+    backend_calls: list[tuple[object, dict[str, object]]] = []
+
+    def factory(command: object, **kwargs: object) -> object:
+        backend_calls.append((command, kwargs))
+        raise AssertionError("an unbound project root must fail before process construction")
+
+    backend = LocalComputeBackend(process_factory=factory)
+    prepared = backend.prepare(_context(project), request)
+    hostile_root = tmp_path if hostile_root_kind == "ancestor" else tmp_path / "outside"
+    hostile_root.mkdir(exist_ok=True)
+    sentinel = hostile_root / f"{hostile_root_kind}.sentinel"
+    sentinel.write_bytes(b"preserve-outside")
+    unauthorized_bundle_root = hostile_root / ".spritelab" / "training_code_bundles"
+    output_root = request.output_root
+    assert not unauthorized_bundle_root.exists()
+    assert not output_root.exists()
+
+    hostile = replace(request, local_project_root=hostile_root)
+    with pytest.raises(TrainingLaunchRejected, match="local project root"):
+        backend.launch(prepared, hostile)
+
+    assert sentinel.read_bytes() == b"preserve-outside"
+    assert not unauthorized_bundle_root.exists()
+    assert not output_root.exists()
+    assert backend_calls == []
 
 
 def test_hosted_registry_accepts_plugin_backend_and_rejects_non_cloud() -> None:

@@ -14,8 +14,10 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import sys
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +28,138 @@ _MAX_EXECUTABLE_BYTES = 2 * 1024**3
 
 class PinnedExecutableError(RuntimeError):
     """An executable target or launched process failed exact verification."""
+
+
+def pinned_git_ls_files(
+    project_root: str | Path,
+    pathspecs: Sequence[str],
+    *,
+    timeout_seconds: float,
+    operation_check: Callable[[], None] | None = None,
+) -> bytes:
+    """Run ``git ls-files`` through one fixed, held system executable."""
+
+    root = Path(project_root).resolve(strict=True)
+    if not root.is_dir():
+        raise PinnedExecutableError("The Git inventory root is unavailable.")
+    normalized = tuple(str(value) for value in pathspecs)
+    if not normalized or any(not value or "\x00" in value for value in normalized):
+        raise PinnedExecutableError("The Git inventory pathspec is invalid.")
+    if timeout_seconds <= 0:
+        raise PinnedExecutableError("The Git inventory timeout is invalid.")
+    if operation_check is not None:
+        operation_check()
+    executable = _resolve_system_git(root)
+    identity = read_executable_identity(executable)
+    process: subprocess.Popen[bytes] | None = None
+    if operation_check is not None:
+        operation_check()
+    with pin_executable(
+        identity.resolved_path,
+        expected_sha256=identity.executable_sha256,
+        expected_size=identity.byte_count,
+        expected_metadata_sha256=identity.metadata_sha256,
+    ) as pinned:
+        options: dict[str, Any] = {
+            "cwd": root,
+            "env": _minimal_git_environment(),
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            options["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        else:
+            options["pass_fds"] = pinned.pass_fds
+            options["start_new_session"] = True
+        try:
+            process = subprocess.Popen(
+                [pinned.launch_path, "ls-files", "-z", "--cached", "--", *normalized],
+                **options,
+            )
+            deadline = time.monotonic() + float(timeout_seconds)
+            while True:
+                if operation_check is not None:
+                    operation_check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+                try:
+                    stdout, _stderr = process.communicate(timeout=min(0.05, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BaseException:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+            raise
+    if process is None or process.returncode != 0:
+        raise PinnedExecutableError("The fixed Git inventory process failed.")
+    return stdout
+
+
+def _resolve_system_git(project_root: Path) -> Path:
+    for candidate in _system_git_candidates():
+        try:
+            resolved = candidate.resolve(strict=True)
+            if not resolved.is_file():
+                continue
+            try:
+                resolved.relative_to(project_root)
+            except ValueError:
+                pass
+            else:
+                continue
+            read_executable_identity(resolved)
+            return resolved
+        except (OSError, PinnedExecutableError, RuntimeError):
+            continue
+    raise PinnedExecutableError("A fixed system Git executable is unavailable.")
+
+
+def _system_git_candidates() -> tuple[Path, ...]:
+    if os.name == "nt":
+        roots = {
+            Path(value)
+            for value in (
+                os.environ.get("ProgramW6432"),
+                os.environ.get("ProgramFiles"),
+                r"C:\Program Files",
+            )
+            if value
+        }
+        return tuple(
+            path
+            for root in sorted(roots, key=lambda value: str(value).casefold())
+            for path in (
+                root / "Git/cmd/git.exe",
+                root / "Git/bin/git.exe",
+            )
+        )
+    if sys.platform.startswith("linux"):
+        return (Path("/usr/bin/git"), Path("/usr/local/bin/git"))
+    if sys.platform == "darwin":
+        return (Path("/usr/bin/git"),)
+    return ()
+
+
+def _minimal_git_environment() -> dict[str, str]:
+    environment = {
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+    environment["GIT_CONFIG_GLOBAL"] = "NUL" if os.name == "nt" else "/dev/null"
+    if os.name == "nt":
+        for key in ("COMSPEC", "SystemRoot", "WINDIR"):
+            value = os.environ.get(key)
+            if value:
+                environment[key] = value
+    return environment
 
 
 @dataclass(frozen=True)
@@ -87,7 +221,7 @@ def pin_executable(
         if sys.platform.startswith("linux"):
             launch_path = f"/proc/self/fd/{descriptor}"
             pass_fds = (descriptor,)
-        elif os.name == "nt":
+        elif os.name == "nt" or sys.platform == "darwin":
             launch_path = str(resolved)
             pass_fds = ()
         else:
@@ -328,7 +462,7 @@ def _terminate_process(process: Any) -> None:
 def _open_pinned_file(path: Path) -> int:
     if os.name == "nt":
         return _open_windows_pinned_file(path)
-    if sys.platform.startswith("linux"):
+    if sys.platform.startswith("linux") or sys.platform == "darwin":
         flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
         return os.open(path, flags)
     raise PinnedExecutableError("Pinned executable launch is unsupported on this platform.")
@@ -474,6 +608,7 @@ __all__ = [
     "close_windows_handle",
     "linux_parent_death_signal",
     "pin_executable",
+    "pinned_git_ls_files",
     "read_executable_identity",
     "verify_process_image",
 ]

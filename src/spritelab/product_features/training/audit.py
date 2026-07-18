@@ -49,6 +49,7 @@ from spritelab.training.smoke_bundle import (
     run_bundle_directory,
     verify_complete_bundle,
 )
+from spritelab.utils.pinned_executable import PinnedExecutableError, pinned_git_ls_files
 from spritelab.utils.safe_fs import (
     AnchoredDirectory,
     OwnedFileIdentity,
@@ -897,26 +898,19 @@ def training_audit_test_harness_inventory(project_root: str | Path) -> dict[str,
             "audit_test_bootstrap", "The fixed Python and pytest bootstrap namespace is unsafe."
         ) from exc
     try:
-        process = subprocess.Popen(
-            ["git", "ls-files", "-z", "--cached", "--", "tests", "pyproject.toml"],
-            cwd=root,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        stdout = pinned_git_ls_files(
+            root,
+            ("tests", "pyproject.toml"),
+            timeout_seconds=15.0,
         )
-        stdout, _stderr = process.communicate(timeout=15)
     except subprocess.TimeoutExpired as exc:
-        process.kill()
-        process.communicate()
         raise TrainingAuditExecutionError(
             "audit_test_inventory", "The tracked test-harness inventory timed out."
         ) from exc
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, PinnedExecutableError, subprocess.SubprocessError) as exc:
         raise TrainingAuditExecutionError(
             "audit_test_inventory", "The tracked test-harness inventory is unavailable."
         ) from exc
-    if process.returncode != 0:
-        raise TrainingAuditExecutionError("audit_test_inventory", "The tracked test-harness inventory is unavailable.")
     tracked_relatives = {os.fsdecode(raw).replace("\\", "/") for raw in stdout.split(b"\0") if raw}
     if not mandatory.issubset(tracked_relatives):
         raise TrainingAuditExecutionError("audit_test_inventory", "Mandatory pytest harness files are not tracked.")

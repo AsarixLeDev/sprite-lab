@@ -33,6 +33,7 @@ from spritelab.remote_compute.contracts import (
     StaleRemoteIdentityError,
     verify_compute_job_request,
     verify_launch_authorization_capability,
+    verify_local_project_root_binding,
 )
 from spritelab.remote_compute.utils import file_sha256, stable_hash, validate_identifier
 
@@ -388,7 +389,8 @@ class LocalComputeBackend:
             event_name = EVENT_FILENAME
         from spritelab.training.launch import TrainingFilesystemCapability
 
-        capability = TrainingFilesystemCapability(validated.campaign, request.local_project_root)
+        validated_project_root = verify_local_project_root_binding(request)
+        capability = TrainingFilesystemCapability(validated.campaign, validated_project_root)
         capability.__enter__()
         try:
             verified = verify_compute_job_request(
@@ -401,7 +403,7 @@ class LocalComputeBackend:
                 environment = dict(verified.environment)
                 environment.update(boundary_environment)
                 process_options = {
-                    "cwd": request.local_project_root,
+                    "cwd": validated_project_root,
                     "env": environment,
                     "stdin": subprocess.DEVNULL,
                     "stdout": subprocess.DEVNULL,

@@ -128,6 +128,10 @@ class _SL_TML(ctypes.Structure):
     _fields_=[("Label",_SL_SAA)]
 class _SL_TMP(ctypes.Structure):
     _fields_=[("Policy",ctypes.c_uint32)]
+class _SL_LUID(ctypes.Structure):
+    _fields_=[("LowPart",ctypes.c_uint32),("HighPart",ctypes.c_int32)]
+class _SL_LAA(ctypes.Structure):
+    _fields_=[("Luid",_SL_LUID),("Attributes",ctypes.c_uint32)]
 class _SL_IO(ctypes.Structure):
     _fields_=[(name,ctypes.c_ulonglong) for name in ("a","b","c","d","e","f")]
 class _SL_BL(ctypes.Structure):
@@ -151,6 +155,8 @@ _sl_advapi.SetTokenInformation.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_v
 _sl_advapi.SetTokenInformation.restype=ctypes.c_int
 _sl_advapi.GetTokenInformation.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_void_p,ctypes.c_uint32,ctypes.POINTER(ctypes.c_uint32)]
 _sl_advapi.GetTokenInformation.restype=ctypes.c_int
+_sl_advapi.LookupPrivilegeValueW.argtypes=[ctypes.c_wchar_p,ctypes.c_wchar_p,ctypes.POINTER(_SL_LUID)]
+_sl_advapi.LookupPrivilegeValueW.restype=ctypes.c_int
 _sl_advapi.IsTokenRestricted.argtypes=[ctypes.c_void_p]
 _sl_advapi.IsTokenRestricted.restype=ctypes.c_int
 _sl_advapi.ConvertStringSidToSidW.argtypes=[ctypes.c_wchar_p,ctypes.POINTER(ctypes.c_void_p)]
@@ -209,12 +215,47 @@ def _sl_restricting_sid_bytes(token):
         )
     )
     return restricted,values
+def _sl_privileges(token):
+    buffer=_sl_token_info(token,3)
+    if len(buffer)<ctypes.sizeof(ctypes.c_uint32):
+        raise RuntimeError("bootstrap privilege evidence is malformed")
+    count=int(ctypes.c_uint32.from_buffer(buffer).value)
+    if count>4096:
+        raise RuntimeError("bootstrap privilege evidence is excessive")
+    offset=ctypes.sizeof(ctypes.c_uint32)
+    required=offset+ctypes.sizeof(_SL_LAA)*count
+    if len(buffer)<required:
+        raise RuntimeError("bootstrap privilege evidence is truncated")
+    values=(
+        ctypes.cast(
+            ctypes.addressof(buffer)+offset,
+            ctypes.POINTER(_SL_LAA*count),
+        ).contents
+        if count
+        else ()
+    )
+    return tuple(
+        sorted((int(value.Luid.LowPart),int(value.Luid.HighPart),int(value.Attributes)) for value in values)
+    )
+def _sl_exact_traverse_privilege(token):
+    expected=_SL_LUID()
+    if not _sl_advapi.LookupPrivilegeValueW(None,"SeChangeNotifyPrivilege",ctypes.byref(expected)):
+        raise RuntimeError("bootstrap traverse-privilege identity is unavailable")
+    values=_sl_privileges(token)
+    return (
+        len(values)==1
+        and values[0][:2]==(int(expected.LowPart),int(expected.HighPart))
+        and bool(values[0][2]&0x2)
+        and not values[0][2]&~0x3
+    )
 
 _sl_query_handle=_sl_open_token(0x0008)
 _sl_startup=_sl_query(_sl_query_handle)
 if _sl_startup!=(4096,True):
     raise RuntimeError("bootstrap did not start at exact Low integrity")
 _sl_startup_restricted,_sl_startup_sid_bytes=_sl_restricting_sid_bytes(_sl_query_handle)
+if not _sl_exact_traverse_privilege(_sl_query_handle):
+    raise RuntimeError("bootstrap startup token lacks its exact traverse-only privilege")
 _sl_adjust=_sl_open_token(0x0080|0x0008)
 _sl_untrusted=ctypes.c_void_p()
 try:
@@ -231,6 +272,8 @@ finally:
 _sl_lowered=_sl_query(_sl_query_handle)
 if _sl_lowered!=(0,True):
     raise RuntimeError("bootstrap primary-token evidence is not exact Untrusted")
+if not _sl_exact_traverse_privilege(_sl_query_handle):
+    raise RuntimeError("bootstrap Untrusted token changed its traverse-only privilege")
 
 import hashlib,json,os,_thread
 _sl_bound_project_root=os.environ.pop("SPRITELAB_CONFINEMENT_PROJECT_ROOT",None)
@@ -494,6 +537,18 @@ class _TokenMandatoryPolicy(ctypes.Structure):
 
 class _TokenGroups(ctypes.Structure):
     _fields_ = [("GroupCount", ctypes.c_uint32), ("Groups", _SidAndAttributes * 1)]
+
+
+class _Luid(ctypes.Structure):
+    _fields_ = [("LowPart", ctypes.c_uint32), ("HighPart", ctypes.c_int32)]
+
+
+class _LuidAndAttributes(ctypes.Structure):
+    _fields_ = [("Luid", _Luid), ("Attributes", ctypes.c_uint32)]
+
+
+class _TokenPrivileges(ctypes.Structure):
+    _fields_ = [("PrivilegeCount", ctypes.c_uint32), ("Privileges", _LuidAndAttributes * 1)]
 
 
 class _AclSizeInformation(ctypes.Structure):
@@ -1167,6 +1222,7 @@ def create_windows_bootstrap_untrusted_process(
             integrity_rid != _LOW_INTEGRITY_RID
             or not no_write_up
             or restricted != bool(restricted or restricted_sid_hashes)
+            or not _windows_token_has_only_enabled_traverse_privilege(token)
         ):
             raise WriteConfinementError("The bootstrap startup token failed exact Low-integrity verification.")
         child_environment["SPRITELAB_CONFINEMENT_RESTRICTED_TOKEN"] = "1" if restricted else "0"
@@ -1303,6 +1359,7 @@ def windows_current_process_confinement_evidence(
     if identity.device != expected_device or identity.inode != expected_inode:
         raise WriteConfinementError("The write-confinement root identity changed before child verification.")
     restricted, integrity_rid, mandatory_no_write_up, restricted_sid_hashes = _windows_token_confinement(None)
+    privileges = _windows_token_privileges(None)
     workspace_rid, workspace_no_write_up = _windows_path_integrity_label(absolute)
     bootstrap = getattr(sys, "_spritelab_windows_untrusted_evidence", None)
     expected_bootstrap = {
@@ -1328,6 +1385,7 @@ def windows_current_process_confinement_evidence(
         or not workspace_no_write_up
         or not isinstance(bootstrap, Mapping)
         or dict(bootstrap) != expected_bootstrap
+        or not _is_only_enabled_traverse_privilege(privileges)
     ):
         raise WriteConfinementError("The Windows worker lacks its exact bootstrap-to-Untrusted boundary.")
     return WriteConfinementEvidence(
@@ -1764,8 +1822,9 @@ def _create_windows_low_startup_token() -> int:
     advapi32 = _windows_advapi32()
     kernel32 = _windows_kernel32()
     current_token = ctypes.c_void_p()
-    desired_access = 0x0001 | 0x0002 | 0x0008 | 0x0080 | 0x0100
-    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), desired_access, ctypes.byref(current_token)):
+    caller_access = 0x0001 | 0x0002 | 0x0008 | 0x0080 | 0x0100
+    startup_access = caller_access | 0x0020  # TOKEN_ADJUST_PRIVILEGES
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), caller_access, ctypes.byref(current_token)):
         raise WriteConfinementUnavailable("Windows could not open the caller token for restriction.")
     low_sid = ctypes.c_void_p()
     startup_token = ctypes.c_void_p()
@@ -1785,7 +1844,7 @@ def _create_windows_low_startup_token() -> int:
             # again inside the child before any worker source executes.
             if not advapi32.DuplicateTokenEx(
                 current_token,
-                desired_access,
+                startup_access,
                 None,
                 2,
                 1,
@@ -1817,6 +1876,7 @@ def _create_windows_low_startup_token() -> int:
             ):
                 code = ctypes.get_last_error()
                 raise WriteConfinementUnavailable(f"Windows could not create the Low startup token (error {code}).")
+        _remove_windows_token_privileges(startup_token)
         low_sid = _windows_string_sid("S-1-16-4096")
         label = _TokenMandatoryLabel(_SidAndAttributes(low_sid, 0x20))
         label_size = ctypes.sizeof(label) + int(advapi32.GetLengthSid(low_sid))
@@ -1842,6 +1902,7 @@ def _create_windows_low_startup_token() -> int:
             or not final_no_write_up
             or final_sids != inherited_restricted_sids
             or (inherited_restricted and not final_restricted)
+            or not _windows_token_has_only_enabled_traverse_privilege(startup_token)
         ):
             raise WriteConfinementError("Windows changed the startup token restriction boundary.")
         result = int(startup_token.value)
@@ -1853,6 +1914,66 @@ def _create_windows_low_startup_token() -> int:
         if low_sid:
             kernel32.LocalFree(low_sid)
         kernel32.CloseHandle(current_token)
+
+
+def _remove_windows_token_privileges(token: int | ctypes.c_void_p) -> None:
+    """Remove every startup-token privilege except enabled path traversal."""
+
+    privileges = _windows_token_privileges(token)
+    expected_luid = _windows_privilege_luid("SeChangeNotifyPrivilege")
+    removable = tuple(value for value in privileges if value[:2] != expected_luid)
+    if not removable:
+        if not _is_only_enabled_traverse_privilege(privileges, expected_luid=expected_luid):
+            raise WriteConfinementError("Windows startup token lacks its exact traverse-only privilege.")
+        return
+    count = len(removable)
+    buffer_size = _TokenPrivileges.Privileges.offset + ctypes.sizeof(_LuidAndAttributes) * count
+    buffer = ctypes.create_string_buffer(buffer_size)
+    ctypes.c_uint32.from_buffer(buffer).value = count
+    values_address = ctypes.addressof(buffer) + _TokenPrivileges.Privileges.offset
+    values = ctypes.cast(values_address, ctypes.POINTER(_LuidAndAttributes * count)).contents
+    for target, (low_part, high_part, _attributes) in zip(values, removable, strict=True):
+        target.Luid.LowPart = low_part
+        target.Luid.HighPart = high_part
+        target.Attributes = 0x00000004  # SE_PRIVILEGE_REMOVED
+    ctypes.set_last_error(0)
+    if not _windows_advapi32().AdjustTokenPrivileges(token, False, buffer, 0, None, None):
+        code = ctypes.get_last_error()
+        raise WriteConfinementUnavailable(f"Windows could not remove startup-token privileges (error {code}).")
+    code = ctypes.get_last_error()
+    if code:
+        raise WriteConfinementUnavailable(f"Windows did not remove every startup-token privilege (error {code}).")
+    retained = _windows_token_privileges(token)
+    if any(value[:2] != expected_luid for value in retained):
+        raise WriteConfinementError("Windows startup token retained removable privileges.")
+    if not _is_only_enabled_traverse_privilege(retained, expected_luid=expected_luid):
+        raise WriteConfinementError("Windows startup token changed its exact traverse-only privilege.")
+
+
+def _windows_token_has_only_enabled_traverse_privilege(token: int | ctypes.c_void_p | None) -> bool:
+    return _is_only_enabled_traverse_privilege(_windows_token_privileges(token))
+
+
+def _is_only_enabled_traverse_privilege(
+    privileges: tuple[tuple[int, int, int], ...],
+    *,
+    expected_luid: tuple[int, int] | None = None,
+) -> bool:
+    expected = _windows_privilege_luid("SeChangeNotifyPrivilege") if expected_luid is None else expected_luid
+    return (
+        len(privileges) == 1
+        and privileges[0][:2] == expected
+        and bool(privileges[0][2] & 0x00000002)
+        and not privileges[0][2] & ~0x00000003
+    )
+
+
+def _windows_privilege_luid(name: str) -> tuple[int, int]:
+    luid = _Luid()
+    if not _windows_advapi32().LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+        code = ctypes.get_last_error()
+        raise WriteConfinementUnavailable(f"Windows could not resolve a required privilege identity (error {code}).")
+    return int(luid.LowPart), int(luid.HighPart)
 
 
 def _windows_token_confinement(token: int | ctypes.c_void_p | None) -> tuple[bool, int, bool, tuple[str, ...]]:
@@ -1894,6 +2015,42 @@ def _windows_token_confinement(token: int | ctypes.c_void_p | None) -> tuple[boo
             bool(int(policy.Policy) & _TOKEN_MANDATORY_POLICY_NO_WRITE_UP),
             hashes,
         )
+    finally:
+        if opened:
+            kernel32.CloseHandle(opened)
+
+
+def _windows_token_privileges(token: int | ctypes.c_void_p | None) -> tuple[tuple[int, int, int], ...]:
+    advapi32 = _windows_advapi32()
+    kernel32 = _windows_kernel32()
+    opened = ctypes.c_void_p()
+    handle: int | ctypes.c_void_p
+    if token is None:
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(opened)):
+            raise WriteConfinementError("Windows could not query current process-token privileges.")
+        handle = opened
+    else:
+        handle = token
+    try:
+        buffer = _windows_token_information(handle, 3)  # TokenPrivileges
+        if len(buffer) < ctypes.sizeof(ctypes.c_uint32):
+            raise WriteConfinementError("Windows returned malformed privilege evidence.")
+        count = int(ctypes.c_uint32.from_buffer(buffer).value)
+        if count > 4096:
+            raise WriteConfinementError("Windows returned excessive privilege evidence.")
+        required = _TokenPrivileges.Privileges.offset + ctypes.sizeof(_LuidAndAttributes) * count
+        if len(buffer) < required:
+            raise WriteConfinementError("Windows returned truncated privilege evidence.")
+        if not count:
+            return ()
+        values_address = ctypes.addressof(buffer) + _TokenPrivileges.Privileges.offset
+        values = ctypes.cast(values_address, ctypes.POINTER(_LuidAndAttributes * count)).contents
+        privileges = tuple(
+            sorted((int(value.Luid.LowPart), int(value.Luid.HighPart), int(value.Attributes)) for value in values)
+        )
+        if len({(low_part, high_part) for low_part, high_part, _attributes in privileges}) != count:
+            raise WriteConfinementError("Windows returned duplicate privilege evidence.")
+        return privileges
     finally:
         if opened:
             kernel32.CloseHandle(opened)
@@ -2236,6 +2393,17 @@ def _windows_advapi32() -> Any:
         ctypes.POINTER(ctypes.c_void_p),
     ]
     advapi32.DuplicateTokenEx.restype = ctypes.c_int
+    advapi32.AdjustTokenPrivileges.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    advapi32.AdjustTokenPrivileges.restype = ctypes.c_int
+    advapi32.LookupPrivilegeValueW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.POINTER(_Luid)]
+    advapi32.LookupPrivilegeValueW.restype = ctypes.c_int
     advapi32.SetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     advapi32.SetTokenInformation.restype = ctypes.c_int
     advapi32.IsTokenRestricted.argtypes = [ctypes.c_void_p]

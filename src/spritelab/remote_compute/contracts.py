@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -141,6 +142,42 @@ def verify_launch_authorization_capability(request: ComputeJobRequest) -> None:
         raise TrainingLaunchRejected("retained launch-authorization evidence changed: " + str(exc)) from exc
 
 
+def verify_local_project_root_binding(request: ComputeJobRequest) -> Path:
+    """Return the exact validated project root without permitting a broader authority root."""
+
+    context = request.validator_context
+    if context is None:
+        raise TrainingLaunchRejected("validator context is required to bind the local project root")
+
+    def normalized_and_resolved(value: str | os.PathLike[str], *, label: str) -> tuple[Path, Path]:
+        try:
+            raw = os.fspath(value)
+        except TypeError as exc:
+            raise TrainingLaunchRejected(f"{label} is malformed") from exc
+        if not isinstance(raw, str) or not raw or not raw.strip() or raw != raw.strip() or "\x00" in raw:
+            raise TrainingLaunchRejected(f"{label} is malformed")
+        normalized = Path(os.path.abspath(raw))
+        try:
+            resolved = normalized.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise TrainingLaunchRejected(f"{label} is unavailable") from exc
+        if not resolved.is_dir():
+            raise TrainingLaunchRejected(f"{label} is not a directory")
+        return normalized, resolved
+
+    requested_normalized, requested_resolved = normalized_and_resolved(
+        request.local_project_root,
+        label="compute request local project root",
+    )
+    validated_normalized, validated_resolved = normalized_and_resolved(
+        context.project_root,
+        label="validated training project root",
+    )
+    if requested_normalized != validated_normalized or requested_resolved != validated_resolved:
+        raise TrainingLaunchRejected("compute request local project root does not exactly match its validated root")
+    return validated_normalized
+
+
 def verify_compute_job_request(
     request: ComputeJobRequest,
     *,
@@ -151,6 +188,7 @@ def verify_compute_job_request(
 
     if request.launch_receipt is None or request.validator_context is None:
         raise TrainingLaunchRejected("validated training launch receipt and validator context are required")
+    verify_local_project_root_binding(request)
     verify_launch_authorization_capability(request)
     receipt = request.launch_receipt
     protected = {

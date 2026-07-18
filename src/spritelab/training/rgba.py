@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import numpy as np
 
@@ -67,7 +68,7 @@ def npz_row_to_rgba(
 def save_rgba_contact_sheet(
     *,
     outputs: dict[str, Any],
-    path: str | Path,
+    path: str | Path | BinaryIO,
     batch: dict[str, Any] | None = None,
     max_items: int = 16,
     scale: int = 6,
@@ -116,9 +117,12 @@ def save_rgba_contact_sheet(
             left = padding + col * (cell + padding)
             sheet.paste(image.resize((cell, cell), Image.NEAREST), (left, top))
 
-    out_path = Path(path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    sheet.save(out_path)
+    if isinstance(path, BytesIO) or hasattr(path, "write"):
+        sheet.save(path, format="PNG")
+    else:
+        out_path = Path(path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        sheet.save(out_path)
 
 
 def _normalize_alpha(alpha: np.ndarray) -> np.ndarray:

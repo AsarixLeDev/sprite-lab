@@ -13,7 +13,11 @@ import pytest
 
 from spritelab.product_core import ProductStatus, ProjectContext
 from spritelab.product_features.training import cloud_challenge as cloud_challenge_module
-from spritelab.product_features.training.action_lock import TrainingActionLock
+from spritelab.product_features.training.action_lock import (
+    ACTION_LOCK_FILENAME,
+    TrainingActionLock,
+    TrainingActionLockError,
+)
 from spritelab.product_features.training.cloud_challenge import CloudChallengeError, CloudChallengeStore
 from spritelab.product_features.training.dashboard import DashboardState
 from spritelab.product_features.training.models import ResolvedTrainingPlan, TrainingProfile
@@ -456,6 +460,48 @@ def test_start_while_activation_lock_is_held_reaches_zero_backend_calls(tmp_path
     assert result.status == ProductStatus.BLOCKED
     assert result.blockers[0].code == "training_action_conflict"
     assert backend.calls == []
+
+
+def test_action_lock_rejects_outside_zero_byte_hardlink_without_mutation(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    outside_sentinel = tmp_path / "outside-zero-byte-sentinel.bin"
+    outside_sentinel.write_bytes(b"")
+    try:
+        os.link(outside_sentinel, project_root / ACTION_LOCK_FILENAME)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"hard links are unavailable for this filesystem: {exc}")
+
+    with pytest.raises(TrainingActionLockError):
+        with TrainingActionLock(project_root, timeout_seconds=0.0):
+            pass
+
+    assert outside_sentinel.read_bytes() == b""
+    assert outside_sentinel.stat().st_size == 0
+
+
+def test_action_lock_keeps_one_authority_across_rename_recreate_attack(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    lock_path = project_root / ACTION_LOCK_FILENAME
+    displaced = project_root / ".displaced-action-lock"
+
+    if os.name == "nt":
+        with TrainingActionLock(project_root, timeout_seconds=0.0):
+            with pytest.raises(OSError):
+                os.replace(lock_path, displaced)
+            with pytest.raises(TrainingActionLockError):
+                with TrainingActionLock(project_root, timeout_seconds=0.0):
+                    pass
+        return
+
+    with pytest.raises(TrainingActionLockError, match="changed"):
+        with TrainingActionLock(project_root, timeout_seconds=0.0):
+            os.replace(lock_path, displaced)
+            lock_path.write_bytes(b"\0")
+            with pytest.raises(TrainingActionLockError):
+                with TrainingActionLock(project_root, timeout_seconds=0.0):
+                    pass
 
 
 def test_nonrecommended_start_reaches_zero_backend_calls(tmp_path: Path) -> None:

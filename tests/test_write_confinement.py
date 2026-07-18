@@ -499,6 +499,73 @@ def test_windows_startup_token_refuses_changed_inherited_restriction_hashes(
     assert closed == [0x5678, 0x1234]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows token privileges are platform-specific")
+def test_windows_startup_token_irreversibly_removes_inherited_enabled_privileges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import spritelab.utils.write_confinement as module
+
+    queried = iter(
+        [
+            ((23, 0, 0x00000003), (29, 0, 0x00000002)),
+            ((23, 0, 0x00000003),),
+        ]
+    )
+    adjusted: list[tuple[int, int, int]] = []
+
+    class FakeAdvapi32:
+        @staticmethod
+        def AdjustTokenPrivileges(
+            token: ctypes.c_void_p,
+            disable_all: bool,
+            new_state: ctypes.Array[ctypes.c_char],
+            _buffer_length: int,
+            _previous_state: object,
+            _return_length: object,
+        ) -> int:
+            assert int(token.value) == 0x5678
+            assert disable_all is False
+            count = int(ctypes.c_uint32.from_buffer(new_state).value)
+            offset = module._TokenPrivileges.Privileges.offset
+            values = ctypes.cast(
+                ctypes.addressof(new_state) + offset,
+                ctypes.POINTER(module._LuidAndAttributes * count),
+            ).contents
+            adjusted.extend(
+                (int(value.Luid.LowPart), int(value.Luid.HighPart), int(value.Attributes)) for value in values
+            )
+            return 1
+
+    monkeypatch.setattr(module, "_windows_advapi32", lambda: FakeAdvapi32())
+    monkeypatch.setattr(module, "_windows_privilege_luid", lambda _name: (23, 0))
+    monkeypatch.setattr(module, "_windows_token_privileges", lambda _token: next(queried))
+
+    module._remove_windows_token_privileges(ctypes.c_void_p(0x5678))
+
+    assert adjusted == [(29, 0, 0x00000004)]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows token privileges are platform-specific")
+def test_windows_startup_token_fails_closed_when_privilege_removal_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import spritelab.utils.write_confinement as module
+
+    privileges = ((23, 0, 0x00000003), (29, 0, 0x00000002))
+
+    class FakeAdvapi32:
+        @staticmethod
+        def AdjustTokenPrivileges(*_args: object) -> int:
+            return 1
+
+    monkeypatch.setattr(module, "_windows_advapi32", lambda: FakeAdvapi32())
+    monkeypatch.setattr(module, "_windows_privilege_luid", lambda _name: (23, 0))
+    monkeypatch.setattr(module, "_windows_token_privileges", lambda _token: privileges)
+
+    with pytest.raises(WriteConfinementError, match="retained removable privileges"):
+        module._remove_windows_token_privileges(ctypes.c_void_p(0x5678))
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="restricted-token confinement is Windows-specific")
 def test_windows_bootstrap_untrusted_denies_medium_and_low_outside_writes(tmp_path: Path) -> None:
     import msvcrt
@@ -553,7 +620,7 @@ for name, target in (("medium", medium), ("low", low)):
         target.write_bytes(b"compromised")
     except OSError:
         denied.append(name)
-print(json.dumps({"denied": denied, "evidence": evidence.to_dict(), "held": held_payload.decode("ascii")}, sort_keys=True))
+print(json.dumps({"denied": denied, "evidence": evidence.to_dict(), "held": held_payload.decode("ascii"), "privileges": module._windows_token_privileges(None)}, sort_keys=True))
 """
     workspace_identity = directory_identity(workspace)
     executable = Path(sys.executable).resolve(strict=True)
@@ -616,6 +683,9 @@ print(json.dumps({"denied": denied, "evidence": evidence.to_dict(), "held": held
     payload = json.loads(stdout)
     assert payload["denied"] == ["medium", "low"]
     assert payload["held"] == "exact-held-source"
+    assert len(payload["privileges"]) == 1
+    assert payload["privileges"][0][2] & 0x00000002
+    assert not payload["privileges"][0][2] & ~0x00000003
     evidence = payload["evidence"]
     assert evidence["schema_version"] == "spritelab.write-confinement-evidence.v3"
     assert evidence["strategy"] == WINDOWS_PARENT_ANCHORS_STRATEGY

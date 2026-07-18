@@ -33,10 +33,12 @@ from spritelab.product_features.evaluation.playground import (
     validate_runtime_identity,
 )
 from spritelab.utils.pinned_executable import (
+    PinnedExecutableError,
     activate_windows_suspended_process,
     close_windows_handle,
     linux_parent_death_signal,
     pin_executable,
+    pinned_git_ls_files,
     read_executable_identity,
     verify_process_image,
 )
@@ -2459,47 +2461,19 @@ def _operation_checked_training_code_identity_source_paths(
             + ", ".join(path.relative_to(root).as_posix() for path in missing_files)
         )
 
-    inventory: subprocess.Popen[bytes] | None = None
     try:
-        operation_check()
-        inventory = subprocess.Popen(
-            ["git", "ls-files", "-z", "--", *relative_roots, *TRAINING_CODE_IDENTITY_MANDATORY_FILES],
-            cwd=root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        stdout = pinned_git_ls_files(
+            root,
+            (*relative_roots, *TRAINING_CODE_IDENTITY_MANDATORY_FILES),
+            timeout_seconds=10.0,
+            operation_check=operation_check,
         )
-        inventory_deadline = time.monotonic() + 10.0
-        while True:
-            operation_check()
-            remaining = inventory_deadline - time.monotonic()
-            if remaining <= 0:
-                inventory.kill()
-                inventory.communicate()
-                raise CampaignValidationError("tracked code-identity source inventory timed out")
-            try:
-                stdout, _stderr = inventory.communicate(timeout=min(0.05, remaining))
-                break
-            except subprocess.TimeoutExpired:
-                continue
     except (GenerationCancelledError, GenerationTimedOutError):
-        if inventory is not None and inventory.poll() is None:
-            inventory.kill()
-            inventory.communicate()
         raise
-    except CampaignValidationError:
-        raise
-    except (OSError, subprocess.SubprocessError) as exc:
-        if inventory is not None and inventory.poll() is None:
-            inventory.kill()
-            inventory.communicate()
+    except subprocess.TimeoutExpired as exc:
+        raise CampaignValidationError("tracked code-identity source inventory timed out") from exc
+    except (OSError, PinnedExecutableError, subprocess.SubprocessError) as exc:
         raise CampaignValidationError(f"tracked code-identity source inventory failed: {exc}") from exc
-    except BaseException:
-        if inventory is not None and inventory.poll() is None:
-            inventory.kill()
-            inventory.communicate()
-        raise
-    if inventory.returncode != 0:
-        raise CampaignValidationError("tracked code-identity source inventory failed")
     operation_check()
     tracked: set[Path] = set()
     for raw in stdout.split(b"\0"):

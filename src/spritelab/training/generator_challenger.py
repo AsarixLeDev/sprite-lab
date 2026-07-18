@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
 import math
 import os
@@ -1006,6 +1007,27 @@ class _CampaignRunWriter(AbstractContextManager["_CampaignRunWriter"]):
         finally:
             os.close(descriptor)
 
+    def write_bytes_atomic(self, name: str, content: bytes) -> str:
+        self.anchor.atomic_write_bytes(name, content)
+        if self.read_bytes(name, max_bytes=max(1024, len(content))) != content:
+            raise UnsafeFilesystemOperation(f"campaign artifact changed after atomic publication: {name}")
+        return hashlib.sha256(content).hexdigest()
+
+    def open_jsonl_append(self, name: str, *, initialize: bool) -> _CampaignJsonlWriter:
+        if initialize:
+            descriptor, identity = self._open_exclusive(name)
+        else:
+            descriptor = self.anchor.open_file_immovable(
+                name,
+                os.O_RDWR | int(getattr(os, "O_BINARY", 0)),
+            )
+            metadata = os.fstat(descriptor)
+            identity = OwnedFileIdentity.from_stat(metadata)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                os.close(descriptor)
+                raise UnsafeFilesystemOperation(f"campaign artifact is not append-safe: {name}")
+        return _CampaignJsonlWriter(self, name, descriptor, identity)
+
     def write_torch_checkpoint(self, name: str, checkpoint: Mapping[str, Any], torch_module: Any) -> str:
         descriptor, identity = self._open_exclusive(name)
         try:
@@ -1085,6 +1107,63 @@ class _CampaignRunWriter(AbstractContextManager["_CampaignRunWriter"]):
 
 def _canonical_pretty_json_bytes(value: Mapping[str, Any]) -> bytes:
     return (json.dumps(_jsonable(dict(value)), indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+class _CampaignJsonlWriter(AbstractContextManager["_CampaignJsonlWriter"]):
+    """Append JSONL through one retained single-link campaign descriptor."""
+
+    def __init__(
+        self,
+        writer: _CampaignRunWriter,
+        name: str,
+        descriptor: int,
+        identity: OwnedFileIdentity,
+    ) -> None:
+        self.writer = writer
+        self.name = name
+        self.descriptor = descriptor
+        self.identity = identity
+        self._verify()
+        size = int(os.fstat(descriptor).st_size)
+        if size:
+            os.lseek(descriptor, -1, os.SEEK_END)
+            if os.read(descriptor, 1) != b"\n":
+                self.close()
+                raise UnsafeFilesystemOperation(f"campaign JSONL artifact is truncated: {name}")
+
+    def __enter__(self) -> _CampaignJsonlWriter:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        self.close()
+
+    def write_record(self, record: Mapping[str, Any]) -> None:
+        self._verify()
+        os.lseek(self.descriptor, 0, os.SEEK_END)
+        _write_descriptor_all(
+            self.descriptor,
+            (json.dumps(_jsonable(dict(record)), sort_keys=True) + "\n").encode("utf-8"),
+        )
+        self.flush()
+
+    def flush(self) -> None:
+        self._verify()
+        os.fsync(self.descriptor)
+        self._verify()
+
+    def close(self) -> None:
+        if self.descriptor < 0:
+            return
+        try:
+            self._verify()
+        finally:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def _verify(self) -> None:
+        if self.descriptor < 0:
+            raise UnsafeFilesystemOperation(f"campaign JSONL writer is closed: {self.name}")
+        self.writer._verify_descriptor_identity(self.name, self.descriptor, self.identity)
 
 
 def _write_descriptor_all(descriptor: int, content: bytes) -> None:
@@ -1331,9 +1410,12 @@ def _run_challenger_training_impl(
         )
     logical_out_dir = Path(config.out_dir)
     out_dir = Path(config.retained_output_root) if config.retained_output_root is not None else logical_out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
     if campaign_writer is not None and campaign_contract is not None:
+        if out_dir != campaign_writer.physical_root:
+            raise UnsafeFilesystemOperation("campaign output root differs from its retained writer")
         _initialize_campaign_run(campaign_writer, campaign_contract)
+    else:
+        out_dir.mkdir(parents=True, exist_ok=True)
     conditioning_mode = validate_conditioning_mode(config.conditioning_mode)
 
     retained_inputs = (
@@ -1379,7 +1461,10 @@ def _run_challenger_training_impl(
     tokenizer = SpriteTextTokenizer.build_from_records(
         train_rows or token_rows or manifest_rows, max_length=config.caption_max_length
     )
-    tokenizer.save(out_dir / "vocab.json")
+    if campaign_writer is None:
+        tokenizer.save(out_dir / "vocab.json")
+    else:
+        campaign_writer.write_json_idempotent("vocab.json", tokenizer.to_json_dict())
     preloaded_resume = (
         _load_checkpoint(
             config.resume_from,
@@ -1398,7 +1483,13 @@ def _run_challenger_training_impl(
                 [row for row in token_rows if row.get("split") == effective_split] or train_rows or token_rows
             )
     if structured_vocab is not None:
-        save_structured_conditioning_vocab(structured_vocab, out_dir / "structured_conditioning_vocab.json")
+        if campaign_writer is None:
+            save_structured_conditioning_vocab(structured_vocab, out_dir / "structured_conditioning_vocab.json")
+        else:
+            campaign_writer.write_json_idempotent(
+                "structured_conditioning_vocab.json",
+                structured_vocab.to_json_dict(),
+            )
 
     palette_swap = PaletteSwapConfig.from_training_config(config)
     role_ramp_transplant = RoleRampTransplantConfig.from_training_config(config)
@@ -1683,7 +1774,11 @@ def _run_challenger_training_impl(
             "correlation_analysis": label_quality_correlations,
         },
     }
-    (out_dir / "config.json").write_text(json.dumps(config_json, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    config_content = _canonical_pretty_json_bytes(config_json)
+    if campaign_writer is None:
+        (out_dir / "config.json").write_bytes(config_content)
+    else:
+        campaign_writer.write_bytes_atomic("config.json", config_content)
 
     initial_train_losses = _evaluate_challenger_losses(
         model,
@@ -1700,7 +1795,7 @@ def _run_challenger_training_impl(
         timestep_boundaries=timestep_boundaries,
     )
     metrics_path = out_dir / "train_metrics.jsonl"
-    if config.resume_from is None:
+    if config.resume_from is None and campaign_writer is None:
         metrics_path.write_text("", encoding="utf-8")
     preview_batch_cpu = next(iter(eval_train_loader))
     preview_batch = move_batch_to_device(preview_batch_cpu, device)
@@ -1904,7 +1999,11 @@ def _run_challenger_training_impl(
     progress = StepProgressBar(config.max_steps, desc=f"challenger:{out_dir.name}")
     # Keep the metrics file open for the whole run instead of reopening it every
     # step; the line content and order are unchanged, so the file is identical.
-    metrics_handle = metrics_path.open("a", encoding="utf-8")
+    metrics_handle: Any = (
+        campaign_writer.open_jsonl_append("train_metrics.jsonl", initialize=config.resume_from is None)
+        if campaign_writer is not None
+        else metrics_path.open("a", encoding="utf-8")
+    )
     try:
         train_iterator = iter(train_loader)
         if isinstance(resumed_sampler_state, Mapping) and int(resumed_sampler_state["sample_cursor"]) < int(
@@ -1984,6 +2083,7 @@ def _run_challenger_training_impl(
                     conditioning_mode=conditioning_mode,
                     pad_token_id=tokenizer.pad_id,
                     steps=min(16, max(2, int(config.sample_every))),
+                    immutable_writer=campaign_writer,
                 )
             should_save_checkpoint = (
                 step in set(checkpoint_steps)
@@ -2178,6 +2278,7 @@ def _run_challenger_training_impl(
         conditioning_mode=conditioning_mode,
         pad_token_id=tokenizer.pad_id,
         steps=16,
+        immutable_writer=campaign_writer,
     )
     report = {
         "model_type": "generator_challenger",
@@ -2268,9 +2369,11 @@ def _run_challenger_training_impl(
             "correlation_analysis": label_quality_correlations,
         },
     }
-    (out_dir / "train_report.json").write_text(
-        json.dumps(_jsonable(report), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    report_content = _canonical_pretty_json_bytes(report)
+    if campaign_writer is None:
+        (out_dir / "train_report.json").write_bytes(report_content)
+    else:
+        campaign_writer.write_bytes_atomic("train_report.json", report_content)
     if campaign_writer is not None and campaign_contract is not None:
         if step == int(campaign_contract["max_optimizer_steps"]):
             _publish_campaign_completion(
@@ -3537,6 +3640,7 @@ def _write_challenger_sample_sheet(
     conditioning_mode: str,
     pad_token_id: int,
     steps: int,
+    immutable_writer: _CampaignRunWriter | None = None,
 ) -> None:
     th, _nn_mod = _require_torch()
     model.eval()
@@ -3560,7 +3664,16 @@ def _write_challenger_sample_sheet(
             cfg_scale=1.0,
             pad_token_id=pad_token_id,
         )
-    save_rgba_contact_sheet(outputs=_rgba_to_logit_outputs(rgba), batch=batch, path=path)
+    outputs = _rgba_to_logit_outputs(rgba)
+    if immutable_writer is None:
+        save_rgba_contact_sheet(outputs=outputs, batch=batch, path=path)
+    else:
+        if path.parent != immutable_writer.physical_root or path.name != Path(path.name).name:
+            raise UnsafeFilesystemOperation("campaign sample path is outside the retained output root")
+        buffer = io.BytesIO()
+        save_rgba_contact_sheet(outputs=outputs, batch=batch, path=buffer)
+        if buffer.tell():
+            immutable_writer.write_bytes_atomic(path.name, buffer.getvalue())
     model.train()
 
 
@@ -4394,6 +4507,9 @@ def _matches_caption_policy(record: dict[str, Any], caption_policy_filter: str |
 
 
 def _write_jsonl_line(handle: Any, record: dict[str, Any]) -> None:
+    if isinstance(handle, _CampaignJsonlWriter):
+        handle.write_record(record)
+        return
     handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 

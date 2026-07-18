@@ -179,6 +179,11 @@ def test_campaign_training_is_resumable_then_commits_complete_artifacts_last(tmp
         "checkpoint_step_000001.pt",
         "checkpoint_step_000002.pt",
     ]
+    assert (root / "samples_final.png").read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert all(
+        (root / name).stat().st_nlink == 1
+        for name in ("config.json", "samples_final.png", "train_metrics.jsonl", "train_report.json", "vocab.json")
+    )
     assert all((root / f"{name}.json").stat().st_nlink == 1 for name in PER_RUN_ARTIFACTS)
 
     terminal_before = {
@@ -323,3 +328,52 @@ def test_partial_direct_final_completion_marker_fails_closed(tmp_path: Path, mon
         with pytest.raises(UnsafeFilesystemOperation, match="conflicts with retained bytes"):
             writer.write_json_idempotent("run_completion_marker.json", marker)
     assert sentinel.read_bytes() == b"unchanged"
+
+
+def test_campaign_atomic_publication_replaces_post_scan_hardlink_without_touching_outside(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    root.mkdir()
+    outside = tmp_path / "outside-config.json"
+    outside.write_bytes(b"outside-preserved")
+
+    with _CampaignRunWriter(root, root) as writer:
+        try:
+            os.link(outside, root / "config.json")
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"hard links are unavailable for this filesystem: {exc}")
+        writer.write_bytes_atomic("config.json", b'{"safe":true}\n')
+
+    assert outside.read_bytes() == b"outside-preserved"
+    assert (root / "config.json").read_bytes() == b'{"safe":true}\n'
+    assert (root / "config.json").stat().st_nlink == 1
+
+
+def test_campaign_metrics_append_keeps_one_descriptor_across_rename_recreate_attack(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    root.mkdir()
+    metrics_path = root / "train_metrics.jsonl"
+    displaced = root / "displaced-metrics.jsonl"
+    outside = tmp_path / "outside-metrics.jsonl"
+    outside.write_bytes(b"outside-preserved\n")
+
+    with _CampaignRunWriter(root, root) as writer:
+        metrics = writer.open_jsonl_append("train_metrics.jsonl", initialize=True)
+        try:
+            os.replace(metrics_path, displaced)
+        except OSError:
+            metrics.write_record({"step": 1})
+            metrics.close()
+            assert metrics_path.read_text(encoding="utf-8") == '{"step": 1}\n'
+        else:
+            try:
+                os.link(outside, metrics_path)
+            except (NotImplementedError, OSError) as exc:
+                with pytest.raises(UnsafeFilesystemOperation):
+                    metrics.close()
+                pytest.skip(f"hard links are unavailable for this filesystem: {exc}")
+            with pytest.raises(UnsafeFilesystemOperation, match="identity changed"):
+                metrics.write_record({"step": 1})
+            with pytest.raises(UnsafeFilesystemOperation, match="identity changed"):
+                metrics.close()
+
+    assert outside.read_bytes() == b"outside-preserved\n"
