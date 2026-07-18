@@ -15,17 +15,26 @@
   <section class="panel"><div class="section-heading"><div><p class="eyebrow">2 · Durable build</p><h2>Candidate, counts, and logs</h2></div><span id="cv5-poll">Idle</span></div>
     <div id="cv5-jobs"></div><pre id="cv5-logs">No build selected.</pre></section>
 
-  <section class="panel"><p class="eyebrow">3 · Independent evidence</p><h2>Attach and select exact PASS reports</h2>
-    <p>Reports must come from independent audit runs and enumerate the complete candidate inventory. This workflow never creates its own PASS evidence.</p>
-    <div class="cv5-grid"><label>Label-audit JSON file<input id="cv5-label-file" type="file" accept="application/json,.json"></label><label>Dataset-validation JSON file<input id="cv5-validation-file" type="file" accept="application/json,.json"></label></div>
-    <div class="cv5-actions"><button class="button secondary" id="cv5-upload-label" type="button">Attach label audit</button><button class="button secondary" id="cv5-upload-validation" type="button">Attach dataset validation</button></div></section>
+  <section class="panel"><p class="eyebrow">3 · Independent evidence</p><h2>Run independent server audits</h2>
+    <p>Each explicit action runs the independently inventoried server auditor against the exact candidate. The browser cannot upload or author evidence; only a server-recomputed PASS report is attached.</p>
+    <div class="cv5-actions"><button class="button secondary" id="cv5-audit-label" type="button">Run label audit</button><button class="button secondary" id="cv5-audit-validation" type="button">Run dataset validation</button></div></section>
 
   <section class="panel"><p class="eyebrow">4 · One-time publication</p><h2>Publish immutable freeze</h2>
     <p>The action is bound to the exact candidate and both evidence hashes. It publishes below <code>datasets/</code>, creates the exact 3-seed 5,000-step campaign, and does not activate configuration or start training.</p>
     <label class="cv5-check"><input id="cv5-authorize" type="checkbox"> I authorize this exact one-time production freeze.</label>
     <button class="button primary" id="cv5-publish" type="button" disabled>Publish authorized freeze</button><pre id="cv5-publication">Nothing published.</pre></section>
 
-  <section class="panel"><p class="eyebrow">5 · Explicit activation</p><h2>Activate audited freeze and campaign</h2>
+  <section class="panel" id="cv5-training-audit-section"><p class="eyebrow">5 · Training infrastructure audit</p><h2>Audit the published campaign</h2>
+    <p>First complete and register the bounded CPU/CUDA smoke in Playground. This action sends only opaque server identities, runs the fixed 18-gate audit, and cannot activate configuration or start training.</p>
+    <p id="cv5-training-audit-prerequisite" class="help">Publish a freeze and register its smoke evidence to continue.</p>
+    <div id="cv5-training-audit-controls" hidden>
+      <label>Registered exploratory smoke<select id="cv5-training-smoke" aria-describedby="cv5-training-audit-prerequisite"></select></label>
+      <div class="cv5-actions"><button class="button secondary" id="cv5-training-audit" type="button" disabled>Run 18-gate training audit</button></div>
+    </div>
+    <pre id="cv5-training-audit-result">No training infrastructure audit run.</pre>
+  </section>
+
+  <section class="panel"><p class="eyebrow">6 · Explicit activation</p><h2>Activate audited freeze and campaign</h2>
     <p>This separate compare-and-swap action rechecks the exact freeze, campaign, current project configuration, and applicable training audit. It never starts training.</p>
     <div class="cv5-grid"><label>Observed configuration SHA-256<input id="cv5-config-sha" type="text" readonly aria-describedby="cv5-activation-help"></label><label>One-time activation authorization<input id="cv5-activation-auth" type="text" autocomplete="off" spellcheck="false"></label></div>
     <p id="cv5-activation-help" class="help">Refresh immediately before activation. A stale configuration hash is refused.</p>

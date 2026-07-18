@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ from spritelab.training.campaign import (
     validate_fixed_step_fairness,
 )
 from spritelab.training.cli import main as train_cli
+from spritelab.training.cli.experiment_cmds import _authoritative_lr_schedule
 
 HASHES = {
     name: f"{index:064x}"
@@ -63,11 +65,15 @@ def _spec(tmp_path: Path, *, cells: list[dict] | None = None) -> dict:
     benchmark = inputs / "benchmark.json"
     for path, payload in (
         (dataset, {"view": "synthetic"}),
-        (split, {"train": ["a"]}),
         (vocabulary, {"tokens": ["<pad>", "sprite"]}),
         (benchmark, {"prompts": ["sprite"]}),
     ):
         _write_json(path, payload)
+    split.write_text(
+        json.dumps({"split": "train", "sprite_id": "a", "npz_file": "train.npz", "npz_row": 0}) + "\n",
+        encoding="utf-8",
+    )
+    (inputs / "train.npz").write_bytes(b"synthetic retained dataset artifact")
     optimizer = {"name": "adamw", "learning_rate": 0.0002}
     schedule = {"name": "cosine", "warmup_steps": 500}
     loss = {"name": "uniform_velocity"}
@@ -137,7 +143,7 @@ def _spec(tmp_path: Path, *, cells: list[dict] | None = None) -> dict:
 
 
 def _plan(tmp_path: Path) -> dict:
-    plan = plan_campaign(_spec(tmp_path))
+    plan = plan_campaign(_spec(tmp_path), execution_root=tmp_path)
     assert plan["plan_status"] == "ready"
     assert plan["executable"] is True
     return plan
@@ -152,6 +158,26 @@ def _write_campaign_config(plan: dict, tmp_path: Path) -> Path:
     path = tmp_path / "campaign-config.json"
     _write_json(path, plan)
     return path
+
+
+def _materialize_campaign_for_execution(plan: dict, tmp_path: Path) -> Path:
+    for run in plan["expected_runs"]:
+        _write_json(Path(run["resolved_config_path"]), run["resolved_config"])
+    return _write_campaign_config(plan, tmp_path)
+
+
+def _write_partial_child_outputs(plan: dict, run: dict) -> None:
+    root = Path(run["output_root"])
+    _write_json(root / "run_identity.json", _run_identity_payload(plan, run))
+    _write_json(
+        root / "training_metrics.json",
+        {
+            "campaign_identity": plan["campaign_identity"],
+            "run_identity": run["run_identity"],
+            "seed": run["seed"],
+            "optimizer_step": 1,
+        },
+    )
 
 
 def _run_identity_payload(plan: dict, run: dict) -> dict:
@@ -262,6 +288,18 @@ def test_one_declared_architecture_variable_may_differ(tmp_path: Path) -> None:
     assert report["errors"] == []
 
 
+def test_campaign_cli_uses_the_authoritative_top_level_learning_rate_schedule(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    resolved = plan["expected_runs"][0]["resolved_config"]
+
+    assert _authoritative_lr_schedule(resolved) == ("cosine", 500)
+
+    drifted = deepcopy(resolved)
+    drifted["optimizer"]["schedule"] = "none"
+    with pytest.raises(ValueError, match="differs from the authoritative campaign schedule"):
+        _authoritative_lr_schedule(drifted)
+
+
 def test_undeclared_architecture_variable_is_rejected(tmp_path: Path) -> None:
     spec = _spec(tmp_path)
     spec["experimental_variables"] = []
@@ -369,8 +407,115 @@ def test_valid_resume_uses_checkpoint_and_never_restarts_at_zero(
     )
     assert len(report["launched"]) == 6
     assert checkpoint.is_file()
-    assert ["--resume", str(actual_checkpoint)] == calls[0][-2:]
+    assert ("--resume", str(actual_checkpoint)) == calls[0][-2:]
     assert all(command for command in calls)
+
+
+def test_sequential_seed_launches_retain_one_capability_while_children_publish_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan(tmp_path)
+    campaign_config = _materialize_campaign_for_execution(plan, tmp_path)
+    calls: list[str] = []
+    retained_identities: dict[str, tuple[int, int]] = {}
+
+    def child_run(_command: list[str], **_kwargs: object) -> SimpleNamespace:
+        run = plan["expected_runs"][len(calls)]
+        root = Path(run["output_root"])
+        before = root.stat()
+        retained_identities[run["run_id"]] = (before.st_dev, before.st_ino)
+        _write_partial_child_outputs(plan, run)
+        after = root.stat()
+        assert (after.st_dev, after.st_ino) == retained_identities[run["run_id"]]
+        calls.append(run["run_id"])
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(campaign_module.subprocess, "run", child_run)
+    report = execute_campaign(
+        plan,
+        execute=True,
+        confirm_execute=True,
+        campaign_config_path=campaign_config,
+        project_root=tmp_path,
+    )
+
+    expected_ids = [str(run["run_id"]) for run in plan["expected_runs"]]
+    assert calls == expected_ids
+    assert [row["run_id"] for row in report["launched"]] == expected_ids
+    assert [plan["expected_runs"][index]["seed"] for index in range(3)] == list(DEFAULT_SEEDS)
+    for run in plan["expected_runs"]:
+        root = Path(run["output_root"])
+        current = root.stat()
+        assert (current.st_dev, current.st_ino) == retained_identities[run["run_id"]]
+        assert (root / "training_metrics.json").is_file()
+
+
+def test_pending_seed_namespace_rejects_a_foreign_entry_before_second_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan(tmp_path)
+    campaign_config = _materialize_campaign_for_execution(plan, tmp_path)
+    calls: list[str] = []
+
+    def first_child(_command: list[str], **_kwargs: object) -> SimpleNamespace:
+        run = plan["expected_runs"][len(calls)]
+        _write_partial_child_outputs(plan, run)
+        calls.append(str(run["run_id"]))
+        if len(calls) == 1:
+            foreign_root = Path(plan["expected_runs"][1]["output_root"])
+            (foreign_root / "foreign-entry.bin").write_bytes(b"not issued by the selected child capability")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(campaign_module.subprocess, "run", first_child)
+    with pytest.raises(CampaignValidationError, match="training output changed after the retained resume audit"):
+        execute_campaign(
+            plan,
+            execute=True,
+            confirm_execute=True,
+            campaign_config_path=campaign_config,
+            project_root=tmp_path,
+        )
+
+    assert calls == [plan["expected_runs"][0]["run_id"]]
+
+
+def test_pending_seed_namespace_rejects_an_outside_hardlink_without_mutating_sentinel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan(tmp_path)
+    campaign_config = _materialize_campaign_for_execution(plan, tmp_path)
+    sentinel = tmp_path / "outside-run-roots-sentinel.bin"
+    sentinel.write_bytes(b"outside sentinel remains byte-identical")
+    before = sentinel.read_bytes()
+    calls: list[str] = []
+
+    def first_child(_command: list[str], **_kwargs: object) -> SimpleNamespace:
+        run = plan["expected_runs"][len(calls)]
+        _write_partial_child_outputs(plan, run)
+        calls.append(str(run["run_id"]))
+        if len(calls) == 1:
+            pending_root = Path(plan["expected_runs"][1]["output_root"])
+            try:
+                os.link(sentinel, pending_root / "foreign-hardlink.bin")
+            except (NotImplementedError, OSError):
+                pytest.skip("hard links are unavailable in this test session")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(campaign_module.subprocess, "run", first_child)
+    with pytest.raises(CampaignValidationError, match="aliased"):
+        execute_campaign(
+            plan,
+            execute=True,
+            confirm_execute=True,
+            campaign_config_path=campaign_config,
+            project_root=tmp_path,
+        )
+
+    assert calls == [plan["expected_runs"][0]["run_id"]]
+    assert sentinel.read_bytes() == before
 
 
 def test_partial_completion_state_blocks_all_launches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -782,6 +927,66 @@ def test_execution_requires_both_explicit_noninteractive_flags(tmp_path: Path) -
         execute_campaign(plan, execute=True, confirm_execute=False, runner=lambda *args, **kwargs: None)
 
 
+@pytest.mark.parametrize("field", ["execute", "confirm_execute", "resume", "unsafe_resume"])
+@pytest.mark.parametrize("value", [1, 0, "true", "false", None])
+def test_non_boolean_runtime_flags_fail_before_downstream_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    plan = _plan(tmp_path)
+    downstream_calls: list[str] = []
+
+    def unexpected_downstream(*args: object, **kwargs: object) -> dict[str, object]:
+        downstream_calls.append("called")
+        pytest.fail("runtime flag validation must precede validation and path inspection")
+
+    def unexpected_runner(*args: object, **kwargs: object) -> None:
+        downstream_calls.append("runner")
+        pytest.fail("runtime flag validation must precede runner selection")
+
+    monkeypatch.setattr(campaign_module, "validate_campaign", unexpected_downstream)
+    monkeypatch.setattr(campaign_module, "audit_resume", unexpected_downstream)
+    flags: dict[str, object] = {
+        "execute": True,
+        "confirm_execute": True,
+        "resume": False,
+        "unsafe_resume": False,
+    }
+    flags[field] = value
+
+    with pytest.raises(CampaignValidationError, match=rf"{field} must be a boolean; coercion is forbidden"):
+        execute_campaign(
+            plan,
+            execute=flags["execute"],
+            confirm_execute=flags["confirm_execute"],
+            resume=flags["resume"],
+            unsafe_resume=flags["unsafe_resume"],
+            runner=unexpected_runner,
+        )
+    assert downstream_calls == []
+
+
+@pytest.mark.parametrize("value", [1, 0, "true", "false", None])
+def test_audit_resume_rejects_non_boolean_unsafe_resume_before_path_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: object,
+) -> None:
+    plan = _plan(tmp_path)
+    path_calls: list[str] = []
+
+    def unexpected_path_work(*args: object, **kwargs: object) -> dict[str, object]:
+        path_calls.append("called")
+        pytest.fail("unsafe_resume validation must precede path inspection")
+
+    monkeypatch.setattr(campaign_module, "_classify_run_root", unexpected_path_work)
+    with pytest.raises(CampaignValidationError, match="unsafe_resume must be a boolean; coercion is forbidden"):
+        audit_resume(plan, unsafe_resume=value)
+    assert path_calls == []
+
+
 def test_campaign_identity_is_mandatory_and_content_bound(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     missing = deepcopy(plan)
@@ -822,6 +1027,94 @@ def test_launch_authorization_blocks_before_runner_selection(tmp_path: Path) -> 
             runner=lambda *args, **kwargs: calls.append(args),
         )
     assert calls == []
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1])
+def test_non_boolean_campaign_gate_values_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    value: object,
+) -> None:
+    reference = _plan(tmp_path)
+    code_identity = deepcopy(reference["code_identity"])
+    monkeypatch.setattr(campaign_module, "_code_identity", lambda: deepcopy(code_identity))
+
+    for field in ("executable", "launch_authorized"):
+        spec = _spec(tmp_path)
+        spec[field] = value
+        planned = plan_campaign(spec)
+
+        assert planned[field] is False
+        assert planned["executable"] is False
+        assert planned["plan_status"] == "blocked"
+        assert any(f"{field} must be a boolean; coercion is forbidden" in item for item in planned["blockers"])
+        assert validate_campaign(planned)["launch_ready"] is False
+
+        materialized = deepcopy(reference)
+        materialized[field] = value
+        materialized["campaign_identity"] = stable_hash(campaign_module._campaign_identity_payload(materialized))
+        validation = validate_campaign(materialized)
+        assert any(f"{field} must be a boolean; coercion is forbidden" == item for item in validation["errors"])
+        assert validation["launch_ready"] is False
+        runner_calls: list[object] = []
+        message = "blocked" if field == "executable" else "launch_authorized"
+        with pytest.raises(CampaignValidationError, match=message):
+            execute_campaign(
+                materialized,
+                execute=True,
+                confirm_execute=True,
+                runner=lambda *args, _calls=runner_calls, **kwargs: _calls.append((args, kwargs)),
+            )
+        assert runner_calls == []
+
+
+@pytest.mark.parametrize(
+    ("executable", "launch_authorized", "expected_executable", "expected_launch_ready"),
+    [
+        (True, True, True, True),
+        (True, False, True, False),
+        (False, True, False, False),
+        (False, False, False, False),
+    ],
+)
+def test_real_boolean_campaign_gates_preserve_exact_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    executable: bool,
+    launch_authorized: bool,
+    expected_executable: bool,
+    expected_launch_ready: bool,
+) -> None:
+    reference = _plan(tmp_path)
+    code_identity = deepcopy(reference["code_identity"])
+    monkeypatch.setattr(campaign_module, "_code_identity", lambda: deepcopy(code_identity))
+    spec = _spec(tmp_path)
+    spec["executable"] = executable
+    spec["launch_authorized"] = launch_authorized
+
+    planned = plan_campaign(spec)
+    validation = validate_campaign(planned)
+
+    assert planned["executable"] is expected_executable
+    assert planned["launch_authorized"] is launch_authorized
+    assert planned["plan_status"] == ("ready" if expected_executable else "blocked")
+    assert not validation["errors"]
+    assert not validation["blockers"]
+    assert validation["launch_ready"] is expected_launch_ready
+
+
+def test_missing_raw_campaign_gates_keep_safe_false_defaults(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    spec.pop("executable")
+    spec.pop("launch_authorized")
+
+    planned = plan_campaign(spec)
+
+    assert planned["executable"] is False
+    assert planned["launch_authorized"] is False
+    assert planned["plan_status"] == "blocked"
+    assert not any("must be a boolean" in item for item in planned["blockers"])
+    assert validate_campaign(planned)["launch_ready"] is False
 
 
 @pytest.mark.parametrize("changed", ["config", "command"])
@@ -1019,6 +1312,8 @@ def test_artifact_manifest_rejects_missing_hash_changed_content_and_path_travers
     run = plan["expected_runs"][0]
     path, manifest = _artifact_manifest(plan, run)
     target = next(item for item in manifest["artifacts"] if item["artifact_type"] == "training_metrics")
+    target_path = Path(run["output_root"], target["relative_path"])
+    target_bytes = target_path.read_bytes()
 
     missing_hash = deepcopy(manifest)
     next(item for item in missing_hash["artifacts"] if item["artifact_type"] == "training_metrics").pop(
@@ -1030,13 +1325,13 @@ def test_artifact_manifest_rejects_missing_hash_changed_content_and_path_travers
     assert any("missing a concrete content hash" in error for error in report["runs"][0]["errors"])
 
     _write_json(path, manifest)
-    Path(run["output_root"], target["relative_path"]).write_text('{"changed":true}', encoding="utf-8")
+    target_path.write_text('{"changed":true}', encoding="utf-8")
     report = audit_artifact_completeness(plan)
     assert not report["complete"]
     assert any("content hash mismatch" in error for error in report["runs"][0]["errors"])
 
-    _write_complete_run_artifacts(plan)
-    path, manifest = _artifact_manifest(plan, run)
+    target_path.write_bytes(target_bytes)
+    _write_json(path, manifest)
     next(item for item in manifest["artifacts"] if item["artifact_type"] == "training_metrics")["relative_path"] = (
         "../escape.json"
     )
@@ -1052,10 +1347,12 @@ def test_foreign_artifact_identity_and_off_schedule_checkpoint_prevent_completio
     run = plan["expected_runs"][0]
     root = Path(run["output_root"])
     experiment_manifest = root / "experiment_manifest.json"
+    original_experiment_manifest = experiment_manifest.read_bytes()
     payload = json.loads(experiment_manifest.read_text(encoding="utf-8"))
     payload["run_identity"] = "f" * 64
     _write_json(experiment_manifest, payload)
     manifest_path, manifest = _artifact_manifest(plan, run)
+    original_manifest = deepcopy(manifest)
     next(item for item in manifest["artifacts"] if item["relative_path"] == experiment_manifest.name)[
         "content_sha256"
     ] = file_sha256(experiment_manifest)
@@ -1064,7 +1361,8 @@ def test_foreign_artifact_identity_and_off_schedule_checkpoint_prevent_completio
     assert not report["complete"]
     assert any("foreign run_identity" in error for error in report["runs"][0]["errors"])
 
-    _write_complete_run_artifacts(plan)
+    experiment_manifest.write_bytes(original_experiment_manifest)
+    _write_json(manifest_path, original_manifest)
     (root / "checkpoint_4000.bin").write_bytes(b"off-schedule")
     report = audit_artifact_completeness(plan)
     assert not report["complete"]

@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import math
+import os
+import platform
 import random
+import re
+import stat
 import time
 import warnings
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from enum import Enum
@@ -29,6 +36,7 @@ from spritelab.harvest.label_v4.training_quality import (
     training_uncertainty_report,
     uncertainty_correlation_report,
 )
+from spritelab.product_core import strict_json_loads
 from spritelab.training.checkpoint_io import load_checkpoint as _load_checkpoint
 from spritelab.training.checkpoint_io import tokenizer_from_checkpoint as _tokenizer_from_checkpoint
 from spritelab.training.conditioning import (
@@ -99,10 +107,13 @@ from spritelab.training.timestep_validation import (
     validate_timestep_boundaries,
 )
 from spritelab.training.tokenization import SpriteTextTokenizer
+from spritelab.utils.safe_fs import AnchoredDirectory, OwnedFileIdentity, UnsafeFilesystemOperation
 
 SPRITE_SIZE = 32
 AUXILIARY_HEAD_PREFIXES = ("palette_head_rgb.", "palette_head_presence.", "index_head.")
 FORWARD_OUTPUT_SCHEMA_VERSION = "spritelab_generator_forward_v2"
+CAMPAIGN_RUN_CONTRACT_SCHEMA_VERSION = "spritelab_generator_campaign_run_contract_v1"
+CAMPAIGN_EVALUATION_RECORD_SCHEMA_VERSION = "spritelab_generator_campaign_evaluation_v1"
 
 
 class AuxiliaryHeadsMode(str, Enum):
@@ -304,6 +315,13 @@ class ChallengerTrainConfig:
     palette_conditioning_inject: str = "decoder"
     experiment_manifest: dict[str, Any] | None = None
     resume_from: Path | None = None
+    retained_output_root: Path | None = None
+    retained_training_manifest_records: Sequence[Mapping[str, Any]] | None = None
+    retained_dataset_descriptors: Mapping[str, int] | None = None
+    retained_dataset_content_sha256: Mapping[str, str] | None = None
+    resume_descriptor: int | None = None
+    expected_resume_sha256: str | None = None
+    campaign_run_contract: dict[str, Any] | None = None
     unsafe_resume: bool = False
     unsafe_resume_reason: str | None = None
     determinism: str = "off"
@@ -872,7 +890,400 @@ class ChallengerPromptAdapter:
         return _rgba_to_logit_outputs(rgba)
 
 
+class _CampaignRunWriter(AbstractContextManager["_CampaignRunWriter"]):
+    """Hold one exact run root and publish single-link final-name artifacts."""
+
+    def __init__(self, logical_root: Path, physical_root: Path) -> None:
+        self.logical_root = logical_root
+        self.physical_root = physical_root
+        self._anchor: AnchoredDirectory | None = None
+
+    def __enter__(self) -> _CampaignRunWriter:
+        self.physical_root.mkdir(parents=True, exist_ok=True)
+        anchor = AnchoredDirectory(self.logical_root, self.logical_root)
+        anchor.__enter__()
+        try:
+            physical = self.physical_root.stat()
+            held = anchor.directory_metadata()
+            if not stat.S_ISDIR(physical.st_mode) or not OwnedFileIdentity.from_stat(held).matches(physical):
+                raise UnsafeFilesystemOperation("retained campaign output root identity changed")
+            for name in anchor.names():
+                metadata = anchor.lstat(name)
+                reparse = bool(int(getattr(metadata, "st_file_attributes", 0) or 0) & 0x400)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or stat.S_ISLNK(metadata.st_mode)
+                    or reparse
+                    or metadata.st_nlink != 1
+                ):
+                    raise UnsafeFilesystemOperation(f"campaign output contains an unsafe entry: {name}")
+        except BaseException as exc:
+            anchor.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        self._anchor = anchor
+        return self
+
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
+        if self._anchor is not None:
+            self._anchor.__exit__(exc_type, exc_value, traceback)
+            self._anchor = None
+
+    @property
+    def anchor(self) -> AnchoredDirectory:
+        if self._anchor is None:
+            raise UnsafeFilesystemOperation("campaign output writer is not open")
+        return self._anchor
+
+    def names(self) -> tuple[str, ...]:
+        return self.anchor.names()
+
+    def lexists(self, name: str) -> bool:
+        return self.anchor.lexists(name)
+
+    def read_bytes(self, name: str, *, max_bytes: int = 128 * 1024 * 1024) -> bytes:
+        descriptor = self._open_read(name)
+        try:
+            before = os.fstat(descriptor)
+            if before.st_size > max_bytes:
+                raise UnsafeFilesystemOperation(f"campaign artifact is oversized: {name}")
+            content = bytearray()
+            while len(content) <= max_bytes:
+                chunk = os.read(descriptor, min(1024 * 1024, max_bytes + 1 - len(content)))
+                if not chunk:
+                    break
+                content.extend(chunk)
+            after = os.fstat(descriptor)
+            identity = OwnedFileIdentity.from_stat(before)
+            if (
+                len(content) > max_bytes
+                or not identity.matches(after)
+                or after.st_nlink != 1
+                or not identity.matches(self.anchor.lstat(name))
+            ):
+                raise UnsafeFilesystemOperation(f"campaign artifact changed while read: {name}")
+            return bytes(content)
+        finally:
+            os.close(descriptor)
+
+    def file_sha256(self, name: str) -> str:
+        descriptor = self._open_read(name)
+        try:
+            before = os.fstat(descriptor)
+            identity = OwnedFileIdentity.from_stat(before)
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            after = os.fstat(descriptor)
+            if not identity.matches(after) or after.st_nlink != 1 or not identity.matches(self.anchor.lstat(name)):
+                raise UnsafeFilesystemOperation(f"campaign artifact changed while hashed: {name}")
+            return digest.hexdigest()
+        finally:
+            os.close(descriptor)
+
+    def write_json_idempotent(self, name: str, value: Mapping[str, Any]) -> bytes:
+        content = _canonical_pretty_json_bytes(value)
+        try:
+            self.write_bytes_exclusive(name, content)
+        except FileExistsError as exc:
+            if self.read_bytes(name, max_bytes=max(1024, len(content))) != content:
+                raise UnsafeFilesystemOperation(
+                    f"immutable campaign artifact conflicts with retained bytes: {name}"
+                ) from exc
+        return content
+
+    def write_bytes_exclusive(self, name: str, content: bytes) -> str:
+        descriptor, identity = self._open_exclusive(name)
+        try:
+            _write_descriptor_all(descriptor, content)
+            os.fsync(descriptor)
+            self._verify_written(name, descriptor, identity, content)
+            self._sync_directory()
+            self._verify_written(name, descriptor, identity, content)
+            return hashlib.sha256(content).hexdigest()
+        finally:
+            os.close(descriptor)
+
+    def write_torch_checkpoint(self, name: str, checkpoint: Mapping[str, Any], torch_module: Any) -> str:
+        descriptor, identity = self._open_exclusive(name)
+        try:
+            with os.fdopen(os.dup(descriptor), "wb") as handle:
+                torch_module.save(dict(checkpoint), handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            content_sha256 = _descriptor_sha256(descriptor)
+            self._verify_descriptor_identity(name, descriptor, identity)
+            self._sync_directory()
+            self._verify_descriptor_identity(name, descriptor, identity)
+            if not hmac.compare_digest(content_sha256, _descriptor_sha256(descriptor)):
+                raise UnsafeFilesystemOperation(f"campaign checkpoint changed after publication: {name}")
+            return content_sha256
+        finally:
+            os.close(descriptor)
+
+    def _open_exclusive(self, name: str) -> tuple[int, OwnedFileIdentity]:
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0))
+        descriptor = self.anchor.open_file_immovable(name, flags, 0o600)
+        metadata = os.fstat(descriptor)
+        identity = OwnedFileIdentity.from_stat(metadata)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size != 0:
+            os.close(descriptor)
+            raise UnsafeFilesystemOperation(f"new campaign artifact is unsafe: {name}")
+        return descriptor, identity
+
+    def _open_read(self, name: str) -> int:
+        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+        descriptor = self.anchor.open_file_immovable(name, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            os.close(descriptor)
+            raise UnsafeFilesystemOperation(f"campaign artifact is not a single-link regular file: {name}")
+        return descriptor
+
+    def _verify_written(
+        self,
+        name: str,
+        descriptor: int,
+        identity: OwnedFileIdentity,
+        expected: bytes,
+    ) -> None:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        actual = bytearray()
+        while len(actual) <= len(expected):
+            chunk = os.read(descriptor, min(1024 * 1024, len(expected) + 1 - len(actual)))
+            if not chunk:
+                break
+            actual.extend(chunk)
+        if bytes(actual) != expected:
+            raise UnsafeFilesystemOperation(f"campaign artifact content changed during publication: {name}")
+        self._verify_descriptor_identity(name, descriptor, identity)
+
+    def _verify_descriptor_identity(
+        self,
+        name: str,
+        descriptor: int,
+        identity: OwnedFileIdentity,
+    ) -> None:
+        metadata = os.fstat(descriptor)
+        if not identity.matches(metadata) or metadata.st_nlink != 1 or not identity.matches(self.anchor.lstat(name)):
+            raise UnsafeFilesystemOperation(f"campaign artifact identity changed during publication: {name}")
+
+    def _sync_directory(self) -> None:
+        if os.name == "nt":
+            return
+        descriptor = os.open(
+            self.anchor.fixed_directory_path(),
+            os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0)),
+        )
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _canonical_pretty_json_bytes(value: Mapping[str, Any]) -> bytes:
+    return (json.dumps(_jsonable(dict(value)), indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _write_descriptor_all(descriptor: int, content: bytes) -> None:
+    offset = 0
+    while offset < len(content):
+        written = os.write(descriptor, content[offset:])
+        if written <= 0:
+            raise OSError("campaign artifact write made no progress")
+        offset += written
+
+
+def _descriptor_sha256(descriptor: int) -> str:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(descriptor, 1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+_CAMPAIGN_RUN_CONTRACT_KEYS = frozenset(
+    {
+        "schema_version",
+        "campaign_id",
+        "campaign_identity",
+        "run_id",
+        "run_identity",
+        "seed",
+        "output_root",
+        "resolved_config_sha256",
+        "execution_contract_sha256",
+        "expected_checkpoint_steps",
+        "expected_evaluation_steps",
+        "max_optimizer_steps",
+        "schedule_name",
+        "evaluation_ema_policy",
+        "training_code_identity_sha256",
+        "resolved_config",
+    }
+)
+_CONCRETE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _validate_campaign_run_contract(config: ChallengerTrainConfig) -> dict[str, Any] | None:
+    value = config.campaign_run_contract
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != _CAMPAIGN_RUN_CONTRACT_KEYS:
+        raise ValueError("campaign run contract has an unsupported shape")
+    contract = deepcopy(dict(value))
+    if contract.get("schema_version") != CAMPAIGN_RUN_CONTRACT_SCHEMA_VERSION:
+        raise ValueError("campaign run contract schema is unsupported")
+    for field in (
+        "campaign_identity",
+        "run_identity",
+        "resolved_config_sha256",
+        "execution_contract_sha256",
+        "training_code_identity_sha256",
+    ):
+        if not isinstance(contract.get(field), str) or _CONCRETE_SHA256.fullmatch(contract[field]) is None:
+            raise ValueError(f"campaign run contract {field} is not a concrete SHA-256")
+    for field in ("campaign_id", "run_id", "output_root", "schedule_name", "evaluation_ema_policy"):
+        item = contract.get(field)
+        if not isinstance(item, str) or not item or item != item.strip():
+            raise ValueError(f"campaign run contract {field} is invalid")
+    if type(contract.get("seed")) is not int or int(contract["seed"]) != int(config.seed):
+        raise ValueError("campaign run contract seed does not match the trainer")
+    if type(contract.get("max_optimizer_steps")) is not int or contract["max_optimizer_steps"] != int(config.max_steps):
+        raise ValueError("campaign run contract max optimizer steps do not match the trainer")
+    if Path(contract["output_root"]) != Path(config.out_dir):
+        raise ValueError("campaign run contract logical output root does not match the trainer")
+    if config.unsafe_resume:
+        raise ValueError("campaign run contracts never permit unsafe resume")
+    resolved_config = contract.get("resolved_config")
+    if not isinstance(resolved_config, Mapping):
+        raise ValueError("campaign run contract resolved config is invalid")
+    from spritelab.training.experiment_system import stable_hash
+
+    if stable_hash(resolved_config) != contract["resolved_config_sha256"]:
+        raise ValueError("campaign run contract resolved config identity changed")
+    for field in ("expected_checkpoint_steps", "expected_evaluation_steps"):
+        raw_steps = contract.get(field)
+        if not isinstance(raw_steps, list) or any(type(step) is not int or step <= 0 for step in raw_steps):
+            raise ValueError(f"campaign run contract {field} is invalid")
+        if raw_steps != sorted(set(raw_steps)) or not raw_steps or raw_steps[-1] != int(config.max_steps):
+            raise ValueError(f"campaign run contract {field} does not end at the fixed optimizer step")
+    if contract["evaluation_ema_policy"] not in {"live", "ema", "both"}:
+        raise ValueError("campaign run contract evaluation EMA policy is invalid")
+    return contract
+
+
+def _initialize_campaign_run(
+    writer: _CampaignRunWriter,
+    contract: Mapping[str, Any],
+) -> None:
+    from spritelab.product_web.events import (
+        EVENT_FILENAME,
+        EVENT_HISTORY_ORIGIN_FILENAME,
+        _build_event_history_origin,
+        _event_history_origin_bindings,
+        verify_event_migration,
+    )
+
+    identity_name = "run_identity.json"
+    if writer.lexists(identity_name):
+        identity = strict_json_loads(writer.read_bytes(identity_name, max_bytes=1024 * 1024))
+        if not isinstance(identity, Mapping):
+            raise UnsafeFilesystemOperation("retained campaign run identity is malformed")
+        for field in (
+            "campaign_id",
+            "campaign_identity",
+            "run_id",
+            "run_identity",
+            "seed",
+            "output_root",
+            "resolved_config_sha256",
+            "execution_contract_sha256",
+        ):
+            if identity.get(field) != contract.get(field):
+                raise UnsafeFilesystemOperation(f"retained campaign run identity changed: {field}")
+        migration = verify_event_migration(
+            str(contract["run_id"]),
+            writer.physical_root,
+            origin_required=True,
+        )
+        if not migration.resume_compatible:
+            raise UnsafeFilesystemOperation("retained campaign event history is not resume compatible")
+        return
+    if writer.names():
+        raise UnsafeFilesystemOperation("nonempty campaign output root has no immutable run identity")
+    writer.write_bytes_exclusive(EVENT_FILENAME, b"")
+    origin = _build_event_history_origin(
+        str(contract["run_id"]),
+        writer.physical_root,
+        migration_record=None,
+    )
+    origin_content = writer.write_json_idempotent(EVENT_HISTORY_ORIGIN_FILENAME, origin)
+    bindings = _event_history_origin_bindings(
+        origin,
+        hashlib.sha256(origin_content).hexdigest(),
+        hashlib.sha256(b"").hexdigest(),
+    )
+    identity = {
+        "campaign_id": contract["campaign_id"],
+        "campaign_identity": contract["campaign_identity"],
+        "run_id": contract["run_id"],
+        "run_identity": contract["run_identity"],
+        "seed": contract["seed"],
+        "output_root": contract["output_root"],
+        "resolved_config_sha256": contract["resolved_config_sha256"],
+        "execution_contract_sha256": contract["execution_contract_sha256"],
+        **bindings,
+    }
+    writer.write_json_idempotent(identity_name, identity)
+    migration = verify_event_migration(
+        str(contract["run_id"]),
+        writer.physical_root,
+        origin_required=True,
+    )
+    if not migration.resume_compatible:
+        raise UnsafeFilesystemOperation("new campaign event history is not resume compatible")
+
+
 def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
+    """Train one challenger, including ``create_unsafe_resume_revocation`` handling."""
+
+    contract = _validate_campaign_run_contract(config)
+    if contract is None:
+        return _run_challenger_training_impl(config, campaign_writer=None, campaign_contract=None)
+    if config.resume_from is not None and (
+        not isinstance(config.expected_resume_sha256, str)
+        or _CONCRETE_SHA256.fullmatch(config.expected_resume_sha256) is None
+    ):
+        raise ValueError("campaign resume requires the exact retained checkpoint SHA-256")
+    logical_root = Path(config.out_dir)
+    physical_root = Path(config.retained_output_root) if config.retained_output_root is not None else logical_root
+    with _CampaignRunWriter(logical_root, physical_root) as writer:
+        return _run_challenger_training_impl(config, campaign_writer=writer, campaign_contract=contract)
+
+
+def _run_challenger_training_impl(
+    config: ChallengerTrainConfig,
+    *,
+    campaign_writer: _CampaignRunWriter | None,
+    campaign_contract: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if config.resume_from is None and (
+        config.resume_descriptor is not None or config.expected_resume_sha256 is not None
+    ):
+        raise ValueError("retained resume inputs require an exact --resume checkpoint")
+    if config.resume_descriptor is not None and (
+        type(config.resume_descriptor) is not int
+        or config.resume_descriptor < 0
+        or not isinstance(config.expected_resume_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", config.expected_resume_sha256) is None
+    ):
+        raise ValueError("retained resume descriptor requires an exact checkpoint SHA-256")
     if config.unsafe_resume:
         if config.resume_from is None:
             raise ValueError("--unsafe-resume requires --resume")
@@ -918,11 +1329,44 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
             "gradient_accumulation_steps other than 1 are not yet supported for exact resume; "
             "gradient tensors would need checkpointing"
         )
-    out_dir = Path(config.out_dir)
+    logical_out_dir = Path(config.out_dir)
+    out_dir = Path(config.retained_output_root) if config.retained_output_root is not None else logical_out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    if campaign_writer is not None and campaign_contract is not None:
+        _initialize_campaign_run(campaign_writer, campaign_contract)
     conditioning_mode = validate_conditioning_mode(config.conditioning_mode)
 
-    manifest_rows = read_jsonl(config.training_manifest)
+    retained_inputs = (
+        config.retained_training_manifest_records,
+        config.retained_dataset_descriptors,
+        config.retained_dataset_content_sha256,
+    )
+    if all(value is None for value in retained_inputs):
+        manifest_rows = read_jsonl(config.training_manifest)
+    elif any(value is None for value in retained_inputs):
+        raise ValueError("retained training manifest records, dataset descriptors, and hashes are inseparable")
+    else:
+        retained_records = config.retained_training_manifest_records
+        retained_descriptors = config.retained_dataset_descriptors
+        retained_hashes = config.retained_dataset_content_sha256
+        assert retained_records is not None
+        assert retained_descriptors is not None
+        assert retained_hashes is not None
+        if (
+            isinstance(retained_records, (str, bytes))
+            or not isinstance(retained_records, Sequence)
+            or not retained_records
+            or any(not isinstance(record, Mapping) for record in retained_records)
+        ):
+            raise ValueError("retained training manifest records are malformed")
+        if (
+            not isinstance(retained_descriptors, Mapping)
+            or not isinstance(retained_hashes, Mapping)
+            or not retained_descriptors
+            or set(retained_descriptors) != set(retained_hashes)
+        ):
+            raise ValueError("retained dataset descriptor and hash inventories differ")
+        manifest_rows = [dict(record) for record in retained_records]
     token_rows = [row for row in manifest_rows if _matches_caption_policy(row, config.caption_policy_filter)]
     effective_split = str(config.overfit_split or config.split)
     subset_selection = _select_training_subset(token_rows, config, split=effective_split)
@@ -936,7 +1380,15 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         train_rows or token_rows or manifest_rows, max_length=config.caption_max_length
     )
     tokenizer.save(out_dir / "vocab.json")
-    preloaded_resume = _load_checkpoint(config.resume_from) if config.resume_from is not None else None
+    preloaded_resume = (
+        _load_checkpoint(
+            config.resume_from,
+            expected_sha256=config.expected_resume_sha256,
+            retained_descriptor=config.resume_descriptor,
+        )
+        if config.resume_from is not None
+        else None
+    )
     structured_vocab = None
     if uses_structured_conditioning(conditioning_mode):
         if config.unsafe_resume and isinstance(preloaded_resume, Mapping):
@@ -966,6 +1418,9 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         palette_swap=palette_swap,
         role_ramp_transplant=role_ramp_transplant,
         palette_conditioning=bool(config.palette_conditioning),
+        retained_records=config.retained_training_manifest_records,
+        retained_npz_descriptors=config.retained_dataset_descriptors,
+        retained_npz_sha256=config.retained_dataset_content_sha256,
     )
     palette_swap_summary = {**palette_swap.report_dict()}
     if palette_swap.active():
@@ -976,6 +1431,7 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
                 config.dataset_dir,
                 [dict(record) for record in train_dataset.records],
                 palette_swap,
+                npz_cache=shared_npz_cache,
             )
         )
     else:
@@ -1003,6 +1459,9 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
             structured_vocab=structured_vocab,
             npz_cache=shared_npz_cache,
             palette_conditioning=bool(config.palette_conditioning),
+            retained_records=config.retained_training_manifest_records,
+            retained_npz_descriptors=config.retained_dataset_descriptors,
+            retained_npz_sha256=config.retained_dataset_content_sha256,
         )
 
     dataset_label_quality = dataset_uncertainty_report(token_rows)
@@ -1093,13 +1552,25 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
             structured_vocab=None if structured_vocab is None else structured_vocab.to_json_dict(),
         )
         manifest_path = Path(config.training_manifest)
+        if config.retained_training_manifest_records is None:
+            manifest_content_sha256 = file_sha256(manifest_path)
+        else:
+            retained_manifest_hashes = {
+                str(effective_experiment_manifest.get(field) or "")
+                for field in ("dataset_manifest_hash", "split_manifest_hash")
+            }
+            if len(retained_manifest_hashes) != 1:
+                raise ValueError("retained training manifest identities are missing or inconsistent")
+            manifest_content_sha256 = retained_manifest_hashes.pop()
+            if _CONCRETE_SHA256.fullmatch(manifest_content_sha256) is None:
+                raise ValueError("retained training manifest identity is not a concrete SHA-256")
         effective_experiment_manifest.update(
             {
                 "manifest_version": EXPERIMENT_MANIFEST_VERSION,
                 "dataset_manifest": str(manifest_path),
-                "dataset_manifest_hash": file_sha256(manifest_path),
+                "dataset_manifest_hash": manifest_content_sha256,
                 "split_manifest": str(manifest_path),
-                "split_manifest_hash": file_sha256(manifest_path),
+                "split_manifest_hash": manifest_content_sha256,
                 "conditioning_schema": actual_conditioning,
                 "conditioning_schema_hash": actual_conditioning["hash"],
                 "optimizer_configuration": optimizer_identity,
@@ -1158,8 +1629,15 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
     )
     non_blocking = device_type(device) == "cuda"
     unsafe_resume_record: dict[str, Any] = {}
+    persisted_config = asdict(config)
+    persisted_config.pop("retained_output_root", None)
+    persisted_config.pop("retained_training_manifest_records", None)
+    persisted_config.pop("retained_dataset_descriptors", None)
+    persisted_config.pop("retained_dataset_content_sha256", None)
+    persisted_config.pop("resume_descriptor", None)
+    persisted_config.pop("campaign_run_contract", None)
     config_json = {
-        **{key: _jsonable(value) for key, value in asdict(config).items()},
+        **{key: _jsonable(value) for key, value in persisted_config.items()},
         "architecture": "rectified_flow",
         "model_type": "generator_challenger",
         "conditioning_mode": conditioning_mode,
@@ -1230,7 +1708,11 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
     step = 0
     last_loss = float(initial_train_losses["loss"])
     last_loss_components: dict[str, float] = {}
-    checkpoint_steps = _normalize_checkpoint_steps(config.checkpoint_steps, max_steps=config.max_steps)
+    checkpoint_steps = (
+        tuple(int(step) for step in campaign_contract["expected_checkpoint_steps"])
+        if campaign_contract is not None
+        else _normalize_checkpoint_steps(config.checkpoint_steps, max_steps=config.max_steps)
+    )
     run_limit = min(config.max_steps, int(config.stop_after_step or config.max_steps))
     checkpoint_step_paths: list[str] = []
     checkpoint_step_ema_paths: list[str] = []
@@ -1357,6 +1839,67 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
             worker_seed_base=config.seed + 1,
         )
 
+    campaign_evaluations = (
+        _load_campaign_evaluations(campaign_writer, campaign_contract)
+        if campaign_writer is not None and campaign_contract is not None
+        else {}
+    )
+
+    def evaluate_campaign_step(optimizer_step: int) -> None:
+        if campaign_writer is None or campaign_contract is None or optimizer_step in campaign_evaluations:
+            return
+        if len(val_source) == 0:
+            raise ValueError("campaign completion requires a nonempty validation split")
+        policy = str(campaign_contract["evaluation_ema_policy"])
+        weights: dict[str, Any] = {}
+        if policy in {"live", "both"}:
+            weights["live"] = _evaluate_challenger_losses(
+                model,
+                val_loader,
+                device=device,
+                conditioning_mode=conditioning_mode,
+                pad_token_id=tokenizer.pad_id,
+                seed=config.seed + 2 + optimizer_step,
+                foreground_rgb_loss_weight=config.foreground_rgb_loss_weight,
+                background_rgb_loss_weight=config.background_rgb_loss_weight,
+                palette_loss_weight=config.palette_loss_weight,
+                palette_loss_temperature=config.palette_loss_temperature,
+                max_batches=config.eval_max_batches,
+                timestep_boundaries=timestep_boundaries,
+            )
+        if policy in {"ema", "both"}:
+            if ema_state is None:
+                raise ValueError("campaign completion requires retained EMA state")
+            live_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+            model.load_state_dict(ema_state)
+            try:
+                weights["ema"] = _evaluate_challenger_losses(
+                    model,
+                    val_loader,
+                    device=device,
+                    conditioning_mode=conditioning_mode,
+                    pad_token_id=tokenizer.pad_id,
+                    seed=config.seed + 2 + optimizer_step,
+                    foreground_rgb_loss_weight=config.foreground_rgb_loss_weight,
+                    background_rgb_loss_weight=config.background_rgb_loss_weight,
+                    palette_loss_weight=config.palette_loss_weight,
+                    palette_loss_temperature=config.palette_loss_temperature,
+                    max_batches=config.eval_max_batches,
+                    timestep_boundaries=timestep_boundaries,
+                )
+            finally:
+                model.load_state_dict(live_state)
+        evaluation = _campaign_evaluation_record(
+            campaign_contract,
+            optimizer_step=optimizer_step,
+            metrics_by_weight=weights,
+        )
+        campaign_writer.write_json_idempotent(
+            f"evaluation_step_{optimizer_step:06d}.json",
+            evaluation,
+        )
+        campaign_evaluations[optimizer_step] = evaluation
+
     model.train()
     progress = StepProgressBar(config.max_steps, desc=f"challenger:{out_dir.name}")
     # Keep the metrics file open for the whole run instead of reopening it every
@@ -1442,10 +1985,20 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
                     pad_token_id=tokenizer.pad_id,
                     steps=min(16, max(2, int(config.sample_every))),
                 )
-            if _should_save_checkpoint_step(step, save_every=config.save_every, checkpoint_steps=checkpoint_steps):
+            should_save_checkpoint = (
+                step in set(checkpoint_steps)
+                if campaign_writer is not None
+                else _should_save_checkpoint_step(
+                    step,
+                    save_every=config.save_every,
+                    checkpoint_steps=checkpoint_steps,
+                )
+            )
+            if should_save_checkpoint:
                 metrics_handle.flush()
                 step_checkpoint = out_dir / f"checkpoint_step_{step:06d}.pt"
-                _save_checkpoint(
+                sampler_snapshot = current_sampler_state()
+                checkpoint_sha256 = _save_checkpoint(
                     step_checkpoint,
                     model=model,
                     optimizer=optimizer,
@@ -1457,10 +2010,27 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
                     scheduler=scheduler,
                     ema_state=ema_state,
                     metrics_summary=last_loss_components,
-                    sampler_state=current_sampler_state(),
+                    sampler_state=sampler_snapshot,
+                    immutable_writer=campaign_writer,
                 )
-                checkpoint_step_paths.append(str(step_checkpoint))
-                if ema_state is not None:
+                checkpoint_step_paths.append(str(logical_out_dir / step_checkpoint.name))
+                if campaign_writer is not None and campaign_contract is not None:
+                    if not isinstance(checkpoint_sha256, str):
+                        raise UnsafeFilesystemOperation("campaign checkpoint publication did not retain a content hash")
+                    campaign_writer.write_json_idempotent(
+                        f"checkpoint_step_{step:06d}.json",
+                        _campaign_checkpoint_sidecar(
+                            campaign_contract,
+                            effective_experiment_manifest,
+                            step=step,
+                            checkpoint_name=step_checkpoint.name,
+                            checkpoint_sha256=checkpoint_sha256,
+                            scheduler_present=scheduler is not None,
+                            ema_present=ema_state is not None,
+                            sampler_state=sampler_snapshot,
+                        ),
+                    )
+                if ema_state is not None and campaign_writer is None:
                     step_ema_checkpoint = out_dir / f"checkpoint_step_{step:06d}_ema.pt"
                     _save_checkpoint(
                         step_ema_checkpoint,
@@ -1478,7 +2048,9 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
                         metrics_summary=last_loss_components,
                         sampler_state=current_sampler_state(),
                     )
-                    checkpoint_step_ema_paths.append(str(step_ema_checkpoint))
+                    checkpoint_step_ema_paths.append(str(logical_out_dir / step_ema_checkpoint.name))
+            if campaign_contract is not None and step in set(campaign_contract["expected_evaluation_steps"]):
+                evaluate_campaign_step(step)
     finally:
         metrics_handle.close()
         progress.close(final_loss=last_loss)
@@ -1536,68 +2108,69 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
             )
         finally:
             model.load_state_dict(live_state)
-    _save_checkpoint(
-        out_dir / "checkpoint_last.pt",
-        model=model,
-        optimizer=optimizer,
-        tokenizer=tokenizer,
-        config_json=config_json,
-        step=step,
-        ema_decay=float(config.ema_decay),
-        checkpoint_variant="last",
-        scheduler=scheduler,
-        ema_state=ema_state,
-        metrics_summary=last_loss_components,
-        sampler_state=current_sampler_state(),
-    )
-    if ema_state is not None:
+    if campaign_writer is None:
         _save_checkpoint(
-            out_dir / "checkpoint_last_ema.pt",
+            out_dir / "checkpoint_last.pt",
             model=model,
             optimizer=optimizer,
             tokenizer=tokenizer,
             config_json=config_json,
             step=step,
-            model_state_dict=ema_state,
             ema_decay=float(config.ema_decay),
-            checkpoint_variant="last_ema",
-            ema_weights=True,
+            checkpoint_variant="last",
             scheduler=scheduler,
             ema_state=ema_state,
             metrics_summary=last_loss_components,
             sampler_state=current_sampler_state(),
         )
-    _save_checkpoint(
-        out_dir / "checkpoint_best.pt",
-        model=model,
-        optimizer=optimizer,
-        tokenizer=tokenizer,
-        config_json=config_json,
-        step=step,
-        ema_decay=float(config.ema_decay),
-        checkpoint_variant="best",
-        scheduler=scheduler,
-        ema_state=ema_state,
-        metrics_summary=last_loss_components,
-        sampler_state=current_sampler_state(),
-    )
-    if ema_state is not None:
+        if ema_state is not None:
+            _save_checkpoint(
+                out_dir / "checkpoint_last_ema.pt",
+                model=model,
+                optimizer=optimizer,
+                tokenizer=tokenizer,
+                config_json=config_json,
+                step=step,
+                model_state_dict=ema_state,
+                ema_decay=float(config.ema_decay),
+                checkpoint_variant="last_ema",
+                ema_weights=True,
+                scheduler=scheduler,
+                ema_state=ema_state,
+                metrics_summary=last_loss_components,
+                sampler_state=current_sampler_state(),
+            )
         _save_checkpoint(
-            out_dir / "checkpoint_best_ema.pt",
+            out_dir / "checkpoint_best.pt",
             model=model,
             optimizer=optimizer,
             tokenizer=tokenizer,
             config_json=config_json,
             step=step,
-            model_state_dict=ema_state,
             ema_decay=float(config.ema_decay),
-            checkpoint_variant="best_ema",
-            ema_weights=True,
+            checkpoint_variant="best",
             scheduler=scheduler,
             ema_state=ema_state,
             metrics_summary=last_loss_components,
             sampler_state=current_sampler_state(),
         )
+        if ema_state is not None:
+            _save_checkpoint(
+                out_dir / "checkpoint_best_ema.pt",
+                model=model,
+                optimizer=optimizer,
+                tokenizer=tokenizer,
+                config_json=config_json,
+                step=step,
+                model_state_dict=ema_state,
+                ema_decay=float(config.ema_decay),
+                checkpoint_variant="best_ema",
+                ema_weights=True,
+                scheduler=scheduler,
+                ema_state=ema_state,
+                metrics_summary=last_loss_components,
+                sampler_state=current_sampler_state(),
+            )
     _write_challenger_sample_sheet(
         model,
         preview_batch,
@@ -1656,10 +2229,24 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "model_config": model_config,
         "structured_vocab_sizes": None if structured_vocab is None else structured_vocab.sizes(),
         "structured_fields_enabled": structured_vocab is not None,
-        "checkpoint_last": str(out_dir / "checkpoint_last.pt"),
-        "checkpoint_best": str(out_dir / "checkpoint_best.pt"),
-        "checkpoint_last_ema": None if ema_state is None else str(out_dir / "checkpoint_last_ema.pt"),
-        "checkpoint_best_ema": None if ema_state is None else str(out_dir / "checkpoint_best_ema.pt"),
+        "checkpoint_last": str(
+            logical_out_dir
+            / (f"checkpoint_step_{step:06d}.pt" if campaign_writer is not None else "checkpoint_last.pt")
+        ),
+        "checkpoint_best": str(
+            logical_out_dir
+            / (f"checkpoint_step_{step:06d}.pt" if campaign_writer is not None else "checkpoint_best.pt")
+        ),
+        "checkpoint_last_ema": (
+            None
+            if ema_state is None or campaign_writer is not None
+            else str(logical_out_dir / "checkpoint_last_ema.pt")
+        ),
+        "checkpoint_best_ema": (
+            None
+            if ema_state is None or campaign_writer is not None
+            else str(logical_out_dir / "checkpoint_best_ema.pt")
+        ),
         "checkpoint_steps": list(checkpoint_steps),
         "checkpoint_step_paths": checkpoint_step_paths,
         "checkpoint_step_ema_paths": checkpoint_step_ema_paths,
@@ -1667,6 +2254,7 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
         "determinism": determinism_report,
         "sampler_state_schema": current_sampler_state()["schema_version"],
         "resume_from": None if config.resume_from is None else str(config.resume_from),
+        "resume_checkpoint_sha256": config.expected_resume_sha256,
         "resume_compatibility_mismatches": resume_mismatches,
         "unsafe_resume_record": unsafe_resume_record,
         "auxiliary_heads_mode": auxiliary_mode.value,
@@ -1683,6 +2271,22 @@ def run_challenger_training(config: ChallengerTrainConfig) -> dict[str, Any]:
     (out_dir / "train_report.json").write_text(
         json.dumps(_jsonable(report), indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    if campaign_writer is not None and campaign_contract is not None:
+        if step == int(campaign_contract["max_optimizer_steps"]):
+            _publish_campaign_completion(
+                campaign_writer,
+                campaign_contract,
+                experiment_manifest=effective_experiment_manifest,
+                report=report,
+                final_train_losses=final_train_losses,
+                validation_losses=val_losses,
+                ema_validation_losses=ema_val_losses,
+                evaluations=campaign_evaluations,
+                resume_mismatches=resume_mismatches,
+                determinism_report=determinism_report,
+            )
+        elif step > int(campaign_contract["max_optimizer_steps"]):
+            raise UnsafeFilesystemOperation("campaign trainer exceeded its fixed optimizer-step budget")
     return report
 
 
@@ -3055,7 +3659,8 @@ def _save_checkpoint(
     metrics_summary: Mapping[str, Any] | None = None,
     data_position: Mapping[str, Any] | None = None,
     sampler_state: Mapping[str, Any] | None = None,
-) -> None:
+    immutable_writer: _CampaignRunWriter | None = None,
+) -> str | None:
     th, _nn_mod = _require_torch()
     from spritelab.training.experiment_system import capture_rng_state
 
@@ -3116,8 +3721,366 @@ def _save_checkpoint(
         "checkpoint_lineage": (config_json.get("experiment_manifest") or {}).get("checkpoint_lineage", []),
         "checkpoint_type": "generator_challenger_rectified_flow_v1",
     }
+    if immutable_writer is not None:
+        if path.parent != immutable_writer.physical_root or path.name != Path(path.name).name:
+            raise UnsafeFilesystemOperation("campaign checkpoint path is outside the retained output root")
+        return immutable_writer.write_torch_checkpoint(path.name, checkpoint, th)
     path.parent.mkdir(parents=True, exist_ok=True)
     th.save(checkpoint, path)
+    return None
+
+
+def _campaign_checkpoint_sidecar(
+    contract: Mapping[str, Any],
+    experiment_manifest: Mapping[str, Any] | None,
+    *,
+    step: int,
+    checkpoint_name: str,
+    checkpoint_sha256: str,
+    scheduler_present: bool,
+    ema_present: bool,
+    sampler_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    from spritelab.training.campaign import RESUME_CHECKPOINT_SCHEMA_VERSION
+    from spritelab.training.experiment_system import stable_hash
+
+    manifest_identity = None if experiment_manifest is None else experiment_manifest.get("experiment_hash")
+    if not isinstance(manifest_identity, str) or _CONCRETE_SHA256.fullmatch(manifest_identity) is None:
+        if experiment_manifest is None:
+            raise ValueError("campaign checkpoint requires a concrete experiment manifest")
+        manifest_identity = stable_hash(experiment_manifest)
+    if sampler_state.get("dataloader_generator_state") is None:
+        raise ValueError("campaign checkpoint has no exact data-loader generator state")
+    state_presence = {
+        "model_state_dict": True,
+        "optimizer_state_dict": True,
+        "scheduler_state_dict": scheduler_present,
+        "ema_state_dict": ema_present,
+        "rng_states": True,
+        "sampler_state": True,
+        "dataloader_generator_state": True,
+    }
+    schedule_required = str(contract["schedule_name"]).strip().lower() != "none"
+    ema_required = contract["evaluation_ema_policy"] in {"ema", "both"}
+    if schedule_required and not scheduler_present:
+        raise ValueError("campaign checkpoint is missing required scheduler state")
+    if ema_required and not ema_present:
+        raise ValueError("campaign checkpoint is missing required EMA state")
+    return {
+        "optimizer_step": int(step),
+        "campaign_identity": contract["campaign_identity"],
+        "run_identity": contract["run_identity"],
+        "resumability_metadata": {
+            "schema_version": RESUME_CHECKPOINT_SCHEMA_VERSION,
+            "checkpoint_relative_path": checkpoint_name,
+            "checkpoint_content_sha256": checkpoint_sha256,
+            "source_checkpoint_identity": checkpoint_sha256,
+            "target_runtime_identity": contract["run_identity"],
+            "experiment_manifest_identity": manifest_identity,
+            "exact_replay_eligible": True,
+            "unsafe_resume": False,
+            "max_optimizer_steps": contract["max_optimizer_steps"],
+            "gradient_accumulation_position": 0,
+            "state_presence": state_presence,
+        },
+    }
+
+
+def _campaign_evaluation_record(
+    contract: Mapping[str, Any],
+    *,
+    optimizer_step: int,
+    metrics_by_weight: Mapping[str, Any],
+) -> dict[str, Any]:
+    from spritelab.training.experiment_system import stable_hash
+
+    base = {
+        "schema_version": CAMPAIGN_EVALUATION_RECORD_SCHEMA_VERSION,
+        "campaign_identity": contract["campaign_identity"],
+        "run_identity": contract["run_identity"],
+        "seed": contract["seed"],
+        "optimizer_step": int(optimizer_step),
+        "evaluated_weights": sorted(str(key) for key in metrics_by_weight),
+        "metrics_by_weight": _jsonable(dict(metrics_by_weight)),
+    }
+    return {**base, "record_identity": stable_hash(base)}
+
+
+def _load_campaign_evaluations(
+    writer: _CampaignRunWriter,
+    contract: Mapping[str, Any],
+) -> dict[int, dict[str, Any]]:
+    from spritelab.training.experiment_system import stable_hash
+
+    expected = {int(step) for step in contract["expected_evaluation_steps"]}
+    found: dict[int, dict[str, Any]] = {}
+    for name in writer.names():
+        match = re.fullmatch(r"evaluation_step_(\d+)\.json", name)
+        if match is None:
+            continue
+        step = int(match.group(1))
+        if step not in expected or step in found:
+            raise UnsafeFilesystemOperation(f"campaign output has an off-schedule evaluation: {name}")
+        content = writer.read_bytes(name, max_bytes=16 * 1024 * 1024)
+        value = strict_json_loads(content)
+        if not isinstance(value, Mapping):
+            raise UnsafeFilesystemOperation(f"campaign evaluation is malformed: {name}")
+        record = dict(value)
+        identity = record.pop("record_identity", None)
+        required_weights = (
+            {"live", "ema"} if contract["evaluation_ema_policy"] == "both" else {str(contract["evaluation_ema_policy"])}
+        )
+        if (
+            value.get("schema_version") != CAMPAIGN_EVALUATION_RECORD_SCHEMA_VERSION
+            or value.get("campaign_identity") != contract["campaign_identity"]
+            or value.get("run_identity") != contract["run_identity"]
+            or value.get("seed") != contract["seed"]
+            or value.get("optimizer_step") != step
+            or set(value.get("evaluated_weights") or ()) != required_weights
+            or not isinstance(value.get("metrics_by_weight"), Mapping)
+            or set(value["metrics_by_weight"]) != required_weights
+            or identity != stable_hash(record)
+            or content != _canonical_pretty_json_bytes(value)
+        ):
+            raise UnsafeFilesystemOperation(f"campaign evaluation identity changed: {name}")
+        found[step] = dict(value)
+    return found
+
+
+def _publish_campaign_completion(
+    writer: _CampaignRunWriter,
+    contract: Mapping[str, Any],
+    *,
+    experiment_manifest: Mapping[str, Any] | None,
+    report: Mapping[str, Any],
+    final_train_losses: Mapping[str, Any],
+    validation_losses: Mapping[str, Any] | None,
+    ema_validation_losses: Mapping[str, Any] | None,
+    evaluations: Mapping[int, Mapping[str, Any]],
+    resume_mismatches: Sequence[str],
+    determinism_report: Mapping[str, Any],
+) -> None:
+    from spritelab.training.campaign import ARTIFACT_MANIFEST_SCHEMA_VERSION, PER_RUN_ARTIFACTS
+    from spritelab.training.experiment_system import stable_hash
+
+    expected_checkpoints = [int(step) for step in contract["expected_checkpoint_steps"]]
+    expected_evaluations = [int(step) for step in contract["expected_evaluation_steps"]]
+    if sorted(evaluations) != expected_evaluations:
+        raise UnsafeFilesystemOperation("campaign evaluation evidence does not exactly match the schedule")
+    checkpoint_rows: list[dict[str, Any]] = []
+    checkpoint_names: set[str] = set()
+    for step in expected_checkpoints:
+        checkpoint_name = f"checkpoint_step_{step:06d}.pt"
+        sidecar_name = f"checkpoint_step_{step:06d}.json"
+        checkpoint_names.add(checkpoint_name)
+        checkpoint_sha256 = writer.file_sha256(checkpoint_name)
+        sidecar_value = strict_json_loads(writer.read_bytes(sidecar_name, max_bytes=4 * 1024 * 1024))
+        if not isinstance(sidecar_value, Mapping):
+            raise UnsafeFilesystemOperation(f"campaign checkpoint sidecar is malformed: {sidecar_name}")
+        metadata = sidecar_value.get("resumability_metadata")
+        if (
+            sidecar_value.get("optimizer_step") != step
+            or sidecar_value.get("campaign_identity") != contract["campaign_identity"]
+            or sidecar_value.get("run_identity") != contract["run_identity"]
+            or not isinstance(metadata, Mapping)
+            or metadata.get("checkpoint_relative_path") != checkpoint_name
+            or metadata.get("checkpoint_content_sha256") != checkpoint_sha256
+            or metadata.get("source_checkpoint_identity") != checkpoint_sha256
+            or metadata.get("target_runtime_identity") != contract["run_identity"]
+            or metadata.get("exact_replay_eligible") is not True
+            or metadata.get("unsafe_resume") is not False
+        ):
+            raise UnsafeFilesystemOperation(f"campaign checkpoint sidecar identity changed: {sidecar_name}")
+        checkpoint_rows.append(
+            {
+                "optimizer_step": step,
+                "relative_path": checkpoint_name,
+                "content_sha256": checkpoint_sha256,
+                "resumability_metadata_identity": stable_hash(metadata),
+            }
+        )
+    on_disk_checkpoints = {
+        name for name in writer.names() if re.fullmatch(r"checkpoint(?:_step_\d+)?(?:_ema)?\.(?:bin|pt|pth|ckpt)", name)
+    }
+    if on_disk_checkpoints != checkpoint_names:
+        raise UnsafeFilesystemOperation("campaign checkpoint set contains an off-schedule or missing file")
+
+    common = {
+        "campaign_identity": contract["campaign_identity"],
+        "run_identity": contract["run_identity"],
+        "seed": contract["seed"],
+    }
+    evaluated_weights = sorted(
+        {str(weight) for evaluation in evaluations.values() for weight in evaluation.get("evaluated_weights", ())}
+    )
+    metric_definitions = {
+        "loss": {"unit": "mean rectified-flow objective", "split": "validation"},
+        "loss_velocity": {"unit": "mean velocity MSE", "split": "validation"},
+    }
+    experiment_identity = None if experiment_manifest is None else experiment_manifest.get("experiment_hash")
+    if not isinstance(experiment_identity, str) or _CONCRETE_SHA256.fullmatch(experiment_identity) is None:
+        if experiment_manifest is None:
+            raise UnsafeFilesystemOperation("campaign completion has no experiment manifest")
+        experiment_identity = stable_hash(experiment_manifest)
+    training_metrics_definition = {"unit": "mean loss", "split": "train", "aggregation": "optimizer_step"}
+    validation_metrics_definition = {
+        "unit": "mean loss",
+        "split": "validation",
+        "aggregation": "fixed_schedule",
+    }
+    ema_metrics_definition = {"weights": "ema", "split": "validation", "aggregation": "fixed_schedule"}
+    live_metrics_definition = {"weights": "live", "split": "validation", "aggregation": "fixed_schedule"}
+    raw_metrics_sha256 = writer.file_sha256("train_metrics.jsonl")
+    train_report_sha256 = writer.file_sha256("train_report.json")
+    values: dict[str, dict[str, Any]] = {
+        "experiment_manifest": {
+            **common,
+            "experiment_manifest_identity": experiment_identity,
+            "experiment_manifest": deepcopy(dict(experiment_manifest or {})),
+        },
+        "resolved_config": {
+            **common,
+            "resolved_config_sha256": contract["resolved_config_sha256"],
+            "execution_contract_sha256": contract["execution_contract_sha256"],
+            "resolved_config": deepcopy(dict(contract["resolved_config"])),
+        },
+        "checkpoint_series": {
+            **common,
+            "checkpoint_steps": expected_checkpoints,
+            "checkpoints": checkpoint_rows,
+        },
+        "training_metrics": {
+            **common,
+            "definition": training_metrics_definition,
+            "steps_completed": int(report["steps_completed"]),
+            "final": _jsonable(dict(final_train_losses)),
+            "raw_metrics_sha256": raw_metrics_sha256,
+            "train_report_sha256": train_report_sha256,
+        },
+        "validation_metrics": {
+            **common,
+            "definition": validation_metrics_definition,
+            "final": None if validation_losses is None else _jsonable(dict(validation_losses)),
+        },
+        "ema_metrics": {
+            **common,
+            "definition": ema_metrics_definition,
+            "evaluations": [
+                {"optimizer_step": step, "metrics": evaluation["metrics_by_weight"].get("ema")}
+                for step, evaluation in sorted(evaluations.items())
+            ],
+        },
+        "live_metrics": {
+            **common,
+            "definition": live_metrics_definition,
+            "evaluations": [
+                {"optimizer_step": step, "metrics": evaluation["metrics_by_weight"].get("live")}
+                for step, evaluation in sorted(evaluations.items())
+            ],
+        },
+        "evaluation_reports": {
+            **common,
+            "evaluation_steps": expected_evaluations,
+            "evaluated_weights": evaluated_weights,
+            "metric_definitions": metric_definitions,
+            "evaluations": [deepcopy(dict(evaluations[step])) for step in expected_evaluations],
+        },
+        "effective_pass_report": {
+            **common,
+            "max_optimizer_steps": contract["max_optimizer_steps"],
+            "micro_batch_size": int(report["batch_size"]),
+            "effective_batch_size": int(report["batch_size"]),
+            "train_records": int(report["train_records"]),
+            "optimizer_step_sprite_exposures": int(report["steps_completed"]) * int(report["batch_size"]),
+        },
+        "resume_report": {
+            **common,
+            "resume_used": report.get("resume_from") is not None,
+            "source_checkpoint_sha256": report.get("resume_checkpoint_sha256"),
+            "compatibility_mismatches": list(resume_mismatches),
+            "unsafe_resume": False,
+            "exact_replay_eligible": not resume_mismatches,
+        },
+        "environment_identity": {
+            **common,
+            "python_version": platform.python_version(),
+            "python_implementation": platform.python_implementation(),
+            "platform_system": platform.system(),
+            "platform_machine": platform.machine(),
+            "torch_version": None if torch is None else str(torch.__version__),
+            "device": str(report["device"]),
+            "determinism": _jsonable(dict(determinism_report)),
+        },
+        "code_identity": {
+            **common,
+            "training_code_identity_sha256": contract["training_code_identity_sha256"],
+        },
+        "run_completion_marker": {
+            **common,
+            "complete": True,
+            "failed": False,
+            "partial": False,
+            "final_optimizer_step": expected_checkpoints[-1],
+            "checkpoint_set_identity": stable_hash(checkpoint_rows),
+            "evaluation_set_identity": stable_hash([dict(evaluations[step]) for step in expected_evaluations]),
+            "resolved_config_sha256": contract["resolved_config_sha256"],
+            "execution_contract_sha256": contract["execution_contract_sha256"],
+            "experiment_manifest_identity": experiment_identity,
+            "training_code_identity_sha256": contract["training_code_identity_sha256"],
+        },
+    }
+    expected_value_names = set(PER_RUN_ARTIFACTS) - {"run_identity", "artifact_manifest"}
+    if set(values) != expected_value_names:
+        raise UnsafeFilesystemOperation("campaign completion artifact implementation is incomplete")
+    serialized = {name: _canonical_pretty_json_bytes(value) for name, value in values.items()}
+    artifact_entries: list[dict[str, Any]] = []
+    run_identity_content = writer.read_bytes("run_identity.json", max_bytes=1024 * 1024)
+    serialized_with_identity = {**serialized, "run_identity": run_identity_content}
+    for name in sorted(serialized_with_identity):
+        entry = {
+            "artifact_type": name,
+            "relative_path": f"{name}.json",
+            "content_sha256": hashlib.sha256(serialized_with_identity[name]).hexdigest(),
+            "producing_run_identity": contract["run_identity"],
+            "seed": contract["seed"],
+            "final_role": "required_run_artifact",
+        }
+        if name in {"training_metrics", "validation_metrics", "ema_metrics", "live_metrics"}:
+            entry["metric_definition_identity"] = stable_hash(values[name]["definition"])
+        elif name == "evaluation_reports":
+            entry["metric_definition_identity"] = stable_hash(values[name]["metric_definitions"])
+        artifact_entries.append(entry)
+    for row in checkpoint_rows:
+        artifact_entries.append(
+            {
+                "artifact_type": "checkpoint",
+                "relative_path": row["relative_path"],
+                "content_sha256": row["content_sha256"],
+                "producing_run_identity": contract["run_identity"],
+                "seed": contract["seed"],
+                "scheduled_step": row["optimizer_step"],
+            }
+        )
+    artifact_manifest = {
+        "schema_version": ARTIFACT_MANIFEST_SCHEMA_VERSION,
+        **common,
+        "artifacts": artifact_entries,
+    }
+    for name in sorted(values):
+        if name == "run_completion_marker":
+            continue
+        writer.write_json_idempotent(f"{name}.json", values[name])
+    writer.write_json_idempotent("artifact_manifest.json", artifact_manifest)
+    for entry in artifact_entries:
+        relative = str(entry["relative_path"])
+        if relative == "run_completion_marker.json":
+            continue
+        if writer.file_sha256(relative) != entry["content_sha256"]:
+            raise UnsafeFilesystemOperation(f"campaign completion artifact changed before commit: {relative}")
+    writer.write_json_idempotent("run_completion_marker.json", values["run_completion_marker"])
+    marker_entry = next(entry for entry in artifact_entries if entry["relative_path"] == "run_completion_marker.json")
+    if writer.file_sha256("run_completion_marker.json") != marker_entry["content_sha256"]:
+        raise UnsafeFilesystemOperation("campaign completion marker changed during commit")
 
 
 def _apply_cfg_dropout(inputs: dict[str, Any], *, dropout: float, pad_token_id: int) -> dict[str, Any]:

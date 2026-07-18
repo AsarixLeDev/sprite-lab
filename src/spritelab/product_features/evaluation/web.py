@@ -13,6 +13,7 @@ from spritelab.product_features.evaluation.dashboard import (
     build_dashboard,
     compare_evaluations,
     filter_gallery,
+    public_evaluation_projection,
 )
 from spritelab.product_features.evaluation.exploratory_smoke import (
     ExploratorySmokeWorkflow,
@@ -22,6 +23,7 @@ from spritelab.product_features.evaluation.playground import (
     GenerationCancelledError,
     GenerationRequest,
     GenerationSafetyError,
+    GenerationTimedOutError,
     GeneratorUnavailableError,
     PlaygroundGenerator,
     PlaygroundService,
@@ -32,6 +34,13 @@ from spritelab.training.smoke_runner import ExploratorySmokeRunner
 
 def _resource_text(name: str) -> str:
     return files("spritelab.product_features.evaluation").joinpath(name).read_text(encoding="utf-8")
+
+
+def _strict_payload_bool(payload: dict[str, Any], name: str, *, default: bool = False) -> bool:
+    value = payload.get(name, default)
+    if type(value) is not bool:
+        raise ValueError(f"{name} must be a JSON boolean.")
+    return value
 
 
 def create_evaluation_router(
@@ -72,21 +81,31 @@ def create_evaluation_router(
 
     @router.get("/evaluation", response_class=HTMLResponse)
     def evaluation_page(request: Request) -> Any:
-        initial = {
-            "checkpoints": evaluation.catalog.to_dict(),
-            "exploratory_checkpoints": exploratory_catalog.to_dict(),
-            "smoke_publications": exploratory_smoke_workflow.eligible_publications(),
-            "smoke_plans": exploratory_smoke_workflow.prepared_plans(),
-            "playground_defaults": playground.defaults(),
-            "playground_run": playground.latest_run(),
-            "promotion": evaluation.plan(EvaluationRequest(dry_run=True))[2][-1].to_dict(),
-            "durable_run": {
+        promotion = public_evaluation_projection(
+            evaluation.plan(EvaluationRequest(dry_run=True))[2][-1].to_dict(),
+            surface="stage",
+            private_roots=(context.project_root,),
+        )
+        durable_run = public_evaluation_projection(
+            {
                 "run_id": evaluation.latest_run_id,
                 "status": evaluation.latest_status,
                 "message": evaluation.latest_message,
                 "stages": [stage.to_dict() for stage in evaluation.latest_stages],
                 "dashboard": evaluation.dashboard(),
             },
+            surface="durable_run",
+            private_roots=(context.project_root,),
+        )
+        initial = {
+            "checkpoints": evaluation.catalog.to_dict(private_roots=(context.project_root,)),
+            "exploratory_checkpoints": exploratory_catalog.to_dict(),
+            "smoke_publications": exploratory_smoke_workflow.eligible_publications(),
+            "smoke_plans": exploratory_smoke_workflow.prepared_plans(),
+            "playground_defaults": playground.defaults(),
+            "playground_run": playground.latest_run(),
+            "promotion": promotion,
+            "durable_run": durable_run,
         }
         renderer = getattr(request.app.state, "spritelab_render_plugin_template", None)
         if callable(renderer):
@@ -129,11 +148,11 @@ def create_evaluation_router(
     @product_api
     def checkpoints(
         include_unavailable: bool = False,
-        technical_details: bool = False,
     ) -> dict[str, Any]:
         return evaluation.catalog.to_dict(
             include_unavailable=include_unavailable,
-            technical_details=technical_details,
+            technical_details=False,
+            private_roots=(context.project_root,),
         )
 
     @router.get("/evaluation/api/plan")
@@ -142,7 +161,16 @@ def create_evaluation_router(
         _checkpoint, _benchmark, stages = evaluation.plan(
             EvaluationRequest(checkpoint_id=checkpoint_id, weights=weights, dry_run=True)
         )
-        return {"stages": [stage.to_dict() for stage in stages]}
+        return {
+            "stages": [
+                public_evaluation_projection(
+                    stage.to_dict(),
+                    surface="stage",
+                    private_roots=(context.project_root,),
+                )
+                for stage in stages
+            ]
+        }
 
     @router.post("/evaluation/api/run")
     @product_api
@@ -154,18 +182,26 @@ def create_evaluation_router(
                 "Evaluation uses the project-configured benchmark; browser-supplied server paths are not accepted.",
                 next_action="Configure the benchmark through the local project configuration.",
             )
-        request = EvaluationRequest(
-            checkpoint_id=payload.get("checkpoint_id"),
-            weights=str(payload.get("weights") or "ema"),
-            dry_run=bool(payload.get("dry_run", False)),
-            explicit_action=bool(payload.get("explicit_action", False)),
-            confirm_billable=bool(payload.get("confirm_billable", False)),
-            allow_source_results=bool(payload.get("allow_source_results", False)),
-        )
+        try:
+            request = EvaluationRequest(
+                checkpoint_id=payload.get("checkpoint_id"),
+                weights=str(payload.get("weights") or "ema"),
+                dry_run=_strict_payload_bool(payload, "dry_run"),
+                explicit_action=_strict_payload_bool(payload, "explicit_action"),
+                confirm_billable=_strict_payload_bool(payload, "confirm_billable"),
+                allow_source_results=_strict_payload_bool(payload, "allow_source_results"),
+            )
+        except ValueError:
+            return api_error(
+                422,
+                "evaluation_boolean_invalid",
+                "Evaluation action flags must be JSON booleans.",
+                next_action="Reload the Evaluation page and submit the action again.",
+            )
         try:
             result = evaluation.run(request)
         except GenerationSafetyError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(status_code=409, detail="Evaluation generation was refused safely.") from exc
         if result.status in {ProductStatus.BLOCKED, ProductStatus.UNAVAILABLE, ProductStatus.FAILED}:
             next_action = (
                 result.blockers[0].resolution
@@ -179,7 +215,13 @@ def create_evaluation_router(
                 recoverable=True,
                 next_action=next_action,
             )
-        return JSONResponse(result.to_dict())
+        return JSONResponse(
+            public_evaluation_projection(
+                result.to_dict(),
+                surface="result",
+                private_roots=(context.project_root,),
+            )
+        )
 
     @router.get("/evaluation/api/dashboard")
     @product_api
@@ -197,7 +239,11 @@ def create_evaluation_router(
         sort_metric: str | None = None,
         descending: bool = True,
     ) -> dict[str, Any]:
-        raw = build_dashboard(evaluation.latest_report or {}, evaluation.latest_rows)["gallery"]
+        raw = build_dashboard(
+            evaluation.latest_report or {},
+            evaluation.latest_rows,
+            private_roots=(context.project_root,),
+        )["gallery"]
         return {
             "samples": filter_gallery(
                 raw,
@@ -227,7 +273,7 @@ def create_evaluation_router(
     @router.get("/evaluation/api/report-data")
     @product_api
     def report_data() -> JSONResponse:
-        return JSONResponse(
+        payload = public_evaluation_projection(
             {
                 "report": evaluation.latest_report,
                 "per_image_metrics": evaluation.latest_rows,
@@ -237,6 +283,11 @@ def create_evaluation_router(
                 "message": evaluation.latest_message,
                 "promotion_actions": 0,
             },
+            surface="report_data",
+            private_roots=(context.project_root,),
+        )
+        return JSONResponse(
+            payload,
             headers={"Content-Disposition": 'attachment; filename="sprite-lab-evaluation-report.json"'},
         )
 
@@ -317,6 +368,37 @@ def create_evaluation_router(
     def run_cuda_smoke(payload: dict[str, Any]) -> Any:
         return run_smoke_device(payload, "cuda")
 
+    def cancel_smoke_device(payload: dict[str, Any], device: str) -> Any:
+        allowed = {"conditioned_job_id", "smoke_id", "plan_identity", "explicit_action"}
+        if set(payload) != allowed:
+            return api_error(422, "smoke_cancel_payload", "Use only the selected server-prepared smoke identity.")
+        try:
+            plan = exploratory_smoke_workflow.validate_job_plan(
+                str(payload["conditioned_job_id"]),
+                str(payload["smoke_id"]),
+                str(payload["plan_identity"]),
+            )
+            return exploratory_smoke_runner.cancel(
+                str(plan["smoke_id"]),
+                str(plan["plan_identity"]),
+                device,
+                explicit_action=payload["explicit_action"] is True,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            code = getattr(exc, "code", "smoke_cancel_blocked")
+            message = getattr(exc, "public_message", "The contained smoke cancellation was refused safely.")
+            return api_error(409, str(code), str(message))
+
+    @router.post("/evaluation/api/playground/smokes/cancel-cpu")
+    @product_api
+    def cancel_cpu_smoke(payload: dict[str, Any]) -> Any:
+        return cancel_smoke_device(payload, "cpu")
+
+    @router.post("/evaluation/api/playground/smokes/cancel-cuda")
+    @product_api
+    def cancel_cuda_smoke(payload: dict[str, Any]) -> Any:
+        return cancel_smoke_device(payload, "cuda")
+
     @router.get("/evaluation/api/playground/smokes/{smoke_id}/status")
     @product_api
     def smoke_status(smoke_id: str, conditioned_job_id: str, plan_identity: str) -> Any:
@@ -370,13 +452,17 @@ def create_evaluation_router(
             )
             return playground.generate(
                 request,
-                explicit_action=bool(payload.get("explicit_action", False)),
-                confirm_billable=bool(payload.get("confirm_billable", False)),
+                explicit_action=_strict_payload_bool(payload, "explicit_action"),
+                confirm_billable=_strict_payload_bool(payload, "confirm_billable"),
             )
-        except (ValueError, GenerationSafetyError, GenerationCancelledError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except GenerationTimedOutError as exc:
+            raise HTTPException(status_code=408, detail="Playground generation reached its fixed deadline.") from exc
+        except GenerationCancelledError as exc:
+            raise HTTPException(status_code=409, detail="Playground generation was cancelled.") from exc
+        except (ValueError, GenerationSafetyError) as exc:
+            raise HTTPException(status_code=409, detail="Playground generation was refused safely.") from exc
         except GeneratorUnavailableError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(status_code=503, detail="The Playground generator is unavailable.") from exc
 
     @router.get("/evaluation/api/playground/runs/latest")
     @product_api
@@ -419,23 +505,34 @@ def create_evaluation_router(
         try:
             return playground.rerun(
                 name,
-                explicit_action=bool(payload.get("explicit_action", False)),
-                confirm_billable=bool(payload.get("confirm_billable", False)),
+                explicit_action=_strict_payload_bool(payload, "explicit_action"),
+                confirm_billable=_strict_payload_bool(payload, "confirm_billable"),
                 seed=int(payload["seed"]) if payload.get("seed") is not None else None,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except GenerationTimedOutError as exc:
+            raise HTTPException(status_code=408, detail="Playground generation reached its fixed deadline.") from exc
+        except GenerationCancelledError as exc:
+            raise HTTPException(status_code=409, detail="Playground generation was cancelled.") from exc
         except (ValueError, GenerationSafetyError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise HTTPException(status_code=409, detail="Playground generation was refused safely.") from exc
         except GeneratorUnavailableError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            raise HTTPException(status_code=503, detail="The Playground generator is unavailable.") from exc
 
     @router.get("/evaluation/api/technical/checkpoints")
     @product_api
-    def technical_checkpoints(acknowledge: bool = Query(False)) -> dict[str, Any]:
-        if not acknowledge:
+    def technical_checkpoints(
+        request: Request,
+        acknowledge: str | None = Query(None),
+    ) -> dict[str, Any]:
+        if acknowledge != "true" or request.query_params.getlist("acknowledge") != ["true"]:
             raise HTTPException(status_code=400, detail="Technical details require explicit acknowledgement.")
-        return evaluation.catalog.to_dict(include_unavailable=True, technical_details=True)
+        return evaluation.catalog.to_dict(
+            include_unavailable=True,
+            technical_details=True,
+            private_roots=(context.project_root,),
+        )
 
     router.spritelab_evaluation_service = evaluation
     router.spritelab_playground_service = playground

@@ -786,9 +786,9 @@ def _build_duplicate_groups(results: Sequence[SuitabilityResult]) -> list[Duplic
             fp.get("canonical_alpha_flip_y"),
             fp.get("canonical_alpha_flip_xy"),
         ]
-        values = [str(value) for value in values if value]
-        if values:
-            flip_buckets.setdefault(min(values), []).append(result)
+        fingerprint_values = [str(value) for value in values if value]
+        if fingerprint_values:
+            flip_buckets.setdefault(min(fingerprint_values), []).append(result)
     for fingerprint, members in sorted(flip_buckets.items()):
         ids = tuple(sorted(result.sprite_id for result in members))
         if (

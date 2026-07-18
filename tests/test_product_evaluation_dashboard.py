@@ -13,6 +13,7 @@ from spritelab.product_features.evaluation import (
     memorization_display,
     promotion_integrity_display,
 )
+from spritelab.product_features.evaluation.dashboard import public_evaluation_projection
 
 
 def _report(*, definition: str = "v1", review: int = 0, hard: int = 0) -> dict:
@@ -69,6 +70,58 @@ def test_metric_charts_use_real_rows_and_gallery_redacts_private_paths() -> None
     assert dashboard["per_source"] == []
 
 
+def test_dashboard_recursively_allowlists_metrics_and_exact_booleans() -> None:
+    secret = "DASHBOARD-ADAPTER-SECRET"
+    posix_path = "/srv/private/evaluator/metrics.json"
+    windows_path = r"C:\private\evaluator\metrics.json"
+    file_uri = "file:///srv/private/evaluator/metrics.json"
+    report = _report()
+    report["summary"]["pixel_art"]["adapter_payload"] = {
+        "api_key": secret,
+        "posix": posix_path,
+        "windows": windows_path,
+        "uri": file_uri,
+    }
+    rows = _rows()
+    rows[0]["metrics"]["hard_validity"] = {"pass": True, "adapter_secret": secret}
+    rows[0]["metrics"]["pixel_art"]["adapter_payload"] = {
+        "authorization": f"Bearer {secret}",
+        "path": posix_path,
+    }
+    rows[0]["adapter_payload"] = {"file_uri": file_uri, "password": secret}
+
+    dashboard = build_dashboard(report, rows)
+    serialized = json.dumps(dashboard, sort_keys=True)
+
+    assert dashboard["source_results_allowed"] is False
+    assert dashboard["gallery"][0]["metrics"]["hard_validity"]["pass"] is True
+    assert dashboard["gallery"][0]["metrics"]["pixel_art"]["unique_palette_size"] == 6
+    assert "adapter_payload" not in serialized
+    for private in (secret, posix_path, windows_path, file_uri):
+        assert private not in serialized
+
+
+def test_dashboard_projects_rows_before_aggregation() -> None:
+    row = _rows()[0]
+    row["category"] = {"password": "CATEGORY-SECRET"}
+    row["source_id"] = r"C:\private\source-pack"
+    row["generation_failed"] = "false"
+
+    dashboard = build_dashboard(_report(), [row], allow_source_results=True)
+
+    assert dashboard["per_category"] == [
+        {
+            "name": "unknown",
+            "sample_count": 1,
+            "structural_validity_rate": None,
+            "conditional_adherence": 1.0,
+        }
+    ]
+    assert dashboard["per_source"][0]["name"] == "source-pack"
+    assert "CATEGORY-SECRET" not in json.dumps(dashboard)
+    assert "C:\\private" not in json.dumps(dashboard)
+
+
 def test_no_data_chart_is_explicit() -> None:
     dashboard = build_dashboard(_report(), [])
     assert {chart["status"] for chart in dashboard["charts"]} == {"NO_DATA"}
@@ -98,6 +151,17 @@ def test_side_by_side_comparison_reports_metric_category_and_sample_changes() ->
 def test_incompatible_metric_definitions_are_rejected_before_averaging() -> None:
     with pytest.raises(IncompatibleMetricDefinitions, match="incompatible"):
         compare_evaluations(_report(definition="v1"), _report(definition="v2"))
+
+
+def test_public_reports_preserve_metric_definition_compatibility_identity() -> None:
+    left = public_evaluation_projection(_report(definition="v1"), surface="report")
+    right = public_evaluation_projection(_report(definition="v2"), surface="report")
+
+    assert "metric_definitions" not in left
+    assert len(left["metric_definitions_sha256"]) == 64
+    assert left["metric_definitions_sha256"] != right["metric_definitions_sha256"]
+    with pytest.raises(IncompatibleMetricDefinitions, match="incompatible"):
+        compare_evaluations(left, right)
 
 
 def test_hard_memorization_evidence_never_exposes_clear_action() -> None:

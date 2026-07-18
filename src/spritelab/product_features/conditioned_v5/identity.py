@@ -552,11 +552,11 @@ def controlled_worker_launch_arguments() -> tuple[str, ...]:
         list(flags) != policy.get("interpreter_flags")
         or hashlib.sha256(source.encode("utf-8")).hexdigest() != policy.get("bootstrap_sha256")
         or policy.get("bootstrap_transport") != "zlib-level-9-hex-v1"
-        or hashlib.sha256(command_source.encode("utf-8")).hexdigest()
-        != policy.get("bootstrap_command_sha256")
+        or hashlib.sha256(command_source.encode("utf-8")).hexdigest() != policy.get("bootstrap_command_sha256")
     ):
         raise ConditionedCodeIdentityError("The controlled worker launch source differs from its audited policy.")
     return (*flags, command_source)
+
 
 _AUDITOR_MODULES = {
     "label_audit": (
@@ -630,17 +630,17 @@ def conditioned_code_inventory() -> dict[str, Any]:
     files: dict[str, dict[str, Any]] = {}
     for relative in conditioned_code_module_paths():
         path = package_root.joinpath(*relative.split("/"))
-        payload = _read_single_link(path)
+        content = _read_single_link(path)
         files[f"spritelab/{relative}"] = {
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "byte_count": len(payload),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "byte_count": len(content),
         }
     for relative in _PRODUCTION_RESOURCE_PATHS:
         path = package_root.joinpath(*relative.split("/"))
-        payload = _read_single_link(path)
+        content = _read_single_link(path)
         files[f"spritelab/{relative}"] = {
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "byte_count": len(payload),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "byte_count": len(content),
         }
     runtime_dependencies = _runtime_dependency_inventories()
     payload = {

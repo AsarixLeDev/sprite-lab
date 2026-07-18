@@ -195,11 +195,20 @@ def summarize_dataset_palette_swap(
     config: PaletteSwapConfig,
     *,
     max_samples: int | None = None,
+    npz_cache: dict[str, dict[str, np.ndarray]] | None = None,
 ) -> dict[str, Any]:
     """Eligibility/apply statistics over dataset records for the training report."""
 
     selected = list(records) if max_samples is None else list(records)[: max(0, int(max_samples))]
-    rows = [item.row for item in _evaluate_samples(Path(dataset_dir), selected, config)]
+    rows = [
+        item.row
+        for item in _evaluate_samples(
+            Path(dataset_dir),
+            selected,
+            config,
+            npz_cache=npz_cache,
+        )
+    ]
     metrics = aggregate_metrics(rows)
     eligible = metrics["eligible_count"]
     applied = metrics["applied_count"]
@@ -245,21 +254,22 @@ def _evaluate_samples(
     swap_config: PaletteSwapConfig,
     *,
     draws_per_sprite: int = 1,
+    npz_cache: dict[str, dict[str, np.ndarray]] | None = None,
 ):
-    npz_cache: dict[str, dict[str, np.ndarray]] = {}
+    cache: dict[str, dict[str, np.ndarray]] = {} if npz_cache is None else npz_cache
     draw_count = max(1, int(draws_per_sprite))
     global_draw_index = 0
     for record in records:
         npz_file = str(record.get("npz_file") or f"{record.get('split', '')}.npz")
         npz_row = int(record.get("npz_row", -1))
-        arrays = npz_cache.get(npz_file)
+        arrays = cache.get(npz_file)
         if arrays is None:
             path = dataset_dir / npz_file
             if not path.is_file():
                 continue
             with np.load(path, allow_pickle=False) as data:
                 arrays = {key: data[key] for key in data.files}
-            npz_cache[npz_file] = arrays
+            cache[npz_file] = arrays
         if npz_row < 0 or npz_row >= int(np.asarray(arrays["alpha"]).shape[0]):
             continue
         for _draw in range(draw_count):

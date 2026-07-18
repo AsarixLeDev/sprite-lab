@@ -8,6 +8,7 @@ injectable runner so planning, validation, status, and tests are CPU-only.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -17,7 +18,10 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
+
+from spritelab.utils.safe_fs import UnsafeFilesystemOperation, open_anchored_directory, require_confined_path
 
 CAMPAIGN_SCHEMA_VERSION = "spritelab_training_campaign_v3"
 CODE_IDENTITY_SCHEMA_VERSION = "spritelab_training_code_identity_v4"
@@ -29,6 +33,159 @@ CAMPAIGN_COMPLETION_REPORT_NAME = "campaign_completion_report.json"
 RESUME_CHECKPOINT_SCHEMA_VERSION = "spritelab_campaign_resume_checkpoint_v1"
 DEFAULT_SEEDS = (731001, 731002, 731003)
 REQUIRED_SEED_COUNT = 3
+_CAMPAIGN_FILESYSTEM_SNAPSHOT_AUTHORITY = object()
+
+
+class _CampaignFilesystemSnapshot:
+    """In-process evidence issued only after a trusted filesystem capture."""
+
+    __slots__ = ("_authority", "_sealed", "campaign_identity", "foreign_run_roots", "runs", "schema_version")
+
+    def __init__(
+        self,
+        *,
+        campaign_identity: str,
+        runs: Sequence[Mapping[str, Any]],
+        _authority: object,
+    ) -> None:
+        if _authority is not _CAMPAIGN_FILESYSTEM_SNAPSHOT_AUTHORITY:
+            raise CampaignValidationError("campaign filesystem snapshot issuer is not trusted")
+        object.__setattr__(self, "schema_version", "spritelab_campaign_filesystem_snapshot_v1")
+        object.__setattr__(self, "campaign_identity", campaign_identity)
+        object.__setattr__(self, "foreign_run_roots", ())
+        object.__setattr__(self, "runs", tuple(_freeze_snapshot_value(state) for state in runs))
+        object.__setattr__(self, "_authority", _authority)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("campaign filesystem snapshots are immutable")
+        object.__setattr__(self, name, value)
+
+
+def _freeze_snapshot_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(key): _freeze_snapshot_value(item) for key, item in value.items()})
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return tuple(_freeze_snapshot_value(item) for item in value)
+    return deepcopy(value)
+
+
+def _thaw_snapshot_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_snapshot_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_snapshot_value(item) for item in value]
+    return deepcopy(value)
+
+
+def _native_event_migration_verification(run_id: str) -> dict[str, Any]:
+    from spritelab.product_web.events import MIGRATION_EVIDENCE_SCHEMA, EventMigrationState
+
+    empty_sha256 = hashlib.sha256(b"").hexdigest()
+    details = {
+        "canonical_present": False,
+        "canonical_size_bytes": 0,
+        "canonical_sha256": empty_sha256,
+        "event_history_origin": "native",
+        "origin_record_present": False,
+        "migration_required": False,
+        "canonical_prefix_size_bytes": 0,
+        "canonical_prefix_sha256": empty_sha256,
+    }
+    return {
+        "state": EventMigrationState.NO_MIGRATION.value,
+        "run_id": run_id,
+        "evidence_sha256": stable_hash(
+            {
+                "schema_version": MIGRATION_EVIDENCE_SCHEMA,
+                "state": EventMigrationState.NO_MIGRATION.value,
+                "run_id": run_id,
+                "details": details,
+            }
+        ),
+        "message": "No legacy migration is recorded or required.",
+        "record": None,
+        "details": details,
+    }
+
+
+def _capture_fresh_campaign_filesystem_snapshot(
+    campaign: Mapping[str, Any],
+    project_root: str | Path,
+) -> _CampaignFilesystemSnapshot | None:
+    """Capture an all-fresh campaign state through one anchored ancestor."""
+
+    root = Path(os.path.abspath(os.fspath(project_root)))
+    runs = list(campaign.get("expected_runs") or ())
+    if not runs:
+        return None
+    try:
+        output_roots = [require_confined_path(Path(os.path.abspath(str(run.get("output_root")))), root) for run in runs]
+    except (OSError, UnsafeFilesystemOperation, ValueError):
+        return None
+    campaign_roots = {output_root.parents[1] for output_root in output_roots if len(output_root.parents) >= 2}
+    if len(campaign_roots) != 1:
+        return None
+    campaign_root = next(iter(campaign_roots))
+    current = campaign_root
+    missing_parts: list[str] = []
+    while not os.path.lexists(current) and current != root:
+        missing_parts.append(current.name)
+        current = current.parent
+    if not missing_parts or current == campaign_root or current == current.parent:
+        return None
+    try:
+        with open_anchored_directory(current, root) as ancestor:
+            if ancestor.lexists(missing_parts[-1]):
+                return None
+            ancestor.verify()
+    except (OSError, UnsafeFilesystemOperation, ValueError):
+        return None
+    states: list[dict[str, Any]] = []
+    for run, output_root in zip(runs, output_roots, strict=True):
+        run_id = str(run.get("run_id"))
+        states.append(
+            {
+                "run_id": run_id,
+                "output_root": str(output_root),
+                "status": "fresh",
+                "next_action": "start",
+                "errors": [],
+                "event_migration_verification": _native_event_migration_verification(run_id),
+            }
+        )
+    return _CampaignFilesystemSnapshot(
+        campaign_identity=str(campaign.get("campaign_identity") or ""),
+        runs=states,
+        _authority=_CAMPAIGN_FILESYSTEM_SNAPSHOT_AUTHORITY,
+    )
+
+
+def _capture_anchored_campaign_filesystem_snapshot(
+    campaign: Mapping[str, Any],
+    physical_run_roots: Mapping[str, Path],
+) -> _CampaignFilesystemSnapshot:
+    """Classify exact already-held run roots without reopening lexical roots."""
+
+    runs = list(campaign.get("expected_runs") or ())
+    expected_ids = [str(run.get("run_id")) for run in runs]
+    if set(physical_run_roots) != set(expected_ids):
+        raise CampaignValidationError("anchored campaign filesystem does not cover the exact run set")
+    states = [
+        _classify_run_root(
+            campaign,
+            run,
+            root_override=Path(physical_run_roots[str(run.get("run_id"))]),
+        )
+        for run in runs
+    ]
+    return _CampaignFilesystemSnapshot(
+        campaign_identity=str(campaign.get("campaign_identity") or ""),
+        runs=states,
+        _authority=_CAMPAIGN_FILESYSTEM_SNAPSHOT_AUTHORITY,
+    )
+
 
 TRAINING_CODE_IDENTITY_MANDATORY_FILES = (
     "src/spritelab/__main__.py",
@@ -235,6 +392,22 @@ def _strict_campaign_integer(value: Any, label: str, errors: list[str]) -> int:
     return value
 
 
+def _strict_campaign_boolean(spec: Mapping[str, Any], field: str, errors: list[str]) -> bool:
+    if field not in spec:
+        return False
+    value = spec[field]
+    if type(value) is not bool:
+        errors.append(f"{field} must be a boolean; coercion is forbidden")
+        return False
+    return value
+
+
+def _require_runtime_boolean(value: Any, field: str) -> bool:
+    if type(value) is not bool:
+        raise CampaignValidationError(f"{field} must be a boolean; coercion is forbidden")
+    return value
+
+
 def effective_pass_report(
     *,
     optimizer_steps: int,
@@ -338,7 +511,12 @@ def campaign_schema() -> dict[str, Any]:
     }
 
 
-def plan_campaign(spec: Mapping[str, Any], *, execution_root: str | Path | None = None) -> dict[str, Any]:
+def plan_campaign(
+    spec: Mapping[str, Any],
+    *,
+    execution_root: str | Path | None = None,
+    file_sha256_resolver: Callable[[Path], str] | None = None,
+) -> dict[str, Any]:
     """Resolve a deterministic v1 campaign manifest from an input specification."""
 
     raw = deepcopy(dict(spec))
@@ -351,6 +529,8 @@ def plan_campaign(spec: Mapping[str, Any], *, execution_root: str | Path | None 
     identities = deepcopy(dict(raw.get("identities") or {}))
 
     schedule_errors: list[str] = []
+    requested_executable = _strict_campaign_boolean(raw, "executable", schedule_errors)
+    launch_authorized = _strict_campaign_boolean(raw, "launch_authorized", schedule_errors)
     if any(type(seed) is not int for seed in seeds):
         schedule_errors.append("campaign seeds must be integers; coercion is forbidden")
     micro_batch = _strict_campaign_integer(training.get("micro_batch_size"), "micro_batch_size", schedule_errors)
@@ -468,7 +648,7 @@ def plan_campaign(spec: Mapping[str, Any], *, execution_root: str | Path | None 
         "abort_conditions": list(raw.get("abort_conditions") or _default_abort_conditions()),
         "promotion_restrictions": list(raw.get("promotion_restrictions") or _default_promotion_restrictions()),
         "fixed_epoch_fallback": False,
-        "launch_authorized": bool(raw.get("launch_authorized", False)),
+        "launch_authorized": launch_authorized,
         "campaign_artifact_root": (
             str(raw.get("campaign_artifact_root")) if raw.get("campaign_artifact_root") else None
         ),
@@ -478,10 +658,9 @@ def plan_campaign(spec: Mapping[str, Any], *, execution_root: str | Path | None 
         "blockers": schedule_errors,
     }
     manifest["campaign_identity"] = stable_hash(_campaign_identity_payload(manifest))
-    validation = validate_campaign(manifest)
+    validation = validate_campaign(manifest, file_sha256_resolver=file_sha256_resolver)
     blockers = sorted({*schedule_errors, *validation["errors"], *validation["blockers"]})
     manifest["blockers"] = blockers
-    requested_executable = bool(raw.get("executable", False))
     manifest["executable"] = requested_executable and not blockers
     manifest["plan_status"] = "ready" if manifest["executable"] else "blocked"
     # Bind the fully resolved plan after status resolution.
@@ -489,13 +668,20 @@ def plan_campaign(spec: Mapping[str, Any], *, execution_root: str | Path | None 
     return manifest
 
 
-def validate_campaign(campaign: Mapping[str, Any]) -> dict[str, Any]:
+def validate_campaign(
+    campaign: Mapping[str, Any],
+    *,
+    file_sha256_resolver: Callable[[Path], str] | None = None,
+) -> dict[str, Any]:
     """Validate schema, production identities, schedules, and comparison fairness."""
 
     errors: list[str] = []
     blockers: list[str] = []
     if campaign.get("schema_version") != CAMPAIGN_SCHEMA_VERSION:
         errors.append(f"schema_version must equal {CAMPAIGN_SCHEMA_VERSION!r}")
+    for field in ("executable", "launch_authorized"):
+        if type(campaign.get(field)) is not bool:
+            errors.append(f"{field} must be a boolean; coercion is forbidden")
     if not str(campaign.get("campaign_id") or "").strip():
         errors.append("campaign_id is required")
     if not str(campaign.get("purpose") or "").strip():
@@ -529,7 +715,13 @@ def validate_campaign(campaign: Mapping[str, Any]) -> dict[str, Any]:
         ("split_manifest_hash", "split_manifest_path"),
         ("conditioning_vocabulary_hash", "conditioning_vocabulary_path"),
     ):
-        _validate_file_binding(identities, hash_field, path_field, blockers)
+        _validate_file_binding(
+            identities,
+            hash_field,
+            path_field,
+            blockers,
+            file_sha256_resolver=file_sha256_resolver,
+        )
     configuration_bindings = {
         "model_config_hash": campaign.get("model") or {},
         "optimizer_config_hash": campaign.get("optimizer") or {},
@@ -546,7 +738,12 @@ def validate_campaign(campaign: Mapping[str, Any]) -> dict[str, Any]:
     if not is_concrete_hash(evaluation.get("evaluation_config_hash")):
         blockers.append("evaluation evaluation_config_hash is missing, placeholder, or not a concrete SHA-256")
     _validate_file_binding(
-        evaluation, "benchmark_manifest_hash", "benchmark_manifest_path", blockers, prefix="evaluation "
+        evaluation,
+        "benchmark_manifest_hash",
+        "benchmark_manifest_path",
+        blockers,
+        prefix="evaluation ",
+        file_sha256_resolver=file_sha256_resolver,
     )
     if evaluation.get("evaluation_config_hash") != stable_hash(_evaluation_identity_payload(evaluation)):
         blockers.append("evaluation evaluation_config_hash does not match canonical evaluation configuration")
@@ -698,7 +895,13 @@ def validate_campaign(campaign: Mapping[str, Any]) -> dict[str, Any]:
         "schema_version": "spritelab_campaign_validation_v1",
         "campaign_id": campaign.get("campaign_id"),
         "valid": not errors,
-        "launch_ready": not errors and not blockers and campaign.get("launch_authorized") is True,
+        "launch_ready": (
+            not errors
+            and not blockers
+            and campaign.get("executable") is True
+            and campaign.get("plan_status") == "ready"
+            and campaign.get("launch_authorized") is True
+        ),
         "errors": errors,
         "blockers": blockers,
         "fairness": fairness,
@@ -798,13 +1001,102 @@ def validate_fixed_step_fairness(campaign: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def audit_resume(campaign: Mapping[str, Any], *, unsafe_resume: bool = False) -> dict[str, Any]:
+def audit_resume(
+    campaign: Mapping[str, Any],
+    *,
+    unsafe_resume: bool = False,
+    filesystem_snapshot: _CampaignFilesystemSnapshot | None = None,
+) -> dict[str, Any]:
     """Classify all output roots using the closed, versioned state set."""
 
-    states = [_classify_run_root(campaign, run) for run in campaign.get("expected_runs") or []]
+    unsafe_resume = _require_runtime_boolean(unsafe_resume, "unsafe_resume")
+    if filesystem_snapshot is None:
+        states = [_classify_run_root(campaign, run) for run in campaign.get("expected_runs") or []]
+        foreign_run_roots = _foreign_run_roots(campaign)
+    else:
+        if (
+            type(filesystem_snapshot) is not _CampaignFilesystemSnapshot
+            or filesystem_snapshot._authority is not _CAMPAIGN_FILESYSTEM_SNAPSHOT_AUTHORITY
+        ):
+            raise CampaignValidationError("campaign filesystem snapshot was not issued by the trusted capture seam")
+        if filesystem_snapshot.schema_version != "spritelab_campaign_filesystem_snapshot_v1":
+            raise CampaignValidationError("campaign filesystem snapshot schema is unsupported")
+        if filesystem_snapshot.campaign_identity != campaign.get("campaign_identity"):
+            raise CampaignValidationError("campaign filesystem snapshot belongs to a different campaign")
+        states = [_thaw_snapshot_value(state) for state in filesystem_snapshot.runs]
+        expected_runs = list(campaign.get("expected_runs") or [])
+        expected_ids = [str(run.get("run_id")) for run in expected_runs]
+        if [str(state.get("run_id")) for state in states] != expected_ids:
+            raise CampaignValidationError("campaign filesystem snapshot does not cover the exact run set")
+        from spritelab.product_web.events import EventMigrationState
+
+        allowed_statuses = {
+            "fresh": "start",
+            "valid_resumable": "resume",
+            "complete": "refuse_relaunch",
+            "corrupt": "refuse",
+            "contradictory": "refuse",
+            "foreign": "refuse",
+            "partial_invalid": "refuse",
+        }
+        resume_compatible_migrations = {
+            EventMigrationState.NO_MIGRATION.value,
+            EventMigrationState.VERIFIED_SOURCE_PRESENT.value,
+            EventMigrationState.VERIFIED_SOURCE_REMOVED.value,
+        }
+        for state, run in zip(states, expected_runs, strict=True):
+            status = state.get("status")
+            errors = state.get("errors")
+            if state.get("output_root") != str(run.get("output_root")):
+                raise CampaignValidationError("campaign filesystem snapshot output-root binding changed")
+            if status not in allowed_statuses or state.get("next_action") != allowed_statuses[status]:
+                raise CampaignValidationError("campaign filesystem snapshot contains an invalid closed run state")
+            if not isinstance(errors, list) or any(not isinstance(error, str) or not error for error in errors):
+                raise CampaignValidationError("campaign filesystem snapshot contains malformed run errors")
+            if status in {"fresh", "valid_resumable"} and errors:
+                raise CampaignValidationError("campaign filesystem snapshot marks an executable run as erroneous")
+            if status in {"corrupt", "contradictory", "foreign", "partial_invalid"} and not errors:
+                raise CampaignValidationError("campaign filesystem snapshot omits its refusal reason")
+            migration = state.get("event_migration_verification")
+            if (
+                not isinstance(migration, Mapping)
+                or migration.get("run_id") != str(run.get("run_id"))
+                or not isinstance(migration.get("state"), str)
+                or not isinstance(migration.get("message"), str)
+                or not isinstance(migration.get("details"), Mapping)
+                or (migration.get("record") is not None and not isinstance(migration.get("record"), Mapping))
+            ):
+                raise CampaignValidationError("campaign filesystem snapshot contains malformed event evidence")
+            expected_evidence = stable_hash(
+                {
+                    "schema_version": "spritelab.product.event-migration-evidence.v1",
+                    "state": migration["state"],
+                    "run_id": str(run.get("run_id")),
+                    "details": dict(migration["details"]),
+                }
+            )
+            if not hmac.compare_digest(str(migration.get("evidence_sha256") or ""), expected_evidence):
+                raise CampaignValidationError("campaign filesystem snapshot event evidence identity changed")
+            if status == "fresh" and dict(migration) != _native_event_migration_verification(str(run.get("run_id"))):
+                raise CampaignValidationError("campaign filesystem snapshot contains invalid fresh event evidence")
+            if status == "valid_resumable":
+                checkpoint = state.get("checkpoint")
+                logical_root = Path(str(run.get("output_root")))
+                if (
+                    not isinstance(checkpoint, str)
+                    or Path(checkpoint).parent != logical_root
+                    or not is_concrete_hash(state.get("checkpoint_content_sha256"))
+                    or type(state.get("resume_step")) is not int
+                    or state.get("resume_step") not in set(run.get("expected_checkpoint_steps") or ())
+                ):
+                    raise CampaignValidationError("campaign filesystem snapshot contains an invalid resume binding")
+                if migration["state"] not in resume_compatible_migrations:
+                    raise CampaignValidationError(
+                        "campaign filesystem snapshot resume event evidence is not compatible"
+                    )
+        foreign_run_roots = list(filesystem_snapshot.foreign_run_roots)
     root_state = _classify_campaign_roots(states)
     errors = [f"{state['run_id']}: {message}" for state in states for message in state["errors"]]
-    foreign_run_roots = _foreign_run_roots(campaign)
     if foreign_run_roots:
         root_state = "foreign"
         errors.extend(f"foreign campaign run root: {path}" for path in foreign_run_roots)
@@ -818,7 +1110,7 @@ def audit_resume(campaign: Mapping[str, Any], *, unsafe_resume: bool = False) ->
         "root_state": root_state,
         "allowed_execution_states": ["fresh", "valid_resumable"],
         "safe": not errors and root_state in {"fresh", "valid_resumable"},
-        "unsafe_resume_requested": bool(unsafe_resume),
+        "unsafe_resume_requested": unsafe_resume,
         "errors": errors,
         "foreign_run_roots": foreign_run_roots,
         "runs": states,
@@ -837,15 +1129,23 @@ def execute_campaign(
     project_root: str | Path | None = None,
     resume: bool = False,
     unsafe_resume: bool = False,
+    launch_authorization_evidence_sha256: str | None = None,
     runner: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Run eligible commands only after all non-interactive safety gates pass."""
 
-    if not execute:
+    for field, value in (
+        ("execute", execute),
+        ("confirm_execute", confirm_execute),
+        ("resume", resume),
+        ("unsafe_resume", unsafe_resume),
+    ):
+        _require_runtime_boolean(value, field)
+    if execute is not True:
         raise CampaignValidationError("execution requires explicit execute=True / --execute")
-    if not confirm_execute:
+    if confirm_execute is not True:
         raise CampaignValidationError("execution requires explicit --confirm-execute")
-    if not campaign.get("executable") or campaign.get("plan_status") != "ready":
+    if campaign.get("executable") is not True or campaign.get("plan_status") != "ready":
         raise CampaignValidationError("campaign is blocked or executable=false")
     if campaign.get("launch_authorized") is not True:
         raise CampaignValidationError("campaign launch_authorized must be true")
@@ -857,7 +1157,7 @@ def execute_campaign(
     resume_report = audit_resume(campaign, unsafe_resume=unsafe_resume)
     if not resume_report["safe"]:
         raise CampaignResumeError("unsafe campaign state: " + "; ".join(resume_report["errors"]))
-    if resume_report["root_state"] == "valid_resumable" and not resume:
+    if resume_report["root_state"] == "valid_resumable" and resume is not True:
         raise CampaignResumeError("valid resumable campaign requires explicit resume / --resume")
     if campaign_config_path is None:
         raise CampaignValidationError("execution requires the exact authoritative campaign configuration path")
@@ -895,10 +1195,17 @@ def execute_campaign(
             changed_configs.append(f"{run.get('run_id')}:execution_contract")
     if changed_configs:
         raise CampaignValidationError("resolved config or execution contract changed: " + ", ".join(changed_configs))
-    from spritelab.training.launch import prepare_validated_training_launch, verify_validated_training_launch
+    from spritelab.training.launch import (
+        TrainingFilesystemCapability,
+        prepare_validated_training_launch,
+        verify_validated_training_launch,
+    )
 
-    prepared_launches = []
-    for run in campaign.get("expected_runs") or []:
+    def prepare_run_launch(
+        run: Mapping[str, Any],
+        *,
+        filesystem_snapshot: _CampaignFilesystemSnapshot | None = None,
+    ) -> Any:
         state = states[run["run_id"]]
         validated = prepare_validated_training_launch(
             campaign_config_path,
@@ -909,41 +1216,63 @@ def execute_campaign(
             campaign_profile=campaign_profile,
             environment=normalised_environment,
             resume=state["status"] == "valid_resumable",
+            filesystem_snapshot=filesystem_snapshot,
+            launch_authorization_evidence_sha256=launch_authorization_evidence_sha256,
         )
         if validated.receipt.campaign_identity_sha256 != campaign.get("campaign_identity"):
             raise CampaignValidationError("loaded campaign configuration does not match the requested campaign")
-        prepared_launches.append((run, validated))
+        return validated
 
     launched: list[dict[str, Any]] = []
-    for run, validated in prepared_launches:
-        command = list(validated.argv)
-        if runner is None:
-            verify_validated_training_launch(
-                validated.receipt,
-                validated.validator_context,
-                compute_backend_id=compute_backend_id,
-                argv=command,
-                environment=validated.environment,
-                output_root=validated.output_root,
-                campaign_identity=str(campaign["campaign_identity"]),
-                run_identity=str(run["run_identity"]),
-            )
-            environment = os.environ.copy()
-            environment.update(validated.environment)
-            result = subprocess.run(
-                command,
-                check=True,
-                cwd=str(project_root or Path.cwd()),
-                env=environment,
-            )
-        else:
+    if runner is None:
+        # One capability retains the campaign directory and every per-seed root
+        # for the full sequence.  Each launch inherits only its selected root,
+        # so child-created outputs in seed N cannot become baseline drift when
+        # seed N+1 is checked against its own still-pristine retained snapshot.
+        # Receipts are intentionally issued just before each process: one seed
+        # may outlive the short receipt TTL before the next seed begins.
+        with TrainingFilesystemCapability(campaign, project_root or Path.cwd()) as capability:
+            for run in campaign.get("expected_runs") or []:
+                validated = prepare_run_launch(run, filesystem_snapshot=capability.filesystem_snapshot)
+                command = list(validated.argv)
+                verified = verify_validated_training_launch(
+                    validated.receipt,
+                    validated.validator_context,
+                    compute_backend_id=compute_backend_id,
+                    argv=command,
+                    environment=validated.environment,
+                    output_root=validated.output_root,
+                    campaign_identity=str(campaign["campaign_identity"]),
+                    run_identity=str(run["run_identity"]),
+                    filesystem_snapshot=capability.filesystem_snapshot,
+                )
+                child_command = capability.bootstrap_command(verified)
+                with capability.launch_inheritance(verified) as (boundary_environment, inheritance_options):
+                    environment = dict(validated.environment)
+                    environment.update(boundary_environment)
+                    result = subprocess.run(
+                        child_command,
+                        check=True,
+                        cwd=str(project_root or Path.cwd()),
+                        env=environment,
+                        **inheritance_options,
+                    )
+                launched.append(
+                    {"run_id": run["run_id"], "command": command, "returncode": getattr(result, "returncode", 0)}
+                )
+    else:
+        for run in campaign.get("expected_runs") or []:
+            validated = prepare_run_launch(run)
+            command = list(validated.argv)
             result = runner(
                 command,
                 check=True,
                 cwd=str(project_root or Path.cwd()),
                 validated_launch=validated,
             )
-        launched.append({"run_id": run["run_id"], "command": command, "returncode": getattr(result, "returncode", 0)})
+            launched.append(
+                {"run_id": run["run_id"], "command": command, "returncode": getattr(result, "returncode", 0)}
+            )
     return {
         "schema_version": "spritelab_campaign_execution_v1",
         "campaign_id": campaign.get("campaign_id"),
@@ -1829,26 +2158,43 @@ def _validate_file_binding(
     errors: list[str],
     *,
     prefix: str = "identity ",
+    file_sha256_resolver: Callable[[Path], str] | None = None,
 ) -> None:
     path_value = values.get(path_field)
     if not path_value:
         errors.append(f"{prefix}{path_field} is required to verify {hash_field}")
         return
     path = Path(str(path_value))
-    if not path.is_file():
+    if file_sha256_resolver is not None:
+        try:
+            actual_sha256 = file_sha256_resolver(path)
+        except (KeyError, OSError, ValueError):
+            errors.append(f"{prefix}{path_field} is not present in the verified filesystem snapshot")
+            return
+    elif not path.is_file():
         errors.append(f"{prefix}{path_field} does not exist: {path}")
-    elif values.get(hash_field) != file_sha256(path):
+        return
+    else:
+        actual_sha256 = file_sha256(path)
+    if values.get(hash_field) != actual_sha256:
         errors.append(f"{prefix}{hash_field} does not match actual file content")
 
 
-def _classify_run_root(campaign: Mapping[str, Any], run: Mapping[str, Any]) -> dict[str, Any]:
-    root = Path(str(run["output_root"]))
+def _classify_run_root(
+    campaign: Mapping[str, Any],
+    run: Mapping[str, Any],
+    *,
+    root_override: Path | None = None,
+) -> dict[str, Any]:
+    logical_root = Path(str(run["output_root"]))
+    root = logical_root if root_override is None else root_override
     state: dict[str, Any] = {
         "run_id": run["run_id"],
-        "output_root": str(root),
+        "output_root": str(logical_root),
         "status": "fresh",
         "next_action": "start",
         "errors": [],
+        "event_migration_verification": _native_event_migration_verification(str(run["run_id"])),
     }
     if not root.exists():
         return state
@@ -1881,7 +2227,7 @@ def _classify_run_root(campaign: Mapping[str, Any], run: Mapping[str, Any]) -> d
         "campaign_identity": campaign.get("campaign_identity"),
         "run_id": run.get("run_id"),
         "run_identity": run.get("run_identity"),
-        "output_root": str(root),
+        "output_root": str(logical_root),
         "resolved_config_sha256": run.get("resolved_config_sha256"),
         "execution_contract_sha256": run.get("execution_contract_sha256"),
     }
@@ -1912,6 +2258,14 @@ def _classify_run_root(campaign: Mapping[str, Any], run: Mapping[str, Any]) -> d
     migration = verify_event_migration(str(run["run_id"]), root, origin_required=True)
     state["event_migration_state"] = migration.state.value
     state["event_history_origin"] = migration.event_history_origin
+    state["event_migration_verification"] = {
+        "state": migration.state.value,
+        "run_id": migration.run_id,
+        "evidence_sha256": migration.evidence_sha256,
+        "message": migration.message,
+        "record": deepcopy(migration.record),
+        "details": deepcopy(dict(migration.details or {})),
+    }
     if not migration.resume_compatible:
         state.update(status="partial_invalid", next_action="refuse")
         state["errors"].append(
@@ -1949,7 +2303,7 @@ def _classify_run_root(campaign: Mapping[str, Any], run: Mapping[str, Any]) -> d
             "existing incomplete run has no exact-resume checkpoint; refusing restart from step zero"
         )
         return state
-    parsed: list[tuple[int, Path]] = []
+    parsed: list[tuple[int, Path, str, str]] = []
     expected_steps = set(run.get("expected_checkpoint_steps") or [])
     for checkpoint_path in checkpoint_files:
         try:
@@ -1980,8 +2334,18 @@ def _classify_run_root(campaign: Mapping[str, Any], run: Mapping[str, Any]) -> d
             campaign, run, root, metadata, sidecar=checkpoint_path
         )
         state["errors"].extend(metadata_errors)
-        if actual_checkpoint is not None:
-            parsed.append((step, actual_checkpoint))
+        declared_checkpoint_sha256 = (
+            metadata.get("checkpoint_content_sha256") if isinstance(metadata, Mapping) else None
+        )
+        if actual_checkpoint is not None and is_concrete_hash(declared_checkpoint_sha256):
+            parsed.append(
+                (
+                    step,
+                    actual_checkpoint,
+                    str(declared_checkpoint_sha256),
+                    str(metadata["checkpoint_relative_path"]),
+                )
+            )
     if state["errors"]:
         if state["status"] != "corrupt":
             state.update(status="partial_invalid", next_action="refuse")
@@ -1990,11 +2354,13 @@ def _classify_run_root(campaign: Mapping[str, Any], run: Mapping[str, Any]) -> d
         state.update(status="partial_invalid", next_action="refuse")
         state["errors"].append("no checkpoint satisfies the exact campaign resume contract")
         return state
-    latest_step, latest = max(parsed)
+    latest_step, _latest_physical, latest_sha256, latest_relative = max(parsed)
+    latest = logical_root.joinpath(*PurePosixPath(latest_relative).parts)
     state.update(
         status="valid_resumable",
         next_action="resume",
         checkpoint=str(latest),
+        checkpoint_content_sha256=latest_sha256,
         resume_step=latest_step,
     )
     return state

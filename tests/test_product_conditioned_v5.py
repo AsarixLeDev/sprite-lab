@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import ast
+import errno
 import hashlib
 import importlib.util
 import json
 import marshal
 import os
+import re
 import stat
 import subprocess
 import sys
+import threading
 import time
 import zlib
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -26,12 +30,21 @@ import spritelab.product_features.conditioned_v5.audit_runner as conditioned_aud
 import spritelab.product_features.conditioned_v5.identity as conditioned_identity_module
 import spritelab.product_features.conditioned_v5.intake as conditioned_intake_module
 import spritelab.product_features.conditioned_v5.service as conditioned_service_module
+from spritelab.dataset_maker.exporter import commit_anchored_dataset_maker_export
 from spritelab.dataset_v5.identity import decoded_rgba_sha256 as dataset_decoded_rgba_sha256
 from spritelab.product_core import ProjectContext
 from spritelab.product_features.conditioned_v5 import (
     CandidatePolicy,
     ConditionedDatasetImportAdapter,
     ConditionedDatasetService,
+)
+from spritelab.product_features.conditioned_v5.audit_receipts import (
+    AUDIT_ACTION_RECORD_KEYS,
+    AUDIT_ACTION_RECORD_SCHEMA,
+    AUDIT_RECEIPT_KEYS,
+    AUDIT_RECEIPT_SCHEMA,
+    audit_operation_identity,
+    validate_audit_action_record,
 )
 from spritelab.product_features.conditioned_v5.identity import (
     TRUSTED_AUDITOR_IDS,
@@ -84,7 +97,12 @@ from spritelab.product_features.harvest.trusted_backend import (
 from spritelab.product_web.app import create_app
 from spritelab.training.campaign import stable_hash
 from spritelab.utils.pinned_executable import read_executable_identity
-from spritelab.utils.safe_fs import atomic_write_bytes
+from spritelab.utils.safe_fs import (
+    OwnedFileIdentity,
+    UnsafeFilesystemOperation,
+    atomic_write_bytes,
+    open_anchored_directory,
+)
 from spritelab.v3.config import DEFAULT_CONFIG
 
 
@@ -109,6 +127,31 @@ def _png(path: Path, color: tuple[int, int, int, int], marker: int) -> None:
 
 def _identity(value: Any) -> str:
     return stable_hash(value)
+
+
+def _assert_strict_retained_stage_tree(root: Path) -> None:
+    files = [path for path in root.rglob("*") if path.is_file()]
+    aliases: dict[Path, list[Path]] = {}
+    for path in files:
+        match = re.fullmatch(r"\.(.+)\.staging-[0-9a-f]{32}", path.name)
+        if match is None:
+            continue
+        target = path.with_name(match.group(1))
+        assert target.is_file()
+        alias_metadata = path.stat()
+        target_metadata = target.stat()
+        assert alias_metadata.st_nlink == target_metadata.st_nlink == 2
+        assert (alias_metadata.st_dev, alias_metadata.st_ino) == (target_metadata.st_dev, target_metadata.st_ino)
+        aliases.setdefault(target, []).append(path)
+    for path in files:
+        if re.fullmatch(r"\.(.+)\.staging-[0-9a-f]{32}", path.name) is not None:
+            continue
+        metadata = path.stat()
+        if metadata.st_nlink == 1:
+            assert path not in aliases
+            continue
+        assert metadata.st_nlink == 2
+        assert len(aliases.get(path, ())) == 1
 
 
 def _controlled_worker_work(tmp_path: Path) -> Path:
@@ -161,6 +204,10 @@ def _source(source_id: str) -> HarvestSource:
         license_http_status=200,
         license_content_sha256="c" * 64,
         automation_terms=automation_terms,
+        zero_cost_reviewed=True,
+        zero_cost_verification_identity_sha256="1" * 64,
+        zero_cost_evidence_text_sha256="2" * 64,
+        zero_cost_probe_receipt_identity_sha256="3" * 64,
         attestation_identity_sha256="0" * 64,
     )
     binding = replace(provisional, attestation_identity_sha256=provisional.expected_attestation_identity)
@@ -407,7 +454,25 @@ def _handoff(
     return handoff
 
 
-def _service(project: Path, *, activation_loader: Any = None) -> ConditionedDatasetService:
+def _fake_independent_audit_runner(
+    kind: str,
+    job_root: Path,
+    candidate: dict[str, Any],
+    *,
+    project_root: Path,
+    progress: Any,
+    cancelled: Any,
+) -> dict[str, Any]:
+    del job_root, project_root, progress, cancelled
+    return _evidence(kind, candidate)
+
+
+def _service(
+    project: Path,
+    *,
+    activation_loader: Any = None,
+    independent_audit_runner: Any = _fake_independent_audit_runner,
+) -> ConditionedDatasetService:
     def campaign_builder(*_args: Any, **_kwargs: Any) -> Any:
         portable = {
             "campaign_id": "conditioned_test",
@@ -427,6 +492,7 @@ def _service(project: Path, *, activation_loader: Any = None) -> ConditionedData
         project,
         campaign_builder=campaign_builder,
         activation_loader=activation_loader,
+        independent_audit_runner=independent_audit_runner,
         policy=CandidatePolicy(min_images=4, target_images=8, max_images=10, max_source_files=32),
     )
 
@@ -640,6 +706,7 @@ def _built_candidate(
     production_builder: bool = False,
     write_config: bool = False,
     activation_loader: Any = None,
+    independent_audit_runner: Any = _fake_independent_audit_runner,
 ) -> tuple[ConditionedDatasetService, str, dict[str, Any]]:
     project.mkdir()
     if write_config:
@@ -656,10 +723,15 @@ def _built_candidate(
     conditioned = (
         ConditionedDatasetService(
             project,
+            independent_audit_runner=independent_audit_runner,
             policy=CandidatePolicy(min_images=4, target_images=8, max_images=10, max_source_files=32),
         )
         if production_builder
-        else _service(project, activation_loader=activation_loader)
+        else _service(
+            project,
+            activation_loader=activation_loader,
+            independent_audit_runner=independent_audit_runner,
+        )
     )
     started, created = conditioned.start_build(
         references,
@@ -681,17 +753,31 @@ def _write_config(project: Path) -> bytes:
     return payload
 
 
-def _attach_evidence_pair(
+def _run_independent_audit_pair(
     service: ConditionedDatasetService,
     job_id: str,
-    candidate: dict[str, Any],
+    _candidate: dict[str, Any],
 ) -> dict[str, Any]:
-    service.attach_evidence(job_id, kind="label_audit", document=_evidence("label_audit", candidate))
-    return service.attach_evidence(
+    service.run_independent_audit(job_id, kind="label_audit", explicit_action=True)
+    return service.run_independent_audit(
         job_id,
         kind="dataset_validation",
-        document=_evidence("dataset_validation", candidate),
+        explicit_action=True,
     )
+
+
+def _audit_documents(
+    project: Path,
+    job_id: str,
+    job: dict[str, Any],
+    kind: str,
+) -> tuple[bytes, dict[str, Any], bytes, dict[str, Any]]:
+    root = project / "runs" / "v3" / "conditioned-dataset-v5" / job_id
+    reference = job["evidence"][kind]
+    report_bytes = root.joinpath(*PurePosixPath(reference["relative_path"]).parts).read_bytes()
+    receipt_reference = reference["receipt"]
+    receipt_bytes = root.joinpath(*PurePosixPath(receipt_reference["relative_path"]).parts).read_bytes()
+    return report_bytes, json.loads(report_bytes), receipt_bytes, json.loads(receipt_bytes)
 
 
 def _publish_kwargs(candidate: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
@@ -748,7 +834,7 @@ def _published_configured_candidate(
         activation_loader=_activation_loader,
     )
     before_config = (project / "spritelab.yaml").read_bytes()
-    evidence_job = _attach_evidence_pair(service, job_id, candidate)
+    evidence_job = _run_independent_audit_pair(service, job_id, candidate)
     published = service.publish(job_id, **_publish_kwargs(candidate, evidence_job))
     return service, job_id, candidate, published["publication"], before_config
 
@@ -1109,6 +1195,80 @@ def test_windows_outer_bootstrap_rejects_runtime_source_substitution(
         write_confinement_module._windows_untrusted_bootstrap_arguments(command)
 
 
+def _windows_conditioned_write_confinement_evidence(
+    identity: conditioned_intake_module.DirectoryIdentity,
+    *,
+    restricted_token: Any,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "spritelab.write-confinement-evidence.v3",
+        "strategy": conditioned_intake_module.WINDOWS_PARENT_ANCHORS_STRATEGY,
+        "platform": "windows",
+        "kernel_abi": 0,
+        "root_identity_sha256": identity.identity_sha256,
+        "handled_access_fs": 0,
+        "allowed_access_fs": 0,
+        "no_new_privileges": False,
+        "restricted_token": restricted_token,
+        "integrity_level_rid": 0,
+        "mandatory_no_write_up": True,
+        "workspace_integrity_level_rid": 0,
+        "startup_integrity_level_rid": 4096,
+        "bootstrap_lowered_before_worker_import": True,
+        "new_thread_integrity_level_rid": 0,
+        "raise_to_low_denied": True,
+        "medium_probe_write_denied": True,
+        "low_world_probe_write_denied": True,
+        "untrusted_world_outside_guaranteed": False,
+        "job_kill_on_close": True,
+        "job_active_process_limit": 1,
+        "paths_exposed": False,
+    }
+
+
+@pytest.mark.parametrize("restricted_token", [False, True])
+def test_conditioned_windows_confinement_accepts_exact_inherited_restriction_bit(
+    tmp_path: Path,
+    restricted_token: bool,
+) -> None:
+    identity = conditioned_intake_module.DirectoryIdentity.from_stat(tmp_path.stat())
+    evidence = _windows_conditioned_write_confinement_evidence(
+        identity,
+        restricted_token=restricted_token,
+    )
+
+    conditioned_intake_module._validate_write_confinement_evidence(
+        evidence,
+        strategy=conditioned_intake_module.WINDOWS_PARENT_ANCHORS_STRATEGY,
+        workspace_identity=identity,
+    )
+    conditioned_intake_module._validate_stored_write_confinement(evidence)
+    conditioned_audit_module._validate_receipt_write_confinement(evidence)
+
+
+@pytest.mark.parametrize("restricted_token", [None, 0, 1, "true"])
+def test_conditioned_windows_confinement_rejects_non_boolean_restriction_evidence(
+    tmp_path: Path,
+    restricted_token: Any,
+) -> None:
+    identity = conditioned_intake_module.DirectoryIdentity.from_stat(tmp_path.stat())
+    evidence = _windows_conditioned_write_confinement_evidence(
+        identity,
+        restricted_token=restricted_token,
+    )
+
+    with pytest.raises(conditioned_intake_module.ConditionedIntakeError, match="bootstrap-to-Untrusted"):
+        conditioned_intake_module._validate_write_confinement_evidence(
+            evidence,
+            strategy=conditioned_intake_module.WINDOWS_PARENT_ANCHORS_STRATEGY,
+            workspace_identity=identity,
+        )
+    with pytest.raises(conditioned_intake_module.ConditionedIntakeError, match="write-confinement evidence"):
+        conditioned_intake_module._validate_stored_write_confinement(evidence)
+    with pytest.raises(conditioned_audit_module.IndependentAuditError, match="write-confinement evidence"):
+        conditioned_audit_module._validate_receipt_write_confinement(evidence)
+
+
 @pytest.mark.parametrize("swapped_name", ["worker", "helper"])
 def test_controlled_worker_rejects_swapped_preconfinement_code_bytes(
     tmp_path: Path,
@@ -1367,7 +1527,7 @@ def test_controlled_workspace_audit_rejects_an_outside_hard_link(tmp_path: Path)
         pytest.skip("hard links are unavailable in this test session")
     with conditioned_intake_module.AnchoredDirectory(work, work) as anchor:
         identity = conditioned_intake_module.DirectoryIdentity.from_stat(anchor.directory_metadata())
-        with pytest.raises(conditioned_intake_module.ConditionedIntakeError, match="non-owned"):
+        with pytest.raises(conditioned_intake_module.ConditionedIntakeError, match="retained publication stage"):
             conditioned_intake_module._audit_writable_workspace(anchor, identity)
     assert sentinel.read_bytes() == b"unchanged"
 
@@ -1492,6 +1652,47 @@ def test_local_pixel_vision_is_deterministic_factual_and_nonsemantic() -> None:
     assert "dominant_red" in first["visual_tags"]
     changed_config = {**conditioned_service_module.LOCAL_PIXEL_VISION_CONFIG, "alpha_threshold": 254}
     assert stable_hash(changed_config) != conditioned_service_module.LOCAL_PIXEL_VISION_CONFIG_IDENTITY
+
+
+def test_independent_grounding_rejects_fully_consistent_wrong_semantics() -> None:
+    """Unkeyed agreement across every generated layer cannot bless a wrong label."""
+
+    source_relative = "foods/red_apple.png"
+    source_hash = hashlib.sha256(source_relative.encode("utf-8")).hexdigest()
+    forged_evidence = {
+        "source_relative_path": source_relative,
+        "source_path_sha256": source_hash,
+        "tokens": ["foods", "red", "apple"],
+        "taxonomy_category": "weapon",
+    }
+    forged_record = {
+        "source_id": "source.one",
+        "source_relative_path": source_relative,
+        "category": "weapon",
+        "object_name": "red_sword",
+        "label_evidence": forged_evidence,
+        "label_contract": {"category": "weapon", "object_name": "red_sword"},
+        "semantic_v3": {"category": "weapon", "object_name": "red_sword"},
+    }
+    forged_manifest = {
+        "category": "weapon",
+        "source_name": source_relative,
+        "label_evidence": dict(forged_evidence),
+    }
+    dataset = {
+        "sprites": {
+            "red-sword-fixture": {
+                "record": forged_record,
+                "manifest": forged_manifest,
+            }
+        }
+    }
+    with pytest.raises(conditioned_audit_module.IndependentAuditError) as captured:
+        conditioned_audit_module._verify_independent_filename_grounding(
+            dataset,
+            {"source.one": frozenset({source_relative})},
+        )
+    assert captured.value.code == "audit_source_grounding"
 
 
 def test_near_duplicate_collapse_uses_category_alpha_bbox_and_perceptual_evidence(tmp_path: Path) -> None:
@@ -1779,86 +1980,17 @@ def test_conditioned_builder_rejects_parent_drift_after_managed_load(tmp_path: P
 
 
 def test_conditioned_auditor_reconstructs_receipt_bound_parent_and_rejects_drift(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    project.mkdir()
-    work_name = f"intake-{'1' * 32}"
-    work = project / "datasets" / "conditioned_intake_work" / work_name
-    fixture = _derived_sheet_fixture(work, derived_name="derived_sprites")
-    with (
-        conditioned_intake_module.AnchoredDirectory(fixture["source_root"], fixture["source_root"]) as source_anchor,
-        conditioned_intake_module.AnchoredDirectory(fixture["output_root"], fixture["output_root"]) as output_anchor,
-        conditioned_intake_module.AnchoredDirectory(fixture["derived_root"], fixture["derived_root"]) as derived_anchor,
-    ):
-        manifest = conditioned_intake_module._publish_derived_sheet_tree(
-            output_anchor=output_anchor,
-            source_anchor=source_anchor,
-            derived_anchor=derived_anchor,
-            artifact_manifest=fixture["artifact_manifest"],
-            source=fixture["source"],
-            license_record=fixture["license"],
-            run_id=fixture["run_id"],
-        )
-        source_inventory = conditioned_intake_module._inventory_from_anchor(source_anchor)
-        derived_inventory = conditioned_intake_module._inventory_from_anchor(derived_anchor)
-    reference = f"dataset.{'2' * 24}"
-    source_inventory_identity = stable_hash(source_inventory)
-    derived_inventory_identity = stable_hash(derived_inventory)
-    receipt_payload = {
-        "schema_version": "spritelab.dataset.conditioned-import-receipt.v2",
-        "dataset_reference": reference,
-        "harvest": {"run_id": fixture["run_id"]},
-        "source": fixture["source"],
-        "license": fixture["license"],
-        "artifact_manifest": fixture["artifact_manifest"],
-        "managed": {
-            "work_relative_path": f"datasets/conditioned_intake_work/{work_name}",
-            "source_relative_path": f"datasets/conditioned_intake_work/{work_name}/source",
-            "derived_root_relative_path": f"datasets/conditioned_intake_work/{work_name}/derived_sprites",
-            "source_inventory": source_inventory,
-            "source_inventory_sha256": source_inventory_identity,
-            "derived_inventory": derived_inventory,
-            "derived_inventory_sha256": derived_inventory_identity,
-            "derived_sheet_manifest": manifest,
-        },
-    }
-    receipt = {**receipt_payload, "receipt_identity": stable_hash(receipt_payload)}
-    receipts_root = project / "datasets" / "conditioned_intake_receipts"
-    receipts_root.mkdir(parents=True)
-    (receipts_root / f"{reference}.json").write_text(json.dumps(receipt, sort_keys=True), encoding="utf-8")
-    binding = {
-        "dataset_reference": reference,
-        "harvest_run_id": fixture["run_id"],
-        "managed_intake_receipt_identity": receipt["receipt_identity"],
-        "managed_source_inventory_sha256": source_inventory_identity,
-        "managed_derived_inventory_sha256": derived_inventory_identity,
-        "derived_sheet_manifest_identity": manifest["manifest_identity"],
-        "source_id": fixture["source"]["source_id"],
-        "title": fixture["source"]["title"],
-        "creator": fixture["source"]["creator"],
-        "license_id": fixture["license"]["identifier"],
-        "license_evidence": fixture["license"],
-        "source_document": fixture["source"],
-        "license_document": fixture["license"],
-    }
-    derivation = manifest["records"][0]
-    frame = fixture["derived_root"].joinpath(*PurePosixPath(derivation["output_relative_path"]).parts)
-    with Image.open(frame) as opened:
-        rgba = np.asarray(opened.convert("RGBA"), dtype=np.uint8).copy()
-    record = {
-        "source_id": fixture["source"]["source_id"],
-        "source_pack": fixture["source"]["title"],
-        "creator": fixture["source"]["creator"],
-        "license_id": fixture["license"]["identifier"],
-        "source_relative_path": derivation["semantic_relative_path"],
-        "source_sha256": derivation["encoded_output_sha256"],
-        "source_byte_count": derivation["encoded_output_byte_count"],
-        "source_group": derivation["source_group_identity"],
-        "source_derivation": derivation,
-    }
-    candidate = {"input_bindings": [binding]}
-    dataset = {"sprites": {"sprite-1": {"record": record, "rgba": rgba}}}
-    job_root = project / "runs" / "v3" / "conditioned-dataset-v5" / "conditioned-test"
-    job_root.mkdir(parents=True)
+    from tests.test_conditioned_v5_receipt_strictness_step2 import _fixture as strict_receipt_fixture
+
+    fixture = strict_receipt_fixture(tmp_path)
+    project = fixture["project"]
+    binding = fixture["binding"]
+    candidate = fixture["candidate"]
+    dataset = fixture["dataset"]
+    job_root = fixture["job_root"]
+    record = dataset["sprites"]["sprite-1"]["record"]
+    derivation = record["source_derivation"]
+    rgba = dataset["sprites"]["sprite-1"]["rgba"]
 
     conditioned_audit_module._verify_source_derivation(
         record,
@@ -1875,7 +2007,9 @@ def test_conditioned_auditor_reconstructs_receipt_bound_parent_and_rejects_drift
         cancelled=lambda: False,
     )
 
-    parent = fixture["source_root"] / "weapons" / "iron_swords.png"
+    source_relative = fixture["receipt"]["managed"]["source_relative_path"]
+    source_root = project.joinpath(*PurePosixPath(source_relative).parts)
+    parent = source_root / "weapons" / "iron_swords.png"
     parent.write_bytes(parent.read_bytes() + b"raw-parent-drift")
     with pytest.raises(conditioned_audit_module.IndependentAuditError) as captured:
         conditioned_audit_module._verify_parent_bound_derivations(
@@ -1889,12 +2023,14 @@ def test_conditioned_auditor_reconstructs_receipt_bound_parent_and_rejects_drift
     assert os.fspath(project) not in captured.value.public_message
 
 
-def test_conditioned_sheet_intake_publishes_one_staged_tree_and_builder_reloads_it(
+def test_conditioned_sheet_intake_publishes_direct_final_tree_without_directory_rename(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
+    outside = tmp_path / "outside-sheet-intake.sentinel"
+    outside.write_bytes(b"preserve-outside")
     worker_runtime = {"schema_version": "test.conditioned-worker-runtime.v1", "paths_exposed": False}
     inventory_file = Path(conditioned_intake_module.__file__).read_bytes()
     inventory_payload = {
@@ -2025,39 +2161,19 @@ def test_conditioned_sheet_intake_publishes_one_staged_tree_and_builder_reloads_
         }
 
     monkeypatch.setattr(conditioned_intake_module, "_run_legacy_intake_child", run_bound_intake_in_process)
-    observed: list[tuple[str, str]] = []
-    original_rename = conditioned_intake_module.AnchoredDirectory.rename_held_directory_noreplace
-
-    def observe_tree_rename(
-        parent: conditioned_intake_module.AnchoredDirectory,
-        child: conditioned_intake_module.AnchoredDirectory,
-        destination_name: str,
-    ) -> None:
-        if destination_name == "derived_sprites":
-            assert child.directory.name.startswith(".derived-sprites-")
-            assert not (parent.directory / destination_name).exists()
-            assert set(child.names()) == {"frames", "manifest.json"}
-            before = child.directory.name
-            original_rename(parent, child, destination_name)
-            assert child.directory == parent.directory / destination_name
-            observed.append((before, child.directory.name))
-            return
-        original_rename(parent, child, destination_name)
-
     monkeypatch.setattr(
         conditioned_intake_module.AnchoredDirectory,
         "rename_held_directory_noreplace",
-        observe_tree_rename,
+        lambda *_args, **_kwargs: pytest.fail("direct-final derived publication must not rename a directory"),
     )
     reference = _import_handoff(project, run_id, handoff, adapter=adapter)
     loaded = adapter.load_managed_intake(reference)
-    assert len(observed) == 1
-    assert observed[0][0].startswith(".derived-sprites-")
-    assert observed[0][1] == "derived_sprites"
+    assert loaded["derived_root"].name == "derived_sprites"
     assert len(loaded["derived_sheet_records"]) == 2
     assert loaded["accepted_relative_paths"] == []
     work = loaded["derived_root"].parent
     assert not any(path.name.startswith(".derived-sprites-") for path in work.iterdir())
+    assert outside.read_bytes() == b"preserve-outside"
     records, exclusions = _service(project)._inspect_records(loaded)
     assert exclusions == []
     assert len(records) == 2
@@ -2084,15 +2200,15 @@ def test_conditioned_intake_parent_swap_fails_before_outside_write(
     blocked: list[str] = []
 
     def inject_swaps(work: Path, **_kwargs: Any) -> dict[str, Any]:
-        derived_staging = [path for path in work.iterdir() if path.name.startswith(".derived-sprites-")]
-        assert len(derived_staging) == 1
+        derived_root = work / "derived_sprites"
+        assert derived_root.is_dir()
         writable_roots = (
             work,
             work / "tmp",
             work / "source",
             work / "datasets",
             work / "datasets" / "managed",
-            derived_staging[0],
+            derived_root,
             work / "datasets" / "source_metadata",
             work / "datasets" / "source_metadata" / ".transactions",
             work / "runs",
@@ -2124,7 +2240,7 @@ def test_conditioned_intake_parent_swap_fails_before_outside_write(
         "datasets/managed",
     ]
     assert len(blocked) == 10
-    assert blocked[5].startswith(".derived-sprites-")
+    assert blocked[5] == "derived_sprites"
     assert blocked[6:] == [
         "datasets/source_metadata",
         "datasets/source_metadata/.transactions",
@@ -2135,7 +2251,7 @@ def test_conditioned_intake_parent_swap_fails_before_outside_write(
     assert sorted(path.relative_to(outside).as_posix() for path in outside.rglob("*")) == ["sentinel.bin"]
 
 
-def test_conditioned_intake_receipt_rename_is_commit_point_for_retry(
+def test_conditioned_intake_receipt_exact_publication_is_commit_point_for_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2150,27 +2266,37 @@ def test_conditioned_intake_receipt_rename_is_commit_point_for_retry(
     request = DatasetImportRequest(run_id, run / "artifacts", handoff, manifest)
     adapter = ConditionedDatasetImportAdapter(project)
     monkeypatch.setattr(conditioned_intake_module, "conditioned_code_inventory", lambda: adapter.code_inventory)
-    original_rename = conditioned_intake_module.AnchoredDirectory.rename
+    original_publish = conditioned_intake_module._publish_anchored_file_noreplace
     injected = False
 
-    def fail_after_receipt_rename(
+    def fail_after_receipt_publication(
         anchor: Any,
-        source_name: str,
-        destination_name: str,
+        target_name: str,
+        content: bytes,
         *,
-        replace: bool,
-    ) -> None:
+        residue_prefix: str,
+    ) -> Any:
         nonlocal injected
-        original_rename(anchor, source_name, destination_name, replace=replace)
+        identity = original_publish(
+            anchor,
+            target_name,
+            content,
+            residue_prefix=residue_prefix,
+        )
         if (
             not injected
             and anchor.directory == project / "datasets" / "conditioned_intake_receipts"
-            and destination_name.startswith("dataset.")
+            and target_name.startswith("dataset.")
         ):
             injected = True
             raise OSError("injected fault after the receipt namespace commit")
+        return identity
 
-    monkeypatch.setattr(conditioned_intake_module.AnchoredDirectory, "rename", fail_after_receipt_rename)
+    monkeypatch.setattr(
+        conditioned_intake_module,
+        "_publish_anchored_file_noreplace",
+        fail_after_receipt_publication,
+    )
     with pytest.raises(conditioned_intake_module.ConditionedIntakeError) as caught:
         adapter.import_harvest(request, idempotency_key="dataset-import-commit-retry")
     receipts = list((project / "datasets" / "conditioned_intake_receipts").glob("dataset.*.json"))
@@ -2226,13 +2352,14 @@ def test_preview_build_evidence_and_publication_are_bound_and_portable(tmp_path:
     assert len(candidate["managed_intake_receipt_identities"]) == 2
     phase7 = root / "candidate" / "phase7"
     assert all((phase7 / f"{split}.npz").is_file() for split in ("train", "val", "test"))
+    phase7_commit = json.loads((root / "candidate" / "phase7.commit.json").read_text(encoding="utf-8"))
+    assert phase7_commit["inventory"] == candidate["payload_inventory"]
+    assert stable_hash(phase7_commit) == candidate["phase7_commit_identity"]
     assert str(project) not in (phase7 / "training_manifest.jsonl").read_text(encoding="utf-8")
     assert json.loads((phase7 / "split_integrity_report.json").read_text(encoding="utf-8"))["ok"] is True
 
-    job = service.attach_evidence(started["job_id"], kind="label_audit", document=_evidence("label_audit", candidate))
-    job = service.attach_evidence(
-        started["job_id"], kind="dataset_validation", document=_evidence("dataset_validation", candidate)
-    )
+    service.run_independent_audit(started["job_id"], kind="label_audit", explicit_action=True)
+    job = service.run_independent_audit(started["job_id"], kind="dataset_validation", explicit_action=True)
     published = service.publish(
         started["job_id"],
         candidate_identity=candidate["candidate_identity"],
@@ -2252,6 +2379,28 @@ def test_preview_build_evidence_and_publication_are_bound_and_portable(tmp_path:
         "sha256",
         "byte_count",
     }
+    publication_root = activation.parent
+    for kind, artifact_name, published_name in (
+        ("label_audit", "labeling_audit_receipt", "label_audit_receipt.json"),
+        ("dataset_validation", "validation_receipt", "dataset_validation_receipt.json"),
+    ):
+        _report_bytes, _report, source_receipt_bytes, _receipt = _audit_documents(
+            project,
+            started["job_id"],
+            job,
+            kind,
+        )
+        published_receipt = publication_root / "evidence" / published_name
+        assert published_receipt.read_bytes() == source_receipt_bytes
+        inventory_record = activation_value["publication_inventory"]["files"][f"evidence/{published_name}"]
+        assert inventory_record == {
+            "sha256": hashlib.sha256(source_receipt_bytes).hexdigest(),
+            "byte_count": len(source_receipt_bytes),
+        }
+        assert activation_value["artifacts"][artifact_name] == {
+            "path": f"evidence/{published_name}",
+            **inventory_record,
+        }
     assert publication["campaign_seeds"] == [731001, 731002, 731003]
     assert publication["campaign_steps"] == 5000
     assert publication["configuration_activated"] is False
@@ -2322,127 +2471,337 @@ def test_plugin_and_api_reject_browser_paths_and_expose_navigation(tmp_path: Pat
     assert rejected.json()["error_code"] == "invalid_conditioned_v5_payload"
 
 
-def test_independent_evidence_requires_trusted_auditor_exact_schema_and_coverage(tmp_path: Path) -> None:
-    service, job_id, candidate = _built_candidate(tmp_path / "project")
+def test_independent_audit_is_server_managed_explicit_and_receipt_bound(tmp_path: Path) -> None:
+    calls: list[tuple[str, str]] = []
 
-    arbitrary = _evidence("label_audit", candidate)
-    arbitrary["auditor"]["auditor_id"] = "independent.arbitrary"
-    arbitrary["audit_run_identity"] = stable_hash(
-        {key: value for key, value in arbitrary.items() if key != "audit_run_identity"}
-    )
-    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as arbitrary_error:
-        service.attach_evidence(job_id, kind="label_audit", document=arbitrary)
-    assert arbitrary_error.value.code == "evidence_auditor"
+    def audit_runner(
+        kind: str,
+        job_root: Path,
+        candidate: dict[str, Any],
+        *,
+        project_root: Path,
+        progress: Any,
+        cancelled: Any,
+    ) -> dict[str, Any]:
+        del project_root, progress, cancelled
+        calls.append((kind, job_root.name))
+        return _evidence(kind, candidate)
 
-    extra = _evidence("label_audit", candidate)
-    extra["unexpected"] = True
-    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as extra_error:
-        service.attach_evidence(job_id, kind="label_audit", document=extra)
-    assert extra_error.value.code == "evidence_schema"
+    project = tmp_path / "project"
+    service, job_id, candidate = _built_candidate(project, independent_audit_runner=audit_runner)
+    assert not hasattr(service, "attach_evidence")
 
-    private = _evidence("label_audit", candidate)
-    private["auditor"]["auditor_id"] = "C:/Users/Private/auditor"
-    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as private_error:
-        service.attach_evidence(job_id, kind="label_audit", document=private)
-    assert private_error.value.code == "evidence_schema"
+    with pytest.raises(TypeError):
+        service.run_independent_audit(  # type: ignore[call-arg]
+            job_id,
+            kind="label_audit",
+            explicit_action=True,
+            document=_evidence("label_audit", candidate),
+        )
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as action_error:
+        service.run_independent_audit(job_id, kind="label_audit", explicit_action=False)
+    assert action_error.value.code == "explicit_audit_action_required"
+    assert calls == []
+    assert service.job(job_id)["evidence"] == {}
 
-    incomplete = _evidence("label_audit", candidate)
-    incomplete["metrics"]["audited_record_ids"] = incomplete["metrics"]["audited_record_ids"][:-1]
-    incomplete["audit_run_identity"] = stable_hash(
-        {key: value for key, value in incomplete.items() if key != "audit_run_identity"}
-    )
-    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as coverage_error:
-        service.attach_evidence(job_id, kind="label_audit", document=incomplete)
-    assert coverage_error.value.code == "evidence_metrics"
+    service.run_independent_audit(job_id, kind="label_audit", explicit_action=True)
+    job = service.run_independent_audit(job_id, kind="dataset_validation", explicit_action=True)
+    assert calls == [("label_audit", job_id), ("dataset_validation", job_id)]
+    root = project / "runs" / "v3" / "conditioned-dataset-v5" / job_id
+
+    for kind in ("label_audit", "dataset_validation"):
+        reference = job["evidence"][kind]
+        assert set(reference) == {
+            "relative_path",
+            "sha256",
+            "byte_count",
+            "auditor_id",
+            "audit_run_identity",
+            "operation_id",
+            "operation_identity",
+            "receipt",
+            "action",
+        }
+        assert set(reference["receipt"]) == {
+            "relative_path",
+            "sha256",
+            "byte_count",
+            "receipt_identity",
+        }
+        assert set(reference["action"]) == {
+            "relative_path",
+            "sha256",
+            "byte_count",
+            "record_identity",
+        }
+        report_bytes, report, receipt_bytes, receipt = _audit_documents(project, job_id, job, kind)
+        current_auditor = trusted_auditor_inventory(kind)
+        assert set(receipt) == AUDIT_RECEIPT_KEYS
+        assert receipt["schema_version"] == AUDIT_RECEIPT_SCHEMA
+        assert receipt["audit_kind"] == kind
+        assert receipt["job_id"] == job_id
+        assert receipt["operation_id"] == reference["operation_id"]
+        assert receipt["operation_identity"] == reference["operation_identity"]
+        assert receipt["terminal_status"] == "PASS"
+        assert receipt["server_managed"] is True
+        assert receipt["report_sha256"] == hashlib.sha256(report_bytes).hexdigest() == reference["sha256"]
+        assert receipt["report_byte_count"] == len(report_bytes) == reference["byte_count"]
+        assert receipt["audit_run_identity"] == report["audit_run_identity"] == reference["audit_run_identity"]
+        assert receipt["candidate_identity"] == candidate["candidate_identity"]
+        assert receipt["payload_inventory_sha256"] == candidate["payload_inventory_sha256"]
+        assert receipt["image_count"] == candidate["image_count"]
+        assert receipt["auditor_id"] == TRUSTED_AUDITOR_IDS[kind] == report["auditor"]["auditor_id"]
+        assert receipt["auditor_code_identity_sha256"] == current_auditor["inventory_sha256"]
+        assert receipt["auditor_inventory_sha256"] == current_auditor["inventory_sha256"]
+        assert isinstance(receipt["started_at"], str) and receipt["started_at"]
+        assert isinstance(receipt["completed_at"], str) and receipt["completed_at"]
+        assert receipt["paths_exposed"] is False
+        assert receipt["operation_identity"] == audit_operation_identity(
+            kind=kind,
+            job_id=job_id,
+            operation_id=receipt["operation_id"],
+            candidate_identity=candidate["candidate_identity"],
+            payload_inventory_sha256=candidate["payload_inventory_sha256"],
+            image_count=candidate["image_count"],
+            auditor_id=TRUSTED_AUDITOR_IDS[kind],
+            auditor_code_identity_sha256=current_auditor["inventory_sha256"],
+            auditor_inventory_sha256=current_auditor["inventory_sha256"],
+            started_at=receipt["started_at"],
+        )
+        receipt_payload = dict(receipt)
+        receipt_identity = receipt_payload.pop("receipt_identity")
+        assert receipt_identity == stable_hash(receipt_payload) == reference["receipt"]["receipt_identity"]
+        assert reference["receipt"]["sha256"] == hashlib.sha256(receipt_bytes).hexdigest()
+        assert reference["receipt"]["byte_count"] == len(receipt_bytes)
+        action_reference = reference["action"]
+        action_bytes = root.joinpath(*PurePosixPath(action_reference["relative_path"]).parts).read_bytes()
+        action = json.loads(action_bytes)
+        assert set(action) == AUDIT_ACTION_RECORD_KEYS
+        assert action["schema_version"] == AUDIT_ACTION_RECORD_SCHEMA
+        assert action["job_id"] == job_id
+        assert action["operation_id"] == reference["operation_id"]
+        assert action["operation_identity"] == reference["operation_identity"]
+        assert action["report_sha256"] == reference["sha256"]
+        assert action["receipt_sha256"] == reference["receipt"]["sha256"]
+        assert action["record_identity"] == action_reference["record_identity"]
+        assert hashlib.sha256(action_bytes).hexdigest() == action_reference["sha256"]
+        assert len(action_bytes) == action_reference["byte_count"]
+        assert (
+            validate_audit_action_record(
+                action,
+                kind=kind,
+                expected_job_id=job_id,
+                expected_report_sha256=reference["sha256"],
+                expected_report_byte_count=len(report_bytes),
+                report=report,
+                expected_receipt_sha256=reference["receipt"]["sha256"],
+                expected_receipt_byte_count=len(receipt_bytes),
+                receipt=receipt,
+                candidate=candidate,
+                current_auditor_inventory=current_auditor,
+            )["record_identity"]
+            == action_reference["record_identity"]
+        )
 
 
-def test_publication_rolls_back_exact_outputs_after_campaign_rename_fault(
+def test_independent_audit_runner_failure_terminalizes_without_evidence(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def failing_runner(
+        kind: str,
+        job_root: Path,
+        candidate: dict[str, Any],
+        *,
+        project_root: Path,
+        progress: Any,
+        cancelled: Any,
+    ) -> dict[str, Any]:
+        del job_root, candidate, project_root, progress, cancelled
+        calls.append(kind)
+        raise RuntimeError("synthetic trusted-auditor failure")
+
+    project = tmp_path / "project"
+    service, job_id, _candidate = _built_candidate(project, independent_audit_runner=failing_runner)
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as captured:
+        service.run_independent_audit(job_id, kind="label_audit", explicit_action=True)
+
+    assert captured.value.code == "independent_audit_failed"
+    assert calls == ["label_audit"]
+    job = service.job(job_id)
+    assert job["evidence"] == {}
+    operation = job["audit_operations"]["label_audit"]
+    assert operation["terminal_status"] == "FAILED"
+    assert operation["server_managed"] is True
+    assert operation["candidate_identity"] == _candidate["candidate_identity"]
+    assert operation["payload_inventory_sha256"] == _candidate["payload_inventory_sha256"]
+    assert operation["completed_at"]
+    root = project / "runs" / "v3" / "conditioned-dataset-v5" / job_id
+    assert not list((root / "evidence").glob("*"))
+
+
+def test_independent_audit_live_ownership_and_orphan_recovery(tmp_path: Path) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_runner(
+        kind: str,
+        job_root: Path,
+        candidate: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        del job_root
+        entered.set()
+        assert release.wait(timeout=10)
+        return _evidence(kind, candidate)
+
+    project = tmp_path / "project"
+    service, job_id, candidate = _built_candidate(project, independent_audit_runner=blocking_runner)
+    root = project / "runs" / "v3" / "conditioned-dataset-v5" / job_id
+    state = service._read_state(root)
+    orphan = {
+        "schema_version": "spritelab.audit.conditioned-run-operation.v1",
+        "audit_kind": "label_audit",
+        "job_id": job_id,
+        "operation_id": "audit-11111111111111111111111111111111",
+        "operation_identity": "2" * 64,
+        "terminal_status": "RUNNING",
+        "server_managed": True,
+        "candidate_identity": candidate["candidate_identity"],
+        "payload_inventory_sha256": candidate["payload_inventory_sha256"],
+        "image_count": candidate["image_count"],
+        "auditor_id": TRUSTED_AUDITOR_IDS["label_audit"],
+        "auditor_code_identity_sha256": "3" * 64,
+        "auditor_inventory_sha256": "3" * 64,
+        "started_at": "2026-07-18T00:00:00+00:00",
+        "completed_at": None,
+        "paths_exposed": False,
+    }
+    state["audit_operations"] = {"label_audit": orphan}
+    service._write_state(root, state)
+
+    failures: list[BaseException] = []
+
+    def run_owned() -> None:
+        try:
+            service.run_independent_audit(job_id, kind="label_audit", explicit_action=True)
+        except BaseException as exc:  # pragma: no cover - assertion below reports it
+            failures.append(exc)
+
+    worker = threading.Thread(target=run_owned)
+    worker.start()
+    assert entered.wait(timeout=10)
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as conflict:
+        service.run_independent_audit(job_id, kind="label_audit", explicit_action=True)
+    assert conflict.value.code == "independent_audit_conflict"
+    release.set()
+    worker.join(timeout=20)
+    assert not worker.is_alive()
+    assert failures == []
+    recovered = service.job(job_id)
+    assert recovered["audit_operations"]["label_audit"]["terminal_status"] == "PASS"
+    assert recovered["audit_operation_history"][-1]["terminal_status"] == "INTERRUPTED"
+    assert recovered["audit_operation_history"][-1]["operation_id"] == orphan["operation_id"]
+
+
+def test_independent_audit_reuses_identical_report_and_refuses_conflicting_bytes(tmp_path: Path) -> None:
+    inject_conflict = False
+
+    def audit_runner(
+        kind: str,
+        job_root: Path,
+        candidate: dict[str, Any],
+        *,
+        project_root: Path,
+        progress: Any,
+        cancelled: Any,
+    ) -> dict[str, Any]:
+        del project_root, progress, cancelled
+        report = _evidence(kind, candidate)
+        if inject_conflict:
+            content = (json.dumps(report, allow_nan=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            evidence_root = job_root / "evidence"
+            evidence_root.mkdir(exist_ok=True)
+            (evidence_root / f"{kind}-{hashlib.sha256(content).hexdigest()}.json").write_bytes(b"conflict")
+        return report
+
+    project = tmp_path / "project"
+    service, job_id, _candidate = _built_candidate(project, independent_audit_runner=audit_runner)
+    first = service.run_independent_audit(job_id, kind="label_audit", explicit_action=True)
+    first_reference = first["evidence"]["label_audit"]
+    root = project / "runs" / "v3" / "conditioned-dataset-v5" / job_id
+    evidence_root = root / "evidence"
+    first_report = evidence_root / PurePosixPath(first_reference["relative_path"]).name
+    first_report_bytes = first_report.read_bytes()
+    first_receipt = evidence_root / PurePosixPath(first_reference["receipt"]["relative_path"]).name
+    first_receipt_bytes = first_receipt.read_bytes()
+
+    second = service.run_independent_audit(job_id, kind="label_audit", explicit_action=True)
+    second_reference = second["evidence"]["label_audit"]
+    assert second_reference["relative_path"] == first_reference["relative_path"]
+    assert second_reference["sha256"] == first_reference["sha256"]
+    assert first_report.read_bytes() == first_report_bytes
+    assert second_reference["operation_id"] != first_reference["operation_id"]
+    assert second_reference["receipt"]["relative_path"] != first_reference["receipt"]["relative_path"]
+    assert first_receipt.read_bytes() == first_receipt_bytes
+    receipts_before_conflict = sorted(evidence_root.glob("label_audit-receipt-*.json"))
+    assert len(receipts_before_conflict) == 2
+
+    inject_conflict = True
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as captured:
+        service.run_independent_audit(job_id, kind="label_audit", explicit_action=True)
+    assert captured.value.code == "evidence_identity_conflict"
+    failed = service.job(job_id)
+    assert "label_audit" not in failed["evidence"]
+    assert failed["audit_operations"]["label_audit"]["terminal_status"] == "FAILED"
+    assert first_report.read_bytes() == b"conflict"
+    assert sorted(evidence_root.glob("label_audit-receipt-*.json")) == receipts_before_conflict
+    assert first_receipt.read_bytes() == first_receipt_bytes
+
+
+def test_publication_retains_exact_outputs_after_campaign_marker_fault_and_retry_adopts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
     service, job_id, candidate = _built_candidate(project)
-    job = _attach_evidence_pair(service, job_id, candidate)
-    original_publish = conditioned_service_module._publish_directory_noreplace
+    job = _run_independent_audit_pair(service, job_id, candidate)
+    failed = False
 
-    def fault_after_campaign_rename(anchor: Any, source_name: str, target_name: str, identity: Any) -> None:
-        original_publish(anchor, source_name, target_name, identity)
-        if anchor.directory == service.campaigns_root:
-            raise OSError("injected fault after campaign rename")
+    def fault_after_campaign_marker(step: str) -> None:
+        nonlocal failed
+        if step == "campaign_marker_committed" and not failed:
+            failed = True
+            raise OSError("injected fault after campaign marker")
 
-    monkeypatch.setattr(conditioned_service_module, "_publish_directory_noreplace", fault_after_campaign_rename)
+    monkeypatch.setattr(
+        conditioned_service_module,
+        "_conditioned_publication_checkpoint",
+        fault_after_campaign_marker,
+    )
     with pytest.raises(conditioned_service_module.ConditionedDatasetError) as error:
         service.publish(job_id, **_publish_kwargs(candidate, job))
     assert error.value.code == "publication_failed"
-    assert not list(service.datasets_root.glob("conditioned-v5-*"))
-    assert not list(service.campaigns_root.glob("conditioned-v5-*"))
+    assert list(service.datasets_root.glob("conditioned-v5-*.commit.json"))
+    assert list(service.campaigns_root.glob("conditioned-v5-*.commit.json"))
     assert service.job(job_id)["status"] == "FAILED"
 
+    monkeypatch.setattr(
+        conditioned_service_module,
+        "_conditioned_publication_checkpoint",
+        lambda _step: None,
+    )
+    retried = service.publish(job_id, **_publish_kwargs(candidate, job))
+    assert retried["status"] == "COMPLETE"
+    assert retried["stage"] == "published"
 
-def test_publication_rollback_quarantines_owned_content_drift_with_exact_bytes(
+
+def test_publication_final_state_failure_retains_exact_pair_for_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
     service, job_id, candidate = _built_candidate(project)
-    job = _attach_evidence_pair(service, job_id, candidate)
-    original_publish = conditioned_service_module._publish_directory_noreplace
-
-    def drift_after_campaign_rename(anchor: Any, source_name: str, target_name: str, identity: Any) -> None:
-        original_publish(anchor, source_name, target_name, identity)
-        if anchor.directory == service.campaigns_root:
-            target = anchor.directory / target_name
-            campaign = target / "campaign.json"
-            atomic_write_bytes(campaign, campaign.read_bytes() + b"\n")
-            raise OSError("injected foreign-byte drift after campaign rename")
-
-    monkeypatch.setattr(conditioned_service_module, "_publish_directory_noreplace", drift_after_campaign_rename)
-    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as error:
-        service.publish(job_id, **_publish_kwargs(candidate, job))
-    assert error.value.code == "publication_failed"
-    assert not list(service.datasets_root.glob("conditioned-v5-*"))
-    assert not list(service.campaigns_root.glob("conditioned-v5-*"))
-    residues = list(service.campaigns_root.glob(".rollback-drift-conditioned-v5-*"))
-    assert len(residues) == 1
-    assert (residues[0] / "campaign.json").read_bytes().endswith(b"\n\n")
-    assert service.job(job_id)["status"] == "FAILED"
-
-
-def test_publication_rollback_refuses_foreign_directory_inode_but_continues_owned_cleanup(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    project = tmp_path / "project"
-    service, job_id, candidate = _built_candidate(project)
-    job = _attach_evidence_pair(service, job_id, candidate)
-    original_publish = conditioned_service_module._publish_directory_noreplace
-
-    def replace_after_campaign_rename(anchor: Any, source_name: str, target_name: str, identity: Any) -> None:
-        original_publish(anchor, source_name, target_name, identity)
-        if anchor.directory == service.campaigns_root:
-            target = anchor.directory / target_name
-            target.rename(anchor.directory / f".detached-{target_name}")
-            target.mkdir()
-            (target / "foreign.txt").write_bytes(b"foreign-directory-bytes")
-            raise OSError("injected foreign inode after campaign rename")
-
-    monkeypatch.setattr(conditioned_service_module, "_publish_directory_noreplace", replace_after_campaign_rename)
-    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as error:
-        service.publish(job_id, **_publish_kwargs(candidate, job))
-    assert error.value.code == "publication_rollback_identity_changed"
-    assert not list(service.datasets_root.glob("conditioned-v5-*"))
-    campaigns = list(service.campaigns_root.glob("conditioned-v5-*"))
-    assert len(campaigns) == 1
-    assert (campaigns[0] / "foreign.txt").read_bytes() == b"foreign-directory-bytes"
-
-
-def test_publication_final_state_failure_rolls_back_exact_dataset_and_campaign(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    project = tmp_path / "project"
-    service, job_id, candidate = _built_candidate(project)
-    job = _attach_evidence_pair(service, job_id, candidate)
+    job = _run_independent_audit_pair(service, job_id, candidate)
     original_write = service._write_state_unlocked
 
     def fail_complete_state(root: Path, state: dict[str, Any]) -> None:
@@ -2453,9 +2812,14 @@ def test_publication_final_state_failure_rolls_back_exact_dataset_and_campaign(
     monkeypatch.setattr(service, "_write_state_unlocked", fail_complete_state)
     with pytest.raises(OSError, match="injected final state failure"):
         service.publish(job_id, **_publish_kwargs(candidate, job))
-    assert not list(service.datasets_root.glob("conditioned-v5-*"))
-    assert not list(service.campaigns_root.glob("conditioned-v5-*"))
+    assert list(service.datasets_root.glob("conditioned-v5-*.commit.json"))
+    assert list(service.campaigns_root.glob("conditioned-v5-*.commit.json"))
     assert service.job(job_id)["status"] == "FAILED"
+
+    monkeypatch.setattr(service, "_write_state_unlocked", original_write)
+    retried = service.publish(job_id, **_publish_kwargs(candidate, job))
+    assert retried["status"] == "COMPLETE"
+    assert retried["stage"] == "published"
 
 
 def test_direct_production_campaign_builder_publishes_bound_launch_ready_campaign(
@@ -2464,10 +2828,23 @@ def test_direct_production_campaign_builder_publishes_bound_launch_ready_campaig
 ) -> None:
     import spritelab.product_features.training.activation as training_activation
 
+    def anonymous_files_unsupported(_self: Any, _mode: int = 0o600) -> int:
+        raise OSError(errno.EOPNOTSUPP, "forced no-O_TMPFILE publication")
+
+    monkeypatch.setattr(
+        conditioned_service_module.AnchoredDirectory,
+        "open_anonymous_file",
+        anonymous_files_unsupported,
+    )
     monkeypatch.setattr(training_activation, "MIN_CONDITIONED_IMAGES", 4)
     project = tmp_path / "project"
-    service, job_id, candidate = _built_candidate(project, production_builder=True)
-    job = _attach_evidence_pair(service, job_id, candidate)
+    service, job_id, candidate = _built_candidate(
+        project,
+        production_builder=True,
+        write_config=True,
+    )
+    before_config = (project / "spritelab.yaml").read_bytes()
+    job = _run_independent_audit_pair(service, job_id, candidate)
     published = service.publish(job_id, **_publish_kwargs(candidate, job))
 
     publication = published["publication"]
@@ -2478,6 +2855,38 @@ def test_direct_production_campaign_builder_publishes_bound_launch_ready_campaig
     assert publication["campaign_seeds"] == [731001, 731002, 731003]
     assert recommended["training"]["max_optimizer_steps"] == 5_000
     assert recommended["identities"]["dataset_freeze_hash"] == publication["activation_manifest_sha256"]
+
+    activated = service.activate(
+        job_id,
+        **_activation_kwargs(
+            candidate,
+            publication,
+            hashlib.sha256(before_config).hexdigest(),
+        ),
+    )
+    loaded = training_activation.load_conditioned_training_activation(
+        training_activation.ProjectConfig.load(project / "spritelab.yaml")
+    )
+    contract = loaded.to_contract_dict()
+    assert activated["stage"] == "activated"
+    assert loaded.ready is True
+    assert contract["ready"] is True
+    assert contract["campaign_identity_sha256"] == publication["campaign_identity_sha256"]
+    assert contract["activation_commit_record_identity"]
+    assert contract["paths_exposed"] is False
+
+    job_root = project / "runs" / "v3" / "conditioned-dataset-v5" / job_id
+    publication_roots = (
+        project / "datasets" / "conditioned_intake_receipts",
+        project / "datasets" / "conditioned_intake_work",
+        job_root / "evidence",
+        (project / publication["activation_manifest"]).parent,
+        (project / publication["campaign_config"]).parent,
+        job_root / "activation_receipt",
+    )
+    assert any(path.is_file() for root in publication_roots for path in root.rglob("*"))
+    for root in publication_roots:
+        _assert_strict_retained_stage_tree(root)
 
 
 def test_activation_is_explicit_cas_and_does_not_start_training(tmp_path: Path) -> None:
@@ -2506,9 +2915,13 @@ def test_activation_is_explicit_cas_and_does_not_start_training(tmp_path: Path) 
     assert reloaded["project"] == original["project"]
     assert reloaded["paths"] == original["paths"]
 
+    retried = service.activate(job_id, **_activation_kwargs(candidate, activated["publication"], before_sha256))
+    assert retried["stage"] == "activated"
+    changed_authorization = _activation_kwargs(candidate, activated["publication"], before_sha256)
+    changed_authorization["activation_authorization_id"] = "activation-authorization-fixture-0002"
     with pytest.raises(conditioned_service_module.ConditionedDatasetError) as consumed:
-        service.activate(job_id, **_activation_kwargs(candidate, activated["publication"], before_sha256))
-    assert consumed.value.code == "activation_authorization_consumed"
+        service.activate(job_id, **changed_authorization)
+    assert consumed.value.code == "activation_recovery_mismatch"
 
 
 def test_activation_refuses_stale_config_without_mutation(tmp_path: Path) -> None:
@@ -2524,7 +2937,483 @@ def test_activation_refuses_stale_config_without_mutation(tmp_path: Path) -> Non
     assert service.job(job_id)["publication"]["configuration_activated"] is False
 
 
-def test_activation_final_state_failure_restores_config_and_receipt(
+def test_prospective_activation_parses_exact_held_config_bytes_across_path_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config_path = project / "spritelab.yaml"
+    original_values = json.loads(json.dumps(DEFAULT_CONFIG))
+    original_values["project"]["name"] = "original-project"
+    before = yaml.safe_dump(original_values, sort_keys=False).encode("utf-8")
+    config_path.write_bytes(before)
+    alternate_values = json.loads(json.dumps(original_values))
+    alternate_values["project"]["name"] = "foreign-raced-project"
+    alternate = project / ".spritelab.alternate.yaml"
+    alternate.write_text(yaml.safe_dump(alternate_values, sort_keys=False), encoding="utf-8")
+    outside = tmp_path / "outside-config.sentinel"
+    outside_content = b"preserve-outside"
+    outside.write_bytes(outside_content)
+    campaign_identity = "3" * 64
+    activation_sha256 = "4" * 64
+    campaign_sha256 = "5" * 64
+    observed: list[dict[str, Any]] = []
+
+    def activation_loader(config: Any, **_kwargs: Any) -> Any:
+        observed.append(json.loads(json.dumps(config.values)))
+        return SimpleNamespace(
+            audit_status=SimpleNamespace(value="PASS"),
+            freeze_sha256=activation_sha256,
+            campaign_config_sha256=campaign_sha256,
+            campaign={
+                "campaign_identity": campaign_identity,
+                "seeds": [731001, 731002, 731003],
+                "training": {"max_optimizer_steps": 5_000},
+            },
+        )
+
+    service = ConditionedDatasetService(project, activation_loader=activation_loader)
+    real_parse = conditioned_service_module._project_config_from_bytes
+    raced = False
+
+    def parse_during_aba(root: Path, path: Path, content: bytes) -> Any:
+        nonlocal raced
+        raced = True
+        parked = project / ".spritelab.original.parked"
+        residue = project / ".spritelab.alternate.residue"
+        config_path.rename(parked)
+        alternate.rename(config_path)
+        try:
+            return real_parse(root, path, content)
+        finally:
+            config_path.rename(residue)
+            parked.rename(config_path)
+
+    monkeypatch.setattr(conditioned_service_module, "_project_config_from_bytes", parse_during_aba)
+    payload = service._prospective_activation_payload(
+        config_path,
+        before,
+        activation_relative="datasets/conditioned-v5-test/activation.json",
+        campaign_relative="campaigns/conditioned-v5-test/campaign.json",
+        campaign_identity_sha256=campaign_identity,
+        activation_manifest_sha256=activation_sha256,
+        campaign_config_sha256=campaign_sha256,
+    )
+
+    persisted = yaml.safe_load(payload.decode("utf-8"))
+    assert raced is True
+    assert observed[0]["project"]["name"] == "original-project"
+    assert persisted["project"]["name"] == "original-project"
+    assert config_path.read_bytes() == before
+    assert outside.read_bytes() == outside_content
+
+
+@pytest.mark.parametrize("publisher_kind", ["service", "intake"])
+def test_conditioned_immutable_writer_refuses_staging_name_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publisher_kind: str,
+) -> None:
+    root = tmp_path / publisher_kind
+    root.mkdir()
+    outside = tmp_path / f"outside-{publisher_kind}.sentinel"
+    outside.write_bytes(b"preserve-outside")
+    real_publish = conditioned_service_module.AnchoredDirectory.publish_held_file_no_replace
+
+    def force_named_stage(_self: Any, _mode: int = 0o600) -> int:
+        raise UnsafeFilesystemOperation("force deterministic named-stage race")
+
+    def substitute_source_name(
+        anchor: Any,
+        descriptor: int,
+        source_name: str | None,
+        destination_name: str,
+        *,
+        identity: OwnedFileIdentity,
+    ) -> None:
+        assert source_name is not None
+        parked = f".parked-{publisher_kind}"
+        foreign = f".foreign-{publisher_kind}"
+        anchor.rename(source_name, parked, replace=False)
+        foreign_descriptor = anchor.open_file(
+            source_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0)),
+            0o600,
+        )
+        try:
+            os.write(foreign_descriptor, b"foreign-substitution")
+            os.fsync(foreign_descriptor)
+        finally:
+            os.close(foreign_descriptor)
+        try:
+            real_publish(
+                anchor,
+                descriptor,
+                source_name,
+                destination_name,
+                identity=identity,
+            )
+        finally:
+            if anchor.lexists(source_name):
+                anchor.rename(source_name, foreign, replace=False)
+            if anchor.lexists(parked):
+                anchor.rename(parked, source_name, replace=False)
+
+    monkeypatch.setattr(
+        conditioned_service_module.AnchoredDirectory,
+        "open_anonymous_file",
+        force_named_stage,
+    )
+    monkeypatch.setattr(
+        conditioned_service_module.AnchoredDirectory,
+        "publish_held_file_no_replace",
+        substitute_source_name,
+    )
+    with open_anchored_directory(root, root) as anchor:
+        with pytest.raises(UnsafeFilesystemOperation):
+            if publisher_kind == "service":
+                conditioned_service_module._publish_fresh_immutable_file(
+                    anchor,
+                    "action.json",
+                    b'{"exact":true}\n',
+                    residue_prefix=".service-residue-",
+                )
+            else:
+                conditioned_intake_module._publish_anchored_file_noreplace(
+                    anchor,
+                    "receipt.json",
+                    b'{"exact":true}\n',
+                    residue_prefix=".intake-residue-",
+                )
+        assert not anchor.lexists("action.json")
+        assert not anchor.lexists("receipt.json")
+    assert outside.read_bytes() == b"preserve-outside"
+
+
+@pytest.mark.parametrize("publisher_kind", ["service-reuse", "service-fresh", "intake"])
+@pytest.mark.parametrize("error_code", [errno.EINVAL, errno.EOPNOTSUPP])
+def test_conditioned_immutable_writer_falls_back_for_unsupported_anonymous_file_errno(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publisher_kind: str,
+    error_code: int,
+) -> None:
+    root = tmp_path / f"{publisher_kind}-{error_code}"
+    root.mkdir()
+    outside = tmp_path / f"outside-{publisher_kind}-{error_code}.sentinel"
+    outside.write_bytes(b"preserve-outside")
+    target = "immutable.json"
+    content = b'{"exact":true}\n'
+
+    def unsupported_anonymous_file(_self: Any, _mode: int = 0o600) -> int:
+        raise OSError(error_code, "anonymous files unsupported")
+
+    monkeypatch.setattr(
+        conditioned_service_module.AnchoredDirectory,
+        "open_anonymous_file",
+        unsupported_anonymous_file,
+    )
+    with open_anchored_directory(root, root) as anchor:
+        if publisher_kind == "service-reuse":
+            conditioned_service_module._publish_or_reuse_immutable_file(
+                anchor,
+                target,
+                content,
+                residue_prefix=".service-reuse-residue-",
+            )
+        elif publisher_kind == "service-fresh":
+            conditioned_service_module._publish_fresh_immutable_file(
+                anchor,
+                target,
+                content,
+                residue_prefix=".service-fresh-residue-",
+            )
+        else:
+            conditioned_intake_module._publish_anchored_file_noreplace(
+                anchor,
+                target,
+                content,
+                residue_prefix=".intake-residue-",
+            )
+        assert anchor.lexists(target)
+    assert (root / target).read_bytes() == content
+    _assert_strict_retained_stage_tree(root)
+    assert outside.read_bytes() == b"preserve-outside"
+
+
+@pytest.mark.parametrize("publisher_kind", ["service-reuse", "service-fresh", "intake"])
+def test_conditioned_immutable_writer_propagates_unrelated_anonymous_file_oserror(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    publisher_kind: str,
+) -> None:
+    root = tmp_path / publisher_kind
+    root.mkdir()
+    outside = tmp_path / f"outside-{publisher_kind}.sentinel"
+    outside.write_bytes(b"preserve-outside")
+
+    def unrelated_failure(_self: Any, _mode: int = 0o600) -> int:
+        raise OSError(errno.EIO, "unrelated storage failure")
+
+    monkeypatch.setattr(
+        conditioned_service_module.AnchoredDirectory,
+        "open_anonymous_file",
+        unrelated_failure,
+    )
+    with open_anchored_directory(root, root) as anchor, pytest.raises(OSError) as captured:
+        if publisher_kind == "service-reuse":
+            conditioned_service_module._publish_or_reuse_immutable_file(
+                anchor,
+                "immutable.json",
+                b"exact",
+                residue_prefix=".service-reuse-residue-",
+            )
+        elif publisher_kind == "service-fresh":
+            conditioned_service_module._publish_fresh_immutable_file(
+                anchor,
+                "immutable.json",
+                b"exact",
+                residue_prefix=".service-fresh-residue-",
+            )
+        else:
+            conditioned_intake_module._publish_anchored_file_noreplace(
+                anchor,
+                "immutable.json",
+                b"exact",
+                residue_prefix=".intake-residue-",
+            )
+    assert captured.value.errno == errno.EIO
+    assert not (root / "immutable.json").exists()
+    assert outside.read_bytes() == b"preserve-outside"
+
+
+def test_conditioned_immutable_reuse_accepts_concurrent_identical_anonymous_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "publication"
+    root.mkdir()
+    backing = tmp_path / "anonymous-backing.bin"
+    target = "evidence.json"
+    content = b'{"exact":true}\n'
+
+    def open_held_file(_self: Any, _mode: int = 0o600) -> int:
+        return os.open(
+            backing,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0)),
+            0o600,
+        )
+
+    def publish_concurrent_identical(
+        anchor: Any,
+        _source_descriptor: int,
+        source_name: str | None,
+        destination_name: str,
+        *,
+        identity: Any,
+    ) -> None:
+        del identity
+        assert source_name is None
+        descriptor = anchor.open_file(
+            destination_name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0)),
+            0o600,
+        )
+        try:
+            assert os.write(descriptor, content) == len(content)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        raise FileExistsError(destination_name)
+
+    monkeypatch.setattr(
+        conditioned_service_module.AnchoredDirectory,
+        "open_anonymous_file",
+        open_held_file,
+    )
+    monkeypatch.setattr(
+        conditioned_service_module.AnchoredDirectory,
+        "publish_held_file_no_replace",
+        publish_concurrent_identical,
+    )
+
+    with open_anchored_directory(root, root) as anchor:
+        conditioned_service_module._publish_or_reuse_immutable_file(
+            anchor,
+            target,
+            content,
+            residue_prefix=".concurrent-residue-",
+        )
+
+    assert (root / target).read_bytes() == content
+    assert (root / target).stat().st_nlink == 1
+    assert sorted(path.name for path in root.iterdir()) == [target]
+
+
+def test_service_anchored_reader_accepts_one_exact_retained_publication_stage(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "retained-stage"
+    root.mkdir()
+    target = root / "receipt.json"
+    alias = root / f".receipt.json.staging-{'a' * 32}"
+    content = b'{"exact":true}\n'
+    target.write_bytes(content)
+    try:
+        os.link(target, alias)
+    except OSError:
+        pytest.skip("hard links are unavailable in this test session")
+
+    with open_anchored_directory(root, root) as anchor:
+        assert (
+            conditioned_service_module._read_anchored_regular_bytes(
+                anchor,
+                target.name,
+                max_bytes=len(content),
+            )
+            == content
+        )
+
+    assert target.stat().st_nlink == alias.stat().st_nlink == 2
+
+
+@pytest.mark.parametrize("attack", ["extra-alias", "wrong-inode"])
+def test_service_anchored_reader_rejects_ambiguous_retained_publication_stage(
+    tmp_path: Path,
+    attack: str,
+) -> None:
+    root = tmp_path / attack
+    root.mkdir()
+    outside = tmp_path / f"outside-{attack}.sentinel"
+    outside.write_bytes(b"preserve-outside")
+    target = root / "receipt.json"
+    alias = root / f".receipt.json.staging-{'a' * 32}"
+    target.write_bytes(b'{"exact":true}\n')
+    try:
+        os.link(target, alias)
+        if attack == "extra-alias":
+            os.link(target, root / f".receipt.json.staging-{'b' * 32}")
+        else:
+            (root / f".receipt.json.staging-{'b' * 32}").write_bytes(b"foreign")
+    except OSError:
+        pytest.skip("hard links are unavailable in this test session")
+
+    with (
+        open_anchored_directory(root, root) as anchor,
+        pytest.raises(
+            conditioned_service_module.ConditionedDatasetError,
+            match=r"managed file|publication stage",
+        ),
+    ):
+        conditioned_service_module._read_anchored_regular_bytes(
+            anchor,
+            target.name,
+            max_bytes=1024,
+        )
+
+    assert outside.read_bytes() == b"preserve-outside"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exact held replacement is a Windows capability")
+def test_activation_config_exact_replace_commits_held_source_and_destination(tmp_path: Path) -> None:
+    root = tmp_path / "config-cas-success"
+    root.mkdir()
+    config = root / "spritelab.yaml"
+    config.write_bytes(b"before")
+    payload = b"after"
+    with open_anchored_directory(root, root) as anchor:
+        with conditioned_service_module._held_regular_file_snapshot(
+            anchor,
+            "spritelab.yaml",
+            max_bytes=1024,
+        ) as held:
+            assert conditioned_service_module._replace_held_config_if_supported(
+                anchor,
+                held,
+                payload,
+                expected_sha256=hashlib.sha256(payload).hexdigest(),
+            )
+    assert config.read_bytes() == payload
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exact held replacement is a Windows capability")
+def test_activation_config_exact_replace_refuses_source_name_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "config-cas"
+    root.mkdir()
+    config = root / "spritelab.yaml"
+    before = b"project:\n  name: retained-before\n"
+    payload = b"project:\n  name: intended-after\n"
+    config.write_bytes(before)
+    outside = tmp_path / "outside-config-cas.sentinel"
+    outside.write_bytes(b"preserve-outside")
+    real_replace = conditioned_service_module.AnchoredDirectory.replace_held_file_if_owned
+
+    def substitute_source_name(
+        anchor: Any,
+        source_descriptor: int,
+        source_name: str,
+        destination_name: str,
+        *,
+        identity: OwnedFileIdentity,
+        destination_descriptor: int,
+        destination_identity: OwnedFileIdentity,
+    ) -> None:
+        parked = ".config-source-parked"
+        foreign = ".config-source-foreign"
+        anchor.rename(source_name, parked, replace=False)
+        descriptor = anchor.open_file(
+            source_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0)),
+            0o600,
+        )
+        try:
+            os.write(descriptor, b"foreign-config-source")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            real_replace(
+                anchor,
+                source_descriptor,
+                source_name,
+                destination_name,
+                identity=identity,
+                destination_descriptor=destination_descriptor,
+                destination_identity=destination_identity,
+            )
+        finally:
+            if anchor.lexists(source_name):
+                anchor.rename(source_name, foreign, replace=False)
+            if anchor.lexists(parked):
+                anchor.rename(parked, source_name, replace=False)
+
+    monkeypatch.setattr(
+        conditioned_service_module.AnchoredDirectory,
+        "replace_held_file_if_owned",
+        substitute_source_name,
+    )
+    with open_anchored_directory(root, root) as anchor:
+        with conditioned_service_module._held_regular_file_snapshot(
+            anchor,
+            "spritelab.yaml",
+            max_bytes=1024,
+        ) as held:
+            with pytest.raises(UnsafeFilesystemOperation):
+                conditioned_service_module._replace_held_config_if_supported(
+                    anchor,
+                    held,
+                    payload,
+                    expected_sha256=hashlib.sha256(payload).hexdigest(),
+                )
+    assert config.read_bytes() == before
+    assert outside.read_bytes() == b"preserve-outside"
+
+
+def test_activation_recovers_prepared_records_after_state_checkpoint_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2532,20 +3421,550 @@ def test_activation_final_state_failure_restores_config_and_receipt(
     service, job_id, candidate, publication, before_config = _published_configured_candidate(project)
     original_write = service._write_state_unlocked
 
-    def fail_activated_state(root: Path, state: dict[str, Any]) -> None:
-        if state.get("stage") == "activated":
-            raise OSError("injected activation state failure")
+    failed_once = False
+
+    def fail_after_prepared_state(root: Path, state: dict[str, Any]) -> None:
+        nonlocal failed_once
+        if state.get("stage") == "activation_prepared" and not failed_once:
+            failed_once = True
+            original_write(root, state)
+            raise OSError("injected crash after durable PREPARED state")
         original_write(root, state)
 
-    monkeypatch.setattr(service, "_write_state_unlocked", fail_activated_state)
-    with pytest.raises(OSError, match="injected activation state failure"):
+    monkeypatch.setattr(service, "_write_state_unlocked", fail_after_prepared_state)
+    with pytest.raises(OSError, match="injected crash after durable PREPARED state"):
         service.activate(
             job_id,
             **_activation_kwargs(candidate, publication, hashlib.sha256(before_config).hexdigest()),
         )
     assert (project / "spritelab.yaml").read_bytes() == before_config
-    assert not (project / "runs" / "v3" / "conditioned-dataset-v5" / job_id / "activation_receipt").exists()
-    restored = service.job(job_id)
-    assert restored["stage"] == "published"
-    assert restored["activation_authorization"] is None
-    assert restored["publication"]["configuration_activated"] is False
+    receipt_root = project / "runs" / "v3" / "conditioned-dataset-v5" / job_id / "activation_receipt"
+    assert {path.name for path in receipt_root.iterdir()} == {"journal.json", "receipt.json", "record.json"}
+    prepared = service.job(job_id)
+    assert prepared["stage"] == "activation_prepared"
+    assert prepared["activation_authorization"]["status"] == "PREPARED"
+    assert prepared["publication"]["configuration_activated"] is False
+
+    monkeypatch.setattr(service, "_write_state_unlocked", original_write)
+    recovered = service.activate(
+        job_id,
+        **_activation_kwargs(candidate, publication, hashlib.sha256(before_config).hexdigest()),
+    )
+    assert recovered["stage"] == "activated"
+    assert recovered["activation_authorization"]["status"] == "COMMITTED"
+    assert recovered["publication"]["configuration_activated"] is True
+
+
+def test_activation_projects_exact_commit_after_post_cas_process_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    service, job_id, candidate, publication, before_config = _published_configured_candidate(project)
+    original_publish = conditioned_service_module._publish_or_reuse_immutable_file
+    crashed = False
+
+    def crash_after_project_marker(anchor: Any, name: str, content: bytes, **kwargs: Any) -> Any:
+        nonlocal crashed
+        result = original_publish(anchor, name, content, **kwargs)
+        if name == conditioned_service_module.ACTIVATION_PROJECT_COMMIT_NAME and not crashed:
+            crashed = True
+            raise OSError("injected process loss after immutable activation marker")
+        return result
+
+    monkeypatch.setattr(conditioned_service_module, "_publish_or_reuse_immutable_file", crash_after_project_marker)
+    kwargs = _activation_kwargs(candidate, publication, hashlib.sha256(before_config).hexdigest())
+    with pytest.raises(OSError, match="injected process loss after immutable activation marker"):
+        service.activate(job_id, **kwargs)
+
+    projected = ConditionedDatasetService(
+        project,
+        activation_loader=_activation_loader,
+        policy=service.policy,
+    ).job(job_id)
+    assert projected["stage"] == "activated"
+    assert projected["activation_authorization"]["status"] == "COMMITTED"
+    assert projected["publication"]["configuration_activated"] is True
+    assert projected["publication"]["training_started"] is False
+
+
+def test_activation_recovers_after_config_boundary_before_project_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    service, job_id, candidate, publication, before_config = _published_configured_candidate(project)
+    original_publish = conditioned_service_module._publish_or_reuse_immutable_file
+    failed = False
+
+    def fail_before_project_marker(anchor: Any, name: str, content: bytes, **kwargs: Any) -> Any:
+        nonlocal failed
+        if name == conditioned_service_module.ACTIVATION_PROJECT_COMMIT_NAME and not failed:
+            failed = True
+            raise OSError("injected loss before immutable activation marker")
+        return original_publish(anchor, name, content, **kwargs)
+
+    monkeypatch.setattr(conditioned_service_module, "_publish_or_reuse_immutable_file", fail_before_project_marker)
+    kwargs = _activation_kwargs(candidate, publication, hashlib.sha256(before_config).hexdigest())
+    with pytest.raises(OSError, match="injected loss before immutable activation marker"):
+        service.activate(job_id, **kwargs)
+    prepared = ConditionedDatasetService(
+        project,
+        activation_loader=_activation_loader,
+        policy=service.policy,
+    ).job(job_id)
+    assert prepared["stage"] == "activation_prepared"
+    assert prepared["publication"]["configuration_activated"] is False
+
+    monkeypatch.setattr(conditioned_service_module, "_publish_or_reuse_immutable_file", original_publish)
+    recovered = service.activate(job_id, **kwargs)
+    assert recovered["stage"] == "activated"
+    assert recovered["activation_authorization"]["status"] == "COMMITTED"
+    assert recovered["publication"]["configuration_activated"] is True
+
+
+def _direct_publication_fixture(
+    project: Path,
+) -> tuple[ConditionedDatasetService, Path, dict[str, Any], dict[str, dict[str, Any]]]:
+    project.mkdir()
+
+    def campaign_builder(_root: Path, **_kwargs: Any) -> Any:
+        return SimpleNamespace(
+            portable_campaign={
+                "seeds": [731001, 731002, 731003],
+                "training": {"max_optimizer_steps": 5_000},
+            },
+            campaign={"campaign_identity": "9" * 64},
+            validation={"launch_ready": True},
+        )
+
+    service = ConditionedDatasetService(project, campaign_builder=campaign_builder)
+    job_root = service.jobs_root / "conditioned-0123456789abcdefabcd"
+    phase7 = job_root / "candidate" / "phase7"
+    phase7.mkdir(parents=True)
+    for name, content in {
+        "view_manifest.json": b'{"view":true}\n',
+        "training_manifest.jsonl": b'{"sprite_id":"one"}\n',
+        "conditioning_vocabulary.json": b'{"vocabulary":true}\n',
+        "benchmark_manifest.json": b'{"benchmark":true}\n',
+    }.items():
+        (phase7 / name).write_bytes(content)
+
+    evidence: dict[str, dict[str, Any]] = {}
+    for kind in ("label_audit", "dataset_validation"):
+        report = f'{{"kind":"{kind}","verdict":"PASS"}}\n'.encode()
+        receipt = f'{{"kind":"{kind}","receipt":true}}\n'.encode()
+        action = f'{{"kind":"{kind}","action":true}}\n'.encode()
+        evidence[kind] = {
+            "sha256": hashlib.sha256(report).hexdigest(),
+            "byte_count": len(report),
+            "content": report,
+            "receipt": {
+                "sha256": hashlib.sha256(receipt).hexdigest(),
+                "byte_count": len(receipt),
+                "content": receipt,
+            },
+            "action": {
+                "sha256": hashlib.sha256(action).hexdigest(),
+                "byte_count": len(action),
+                "content": action,
+            },
+        }
+    candidate = {
+        "image_count": 2_000,
+        "candidate_identity": "8" * 64,
+        "license_ids": ["cc0-1.0"],
+    }
+    return service, job_root, candidate, evidence
+
+
+def _direct_publication_identity(
+    project: Path,
+    job_root: Path,
+    evidence: dict[str, dict[str, Any]],
+) -> str:
+    files = dict(conditioned_service_module._inventory(job_root / "candidate" / "phase7", project))
+    for kind in ("label_audit", "dataset_validation"):
+        files[f"evidence/{kind}.json"] = {
+            "sha256": evidence[kind]["sha256"],
+            "byte_count": evidence[kind]["byte_count"],
+        }
+        _receipt_name, receipt_relative = conditioned_service_module.AUDIT_RECEIPT_ARTIFACTS[kind]
+        files[receipt_relative] = {
+            "sha256": evidence[kind]["receipt"]["sha256"],
+            "byte_count": evidence[kind]["receipt"]["byte_count"],
+        }
+        _action_name, action_relative = conditioned_service_module.AUDIT_ACTION_RECORD_ARTIFACTS[kind]
+        files[action_relative] = {
+            "sha256": evidence[kind]["action"]["sha256"],
+            "byte_count": evidence[kind]["action"]["byte_count"],
+        }
+    return conditioned_service_module._inventory_identity(files)
+
+
+def test_direct_final_publication_plans_production_campaign_against_absent_leaf(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "production-builder"
+    service, job_root, candidate, evidence = _direct_publication_fixture(project)
+    service._campaign_builder = None
+
+    publication = service._publish(job_root, candidate, evidence)
+
+    identity = publication["publication_identity_sha256"]
+    campaign = service.campaigns_root / f"conditioned-v5-{identity}"
+    assert campaign.is_dir()
+    assert (campaign / "campaign.json").is_file()
+    assert (service.campaigns_root / conditioned_service_module.campaign_commit_name(identity)).is_file()
+    assert publication["campaign_launch_ready"] is True
+
+
+@pytest.mark.parametrize("fault_step", ["dataset_marker_committed", "campaign_marker_committed"])
+def test_direct_final_publication_retry_converges_after_durable_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_step: str,
+) -> None:
+    project = tmp_path / fault_step
+    service, job_root, candidate, evidence = _direct_publication_fixture(project)
+    outside = tmp_path / f"outside-{fault_step}.sentinel"
+    outside.write_bytes(b"preserve-outside")
+    failed = False
+
+    def fail_once(step: str) -> None:
+        nonlocal failed
+        if step == fault_step and not failed:
+            failed = True
+            raise OSError(f"injected loss after {fault_step}")
+
+    monkeypatch.setattr(conditioned_service_module, "_conditioned_publication_checkpoint", fail_once)
+    with pytest.raises(OSError, match=fault_step):
+        service._publish(job_root, candidate, evidence)
+    monkeypatch.setattr(conditioned_service_module, "_conditioned_publication_checkpoint", lambda _step: None)
+
+    publication = service._publish(job_root, candidate, evidence)
+
+    identity = publication["publication_identity_sha256"]
+    dataset = service.datasets_root / f"conditioned-v5-{identity}"
+    campaign = service.campaigns_root / f"conditioned-v5-{identity}"
+    assert dataset.is_dir()
+    assert campaign.is_dir()
+    assert (service.datasets_root / f"conditioned-v5-{identity}.commit.json").is_file()
+    assert (service.campaigns_root / f"conditioned-v5-{identity}.commit.json").is_file()
+    assert (job_root / "publication-journal.json").is_file()
+    assert outside.read_bytes() == b"preserve-outside"
+
+
+def test_direct_final_publication_refuses_unknown_directory_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "foreign-publication"
+    service, job_root, candidate, evidence = _direct_publication_fixture(project)
+    identity = _direct_publication_identity(project, job_root, evidence)
+    foreign = service.datasets_root / f"conditioned-v5-{identity}"
+    foreign.mkdir(parents=True)
+    foreign_file = foreign / "foreign.bin"
+    foreign_file.write_bytes(b"do-not-touch")
+    outside = tmp_path / "outside-foreign-publication.sentinel"
+    outside.write_bytes(b"preserve-outside")
+
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as refused:
+        service._publish(job_root, candidate, evidence)
+
+    assert refused.value.code == "publication_copy_mismatch"
+    assert foreign_file.read_bytes() == b"do-not-touch"
+    assert outside.read_bytes() == b"preserve-outside"
+    assert not (job_root / "publication-journal.json").exists()
+
+
+def test_direct_final_publication_refuses_unknown_campaign_before_markers(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "foreign-campaign"
+    service, job_root, candidate, evidence = _direct_publication_fixture(project)
+    identity = _direct_publication_identity(project, job_root, evidence)
+    foreign = service.campaigns_root / f"conditioned-v5-{identity}"
+    foreign.mkdir(parents=True)
+    foreign_file = foreign / "foreign.bin"
+    foreign_file.write_bytes(b"do-not-touch")
+    outside = tmp_path / "outside-foreign-campaign.sentinel"
+    outside.write_bytes(b"preserve-outside")
+
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as refused:
+        service._publish(job_root, candidate, evidence)
+
+    assert refused.value.code == "campaign_copy_mismatch"
+    assert foreign_file.read_bytes() == b"do-not-touch"
+    assert outside.read_bytes() == b"preserve-outside"
+    assert not (job_root / "publication-journal.json").exists()
+    assert not (service.datasets_root / conditioned_service_module.dataset_commit_name(identity)).exists()
+    assert not (service.campaigns_root / conditioned_service_module.campaign_commit_name(identity)).exists()
+
+
+def test_candidate_writer_refuses_intermediate_directory_swap_without_touching_outside(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    phase7 = project / "runs" / "job" / "candidate" / "phase7"
+    phase7.mkdir(parents=True)
+    outside_phase7 = tmp_path / "outside" / "phase7"
+    outside_phase7.mkdir(parents=True)
+    sentinel = outside_phase7 / "sentinel.bin"
+    sentinel.write_bytes(b"preserve")
+    candidate = phase7.parent
+    parked = candidate.with_name("candidate-parked")
+
+    try:
+        with pytest.raises((conditioned_service_module.ConditionedDatasetError, UnsafeFilesystemOperation)):
+            with open_anchored_directory(phase7, project) as phase7_anchor:
+                candidate.rename(parked)
+                os.symlink(outside_phase7.parent, candidate, target_is_directory=True)
+                conditioned_service_module._write_json(
+                    phase7_anchor,
+                    "outside-write.json",
+                    {"unsafe": True},
+                )
+    except OSError:
+        if parked.is_dir() and not os.path.lexists(candidate):
+            parked.rename(candidate)
+        assert sentinel.read_bytes() == b"preserve"
+        assert not (outside_phase7 / "outside-write.json").exists()
+        return
+
+    assert sentinel.read_bytes() == b"preserve"
+    assert not (outside_phase7 / "outside-write.json").exists()
+
+
+def test_candidate_loader_requires_marker_and_rejects_candidate_parent_substitution(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service = _service(project)
+    root = project / "runs" / "v3" / "conditioned-dataset-v5" / "marker-loader"
+    candidate_root = root / "candidate"
+    candidate_root.mkdir(parents=True)
+    payload = b"marker-bound-phase7-payload"
+    inventory = {
+        "payload.bin": {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "byte_count": len(payload),
+        }
+    }
+    with open_anchored_directory(candidate_root, project) as candidate_anchor:
+        candidate_root_identity = OwnedFileIdentity.from_stat(candidate_anchor.directory_metadata())
+        phase7_identity = candidate_anchor.mkdir("phase7")
+        with candidate_anchor.open_directory_immovable("phase7") as phase7_anchor:
+            phase7_anchor.atomic_write_bytes("payload.bin", payload)
+        phase7_commit = commit_anchored_dataset_maker_export(
+            candidate_anchor,
+            "phase7",
+            expected_parent_identity=candidate_root_identity,
+            expected_directory_identity=phase7_identity,
+            expected_inventory=inventory,
+        )
+    candidate = {
+        "schema_version": conditioned_service_module.CANDIDATE_SCHEMA,
+        "image_count": 4,
+        "payload_inventory": inventory,
+        "phase7_commit_identity": stable_hash(phase7_commit),
+    }
+    candidate_content = (json.dumps(candidate, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    (root / "candidate_manifest.json").write_bytes(candidate_content)
+    state = {
+        "candidate": {
+            "manifest_relative_path": "candidate_manifest.json",
+            "manifest_sha256": hashlib.sha256(candidate_content).hexdigest(),
+        }
+    }
+
+    assert service._load_candidate(root, state) == candidate
+
+    marker_bytes = (candidate_root / "phase7.commit.json").read_bytes()
+    parked_candidate = root / "candidate-held-by-test"
+    os.replace(candidate_root, parked_candidate)
+    (candidate_root / "phase7").mkdir(parents=True)
+    (candidate_root / "phase7" / "payload.bin").write_bytes(payload)
+    (candidate_root / "phase7.commit.json").write_bytes(marker_bytes)
+    sentinel = candidate_root / "outside-sentinel.bin"
+    sentinel_bytes = b"replacement-parent-must-remain-byte-identical"
+    sentinel.write_bytes(sentinel_bytes)
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as bound_error:
+        with conditioned_service_module._open_bound_candidate_phase7(
+            candidate_root,
+            project,
+            candidate_identity=candidate_root_identity,
+            phase7_identity=phase7_identity,
+        ):
+            raise AssertionError("substituted candidate parent was accepted")
+    assert bound_error.value.code == "candidate_root_changed"
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as caught:
+        service._load_candidate(root, state)
+    assert caught.value.code == "candidate_commit_changed"
+    assert sentinel.read_bytes() == sentinel_bytes
+
+
+def test_conditioned_inventory_refuses_lstat_link_open_restore_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    payload = project / "runs" / "job" / "candidate" / "phase7"
+    payload.mkdir(parents=True)
+    victim = payload / "victim.bin"
+    inside_content = b"inside-publication"
+    victim.write_bytes(inside_content)
+    outside = tmp_path / "outside-sentinel.bin"
+    outside_content = b"outside-preserve"
+    outside.write_bytes(outside_content)
+    inventory = conditioned_service_module._inventory(payload, project)
+    assert inventory == {
+        victim.name: {
+            "sha256": hashlib.sha256(inside_content).hexdigest(),
+            "byte_count": len(inside_content),
+        }
+    }
+
+    probe = tmp_path / "symlink-probe"
+    try:
+        os.symlink(outside, probe)
+        probe.rename(tmp_path / "symlink-probe-residue")
+    except OSError:
+        pytest.skip("file symlinks are unavailable in this test session")
+
+    real_path_open = Path.open
+    real_anchored_open = conditioned_service_module.AnchoredDirectory.open_file
+    raced = False
+
+    def race(open_file: Any) -> Any:
+        nonlocal raced
+        if raced:
+            return open_file()
+        raced = True
+        parked = payload / "victim-parked.bin"
+        residue = payload / "victim-link-residue.bin"
+        victim.rename(parked)
+        os.symlink(outside, victim)
+        try:
+            return open_file()
+        finally:
+            victim.rename(residue)
+            parked.rename(victim)
+
+    def raced_path_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if path == victim:
+            return race(lambda: real_path_open(path, *args, **kwargs))
+        return real_path_open(path, *args, **kwargs)
+
+    def raced_anchored_open(anchor: Any, name: str, flags: int, mode: int = 0o600) -> int:
+        if anchor.directory == payload and name == victim.name:
+            return race(lambda: real_anchored_open(anchor, name, flags, mode))
+        return real_anchored_open(anchor, name, flags, mode)
+
+    monkeypatch.setattr(Path, "open", raced_path_open)
+    monkeypatch.setattr(conditioned_service_module.AnchoredDirectory, "open_file", raced_anchored_open)
+
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as captured:
+        conditioned_service_module._inventory(payload, project)
+
+    assert captured.value.code == "inventory_changed"
+    assert raced is True
+    assert outside.read_bytes() == outside_content
+    assert victim.read_bytes() == inside_content
+
+
+def test_conditioned_inventory_refuses_early_in_place_mutation_during_later_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    payload = project / "runs" / "job" / "candidate" / "phase7"
+    payload.mkdir(parents=True)
+    early = payload / "a-early.bin"
+    early.write_bytes(b"AAAA")
+    later = payload / "z-later.bin"
+    later.write_bytes(b"ZZZZ")
+    outside = tmp_path / "outside-inventory.sentinel"
+    outside_content = b"preserve-outside"
+    outside.write_bytes(outside_content)
+    real_identity = conditioned_service_module._stable_file_identity
+    mutated = False
+
+    def mutate_early_after_later(
+        anchor: Any,
+        name: str,
+        root_device: int,
+    ) -> dict[str, Any]:
+        nonlocal mutated
+        identity = real_identity(anchor, name, root_device)
+        if name == later.name and not mutated:
+            early.write_bytes(b"BBBB")
+            mutated = True
+        return identity
+
+    monkeypatch.setattr(conditioned_service_module, "_stable_file_identity", mutate_early_after_later)
+
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError) as captured:
+        conditioned_service_module._inventory(payload, project)
+
+    assert captured.value.code == "inventory_changed"
+    assert mutated is True
+    assert early.read_bytes() == b"BBBB"
+    assert outside.read_bytes() == outside_content
+
+
+def test_conditioned_inventory_refuses_recursive_directory_open_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    payload = project / "runs" / "job" / "candidate" / "phase7"
+    nested = payload / "nested"
+    nested.mkdir(parents=True)
+    (nested / "inside.bin").write_bytes(b"inside")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel.write_bytes(b"preserve")
+    inventory = conditioned_service_module._inventory(payload, project)
+    assert inventory["nested/inside.bin"]["sha256"] == hashlib.sha256(b"inside").hexdigest()
+
+    probe = tmp_path / "directory-symlink-probe"
+    try:
+        os.symlink(outside, probe, target_is_directory=True)
+        probe.rename(tmp_path / "directory-symlink-probe-residue")
+    except OSError:
+        pytest.skip("directory symlinks are unavailable in this test session")
+
+    real_open_directory = conditioned_service_module.AnchoredDirectory.open_directory_immovable
+    raced = False
+
+    @contextmanager
+    def raced_open_directory(anchor: Any, name: str) -> Any:
+        nonlocal raced
+        if anchor.directory != payload or name != nested.name or raced:
+            with real_open_directory(anchor, name) as child:
+                yield child
+            return
+        raced = True
+        parked = payload / "nested-parked"
+        residue = payload / "nested-link-residue"
+        nested.rename(parked)
+        os.symlink(outside, nested, target_is_directory=True)
+        try:
+            with real_open_directory(anchor, name) as child:
+                yield child
+        finally:
+            nested.rename(residue)
+            parked.rename(nested)
+
+    monkeypatch.setattr(
+        conditioned_service_module.AnchoredDirectory,
+        "open_directory_immovable",
+        raced_open_directory,
+    )
+
+    with pytest.raises(conditioned_service_module.ConditionedDatasetError):
+        conditioned_service_module._inventory(payload, project)
+
+    assert raced is True
+    assert sentinel.read_bytes() == b"preserve"
+    assert (nested / "inside.bin").read_bytes() == b"inside"

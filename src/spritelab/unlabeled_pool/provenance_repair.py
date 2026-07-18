@@ -135,7 +135,10 @@ def _validate_repair(repair: dict[str, Any], *, workspace_root: Path) -> None:
     correspondence = evidence.get("archive_member_mapping")
     if not isinstance(correspondence, list):
         raise ValueError("verification evidence must include archive_member_mapping")
-    mapped_ids = [entry.get("sprite_id") for entry in correspondence if isinstance(entry, dict)]
+    raw_mapped_ids = [entry.get("sprite_id") for entry in correspondence if isinstance(entry, dict)]
+    if not all(isinstance(sprite_id, str) for sprite_id in raw_mapped_ids):
+        raise ValueError("archive member mapping sprite IDs must be strings")
+    mapped_ids = [sprite_id for sprite_id in raw_mapped_ids if isinstance(sprite_id, str)]
     if sorted(mapped_ids) != affected:
         raise ValueError("archive member mapping must cover every affected sprite exactly once")
     sprite_hashes = {

@@ -81,7 +81,7 @@
       </div>
       <div class="filters">
         <label>Prompt <input id="gallery-prompt" placeholder="Filter prompt"></label>
-        <label>Seed <input id="gallery-seed" type="number" min="0" placeholder="Any"></label>
+        <label>Seed <input id="gallery-seed" type="number" min="0" max="9223372036854775807" placeholder="Any"></label>
         <label>Category <input id="gallery-category" placeholder="Any"></label>
         <label>Sort by metric <select id="gallery-sort"><option value="">Default</option><option value="conditional_adherence">Conditional adherence</option><option value="metrics.pixel_art.unique_palette_size">Palette size</option></select></label>
       </div>
@@ -146,7 +146,9 @@
         </div>
         <div class="actions dark-actions">
           <button id="run-cpu-smoke" class="secondary dark-secondary" disabled>Run CPU smoke</button>
+          <button id="cancel-cpu-smoke" class="secondary dark-secondary" disabled>Cancel CPU smoke</button>
           <button id="run-cuda-smoke" class="secondary dark-secondary" disabled>Run CUDA smoke</button>
+          <button id="cancel-cuda-smoke" class="secondary dark-secondary" disabled>Cancel CUDA smoke</button>
           <button id="register-smoke" class="secondary dark-secondary" disabled>Register for Playground only</button>
         </div>
         <div class="smoke-device-grid">
@@ -159,13 +161,13 @@
         <label class="span-two">Prompt<textarea id="play-prompt" rows="3">Describe a 32×32 sprite</textarea></label>
         <label>Checkpoint<select id="play-checkpoint"></select></label>
         <label>Live or EMA<select id="play-weights"><option value="ema">EMA</option><option value="live">Live</option></select></label>
-        <label>Seed<input id="play-seed" type="number" min="0" value="42"></label>
+        <label>Seed<input id="play-seed" type="number" min="0" max="9223372036854775807" value="42"></label>
         <label>Number of images<input id="play-count" type="number" min="1" max="16" value="4"></label>
       </div>
       <details class="advanced-settings"><summary>Advanced settings</summary>
         <div class="advanced-grid">
           <label>Sampling steps<input id="play-steps" type="number" min="1" max="500" value="30"></label>
-          <label>CFG / guidance<input id="play-guidance" type="number" min="0" max="50" step="0.1" value="3.0"></label>
+          <label>CFG / guidance<input id="play-guidance" type="number" min="0.1" max="50" step="0.1" value="3.0"></label>
         </div>
       </details>
       <label id="billable-confirm-wrap" class="confirm-cost" hidden><input id="billable-confirm" type="checkbox"> I confirm this remote or billable generation.</label>

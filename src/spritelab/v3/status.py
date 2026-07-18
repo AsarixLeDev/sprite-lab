@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from spritelab.evaluation.audit_identity import (
     MEMORIZATION_AUDIT_BOUND_FILES as MEMORIZATION_AUDIT_BOUND_FILES,
@@ -34,6 +34,14 @@ from spritelab.product_features.dataset.certification import labeling_audit_veri
 from spritelab.product_features.evaluation.checkpoints import discover_checkpoint_candidates
 from spritelab.v3.config import ProjectConfig, configured_training_identities
 from spritelab.v3.model import AuditStatus, Evidence, ProjectState, StageState, StageStatus
+
+if TYPE_CHECKING:
+    from spritelab.product_features.training.activation import ConditionedTrainingActivation
+    from spritelab.product_features.training.models import TrainingProfile
+
+
+_STRICT_CONDITIONED_DATASET_FREEZE_SCHEMA = "spritelab.dataset.freeze.conditioned.v5"
+_ACTIVATION_NOT_LOADED = object()
 
 
 def _read_json(path: Path | None) -> dict[str, Any] | None:
@@ -75,25 +83,47 @@ def _source_commit(root: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def _training_audit_status(config: ProjectConfig, report: dict[str, Any] | None) -> AuditStatus:
-    if report is None:
-        return AuditStatus.NOT_AUDITED
+def _selected_training_activation(
+    config: ProjectConfig,
+    profile: TrainingProfile | str = "recommended",
+) -> ConditionedTrainingActivation | None:
     from spritelab.product_features.training.activation import (
         ConditionedActivationError,
         load_conditioned_training_activation,
-        training_audit_status,
     )
     from spritelab.product_features.training.models import TrainingProfile
 
     try:
-        activation = load_conditioned_training_activation(
+        selected_profile = profile if isinstance(profile, TrainingProfile) else TrainingProfile(str(profile))
+        return load_conditioned_training_activation(
             config,
-            TrainingProfile.RECOMMENDED,
+            selected_profile,
             require_audit=False,
         )
-    except (ConditionedActivationError, OSError, TypeError, KeyError):
+    except (ConditionedActivationError, OSError, TypeError, KeyError, ValueError):
+        return None
+
+
+def _training_audit_status(
+    config: ProjectConfig,
+    report: dict[str, Any] | None,
+    profile: TrainingProfile | str = "recommended",
+    activation: ConditionedTrainingActivation | None | object = _ACTIVATION_NOT_LOADED,
+) -> AuditStatus:
+    if report is None:
+        return AuditStatus.NOT_AUDITED
+    from spritelab.product_features.training.activation import training_audit_status
+
+    selected_activation = (
+        _selected_training_activation(config, profile) if activation is _ACTIVATION_NOT_LOADED else activation
+    )
+    if selected_activation is None:
         return AuditStatus.STALE
-    return training_audit_status(config, report, activation)
+    return training_audit_status(
+        config,
+        report,
+        cast("ConditionedTrainingActivation", selected_activation),
+    )
 
 
 @dataclass(frozen=True)
@@ -204,7 +234,11 @@ def _labeling_audit_status(verification: AuditVerification) -> AuditStatus:
     return AuditStatus.NOT_AUDITED
 
 
-def build_project_state(config: ProjectConfig) -> ProjectState:
+def build_project_state(
+    config: ProjectConfig,
+    *,
+    training_profile: TrainingProfile | str = "recommended",
+) -> ProjectState:
     raw_path = config.path_for("dataset", "raw_provenance_report")
     extraction_path = config.path_for("dataset", "extraction_report")
     suitability_path = config.path_for("dataset", "suitability_report")
@@ -318,7 +352,7 @@ def build_project_state(config: ProjectConfig) -> ProjectState:
 
     label_stopped = bool(labels and labels.get("campaign_status") == "stopped_health_gate")
     disagreements, comparisons = _count_disagreements(labels or {})
-    label_metrics = {
+    label_metrics: dict[str, Any] = {
         key: labels[key]
         for key in ("pass_a_completed", "pass_b_completed", "pass_a_record_abstention_count")
         if labels and key in labels
@@ -436,7 +470,12 @@ def build_project_state(config: ProjectConfig) -> ProjectState:
             or "condition" in str(freeze.get("dataset_kind", freeze.get("view", ""))).casefold()
         )
     )
-    if (
+    strict_conditioned_v5 = bool(freeze and freeze.get("schema_version") == _STRICT_CONDITIONED_DATASET_FREEZE_SCHEMA)
+    selected_activation: ConditionedTrainingActivation | None | object = _ACTIVATION_NOT_LOADED
+    if strict_conditioned_v5:
+        selected_activation = _selected_training_activation(config, training_profile)
+        freeze_complete = freeze_complete and selected_activation is not None
+    elif (
         freeze_complete
         and freeze_is_conditioned
         and not labeling_verification.authorizes(PRODUCTION_CONDITIONED_DATASET_FREEZE)
@@ -459,31 +498,56 @@ def build_project_state(config: ProjectConfig) -> ProjectState:
         )
     )
 
-    training_audit = _training_audit_status(config, training)
+    training_audit = _training_audit_status(
+        config,
+        training,
+        training_profile,
+        selected_activation,
+    )
+    selected_training_profile = getattr(training_profile, "value", str(training_profile))
     training_failed = training_audit == AuditStatus.FAIL
     training_stale = training_audit == AuditStatus.STALE
+    training_passed = training_audit == AuditStatus.PASS
     failed_gates = sorted(key for key, value in (training or {}).get("gates", {}).items() if value == "FAIL")
     stages.append(
         StageState(
             key="training-infrastructure-audit",
             title="Training infrastructure audit",
-            status=StageStatus.STALE
-            if training_stale
-            else (StageStatus.FAILED if training_failed else StageStatus.INCONCLUSIVE),
+            status=(
+                StageStatus.COMPLETE
+                if training_passed
+                else StageStatus.STALE
+                if training_stale
+                else StageStatus.FAILED
+                if training_failed
+                else StageStatus.INCONCLUSIVE
+            ),
             explanation=(
-                "The latest independent audit is stale because an audited identity changed."
+                "The latest independent training-infrastructure audit is applicable and passed."
+                if training_passed
+                else "The latest independent audit is stale because an audited identity changed."
                 if training_stale
                 else "The latest applicable independent audit reports failed safety gates."
                 if training_failed
                 else "No conclusive applicable training-infrastructure audit is available."
             ),
-            blockers=[f"Independent training audit is {training_audit.value}."],
+            blockers=[] if training_passed else [f"Independent training audit is {training_audit.value}."],
             evidence=_evidence(training_path) + _evidence(training_hashes_path),
             source_commit=source_commit,
-            next_action="Remediate failed gates and commission a new independent audit.",
-            next_command="python -m spritelab v3 explain training-audit",
+            next_action=(
+                "Proceed with the exact selected campaign and retain this audit binding."
+                if training_passed
+                else "Remediate failed gates and commission a new independent audit."
+            ),
+            next_command=(
+                "python -m spritelab v3 train" if training_passed else "python -m spritelab v3 explain training-audit"
+            ),
             audit=training_audit,
-            metrics={"failed_gates": failed_gates, "training_runs": (training or {}).get("training_runs")},
+            metrics={
+                "failed_gates": failed_gates,
+                "training_runs": (training or {}).get("training_runs"),
+                "selected_profile": selected_training_profile,
+            },
         )
     )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -87,6 +88,71 @@ def test_atomic_metadata_barrier_reopens_destination_without_changing_bytes(tmp_
 
     assert binary_path.read_bytes() == b"exact durable bytes\n"
     assert json_path.read_bytes() == b'{\n  "value": "exact"\n}\n'
+
+
+@pytest.mark.parametrize(
+    "marker_kind",
+    ["valid", "malformed", "foreign", "partial", "directory", "hardlink", "symlink"],
+)
+def test_any_completion_marker_path_freezes_event_history_before_transaction_publication(
+    tmp_path: Path,
+    marker_kind: str,
+) -> None:
+    run_id = f"terminal-event-freeze-{marker_kind}"
+    runs = tmp_path / "runs"
+    repository = EventRepository(runs)
+    repository.create_run(run_id, feature="training", command="train")
+    directory = runs / run_id
+    state_path = directory / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    run_identity_path = directory / "run_identity.json"
+    atomic_write_json(
+        run_identity_path,
+        {
+            "run_id": run_id,
+            **{key: value for key, value in state.items() if key.startswith("event_")},
+        },
+    )
+    marker = directory / "run_completion_marker.json"
+    outside_sentinel = tmp_path / f"outside-terminal-marker-{marker_kind}.json"
+    outside_sentinel.write_bytes(b'{"outside":"byte-identical"}\n')
+    outside_before = outside_sentinel.read_bytes()
+    if marker_kind == "valid":
+        marker.write_bytes(b'{"complete":true,"failed":false,"partial":false}\n')
+    elif marker_kind == "malformed":
+        marker.write_bytes(b"{malformed")
+    elif marker_kind == "foreign":
+        marker.write_bytes(b'{"complete":true,"run_identity":"foreign"}\n')
+    elif marker_kind == "partial":
+        marker.write_bytes(b'{"complete":false,"partial":true}\n')
+    elif marker_kind == "directory":
+        marker.mkdir()
+    elif marker_kind == "hardlink":
+        try:
+            os.link(outside_sentinel, marker)
+        except (NotImplementedError, OSError):
+            pytest.skip("hard links are unavailable in this test session")
+    else:
+        try:
+            marker.symlink_to(outside_sentinel)
+        except (NotImplementedError, OSError):
+            pytest.skip("symbolic links are unavailable in this test session")
+
+    authoritative_paths = (
+        directory / EVENT_FILENAME,
+        directory / EVENT_HISTORY_ORIGIN_FILENAME,
+        state_path,
+        run_identity_path,
+    )
+    before = {path: path.read_bytes() for path in authoritative_paths}
+
+    with pytest.raises(LegacyEventMigrationError, match="completion marker freezes event history"):
+        repository.append(_event(run_id))
+
+    assert {path: path.read_bytes() for path in authoritative_paths} == before
+    assert not (directory / EVENT_HISTORY_TRANSACTION_FILENAME).exists()
+    assert marker.exists() or marker.is_symlink()
+    assert outside_sentinel.read_bytes() == outside_before
 
 
 def test_replay_of_missing_run_does_not_create_lock_or_run_directory(tmp_path: Path) -> None:

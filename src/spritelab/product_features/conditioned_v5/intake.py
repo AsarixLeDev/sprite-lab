@@ -8,6 +8,7 @@ opaque receipt after every byte and managed document has been revalidated.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -543,11 +544,11 @@ class ConditionedDatasetImportAdapter:
                 tmp_identity = work_anchor.mkdir("tmp", exist_ok=False)
                 source_identity = work_anchor.mkdir("source", exist_ok=False)
                 work_datasets_identity = work_anchor.mkdir("datasets", exist_ok=False)
-                derived_stage_name, derived_identity = work_anchor.mkdir_unique(".derived-sprites-")
+                derived_identity = work_anchor.mkdir("derived_sprites", exist_ok=False)
                 tmp_anchor = workspace_stack.enter_context(work_anchor.open_directory_immovable("tmp"))
                 source_anchor = workspace_stack.enter_context(work_anchor.open_directory_immovable("source"))
                 work_datasets_anchor = workspace_stack.enter_context(work_anchor.open_directory_immovable("datasets"))
-                derived_anchor = workspace_stack.enter_context(work_anchor.open_directory(derived_stage_name))
+                derived_anchor = workspace_stack.enter_context(work_anchor.open_directory_immovable("derived_sprites"))
                 _require_created_anchor_identity(
                     tmp_identity,
                     tmp_anchor,
@@ -566,7 +567,7 @@ class ConditionedDatasetImportAdapter:
                 _require_created_anchor_identity(
                     derived_identity,
                     derived_anchor,
-                    "The private derived-frame staging tree changed while it was anchored.",
+                    "The private direct-final derived-frame tree changed while it was anchored.",
                 )
                 output_identity = work_datasets_anchor.mkdir("managed", exist_ok=False)
                 output_anchor = workspace_stack.enter_context(work_datasets_anchor.open_directory_immovable("managed"))
@@ -634,7 +635,6 @@ class ConditionedDatasetImportAdapter:
             source_root = work / "source"
             output_root = work / "datasets" / "managed"
             derived_root = work / "derived_sprites"
-            derived_staging_root = work / derived_stage_name
             stage = "copy"
             receipt_committed = False
             try:
@@ -666,7 +666,7 @@ class ConditionedDatasetImportAdapter:
                     work=work,
                     source_root=source_root,
                     output_root=output_root,
-                    derived_root=derived_staging_root,
+                    derived_root=derived_root,
                     project_anchor=storage.project_anchor,
                     work_anchor=work_anchor,
                     source_anchor=source_anchor,
@@ -685,15 +685,14 @@ class ConditionedDatasetImportAdapter:
                 derived_sheet_manifest = dict(legacy["derived_sheet_manifest"])
                 covered_source_paths = list(legacy["covered_source_relative_paths"])
 
-                stage = "derived_tree_publication"
-                work_anchor.rename_held_directory_noreplace(derived_anchor, "derived_sprites")
+                stage = "derived_tree_validation"
                 _require_created_anchor_identity(
                     derived_identity,
                     derived_anchor,
-                    "The derived-frame tree changed during exclusive directory publication.",
+                    "The direct-final derived-frame tree changed before receipt publication.",
                 )
                 if derived_anchor.directory != derived_root:
-                    raise ConditionedIntakeError("The derived-frame tree published at an unexpected private root.")
+                    raise ConditionedIntakeError("The derived-frame tree occupies an unexpected private root.")
 
                 stage = "publication_validation"
                 source_inventory = _inventory_from_anchor(source_anchor)
@@ -1114,6 +1113,14 @@ def _revalidate_managed_transaction(
                 raise ConditionedIntakeError("Managed Dataset intake output changed after publication.")
             if _inventory_from_anchor(derived_anchor) != managed["derived_inventory"]:
                 raise ConditionedIntakeError("Managed derived-frame bytes changed after publication.")
+            _validate_persisted_intake_result(
+                output_anchor,
+                str(managed["intake_result_identity"]),
+            )
+            _validate_persisted_confinement_binding(
+                managed["write_confinement"],
+                work_anchor,
+            )
             _check_optional_operation_control(deadline_monotonic, cancel_requested)
 
             metadata_relative = PurePosixPath(work_relative) / "datasets" / "source_metadata"
@@ -1623,6 +1630,7 @@ def _validate_acquisition_kind_binding(
 def _require_same_harvest_verification(previous: Mapping[str, Any], current: Mapping[str, Any]) -> None:
     keys = (
         "handoff_identity",
+        "request_handoff_identity",
         "artifact_manifest_identity",
         "artifact_manifest_file_sha256",
         "trusted_catalog_identity",
@@ -1645,6 +1653,7 @@ def _require_same_harvest_verification(previous: Mapping[str, Any], current: Map
 def _require_receipt_harvest_bindings(receipt: Mapping[str, Any], current: Mapping[str, Any]) -> None:
     bindings = {
         "handoff_identity": "handoff_identity",
+        "request_handoff_identity": "request_handoff_identity",
         "artifact_manifest_identity": "artifact_manifest_identity",
         "artifact_manifest_file_sha256": "artifact_manifest_file_sha256",
         "trusted_catalog_identity": "trusted_catalog_identity",
@@ -1894,12 +1903,6 @@ def _run_legacy_intake_boundary(
             for held in required_anchors:
                 if held.directory in opened:
                     continue
-                if held.directory == derived_root:
-                    # This parent-only staging tree must retain DELETE access so
-                    # the exact held handle can publish it by exclusive rename.
-                    # The worker never consumes it; any child write makes the
-                    # later empty-root check fail closed.
-                    continue
                 expected = DirectoryIdentity.from_stat(held.directory_metadata())
                 fixed = fixed_anchor_stack.enter_context(AnchoredDirectory(held.directory, held.directory))
                 if DirectoryIdentity.from_stat(fixed.directory_metadata()) != expected:
@@ -1961,6 +1964,10 @@ def _run_legacy_intake_boundary(
         or stable_hash(result_payload) != result_identity
     ):
         raise ConditionedIntakeError("The controlled legacy intake result is invalid.")
+    _validate_persisted_intake_result(
+        output_anchor,
+        str(result["intake_result_identity"]),
+    )
     accepted_paths = _accepted_source_paths(
         output_root,
         source_root,
@@ -2351,8 +2358,12 @@ def _audit_writable_anchor(
     anchor.verify()
     if anchor.directory_metadata().st_dev != expected_device:
         raise ConditionedIntakeError("The controlled workspace crosses a filesystem device boundary.")
-    for name in anchor.names():
+    names = anchor.names()
+    retained_aliases = {name for name in names if _intake_retained_stage_target(anchor, name, names) is not None}
+    for name in names:
         metadata = anchor.lstat(name)
+        if name in retained_aliases:
+            continue
         if _metadata_is_link_or_reparse(metadata) or metadata.st_dev != expected_device:
             raise ConditionedIntakeError("The controlled workspace contains a linked or mounted seam.")
         if stat.S_ISDIR(metadata.st_mode):
@@ -2374,8 +2385,10 @@ def _audit_writable_anchor(
                         held_by_path=held_by_path,
                     )
             continue
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink not in {1, 2}:
             raise ConditionedIntakeError("The controlled workspace contains a non-owned filesystem entry.")
+        if metadata.st_nlink == 2:
+            _intake_retained_stage_alias(anchor, name, metadata)
     anchor.verify()
 
 
@@ -2488,7 +2501,7 @@ def _validate_write_confinement_evidence(
             or value.get("no_new_privileges") is not False
             or value.get("handled_access_fs") != 0
             or value.get("allowed_access_fs") != 0
-            or value.get("restricted_token") is not False
+            or type(value.get("restricted_token")) is not bool
             or value.get("integrity_level_rid") != 0
             or value.get("mandatory_no_write_up") is not True
             or value.get("workspace_integrity_level_rid") != 0
@@ -2710,14 +2723,22 @@ def _validate_derived_sheet_tree(
     expected_records = [record for record, _content in expected]
     if normalized != expected_records:
         raise ConditionedIntakeError("The derived-frame manifest differs from the exact intake/crop reconstruction.")
-    if set(derived_anchor.names()) != {"frames", "manifest.json"}:
+    derived_names = derived_anchor.names()
+    derived_aliases = {
+        name for name in derived_names if _intake_retained_stage_target(derived_anchor, name, derived_names) is not None
+    }
+    if set(derived_names) - derived_aliases != {"frames", "manifest.json"}:
         raise ConditionedIntakeError("The derived-frame tree contains an unknown or missing root entry.")
     expected_manifest_bytes = (strict_json_dumps(dict(manifest), indent=2, sort_keys=True) + "\n").encode("utf-8")
     if _read_anchored_regular_bytes(derived_anchor, "manifest.json", _MAX_JSON_BYTES) != expected_manifest_bytes:
         raise ConditionedIntakeError("The derived-frame manifest file differs from its receipt-bound document.")
     with derived_anchor.open_directory_immovable("frames") as frames_anchor:
         expected_names = {PurePosixPath(str(record["output_relative_path"])).name for record in expected_records}
-        if set(frames_anchor.names()) != expected_names:
+        frame_names = frames_anchor.names()
+        frame_aliases = {
+            name for name in frame_names if _intake_retained_stage_target(frames_anchor, name, frame_names) is not None
+        }
+        if set(frame_names) - frame_aliases != expected_names:
             raise ConditionedIntakeError("The derived-frame directory contains an unknown or missing entry.")
         for record, expected_content in expected:
             _check_optional_operation_control(deadline_monotonic, cancel_requested)
@@ -3443,6 +3464,7 @@ def _validate_managed_harvest_document(
         or not str(harvest["backend_capability_expires_at"])
         or harvest.get("run_id") != handoff_document.get("run_id")
         or harvest.get("handoff_identity") != stable_hash(dict(handoff_document))
+        or harvest.get("request_handoff_identity") != stable_hash(dict(handoff_document))
         or harvest.get("artifact_manifest_identity") != stable_hash(dict(artifact_manifest))
         or harvest.get("artifact_set_identity") != artifact_manifest.get("artifact_set_identity")
         or harvest.get("provenance_identity") != handoff_document.get("provenance_identity")
@@ -3655,7 +3677,7 @@ def _validate_stored_write_confinement(value: Any) -> None:
             and value.get("handled_access_fs") == 0
             and value.get("allowed_access_fs") == 0
             and value.get("no_new_privileges") is False
-            and value.get("restricted_token") is False
+            and type(value.get("restricted_token")) is bool
             and value.get("integrity_level_rid") == 0
             and value.get("mandatory_no_write_up") is True
             and value.get("workspace_integrity_level_rid") == 0
@@ -3729,14 +3751,24 @@ def _inventory_anchored_tree(
     files: dict[str, dict[str, Any]],
     collision_keys: set[str],
 ) -> None:
-    for name in anchor.names():
+    names = anchor.names()
+    retained_aliases = {name for name in names if _intake_retained_stage_target(anchor, name, names) is not None}
+    for name in names:
         metadata = anchor.lstat(name)
+        if name in retained_aliases:
+            continue
         if stat.S_ISDIR(metadata.st_mode) and not _metadata_is_link_or_reparse(metadata):
             with anchor.open_directory(name) as child:
                 _inventory_anchored_tree(child, (*parents, name), files, collision_keys)
             continue
-        if not stat.S_ISREG(metadata.st_mode) or _metadata_is_link_or_reparse(metadata) or metadata.st_nlink != 1:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or _metadata_is_link_or_reparse(metadata)
+            or metadata.st_nlink not in {1, 2}
+        ):
             raise ConditionedIntakeError("Managed inventory crosses a link or unsupported filesystem entry.")
+        if metadata.st_nlink == 2:
+            _intake_retained_stage_alias(anchor, name, metadata)
         relative = _canonical_relative(PurePosixPath(*parents, name).as_posix())
         collision = unicodedata.normalize("NFC", relative).casefold()
         if collision in collision_keys:
@@ -3748,14 +3780,16 @@ def _inventory_anchored_tree(
 
 def _stable_anchored_file_identity(anchor: AnchoredDirectory, name: str) -> dict[str, Any]:
     before = anchor.lstat(name)
-    if not stat.S_ISREG(before.st_mode) or _metadata_is_link_or_reparse(before) or before.st_nlink != 1:
+    if not stat.S_ISREG(before.st_mode) or _metadata_is_link_or_reparse(before) or before.st_nlink not in {1, 2}:
         raise ConditionedIntakeError("Managed inventory entries must be owned single-link regular files.")
+    if before.st_nlink == 2:
+        _intake_retained_stage_alias(anchor, name, before)
     content = _read_anchored_regular_bytes(anchor, name, max(_MAX_JSON_BYTES, before.st_size))
     after = anchor.lstat(name)
     if (
         not stat.S_ISREG(after.st_mode)
         or _metadata_is_link_or_reparse(after)
-        or after.st_nlink != 1
+        or after.st_nlink != before.st_nlink
         or after.st_dev != before.st_dev
         or after.st_ino != before.st_ino
         or after.st_size != before.st_size
@@ -3763,6 +3797,39 @@ def _stable_anchored_file_identity(anchor: AnchoredDirectory, name: str) -> dict
     ):
         raise ConditionedIntakeError("A managed file changed while its identity was computed.")
     return {"sha256": hashlib.sha256(content).hexdigest(), "byte_count": before.st_size}
+
+
+def _validate_persisted_intake_result(
+    output_anchor: AnchoredDirectory,
+    expected_identity: str,
+) -> None:
+    """Bind the child result claim to the immutable managed ``result.json``."""
+
+    if SHA256_PATTERN.fullmatch(expected_identity) is None:
+        raise ConditionedIntakeError("Managed Dataset result identity is invalid.")
+    result = _read_anchored_json(output_anchor, "result.json")
+    if stable_hash(result) != expected_identity:
+        raise ConditionedIntakeError("Managed Dataset result identity differs from its persisted result.")
+
+
+def _validate_persisted_confinement_binding(
+    value: Mapping[str, Any],
+    work_anchor: AnchoredDirectory,
+) -> None:
+    """Bind stored confinement evidence to the exact reopened transaction root."""
+
+    work_anchor.verify()
+    workspace_identity = DirectoryIdentity.from_stat(work_anchor.directory_metadata())
+    try:
+        current_strategy = write_confinement_strategy()
+    except (WriteConfinementError, WriteConfinementUnavailable) as exc:
+        raise ConditionedIntakeError("Managed Dataset write confinement is unavailable.") from exc
+    if (
+        value.get("root_identity_sha256") != workspace_identity.identity_sha256
+        or value.get("strategy") != current_strategy
+    ):
+        raise ConditionedIntakeError("Managed Dataset write-confinement evidence differs from its transaction root.")
+    work_anchor.verify()
 
 
 def _read_project_anchored_file(
@@ -3792,8 +3859,57 @@ def _read_project_anchored_json(
     return dict(value)
 
 
+def _intake_retained_stage_alias(
+    anchor: AnchoredDirectory,
+    target_name: str,
+    metadata: os.stat_result,
+) -> str:
+    prefix = f".{target_name}.staging-"
+    candidates = [
+        candidate
+        for candidate in anchor.names()
+        if re.fullmatch(re.escape(prefix) + r"[0-9a-f]{32}", candidate) is not None
+    ]
+    if len(candidates) != 1:
+        raise ConditionedIntakeError("A two-link managed file lost its sole retained publication stage.")
+    candidate = candidates[0]
+    current = anchor.lstat(candidate)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or _metadata_is_link_or_reparse(metadata)
+        or metadata.st_nlink != 2
+        or not stat.S_ISREG(current.st_mode)
+        or _metadata_is_link_or_reparse(current)
+        or current.st_dev != metadata.st_dev
+        or current.st_ino != metadata.st_ino
+        or current.st_nlink != 2
+        or current.st_size != metadata.st_size
+    ):
+        raise ConditionedIntakeError("A retained managed publication stage differs from its exact target inode.")
+    return candidate
+
+
+def _intake_retained_stage_target(
+    anchor: AnchoredDirectory,
+    alias_name: str,
+    names: Sequence[str],
+) -> str | None:
+    marker = ".staging-"
+    if not alias_name.startswith(".") or marker not in alias_name:
+        return None
+    target_name, separator, suffix = alias_name[1:].rpartition(marker)
+    if separator != marker or re.fullmatch(r"[0-9a-f]{32}", suffix) is None:
+        return None
+    if target_name not in names:
+        raise ConditionedIntakeError("A retained managed publication stage has no exact target.")
+    target = anchor.lstat(target_name)
+    if _intake_retained_stage_alias(anchor, target_name, target) != alias_name:
+        raise ConditionedIntakeError("A retained managed publication stage is ambiguous.")
+    return target_name
+
+
 def _read_anchored_regular_bytes(anchor: AnchoredDirectory, name: str, max_bytes: int) -> bytes:
-    """Read one bounded single-link file relative to a stable parent."""
+    """Read one bounded file, binding any exact retained POSIX stage alias."""
 
     try:
         before = anchor.lstat(name)
@@ -3802,10 +3918,11 @@ def _read_anchored_regular_bytes(anchor: AnchoredDirectory, name: str, max_bytes
     if (
         not stat.S_ISREG(before.st_mode)
         or _metadata_is_link_or_reparse(before)
-        or before.st_nlink != 1
+        or before.st_nlink not in {1, 2}
         or before.st_size > max_bytes
     ):
         raise ConditionedIntakeError("A required managed file is not a bounded single-link regular file.")
+    retained_alias = _intake_retained_stage_alias(anchor, name, before) if before.st_nlink == 2 else None
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     descriptor = anchor.open_file(name, flags)
     try:
@@ -3814,7 +3931,7 @@ def _read_anchored_regular_bytes(anchor: AnchoredDirectory, name: str, max_bytes
             opened.st_dev != before.st_dev
             or opened.st_ino != before.st_ino
             or opened.st_size != before.st_size
-            or opened.st_nlink != 1
+            or opened.st_nlink != before.st_nlink
         ):
             raise ConditionedIntakeError("A managed file changed while it was opened.")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
@@ -3827,7 +3944,7 @@ def _read_anchored_regular_bytes(anchor: AnchoredDirectory, name: str, max_bytes
     after = anchor.lstat(name)
     if (
         not stat.S_ISREG(after.st_mode)
-        or after.st_nlink != 1
+        or after.st_nlink != before.st_nlink
         or after.st_dev != before.st_dev
         or after.st_ino != before.st_ino
         or after.st_size != before.st_size
@@ -3836,10 +3953,14 @@ def _read_anchored_regular_bytes(anchor: AnchoredDirectory, name: str, max_bytes
         or opened_after.st_ino != before.st_ino
         or opened_after.st_size != before.st_size
         or opened_after.st_mtime_ns != before.st_mtime_ns
-        or opened_after.st_nlink != 1
+        or opened_after.st_nlink != before.st_nlink
         or _metadata_is_link_or_reparse(after)
     ):
         raise ConditionedIntakeError("A managed file changed while it was read.")
+    if retained_alias is not None:
+        alias_after = anchor.lstat(retained_alias)
+        if alias_after.st_dev != before.st_dev or alias_after.st_ino != before.st_ino or alias_after.st_nlink != 2:
+            raise ConditionedIntakeError("A retained managed publication stage changed while read.")
     return content
 
 
@@ -3851,10 +3972,12 @@ def _anchored_regular_file_equals(anchor: AnchoredDirectory, name: str, expected
         if (
             not stat.S_ISREG(metadata.st_mode)
             or _metadata_is_link_or_reparse(metadata)
-            or metadata.st_nlink != 1
+            or metadata.st_nlink not in {1, 2}
             or metadata.st_size != len(expected)
         ):
             return False
+        if metadata.st_nlink == 2:
+            _intake_retained_stage_alias(anchor, name, metadata)
         return _read_anchored_regular_bytes(anchor, name, len(expected)) == expected
     except (ConditionedIntakeError, OSError, UnsafeFilesystemOperation):
         return False
@@ -3999,37 +4122,44 @@ def _publish_anchored_file_noreplace(
     *,
     residue_prefix: str,
 ) -> OwnedFileIdentity:
-    """Publish one immutable direct-child file without exposing partial bytes."""
+    """Publish one immutable direct-child file through its exact held inode."""
 
-    temporary = f".{target_name}.staging-{uuid.uuid4().hex}"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0))
-    descriptor = anchor.open_file(temporary, flags, 0o600)
-    identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
-    rename_returned = False
+    temporary: str | None = None
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            descriptor = -1
+        descriptor = anchor.open_anonymous_file()
+    except (UnsafeFilesystemOperation, OSError) as exc:
+        if isinstance(exc, OSError) and exc.errno not in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}:
+            raise
+        temporary = f".{target_name}.staging-{uuid.uuid4().hex}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0))
+        descriptor = anchor.open_file(temporary, flags, 0o600)
+    identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
             if OwnedFileIdentity.from_stat(os.fstat(handle.fileno())) != identity:
                 raise ConditionedIntakeError("A managed staging file changed while it was written.")
-        if not identity.matches(anchor.lstat(temporary)):
+        if temporary is not None and not identity.matches(anchor.lstat(temporary)):
             raise ConditionedIntakeError("A managed staging path changed before publication.")
-        if anchor.lexists(target_name):
-            raise FileExistsError(target_name)
-        anchor.rename(temporary, target_name, replace=False)
-        rename_returned = True
+        anchor.publish_held_file_no_replace(
+            descriptor,
+            temporary,
+            target_name,
+            identity=identity,
+        )
         if not identity.matches(anchor.lstat(target_name)):
             raise ConditionedIntakeError("A managed file identity changed during publication.")
         if _read_anchored_regular_bytes(anchor, target_name, len(content)) != content:
             raise ConditionedIntakeError("Managed file bytes changed during publication.")
     except BaseException:
-        if descriptor >= 0:
-            os.close(descriptor)
-        owned_name = target_name if rename_returned else temporary
-        anchor.quarantine_if_owned(owned_name, identity, prefix=residue_prefix)
+        anchor.quarantine_if_owned(target_name, identity, prefix=residue_prefix)
+        if temporary is not None:
+            anchor.quarantine_if_owned(temporary, identity, prefix=residue_prefix)
         raise
+    finally:
+        os.close(descriptor)
     return identity
 
 

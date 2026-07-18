@@ -59,7 +59,15 @@ _PROBE_KEYS = frozenset(
 _PROBE_URL_KEYS = frozenset({"source_page", "license_evidence_url", "terms_evidence_url", "direct_download_url"})
 _PREFILL_KEYS = frozenset({"source_page", "preset"})
 _PREFILL_URL_KEYS = frozenset({"source_page"})
-_PROMOTE_KEYS = frozenset({"explicit_action", "authorize_catalog_promotion"})
+_PROMOTE_KEYS = frozenset(
+    {
+        "explicit_action",
+        "authorize_catalog_promotion",
+        "authorize_zero_cost_evidence_review",
+        "reviewed_verification_identity",
+        "reviewed_source_pack_evidence_sha256",
+    }
+)
 _PATH_KEY_FRAGMENTS = ("path", "directory", "folder", "output", "destination", "uri", "argv", "command")
 
 
@@ -286,6 +294,9 @@ def create_harvest_router(
                 probe_id,
                 explicit_action=payload.get("explicit_action") is True,
                 authorize_catalog_promotion=payload.get("authorize_catalog_promotion") is True,
+                authorize_zero_cost_evidence_review=payload.get("authorize_zero_cost_evidence_review") is True,
+                reviewed_verification_identity=payload.get("reviewed_verification_identity"),
+                reviewed_source_pack_evidence_sha256=payload.get("reviewed_source_pack_evidence_sha256"),
             )
         )
 

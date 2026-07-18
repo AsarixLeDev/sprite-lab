@@ -18,6 +18,7 @@ from spritelab.product_core import (
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$")
 USER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,31}$")
 ENV_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+BACKEND_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$")
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,9 @@ class ComputeSettings:
         environment_profile = str(raw.get("environment_profile", raw.get("python_executable", "python3"))).strip()
         sync_policy = str(raw.get("artifact_sync_policy") or "verified_checkpoints").strip().lower()
         backend_id = _optional_text(raw.get("backend_id"))
+        cloud = raw.get("cloud", True)
+        if type(cloud) is not bool:
+            raise ValueError("Compute cloud classification must be the JSON boolean true or false.")
         if backend_type == "ssh":
             if host is None or not HOST_PATTERN.fullmatch(host):
                 raise ValueError("SSH host must be a DNS name or IPv4 address without command-line syntax.")
@@ -93,7 +97,9 @@ class ComputeSettings:
                 raise ValueError("SSH credential environment-variable name is invalid.")
         if sync_policy not in {"verified_checkpoints", "all_artifacts", "manual"}:
             raise ValueError("Artifact synchronization policy is invalid.")
-        if backend_type == "other" and not backend_id:
+        if backend_id is not None and BACKEND_ID_PATTERN.fullmatch(backend_id) is None:
+            raise ValueError("Backend ID may contain only letters, numbers, '.', '_', and '-'.")
+        if backend_type == "other" and backend_id is None:
             raise ValueError("Other provider requires a registered backend ID.")
         return cls(
             backend_type=backend_type,
@@ -109,7 +115,7 @@ class ComputeSettings:
             credential_reference=credential_reference,
             environment_profile=environment_profile,
             artifact_sync_policy=sync_policy,
-            cloud=bool(raw.get("cloud", True)),
+            cloud=cloud,
             backend_id=backend_id,
         )
 
@@ -158,8 +164,11 @@ class ComputeSettings:
     def execution_environment(self) -> dict[str, str]:
         environment = {"SPRITELAB_PREVIEW_INTERVAL": str(self.preview_interval)}
         if self.backend_type == "local":
+            environment["SPRITELAB_DEVICE_POLICY"] = self.device_policy
             if self.device_policy == "cpu":
                 environment["CUDA_VISIBLE_DEVICES"] = "-1"
+            elif self.device_policy == "cuda":
+                environment["CUDA_VISIBLE_DEVICES"] = "0"
             if self.cpu_threads:
                 environment["OMP_NUM_THREADS"] = str(self.cpu_threads)
             if self.memory_limit_gb:

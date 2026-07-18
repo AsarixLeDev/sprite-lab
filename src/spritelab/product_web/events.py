@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 if os.name == "nt":
@@ -51,6 +51,7 @@ EVENT_HISTORY_TRANSACTION_APPEND = "append_event"
 EVENT_HISTORY_TRANSACTION_OPERATIONS = frozenset(
     {EVENT_HISTORY_TRANSACTION_MIGRATION, EVENT_HISTORY_TRANSACTION_APPEND}
 )
+RUN_COMPLETION_MARKER_FILENAME = "run_completion_marker.json"
 EVENT_APPEND_SURFACE_REPOSITORY = "event_repository"
 EVENT_APPEND_SURFACE_RUN_STATE = "v3_run_state"
 EVENT_APPEND_SURFACES = frozenset({EVENT_APPEND_SURFACE_REPOSITORY, EVENT_APPEND_SURFACE_RUN_STATE})
@@ -66,10 +67,114 @@ TERMINAL_STATUSES = {
     "NOT_COMPARABLE",
     "STALE",
 }
-SECRET_PATTERN = re.compile(
-    r"(?i)\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|token)\b(\s*[:=]\s*)([^\s,;]+)"
+KEY_COMPONENT_SEPARATOR_PATTERN = r"(?:[ _-]+|(?-i:(?=[A-Z])))"
+SENSITIVE_KEY_PATTERN = (
+    rf"(?:[a-z0-9]+{KEY_COMPONENT_SEPARATOR_PATTERN})*"
+    r"(?:api[ _-]*key|access[ _-]*(?:key|token)|auth(?:entication)?[ _-]*token|"
+    r"authorization|proxy[ _-]*authorization|client[ _-]*secret|private[ _-]*key|password|passwd|"
+    rf"passphrase|bearer|secret|token|credentials?|cookie|sig(?:nature)?)(?:{KEY_COMPONENT_SEPARATOR_PATTERN}[a-z0-9]+)*"
 )
-BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+")
+SECRET_PATTERN = re.compile(
+    rf"(?i)\b({SENSITIVE_KEY_PATTERN})[\"']?(\s*[:=]\s*)"
+    r"(?!\[redacted\])"
+    r"(?:(?:[\"'])[^\"'\r\n]*(?:[\"'])|(?:(?:bearer|basic)\s+)?[^\s,;&}\]]+)"
+)
+BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+BASIC_AUTH_PATTERN = re.compile(r"(?i)\bBasic\s+[^\s,;]+")
+URL_CREDENTIAL_PATTERN = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^@\s/]+@")
+SECRET_VALUE_PATTERNS = (
+    re.compile(
+        r"(?i)\b(?:sk-[a-z0-9_-]{12,}|sk_(?:live|test)_[a-z0-9]{12,}|rpa_[a-z0-9]{8,}|"
+        r"hf_[a-z0-9]{16,}|gh[pousr]_[a-z0-9_]{16,}|github_pat_[a-z0-9_]{16,}|"
+        r"AIza[a-z0-9_-]{20,})\b"
+    ),
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b"),
+)
+PRIVATE_KEY_PEM_PATTERN = re.compile(
+    r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----.*?"
+    r"(?:-----END(?: [A-Z0-9]+)* PRIVATE KEY-----|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+WINDOWS_LOCAL_PATH_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9_])(?:[a-z]:[\\/]|\\\\[^\\/\s]+[\\/])[^\r\n,;]*")
+FORWARD_UNC_LOCAL_PATH_PATTERN = re.compile(r"(?<![:/\w.])//[^/\s,;]+/[^\s,;]+")
+POSIX_LOCAL_PATH_PATTERN = re.compile(r"(?<![/\w.])/(?!/)[^\s,;]+")
+FILE_URI_PATTERN = re.compile(r"""(?i)\bfile://[^\s,;"'<>\[\]{}()]+""")
+PUBLIC_BOOLEAN_METRIC_FIELDS = frozenset(
+    {
+        "activated",
+        "benchmark_evidence",
+        "cancel_available",
+        "cancelled",
+        "completion_validated",
+        "downloaded",
+        "eligible",
+        "hash_verified",
+        "immutable",
+        "may_accrue_cost",
+        "passed",
+        "paths_exposed",
+        "pause_available",
+        "production_authorized",
+        "promotion_evidence",
+        "ready",
+        "remote",
+        "remote_identity_verified",
+        "remote_resource_uncertain",
+        "requires_confirmation",
+        "resource_shutdown_verified",
+        "resource_state_uncertain",
+        "resumable",
+        "resume_available",
+        "safe",
+        "safe_resume",
+        "training_authorized",
+        "trustworthy",
+        "unsafe_resume_available",
+        "validated",
+    }
+)
+_PUBLIC_FIELD_ACRONYM_BOUNDARY_PATTERN = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
+_PUBLIC_FIELD_CAMEL_BOUNDARY_PATTERN = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_PUBLIC_FIELD_SEPARATOR_PATTERN = re.compile(r"[^A-Za-z0-9]+")
+_SENSITIVE_PUBLIC_KEY_TOKENS = frozenset(
+    {
+        "apikey",
+        "authorization",
+        "bearer",
+        "cookie",
+        "credential",
+        "credentials",
+        "password",
+        "passphrase",
+        "passwd",
+        "secret",
+        "sig",
+        "signature",
+        "token",
+    }
+)
+_SENSITIVE_PUBLIC_KEY_COMPOUNDS = (
+    ("api", "key"),
+    ("access", "key"),
+    ("access", "token"),
+    ("auth", "token"),
+    ("authentication", "token"),
+    ("proxy", "authorization"),
+    ("client", "secret"),
+    ("private", "key"),
+)
+_SENSITIVE_PUBLIC_KEY_COMPACT_ALIASES = frozenset(
+    {
+        "accesskey",
+        "accesstoken",
+        "authenticationtoken",
+        "authtoken",
+        "clientsecret",
+        "privatekey",
+        "proxyauthorization",
+    }
+)
 _REPOSITORY_LOCKS: dict[str, threading.RLock] = {}
 _REPOSITORY_LOCK_GUARD = threading.Lock()
 _EVENT_FILE_LOCKS: dict[str, threading.RLock] = {}
@@ -83,6 +188,16 @@ class LegacyEventMigrationError(ValueError):
     def __init__(self, message: str, *, status: str = "NOT_COMPARABLE") -> None:
         super().__init__(message)
         self.status = status
+
+
+def _require_mutable_event_history(directory: Path) -> None:
+    """Freeze every event-history writer once any completion marker path exists."""
+
+    marker = directory / RUN_COMPLETION_MARKER_FILENAME
+    if os.path.lexists(marker):
+        raise LegacyEventMigrationError(
+            "Run completion marker freezes event history; event append and origin mutation are refused."
+        )
 
 
 class EventMigrationState(str, Enum):
@@ -235,16 +350,102 @@ def _public_reference(value: str) -> str:
     return normalized.rsplit("/", 1)[-1] or "artifact"
 
 
-def _public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+def normalize_public_field_name(value: str) -> str:
+    """Normalize a public field name without conflating ordinary key-like words."""
+
+    separated = _PUBLIC_FIELD_ACRONYM_BOUNDARY_PATTERN.sub("_", value)
+    separated = _PUBLIC_FIELD_CAMEL_BOUNDARY_PATTERN.sub("_", separated)
+    return _PUBLIC_FIELD_SEPARATOR_PATTERN.sub("_", separated).strip("_").casefold()
+
+
+def is_sensitive_public_key(value: str) -> bool:
+    """Return whether a mapping key denotes a credential or secret value."""
+
+    normalized = normalize_public_field_name(value)
+    if not normalized:
+        return False
+    tokens = tuple(part for part in normalized.split("_") if part)
+    if any(token in _SENSITIVE_PUBLIC_KEY_TOKENS for token in tokens):
+        return True
+    if any(token in _SENSITIVE_PUBLIC_KEY_COMPACT_ALIASES for token in tokens):
+        return True
+    return any(
+        tokens[index : index + len(compound)] == compound
+        for compound in _SENSITIVE_PUBLIC_KEY_COMPOUNDS
+        for index in range(len(tokens) - len(compound) + 1)
+    )
+
+
+def _redact_public_secrets(value: str) -> str:
+    public = PRIVATE_KEY_PEM_PATTERN.sub("[redacted]", value)
+    public = SECRET_PATTERN.sub(
+        lambda match: (
+            f"{match.group(1)}{match.group(2)}[redacted]" if is_sensitive_public_key(match.group(1)) else match.group(0)
+        ),
+        public,
+    )
+    public = BEARER_PATTERN.sub("Bearer [redacted]", public)
+    public = BASIC_AUTH_PATTERN.sub("Basic [redacted]", public)
+    public = URL_CREDENTIAL_PATTERN.sub(r"\1[redacted]@", public)
+    for pattern in SECRET_VALUE_PATTERNS:
+        public = pattern.sub("[redacted]", public)
+    return public
+
+
+def sanitize_public_text(value: str, private_roots: tuple[Path, ...] = ()) -> str:
+    """Remove credentials and private local paths from one public string."""
+
+    public = _redact_public_secrets(value)
+    public = FILE_URI_PATTERN.sub("file://<local-path>", public)
+    spellings = {spelling for root in private_roots for spelling in (str(root), root.as_posix()) if spelling}
+    for spelling in sorted(spellings, key=len, reverse=True):
+        flags = re.IGNORECASE if PureWindowsPath(spelling).is_absolute() else 0
+        public = re.sub(re.escape(spelling), "<project>", public, flags=flags)
+    candidate = public.strip()
+    if PureWindowsPath(candidate).is_absolute() or PurePosixPath(candidate).is_absolute():
+        reference = _public_reference(candidate)
+        public = "<local-path>" if re.fullmatch(r"(?i)[a-z]:", reference) else reference
+        return _redact_public_secrets(public)
+    public = WINDOWS_LOCAL_PATH_PATTERN.sub("<local-path>", public)
+    public = FORWARD_UNC_LOCAL_PATH_PATTERN.sub("<local-path>", public)
+    public = POSIX_LOCAL_PATH_PATTERN.sub("<local-path>", public)
+    return _redact_public_secrets(public)
+
+
+def _public_text(value: str, private_roots: tuple[Path, ...]) -> str:
+    return sanitize_public_text(value, private_roots)
+
+
+def _public_metrics(metrics: dict[str, Any], *, private_roots: tuple[Path, ...] = ()) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in metrics.items():
-        lowered = str(key).lower().replace("-", "_")
-        if any(marker in lowered for marker in ("secret", "token", "password", "api_key", "apikey")):
+        raw_key = str(key)
+        normalized = normalize_public_field_name(raw_key)
+        if is_sensitive_public_key(raw_key):
             continue
         if isinstance(value, float) and not math.isfinite(value):
             continue
         if isinstance(value, (str, int, float, bool)) or value is None:
-            result[str(key)] = value
+            public_key = _public_text(raw_key, private_roots)
+            if not public_key or public_key in result:
+                continue
+            if normalized in PUBLIC_BOOLEAN_METRIC_FIELDS or normalized.endswith(
+                (
+                    "_available",
+                    "_authorized",
+                    "_eligible",
+                    "_enabled",
+                    "_passed",
+                    "_ready",
+                    "_safe",
+                    "_uncertain",
+                    "_validated",
+                    "_verified",
+                )
+            ):
+                result[public_key] = value if type(value) is bool else False
+            else:
+                result[public_key] = _public_text(value, private_roots) if isinstance(value, str) else value
     return result
 
 
@@ -252,11 +453,18 @@ def _public_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
 class IndexedEvent:
     event_id: int
     event: ProductEvent
+    private_roots: tuple[Path, ...] = ()
 
     def public_dict(self) -> dict[str, Any]:
         value = self.event.to_dict()
-        value["metrics"] = _public_metrics(dict(self.event.metrics))
-        value["artifact_references"] = [_public_reference(item) for item in self.event.artifact_references]
+        for key in ("schema_version", "run_id", "timestamp", "feature", "stage", "event_type", "status", "message"):
+            child = value.get(key)
+            if isinstance(child, str):
+                value[key] = _public_text(child, self.private_roots)
+        value["metrics"] = _public_metrics(dict(self.event.metrics), private_roots=self.private_roots)
+        value["artifact_references"] = [
+            _public_text(_public_reference(item), self.private_roots) for item in self.event.artifact_references
+        ]
         return value
 
 
@@ -456,9 +664,14 @@ class EventRepository:
             if event.run_id != run_id:
                 invalid_event_count += 1
             elif event_id > after_id:
-                events.append(IndexedEvent(event_id, event))
+                events.append(IndexedEvent(event_id, event, self.private_roots))
         if invalid_event_count:
             integrity_warnings.append(f"{invalid_event_count} invalid product event row(s) were ignored.")
+        if integrity_status != "VALID":
+            # The validation parse above preserves only safe diagnostics such as
+            # invalid-row counts.  Once authority verification fails, none of
+            # the parsed event contents may become presentation evidence.
+            events = []
         return EventReplay(
             tuple(events),
             invalid_event_count,
@@ -481,6 +694,7 @@ class EventRepository:
 
         try:
             with self._lock, event_history_transaction_lock(directory):
+                _require_mutable_event_history(directory)
                 pending = pending_event_history_transaction(event.run_id, directory)
                 if pending is not None and pending["operation"] == EVENT_HISTORY_TRANSACTION_APPEND:
                     recovered_event_id = append_event_transactionally(
@@ -899,35 +1113,39 @@ class EventRepository:
         replay = self.replay(run_id)
         indexed = list(replay.events)
         state = self._state(run_id)
-        snapshot = RunSnapshot(run_id=run_id)
-        snapshot.resumable = bool(state.get("resumable", False))
+        snapshot = RunSnapshot(run_id=_public_text(run_id, self.private_roots))
+        snapshot.resumable = state.get("resumable") if type(state.get("resumable")) is bool else False
         snapshot.report_available = self.report_path(run_id) is not None
         snapshot.invalid_event_count = replay.invalid_event_count
-        snapshot.warnings = list(replay.warnings)
+        snapshot.warnings = [_public_text(item, self.private_roots) for item in replay.warnings]
         if not indexed:
-            snapshot.feature = str(state.get("command") or "run")
-            snapshot.stage = str(state.get("stage") or "Waiting")
-            snapshot.status = str(state.get("status") or ProductStatus.NOT_STARTED.value)
-            snapshot.message = str(state.get("message") or snapshot.message)
-            snapshot.started_at = _safe_optional_text(state.get("started_at"))
-            snapshot.ended_at = _safe_optional_text(state.get("ended_at"))
+            snapshot.feature = _public_text(str(state.get("command") or "run"), self.private_roots)
+            snapshot.stage = _public_text(str(state.get("stage") or "Waiting"), self.private_roots)
+            snapshot.status = _public_text(
+                str(state.get("status") or ProductStatus.NOT_STARTED.value), self.private_roots
+            )
+            snapshot.message = _public_text(str(state.get("message") or snapshot.message), self.private_roots)
+            started_at = _safe_optional_text(state.get("started_at"))
+            ended_at = _safe_optional_text(state.get("ended_at"))
+            snapshot.started_at = _public_text(started_at, self.private_roots) if started_at else None
+            snapshot.ended_at = _public_text(ended_at, self.private_roots) if ended_at else None
             if replay.integrity_status != "VALID":
                 snapshot.status = replay.integrity_status
                 snapshot.message = (
-                    replay.warnings[0] if replay.warnings else "Event stream integrity could not be verified."
+                    snapshot.warnings[0] if snapshot.warnings else "Event stream integrity could not be verified."
                 )
                 snapshot.resumable = False
             return snapshot
         first, last = indexed[0].event, indexed[-1].event
-        snapshot.feature = last.feature
-        snapshot.stage = last.stage
-        snapshot.status = last.status.value
+        snapshot.feature = _public_text(last.feature, self.private_roots)
+        snapshot.stage = _public_text(last.stage, self.private_roots)
+        snapshot.status = _public_text(last.status.value, self.private_roots)
         snapshot.current = last.current
         snapshot.total = last.total
-        snapshot.message = last.message
-        snapshot.metrics = _public_metrics(dict(last.metrics))
-        snapshot.started_at = first.timestamp
-        snapshot.ended_at = last.timestamp if snapshot.terminal else None
+        snapshot.message = _public_text(last.message, self.private_roots)
+        snapshot.metrics = _public_metrics(dict(last.metrics), private_roots=self.private_roots)
+        snapshot.started_at = _public_text(first.timestamp, self.private_roots)
+        snapshot.ended_at = _public_text(last.timestamp, self.private_roots) if snapshot.terminal else None
         snapshot.event_count = len(indexed)
         if last.total is not None and last.total > 0:
             snapshot.progress_percent = max(0.0, min(100.0, 100.0 * last.current / last.total))
@@ -944,27 +1162,41 @@ class EventRepository:
             and 0 < last.current < last.total
         ):
             snapshot.eta_seconds = max(0.0, (last.total - last.current) * snapshot.elapsed_seconds / last.current)
-        snapshot.recent_messages = [event.event.message for event in indexed if event.event.message][-8:]
+        snapshot.recent_messages = [
+            _public_text(event.event.message, self.private_roots) for event in indexed if event.event.message
+        ][-8:]
         snapshot.artifacts = list(
             dict.fromkeys(
-                _public_reference(reference) for item in indexed for reference in item.event.artifact_references
+                _public_text(_public_reference(reference), self.private_roots)
+                for item in indexed
+                for reference in item.event.artifact_references
             )
         )
         timeline: dict[str, dict[str, str]] = {}
         for item in indexed:
             event = item.event
             if event.stage not in timeline:
-                timeline[event.stage] = {"stage": event.stage, "status": event.status.value, "message": event.message}
+                timeline[event.stage] = {
+                    "stage": _public_text(event.stage, self.private_roots),
+                    "status": _public_text(event.status.value, self.private_roots),
+                    "message": _public_text(event.message, self.private_roots),
+                }
             else:
-                timeline[event.stage].update(status=event.status.value, message=event.message)
+                timeline[event.stage].update(
+                    status=_public_text(event.status.value, self.private_roots),
+                    message=_public_text(event.message, self.private_roots),
+                )
         snapshot.timeline = list(timeline.values())
         if state.get("status") == "STALE":
             snapshot.status = "STALE"
-            snapshot.message = str(state.get("message") or "A durable artifact changed after this run completed.")
+            snapshot.message = _public_text(
+                str(state.get("message") or "A durable artifact changed after this run completed."),
+                self.private_roots,
+            )
         if replay.integrity_status != "VALID":
             snapshot.status = replay.integrity_status
             snapshot.message = (
-                replay.warnings[0] if replay.warnings else "Event stream integrity could not be verified."
+                snapshot.warnings[0] if snapshot.warnings else "Event stream integrity could not be verified."
             )
             snapshot.resumable = False
         elif replay.invalid_event_count:
@@ -1022,11 +1254,7 @@ class EventRepository:
         except OSError:
             return ""
         roots = self.private_roots or ((self.runs_directory.parent,) if self.runs_directory else ())
-        for root in roots:
-            value = value.replace(str(root), "<project>")
-            value = value.replace(str(root).replace("\\", "/"), "<project>")
-        value = SECRET_PATTERN.sub(lambda match: f"{match.group(1)}{match.group(2)}[redacted]", value)
-        return BEARER_PATTERN.sub("Bearer [redacted]", value)
+        return _public_text(value, roots)
 
     def report_path(self, run_id: str) -> Path | None:
         directory = self._run_directory(run_id)
@@ -1490,6 +1718,7 @@ def record_event_history_origin(
             "Initial authoritative-state binding requires an explicit controlled event-history origin."
         )
     directory = Path(directory)
+    _require_mutable_event_history(directory)
     origin_path = directory / EVENT_HISTORY_ORIGIN_FILENAME
     record_path = directory / LEGACY_MIGRATION_FILENAME
     legacy = directory / LEGACY_EVENT_FILENAME
@@ -2154,6 +2383,7 @@ def append_event_transactionally(
     if request_sha256 is not None:
         _validate_sha256_field(request_sha256, "request_sha256")
     directory = Path(directory)
+    _require_mutable_event_history(directory)
     canonical = directory / EVENT_FILENAME
     intent = pending_event_history_transaction(run_id, directory)
     if intent is None:
@@ -2172,6 +2402,7 @@ def append_event_transactionally(
             expected_origin=expected_origin,
             append_surface=append_surface,
         )
+        _require_mutable_event_history(directory)
         _write_event_history_transaction(directory, intent)
         _event_transaction_checkpoint("append_intent_published", directory)
     elif intent["operation"] != EVENT_HISTORY_TRANSACTION_APPEND:
@@ -2194,6 +2425,7 @@ def append_event_transactionally(
     if current_identity == pre_identity:
         _validate_append_separator(current, intent)
         payload = base64.b64decode(intent["append_payload_base64"].encode("ascii"), validate=True)
+        _require_mutable_event_history(directory)
         with canonical.open("ab") as handle:
             handle.write(payload)
             handle.flush()

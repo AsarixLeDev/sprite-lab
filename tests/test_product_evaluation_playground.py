@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
+import spritelab.product_features.evaluation.playground as playground_module
 from spritelab.product_features.evaluation import (
     CheckpointAvailability,
     CheckpointCandidate,
@@ -17,6 +19,7 @@ from spritelab.product_features.evaluation import (
     GenerationSafetyError,
     PlaygroundService,
 )
+from spritelab.utils.safe_fs import AnchoredDirectory
 
 
 def _candidate(tmp_path: Path, *, weights: str) -> CheckpointCandidate:
@@ -76,6 +79,24 @@ def test_prompt_playground_defaults_are_sensible(tmp_path: Path) -> None:
     assert defaults["weights"] == "ema"
 
 
+def test_generation_request_accepts_exact_seed_and_guidance_boundaries() -> None:
+    request = GenerationRequest(
+        prompt="boundary sprite",
+        checkpoint_id="checkpoint-ema",
+        seed=2**63 - 1,
+        guidance=5e-324,
+    )
+    assert request.seed == 2**63 - 1
+    assert request.guidance == 5e-324
+
+    with pytest.raises(ValueError, match="seed"):
+        GenerationRequest(prompt="boundary sprite", checkpoint_id="checkpoint-ema", seed=2**63)
+    with pytest.raises(ValueError, match="guidance"):
+        GenerationRequest(prompt="boundary sprite", checkpoint_id="checkpoint-ema", guidance=0.0)
+    with pytest.raises(ValueError, match="guidance"):
+        GenerationRequest(prompt="boundary sprite", checkpoint_id="checkpoint-ema", guidance=50.000_001)
+
+
 def test_generation_requires_explicit_action_and_does_not_call_fake(tmp_path: Path) -> None:
     fake = FakeGenerator()
     service = PlaygroundService(_catalog(tmp_path), output_root=tmp_path / "playground", generator=fake)
@@ -116,6 +137,166 @@ def test_fake_generation_records_reproducibility_and_exploratory_scope(tmp_path:
     }
     report = json.loads((run_directory / "report" / "report.json").read_text(encoding="utf-8"))
     assert report["schema_version"].endswith("v1")
+
+
+def test_durable_publication_rejects_raced_reparse_parent_without_touching_outside(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_directory = tmp_path / "playground" / "playground-hostile-publication"
+    artifacts = run_directory / "artifacts"
+    moved_artifacts = run_directory / "artifacts-held-by-test"
+    outside = tmp_path / "outside-publication"
+    artifacts.mkdir(parents=True)
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel_bytes = b"outside-must-remain-byte-identical"
+    sentinel.write_bytes(sentinel_bytes)
+    original_open = AnchoredDirectory.open_directory_immovable
+    attacked = False
+
+    def swap_then_open(anchor: AnchoredDirectory, name: str):
+        nonlocal attacked
+        if not attacked and name == "artifacts":
+            attacked = True
+            os.replace(artifacts, moved_artifacts)
+            try:
+                os.symlink(outside, artifacts, target_is_directory=True)
+            except OSError as exc:
+                os.replace(moved_artifacts, artifacts)
+                pytest.skip(f"directory symbolic links are unavailable in this test session: {exc}")
+        return original_open(anchor, name)
+
+    monkeypatch.setattr(AnchoredDirectory, "open_directory_immovable", swap_then_open)
+    try:
+        with pytest.raises(GenerationSafetyError, match="anchored safely"):
+            playground_module._publish_exact_bytes(
+                run_directory,
+                "artifacts/image_000.bin",
+                b"hostile-publication-payload",
+            )
+        assert attacked is True
+        assert sentinel.read_bytes() == sentinel_bytes
+        assert not (outside / "image_000.bin").exists()
+    finally:
+        if artifacts.is_symlink():
+            artifacts.unlink()
+        if moved_artifacts.is_dir() and not artifacts.exists():
+            os.replace(moved_artifacts, artifacts)
+
+
+def test_durable_publication_is_single_link_and_leaves_no_owned_staging_residue(tmp_path: Path) -> None:
+    run_directory = tmp_path / "playground" / "playground-single-link-publication"
+    artifacts = run_directory / "artifacts"
+    artifacts.mkdir(parents=True)
+
+    playground_module._publish_exact_bytes(
+        run_directory,
+        "artifacts/image_000.bin",
+        b"exact-single-link-playground-payload",
+    )
+
+    published = artifacts / "image_000.bin"
+    assert published.read_bytes() == b"exact-single-link-playground-payload"
+    assert published.stat().st_nlink == 1
+    assert not [path for path in artifacts.iterdir() if path.name.startswith(".spritelab-playground-")]
+
+
+def test_durable_publication_accepts_identical_raced_target_without_staging_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_directory = tmp_path / "playground" / "playground-identical-race"
+    artifacts = run_directory / "artifacts"
+    artifacts.mkdir(parents=True)
+    content = b"identical-raced-playground-payload"
+    original_publish = AnchoredDirectory.publish_held_file_no_replace
+
+    def publish_after_identical_target(
+        parent: AnchoredDirectory,
+        source_descriptor: int,
+        source_name: str | None,
+        destination_name: str,
+        *,
+        identity,
+    ) -> None:
+        (parent.directory / destination_name).write_bytes(content)
+        original_publish(
+            parent,
+            source_descriptor,
+            source_name,
+            destination_name,
+            identity=identity,
+        )
+
+    monkeypatch.setattr(AnchoredDirectory, "publish_held_file_no_replace", publish_after_identical_target)
+
+    playground_module._publish_exact_bytes(run_directory, "artifacts/image_000.bin", content)
+
+    published = artifacts / "image_000.bin"
+    assert published.read_bytes() == content
+    assert published.stat().st_nlink == 1
+    assert not [path for path in artifacts.iterdir() if path.name.startswith(".spritelab-playground-")]
+
+
+def test_durable_publication_rejects_prepublication_substitution_and_retains_foreign_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_directory = tmp_path / "playground" / "playground-substituted-publication"
+    artifacts = run_directory / "artifacts"
+    artifacts.mkdir(parents=True)
+    outside = tmp_path / "outside-publication-substitution.bin"
+    outside_bytes = b"outside-sentinel-must-remain-byte-identical"
+    outside.write_bytes(outside_bytes)
+    original_publish = AnchoredDirectory.publish_held_file_no_replace
+    observed: dict[str, Path | None] = {}
+
+    def substitute_before_publish(
+        parent: AnchoredDirectory,
+        source_descriptor: int,
+        source_name: str | None,
+        destination_name: str,
+        *,
+        identity,
+    ) -> None:
+        if source_name is None:
+            foreign_destination = parent.directory / destination_name
+            os.link(outside, foreign_destination)
+            observed["foreign"] = foreign_destination
+        else:
+            source = parent.directory / source_name
+            retained = parent.directory / ".attacker-retained-owned-stage"
+            os.replace(source, retained)
+            os.link(outside, source)
+            observed["foreign"] = source
+            observed["retained"] = retained
+        original_publish(
+            parent,
+            source_descriptor,
+            source_name,
+            destination_name,
+            identity=identity,
+        )
+
+    monkeypatch.setattr(AnchoredDirectory, "publish_held_file_no_replace", substitute_before_publish)
+
+    with pytest.raises(GenerationSafetyError):
+        playground_module._publish_exact_bytes(
+            run_directory,
+            "artifacts/image_000.bin",
+            b"operation-owned-playground-payload",
+        )
+
+    assert outside.read_bytes() == outside_bytes
+    assert observed["foreign"] is not None
+    assert observed["foreign"].read_bytes() == outside_bytes  # type: ignore[union-attr]
+    if os.name == "nt":
+        assert not (artifacts / "image_000.bin").exists()
+        assert observed["retained"] is not None
+        assert observed["retained"].read_bytes() == b"operation-owned-playground-payload"  # type: ignore[union-attr]
+    else:
+        assert (artifacts / "image_000.bin").samefile(outside)
 
 
 def test_live_ema_selection_is_passed_to_fake_generator(tmp_path: Path) -> None:
@@ -196,6 +377,28 @@ def test_completed_run_reconstructs_after_service_restart_without_generation(tmp
     assert len(fake.calls) == 1
 
 
+def test_reconstruction_never_projects_internal_oserror_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = PlaygroundService(_catalog(tmp_path), output_root=tmp_path / "playground", generator=FakeGenerator())
+    created = service.generate(
+        GenerationRequest(prompt="private path shield", checkpoint_id="checkpoint-ema", image_count=1),
+        explicit_action=True,
+    )
+    secret = r"C:\\private\\checkpoint-secret.pt"
+
+    def fail_recovery(_run_id: str) -> None:
+        raise OSError(f"access denied: {secret}")
+
+    monkeypatch.setattr(service, "_recover_projection", fail_recovery)
+    restored = service.reconstruct(created["run_id"])
+
+    serialized = json.dumps(restored)
+    assert secret not in serialized
+    assert "Playground recovery could not verify an internal artifact safely." in serialized
+
+
 def test_partial_run_reconstructs_after_abrupt_service_loss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import spritelab.product_features.evaluation.playground as playground_module
 
@@ -230,23 +433,28 @@ def test_partial_run_reconstructs_after_abrupt_service_loss(monkeypatch: pytest.
 
 
 def test_failed_and_cancelled_runs_reconstruct_durable_terminal_state(tmp_path: Path) -> None:
+    failure_secret = "PLAYFAILSECRET"
+    cancellation_secret = "PLAYCANCELSECRET"
+
     class FailingGenerator(FakeGenerator):
         def generate(self, **kwargs):
             self.calls.append(kwargs)
-            raise RuntimeError("synthetic adapter failure")
+            raise RuntimeError(f"Authorization=Bearer {failure_secret} C:\\private\\adapter.txt /private/adapter.txt")
 
     class CancellingGenerator(FakeGenerator):
         def generate(self, **kwargs):
             self.calls.append(kwargs)
-            raise GenerationCancelledError("synthetic cancellation")
+            raise GenerationCancelledError(f"api_key={cancellation_secret} C:\\private\\cancel.txt /private/cancel.txt")
 
     request = GenerationRequest(prompt="terminal wand", checkpoint_id="checkpoint-ema", image_count=1)
     failed = PlaygroundService(_catalog(tmp_path), output_root=tmp_path / "failed", generator=FailingGenerator())
-    with pytest.raises(RuntimeError, match="synthetic adapter failure"):
+    with pytest.raises(RuntimeError, match=failure_secret):
         failed.generate(request, explicit_action=True)
     failed_run = failed.latest_run()
     assert failed_run is not None and failed_run["status"] == "FAILED"
-    assert failed_run["failure"]["type"] == "RuntimeError"
+    assert failed_run["failure"]["type"] == "GenerationAdapterError"
+    assert failed_run["failure"]["message"] == "Generation adapter failed."
+    assert failure_secret not in json.dumps(failed_run)
 
     cancelled = PlaygroundService(
         _catalog(tmp_path), output_root=tmp_path / "cancelled", generator=CancellingGenerator()
@@ -255,7 +463,8 @@ def test_failed_and_cancelled_runs_reconstruct_durable_terminal_state(tmp_path: 
         cancelled.generate(request, explicit_action=True)
     cancelled_run = cancelled.latest_run()
     assert cancelled_run is not None and cancelled_run["status"] == "CANCELLED"
-    assert cancelled_run["cancellation"]["reason"] == "synthetic cancellation"
+    assert cancelled_run["cancellation"]["reason"] == "Generation adapter cancelled the run."
+    assert cancellation_secret not in json.dumps(cancelled_run)
 
 
 @pytest.mark.parametrize("mutation", ["missing", "changed"])
@@ -307,7 +516,18 @@ def test_legacy_metadata_is_read_only_not_comparable_and_never_promotion_evidenc
     legacy = root / "generations" / "legacy-one"
     legacy.mkdir(parents=True)
     (legacy / "metadata.json").write_text(
-        json.dumps({"generation_id": "legacy-one", "results": [{"output_hash": "a" * 64}]}),
+        json.dumps(
+            {
+                "generation_id": "file:///private/secret.png",
+                "results": [
+                    {
+                        "output_hash": "a" * 64,
+                        "checkpoint_path": "C:/private/model.pt",
+                        "client_secret": "do-not-expose",
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     service = PlaygroundService(_catalog(tmp_path), output_root=root)
@@ -316,6 +536,11 @@ def test_legacy_metadata_is_read_only_not_comparable_and_never_promotion_evidenc
     assert rows[0]["durable"] is False
     assert rows[0]["frozen_benchmark_eligible"] is False
     assert rows[0]["promotion_evidence_eligible"] is False
+    assert rows[0]["generation_id"].startswith("legacy-")
+    assert rows[0]["result_count"] == 1
+    assert rows[0]["results"] == []
+    assert "private" not in json.dumps(rows[0]).casefold()
+    assert "secret" not in json.dumps(rows[0]).casefold()
     assert service.latest_run() is None
 
 
@@ -459,6 +684,71 @@ def test_complete_planned_run_restarts_without_generation_and_allows_explicit_co
     assert len(continuation_generator.calls) == 1
     event_types = [item.event.event_type for item in restarted.repository.replay(run_id).events]
     assert event_types.count("planned") == 1
+
+
+def test_explicit_continuation_rejects_command_name_substitution_from_held_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs = tmp_path / "runs" / "v3"
+    run_id = "playground-command-snapshot-substitution"
+    request = GenerationRequest(prompt="held command potion", checkpoint_id="checkpoint-ema", image_count=1)
+
+    def interrupt_after_state(step: str, _directory: Path) -> None:
+        if step == "state_written":
+            raise RuntimeError("process stopped after state publication")
+
+    first = PlaygroundService(
+        _catalog(tmp_path),
+        output_root=tmp_path / "playground",
+        runs_directory=runs,
+        generator=FakeGenerator(),
+        run_id_factory=lambda: run_id,
+        initialization_hook=interrupt_after_state,
+    )
+    with pytest.raises(RuntimeError):
+        first.generate(request, explicit_action=True)
+
+    command = runs / run_id / "command.json"
+    retained = runs / run_id / "command-held-by-test.json"
+    outside = tmp_path / "outside-command-sentinel.json"
+    outside_bytes = command.read_bytes()
+    outside.write_bytes(outside_bytes)
+    original_open = AnchoredDirectory.open_file_immovable
+    attacked = False
+
+    def open_then_substitute(
+        parent: AnchoredDirectory,
+        name: str,
+        flags: int,
+        mode: int = 0o600,
+    ) -> int:
+        nonlocal attacked
+        if name != "command.json" or attacked:
+            return original_open(parent, name, flags, mode)
+        attacked = True
+        descriptor = parent.open_file(name, flags, mode)
+        os.replace(command, retained)
+        os.link(outside, command)
+        return descriptor
+
+    restarted_generator = FakeGenerator()
+    restarted = PlaygroundService(
+        _catalog(tmp_path),
+        output_root=tmp_path / "playground",
+        runs_directory=runs,
+        generator=restarted_generator,
+    )
+    monkeypatch.setattr(AnchoredDirectory, "open_file_immovable", open_then_substitute)
+
+    with pytest.raises(GenerationSafetyError, match="not safe for explicit continuation"):
+        restarted.continue_run(run_id, explicit_action=True)
+
+    assert attacked is True
+    assert restarted_generator.calls == []
+    assert outside.read_bytes() == outside_bytes
+    assert retained.read_bytes() == outside_bytes
+    assert command.samefile(outside)
 
 
 def test_authoritative_playground_state_missing_events_is_not_comparable(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from spritelab.product_features.training.plans import synthetic_training_path_contract_for_tests
 from spritelab.v3.config import DEFAULT_CONFIG, ProjectConfig
 from spritelab.v3.model import AuditStatus, ProjectState, StageState, StageStatus
 from spritelab.v3.orchestration import ExecutionOptions, _run_backend, dataset_build, evaluate, train
@@ -22,6 +23,7 @@ def _config(tmp_path: Path) -> ProjectConfig:
             "training_view_identity": "synthetic-training-view-v1",
         }
     )
+    values.update(synthetic_training_path_contract_for_tests(tmp_path))
     return ProjectConfig(root=tmp_path, path=tmp_path / "spritelab.yaml", values=values)
 
 

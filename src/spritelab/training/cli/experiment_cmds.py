@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -121,6 +123,10 @@ def prepare_experiment_manifest(
     config: Mapping[str, object] | None = None,
     runtime_overrides: Mapping[str, object] | None = None,
     resolution_root: Path | None = None,
+    training_manifest_bytes: bytes | None = None,
+    vocabulary_bytes: bytes | None = None,
+    software_version_override: Mapping[str, Any] | None = None,
+    hardware_summary_override: Mapping[str, Any] | None = None,
 ) -> dict:
     """Build the exact effective manifest, optionally from server-owned config bytes.
 
@@ -147,7 +153,26 @@ def prepare_experiment_manifest(
         else (lambda value: _resolve_from_root(resolution_root, value))
     )
     manifest_path = resolver(dataset["training_manifest"])
-    rows = read_jsonl(manifest_path)
+    if training_manifest_bytes is None:
+        rows = read_jsonl(manifest_path)
+        manifest_sha256 = None
+    else:
+        rows = []
+        try:
+            manifest_text = training_manifest_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("retained training manifest is not UTF-8") from exc
+        for line_number, line in enumerate(manifest_text.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"retained training manifest line {line_number} is invalid") from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"retained training manifest line {line_number} is not an object")
+            rows.append(row)
+        manifest_sha256 = hashlib.sha256(training_manifest_bytes).hexdigest()
     train_rows = [row for row in rows if row.get("split") == dataset.get("split", "train")]
     if not train_rows:
         raise ValueError("training manifest has no rows for configured split")
@@ -158,7 +183,11 @@ def prepare_experiment_manifest(
     if vocabulary_path:
         vocabulary_file = resolver(vocabulary_path)
         try:
-            tokenizer_payload = json.loads(vocabulary_file.read_text(encoding="utf-8"))
+            tokenizer_payload = json.loads(
+                vocabulary_file.read_text(encoding="utf-8")
+                if vocabulary_bytes is None
+                else vocabulary_bytes.decode("utf-8")
+            )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("configured conditioning vocabulary is unreadable") from exc
         if not isinstance(tokenizer_payload, dict) or tokenizer_payload != generated_tokenizer.to_json_dict():
@@ -171,23 +200,37 @@ def prepare_experiment_manifest(
         from spritelab.training.experiment_system import file_sha256
 
         expected_manifest_hash = bindings.get("split_manifest_hash")
-        if expected_manifest_hash and expected_manifest_hash != file_sha256(manifest_path):
+        actual_manifest_hash = file_sha256(manifest_path) if manifest_sha256 is None else manifest_sha256
+        if expected_manifest_hash and expected_manifest_hash != actual_manifest_hash:
             raise ValueError("campaign split-manifest identity does not match the experiment input")
         expected_vocabulary_hash = bindings.get("conditioning_vocabulary_hash")
         if expected_vocabulary_hash and (
-            not vocabulary_path or expected_vocabulary_hash != file_sha256(resolver(vocabulary_path))
+            not vocabulary_path
+            or expected_vocabulary_hash
+            != (
+                file_sha256(resolver(vocabulary_path))
+                if vocabulary_bytes is None
+                else hashlib.sha256(vocabulary_bytes).hexdigest()
+            )
         ):
             raise ValueError("campaign conditioning-vocabulary identity does not match the experiment input")
     structured = None
     if "structured" in str(effective["conditioning"]["mode"]):
         structured = build_structured_conditioning_vocab(train_rows).to_json_dict()
+    split_manifest = resolver(dataset.get("split_manifest", dataset["training_manifest"]))
+    if training_manifest_bytes is not None and split_manifest != manifest_path:
+        raise ValueError("retained training input requires one exact dataset/split manifest path")
     result = build_experiment_manifest(
         effective,
         dataset_manifest=manifest_path,
-        split_manifest=resolver(dataset.get("split_manifest", dataset["training_manifest"])),
+        split_manifest=split_manifest,
         tokenizer=tokenizer,
         structured_vocab=structured,
         repo=Path.cwd() if resolution_root is None else resolution_root.resolve(),
+        dataset_manifest_sha256=manifest_sha256,
+        split_manifest_sha256=manifest_sha256,
+        software_version_override=software_version_override,
+        hardware_summary_override=hardware_summary_override,
     )
     if write:
         output = config_path.with_suffix(".manifest.json")
@@ -202,6 +245,10 @@ def _prepare_manifest(
     config: Mapping[str, object] | None = None,
     runtime_overrides: Mapping[str, object] | None = None,
     resolution_root: Path | None = None,
+    training_manifest_bytes: bytes | None = None,
+    vocabulary_bytes: bytes | None = None,
+    software_version_override: Mapping[str, Any] | None = None,
+    hardware_summary_override: Mapping[str, Any] | None = None,
 ) -> dict:
     return prepare_experiment_manifest(
         config_path,
@@ -209,7 +256,41 @@ def _prepare_manifest(
         config=config,
         runtime_overrides=runtime_overrides,
         resolution_root=resolution_root,
+        training_manifest_bytes=training_manifest_bytes,
+        vocabulary_bytes=vocabulary_bytes,
+        software_version_override=software_version_override,
+        hardware_summary_override=hardware_summary_override,
     )
+
+
+def _authoritative_lr_schedule(config: Mapping[str, Any]) -> tuple[str, int]:
+    optimizer = config.get("optimizer")
+    if not isinstance(optimizer, Mapping):
+        raise ValueError("optimizer configuration must be a mapping")
+    schedule = config.get("schedule")
+    if schedule is None:
+        name = optimizer.get("schedule", "none")
+        warmup_steps = optimizer.get("warmup_steps", 0)
+    else:
+        if not isinstance(schedule, Mapping):
+            raise ValueError("schedule configuration must be a mapping")
+        name = schedule.get("name")
+        warmup_steps = schedule.get("warmup_steps", 0)
+        if optimizer.get("schedule", name) != name or optimizer.get("warmup_steps", warmup_steps) != warmup_steps:
+            raise ValueError("optimizer schedule projection differs from the authoritative campaign schedule")
+    if not isinstance(name, str) or name not in {"none", "cosine"}:
+        raise ValueError("learning-rate schedule must be 'none' or 'cosine'")
+    if type(warmup_steps) is not int or warmup_steps < 0:
+        raise ValueError("learning-rate warmup_steps must be a nonnegative integer")
+    return name, warmup_steps
+
+
+def _require_exact_smoke_manifest(
+    rebuilt: Mapping[str, Any],
+    expected: Mapping[str, Any],
+) -> None:
+    if rebuilt != expected:
+        raise ValueError("the effective smoke manifest differs from the server-prepared manifest")
 
 
 def _run(parsed: argparse.Namespace) -> None:
@@ -238,13 +319,22 @@ def _run(parsed: argparse.Namespace) -> None:
             raise ValueError("--unsafe-resume requires a nonempty explicit --unsafe-resume-reason")
     elif parsed.unsafe_resume_reason is not None:
         raise ValueError("--unsafe-resume-reason may only be used with --unsafe-resume")
+    boundary = None
+    if bundle_id is None:
+        from spritelab.training.launch import bootstrap_validated_training_process
+
+        boundary = bootstrap_validated_training_process(parsed.config, parsed.resume)
+        if boundary is not None and (parsed.smoke or parsed.unsafe_resume or parsed.unsafe_resume_reason is not None):
+            raise ValueError("validated campaign process boundaries forbid smoke and unsafe-resume overrides")
     bundle_plan = None
+    bundle_expected_manifest = None
     bundle_config_sha256 = None
     qualification = None
     if bundle_id is not None:
         import os
 
         from spritelab.training.smoke_bundle import (
+            expected_manifest,
             load_plan,
             smoke_launch_identity,
             validate_cli_configuration,
@@ -271,10 +361,18 @@ def _run(parsed: argparse.Namespace) -> None:
             parsed.config,
         )
         verify_execution_guards(project_root, bundle_plan)
+        bundle_expected_manifest = expected_manifest(project_root, bundle_plan, str(bundle_device))
+        if not isinstance(bundle_expected_manifest.get("software_version"), Mapping):
+            raise ValueError("the server-prepared smoke software version is missing or malformed")
+        if not isinstance(bundle_expected_manifest.get("hardware_summary"), Mapping):
+            raise ValueError("the server-prepared smoke hardware summary is missing or malformed")
     else:
-        from spritelab.training.experiment_system import load_config
+        if boundary is None:
+            from spritelab.training.experiment_system import load_config
 
-        config = load_config(parsed.config)
+            config = load_config(parsed.config)
+        else:
+            config = dict(boundary.config)
     runtime = config["runtime"]
     smoke_runtime = (
         {
@@ -292,23 +390,33 @@ def _run(parsed: argparse.Namespace) -> None:
     )
     manifest = _prepare_manifest(
         parsed.config,
-        write=bundle_id is None,
+        write=bundle_id is None and boundary is None,
         config=config,
         runtime_overrides=smoke_runtime,
-        resolution_root=Path.cwd().resolve() if bundle_id is not None else None,
+        resolution_root=(
+            Path.cwd().resolve() if bundle_id is not None else (boundary.project_root if boundary is not None else None)
+        ),
+        training_manifest_bytes=None if boundary is None else boundary.training_manifest_bytes,
+        vocabulary_bytes=None if boundary is None else boundary.vocabulary_bytes,
+        software_version_override=(
+            None if bundle_expected_manifest is None else bundle_expected_manifest["software_version"]
+        ),
+        hardware_summary_override=(
+            None if bundle_expected_manifest is None else bundle_expected_manifest["hardware_summary"]
+        ),
     )
     if bundle_id is not None:
         from spritelab.training.smoke_bundle import (
             begin_device_run,
-            expected_manifest,
             run_bundle_directory,
         )
 
         project_root = Path.cwd().resolve()
         if bundle_plan is None or bundle_config_sha256 is None:
             raise ValueError("the server-prepared smoke plan was not retained safely")
-        if manifest != expected_manifest(project_root, bundle_plan, str(bundle_device)):
-            raise ValueError("the effective smoke manifest differs from the server-prepared manifest")
+        if bundle_expected_manifest is None:
+            raise ValueError("the server-prepared smoke manifest is missing")
+        _require_exact_smoke_manifest(manifest, bundle_expected_manifest)
         out_dir = begin_device_run(project_root, bundle_plan, str(bundle_device))
         expected_output = run_bundle_directory(project_root, bundle_id) / str(bundle_device)
         if out_dir != expected_output:
@@ -317,19 +425,41 @@ def _run(parsed: argparse.Namespace) -> None:
             from spritelab.training.determinism import qualify_determinism
 
             qualification = qualify_determinism(mode="strict", device="cuda", steps=2)
+    elif boundary is not None:
+        out_dir = boundary.output_root
     else:
         out_dir = _resolve(parsed.config, runtime["out_dir"])
+    logical_out_dir = boundary.logical_output_root if boundary is not None else out_dir
     dataset, model = config["dataset"], config["model"]
     conditioning, loss = config["conditioning"], config["loss"]
     optimizer, augmentation = config["optimizer"], config["augmentation"]
+    lr_schedule, lr_warmup_steps = _authoritative_lr_schedule(config)
     ema = config["ema"]
     if not parsed.resume and out_dir.exists() and any(out_dir.glob("checkpoint*.pt")):
         raise FileExistsError(f"refusing to overwrite checkpoints in {out_dir}; choose a new run directory or resume")
     max_steps = min(2, int(runtime["max_steps"])) if parsed.smoke else int(runtime["max_steps"])
+    resolver = (
+        (lambda value: _resolve(parsed.config, value))
+        if boundary is None
+        else (lambda value: _resolve_from_root(boundary.project_root, value))
+    )
     kwargs = {
-        "dataset_dir": _resolve(parsed.config, dataset["directory"]),
-        "training_manifest": _resolve(parsed.config, dataset["training_manifest"]),
-        "out_dir": out_dir,
+        "dataset_dir": resolver(dataset["directory"]),
+        "training_manifest": resolver(dataset["training_manifest"]),
+        "out_dir": logical_out_dir,
+        "retained_output_root": None if boundary is None else out_dir,
+        "campaign_run_contract": None if boundary is None else boundary.campaign_run_contract,
+        "retained_training_manifest_records": (
+            None
+            if boundary is None
+            else tuple(
+                json.loads(line)
+                for line in boundary.training_manifest_bytes.decode("utf-8").splitlines()
+                if line.strip()
+            )
+        ),
+        "retained_dataset_descriptors": None if boundary is None else boundary.dataset_descriptors,
+        "retained_dataset_content_sha256": None if boundary is None else boundary.dataset_content_sha256,
         "split": str(dataset.get("split", "train")),
         "batch_size": min(2, int(runtime["batch_size"])) if parsed.smoke else int(runtime["batch_size"]),
         "max_steps": max_steps,
@@ -360,8 +490,8 @@ def _run(parsed: argparse.Namespace) -> None:
         "validation_mode": str(runtime.get("validation_mode", "auto")),
         "amp": str(runtime.get("precision", "fp32")) != "fp32",
         "grad_clip": float(optimizer.get("gradient_clip", 0.0)),
-        "lr_schedule": str(optimizer.get("schedule", "none")),
-        "lr_warmup_steps": int(optimizer.get("warmup_steps", 0)),
+        "lr_schedule": lr_schedule,
+        "lr_warmup_steps": lr_warmup_steps,
         "film_conditioning": bool(model.get("film_conditioning", False)),
         "bottleneck_attention": bool(model.get("bottleneck_attention", False)),
         "palette_conditioning": bool(conditioning.get("palette", {}).get("enabled", False)),
@@ -373,7 +503,9 @@ def _run(parsed: argparse.Namespace) -> None:
         "caption_max_length": int(conditioning.get("caption_max_length", 32)),
         "semantic_max_length": int(conditioning.get("semantic_max_length", 48)),
         "experiment_manifest": manifest,
-        "resume_from": parsed.resume,
+        "resume_from": parsed.resume if boundary is None else boundary.resume_path,
+        "resume_descriptor": None if boundary is None else boundary.resume_descriptor,
+        "expected_resume_sha256": None if boundary is None else boundary.resume_sha256,
         "unsafe_resume": bool(parsed.unsafe_resume),
         "unsafe_resume_reason": parsed.unsafe_resume_reason,
         "determinism": str(runtime.get("determinism", "off")),
@@ -432,7 +564,12 @@ def _run(parsed: argparse.Namespace) -> None:
             )
         )
     else:
-        print(json.dumps({"steps_completed": report["steps_completed"], "out_dir": str(out_dir)}, sort_keys=True))
+        print(
+            json.dumps(
+                {"steps_completed": report["steps_completed"], "out_dir": str(logical_out_dir)},
+                sort_keys=True,
+            )
+        )
 
 
 def _sample(parsed: argparse.Namespace) -> None:

@@ -45,9 +45,7 @@ def build_product_runtime() -> ProductRuntime:
         _web_shell_plugin(),
         build_provider_plugin(),
         create_harvest_plugin(
-            dataset_import_callback_factory=lambda context: ConditionedDatasetImportAdapter(
-                context.project_root
-            ),
+            dataset_import_callback_factory=lambda context: ConditionedDatasetImportAdapter(context.project_root),
             load_repository_capabilities=True,
         ),
         build_conditioned_v5_plugin(),

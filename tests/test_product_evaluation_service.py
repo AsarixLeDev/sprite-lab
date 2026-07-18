@@ -9,11 +9,17 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from spritelab.product_core import ProjectContext
+from spritelab.product_core import ProductStatus, ProjectContext
 from spritelab.product_core.web import create_product_app
-from spritelab.product_features.evaluation import EvaluationRequest, EvaluationService, build_plugin
+from spritelab.product_features.evaluation import (
+    EvaluationRequest,
+    EvaluationService,
+    GenerationCancelledError,
+    build_plugin,
+)
 from spritelab.product_features.evaluation import plugin as evaluation_plugin
 from spritelab.product_features.evaluation import service as evaluation_service_module
+from spritelab.product_features.evaluation.playground import GenerationTimedOutError
 from spritelab.product_features.evaluation.web import create_evaluation_router
 from spritelab.v3 import cli as product_cli
 
@@ -179,6 +185,405 @@ def test_missing_active_training_view_blocks_api_before_generation(tmp_path: Pat
 
 
 @pytest.mark.parametrize(
+    ("flag", "hostile"),
+    [
+        ("dry_run", "false"),
+        ("explicit_action", "false"),
+        ("confirm_billable", "false"),
+        ("allow_source_results", "false"),
+        ("explicit_action", 1),
+        ("confirm_billable", [False]),
+    ],
+)
+def test_evaluation_api_requires_exact_json_booleans(
+    tmp_path: Path,
+    flag: str,
+    hostile: object,
+) -> None:
+    config, _benchmark = _project(tmp_path)
+    fake = FakeEvaluationGenerator()
+    service = EvaluationService(project_root=tmp_path, config=config, generator=fake, evaluator=_fake_evaluator())
+    context = ProjectContext(tmp_path, config=config, runs_directory=tmp_path / "runs")
+    app = create_product_app(context)
+    app.include_router(create_evaluation_router(context, service=service))
+    payload: dict[str, object] = {"explicit_action": True, flag: hostile}
+
+    response = TestClient(app).post("/evaluation/api/run", json=payload)
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "evaluation_boolean_invalid"
+    assert fake.calls == 0
+
+
+@pytest.mark.parametrize("flag", ["dry_run", "explicit_action", "confirm_billable", "allow_source_results"])
+def test_evaluation_request_rejects_non_boolean_flags_before_service_use(flag: str) -> None:
+    with pytest.raises(ValueError, match="exact boolean"):
+        EvaluationRequest(**{flag: "false"})
+
+
+def test_ordinary_checkpoint_api_ignores_technical_query_and_remains_pathless(tmp_path: Path) -> None:
+    config, _benchmark = _project(tmp_path)
+    service = EvaluationService(project_root=tmp_path, config=config)
+    context = ProjectContext(tmp_path, config=config, runs_directory=tmp_path / "runs")
+    app = create_product_app(context)
+    app.include_router(create_evaluation_router(context, service=service))
+    client = TestClient(app)
+
+    ordinary = client.get("/evaluation/api/checkpoints?include_unavailable=true&technical_details=true")
+    technical = client.get("/evaluation/api/technical/checkpoints?acknowledge=true")
+
+    assert ordinary.status_code == 200
+    assert "checkpoint_path" not in ordinary.text
+    assert "run_directory" not in ordinary.text
+    assert str(tmp_path) not in ordinary.text
+    assert technical.status_code == 200
+    assert "checkpoint_path" not in technical.text
+    assert "run_directory" not in technical.text
+    assert str(tmp_path) not in technical.text
+    technical_candidate = technical.json()["eligible"][0]
+    assert technical_candidate["checkpoint_reference"] == "checkpoint_step_000100_ema.pt"
+    assert technical_candidate["run_reference"] == "train-1"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "",
+        "?acknowledge=false",
+        "?acknowledge=True",
+        "?acknowledge=TRUE",
+        "?acknowledge=1",
+        "?acknowledge=yes",
+        "?acknowledge=on",
+        "?acknowledge=true&acknowledge=true",
+        "?acknowledge=true&acknowledge=false",
+        "?acknowledge%5B%5D=true",
+    ],
+)
+def test_technical_checkpoint_api_requires_one_exact_acknowledgement(tmp_path: Path, query: str) -> None:
+    config, _benchmark = _project(tmp_path)
+    service = EvaluationService(project_root=tmp_path, config=config)
+    context = ProjectContext(tmp_path, config=config, runs_directory=tmp_path / "runs")
+    app = create_product_app(context)
+    app.include_router(create_evaluation_router(context, service=service))
+
+    response = TestClient(app).get(f"/evaluation/api/technical/checkpoints{query}")
+
+    assert response.status_code == 400
+    assert "checkpoint_path" not in response.text
+    assert "run_directory" not in response.text
+    assert str(tmp_path) not in response.text
+
+
+def test_checkpoint_catalog_api_and_initial_html_sanitize_state_derived_strings(tmp_path: Path) -> None:
+    config, _benchmark = _project(tmp_path)
+    state_path = tmp_path / "runs" / "train-1" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["title"] = "Title Authorization=Bearer TITLESECRET C:\\private\\title.txt"
+    state["backend_identity"].update(
+        {
+            "training_profile": "api_key=PROFILESECRET file:///home/alice/profile.json",
+            "dataset_identity_summary": f"password=DATASECRET {tmp_path / 'private' / 'dataset.json'}",
+            "view_identity_summary": "client_secret=VIEWSECRET /home/alice/private/view.json",
+        }
+    )
+    _write_json(state_path, state)
+    service = EvaluationService(project_root=tmp_path, config=config)
+    context = ProjectContext(tmp_path, config=config, runs_directory=tmp_path / "runs")
+    app = create_product_app(context)
+    app.include_router(create_evaluation_router(context, service=service))
+    client = TestClient(app)
+
+    page = client.get("/evaluation")
+    catalog = client.get("/evaluation/api/checkpoints?include_unavailable=true")
+
+    assert page.status_code == 200
+    assert catalog.status_code == 200
+    for response in (page, catalog):
+        for private_value in (
+            "TITLESECRET",
+            "PROFILESECRET",
+            "DATASECRET",
+            "VIEWSECRET",
+            str(tmp_path),
+            tmp_path.as_posix(),
+            "C:\\private",
+            "/home/alice/private",
+            "file:///home/alice",
+        ):
+            assert private_value not in response.text
+        assert "[redacted]" in response.text
+    candidate = catalog.json()["eligible"][0]
+    assert candidate["friendly_run_name"].startswith("Title Authorization=[redacted]")
+    assert candidate["eligible"] is True
+
+
+@pytest.mark.parametrize(
+    ("error_type", "expected_status"),
+    [(GenerationCancelledError, 409), (GenerationTimedOutError, 408)],
+)
+def test_playground_api_never_returns_raw_adapter_exception_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+    expected_status: int,
+) -> None:
+    config, _benchmark = _project(tmp_path)
+    service = EvaluationService(project_root=tmp_path, config=config)
+    context = ProjectContext(tmp_path, config=config, runs_directory=tmp_path / "runs")
+    app = create_product_app(context)
+    router = create_evaluation_router(context, service=service)
+    app.include_router(router)
+    secret = "PLAYWEBSECRET"
+
+    def explode(*_args, **_kwargs):
+        raise error_type(f"Authorization=Bearer {secret} C:\\private\\adapter.txt /private/adapter.txt")
+
+    monkeypatch.setattr(router.spritelab_playground_service, "generate", explode)
+    response = TestClient(app).post(
+        "/evaluation/api/playground/generate",
+        json={
+            "prompt": "red sword",
+            "checkpoint_id": "checkpoint",
+            "explicit_action": True,
+            "confirm_billable": False,
+        },
+    )
+
+    assert response.status_code == expected_status
+    assert secret not in response.text
+    assert "C:\\private" not in response.text
+    assert "/private/adapter.txt" not in response.text
+
+
+@pytest.mark.parametrize("failure_site", ["generator", "evaluator"])
+def test_evaluation_adapter_exceptions_never_reach_durable_or_public_state(
+    tmp_path: Path,
+    failure_site: str,
+) -> None:
+    config, _benchmark = _project(tmp_path)
+    secret = "EVALSECRET"
+    private_detail = f"Authorization=Bearer {secret} C:\\private\\adapter.txt /private/adapter.txt"
+
+    class ExplodingGenerator(FakeEvaluationGenerator):
+        def generate_benchmark(self, **kwargs) -> Path:
+            if failure_site == "generator":
+                raise RuntimeError(private_detail)
+            return super().generate_benchmark(**kwargs)
+
+    def evaluator(_generated: Path, _out: Path) -> dict:
+        raise RuntimeError(private_detail)
+
+    service = EvaluationService(
+        project_root=tmp_path,
+        config=config,
+        generator=ExplodingGenerator(),
+        evaluator=evaluator if failure_site == "evaluator" else _fake_evaluator(),
+        output_root=tmp_path / "evaluation-output",
+    )
+
+    result = service.run(EvaluationRequest(explicit_action=True))
+
+    assert result.status is ProductStatus.FAILED
+    assert secret not in json.dumps(result.to_dict())
+    assert "C:\\private" not in json.dumps(result.to_dict())
+    assert all(secret not in stage.message for stage in service.latest_stages)
+    assert service.latest_run_id is not None
+    durable_state = service.events.state(service.latest_run_id)
+    assert secret not in json.dumps(durable_state)
+    assert "adapter diagnostics remain private" in json.dumps(durable_state)
+
+    recreated = EvaluationService(
+        project_root=tmp_path,
+        config=config,
+        generator=FakeEvaluationGenerator(),
+        evaluator=_fake_evaluator(),
+        output_root=tmp_path / "evaluation-output",
+    )
+    assert secret not in json.dumps([stage.to_dict() for stage in recreated.latest_stages])
+
+
+def test_ordinary_evaluation_surfaces_share_one_recursive_public_allowlist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _benchmark = _project(tmp_path)
+    secret = "EVALUATOR-ADAPTER-SECRET"
+    posix_path = "/srv/private/evaluator/report.json"
+    windows_path = r"C:\private\evaluator\report.json"
+    file_uri = "file:///srv/private/evaluator/report.json"
+    hostile_text = f"Authorization=Bearer {secret} api_key={secret} {posix_path} {windows_path} {file_uri}"
+
+    def hostile_evaluator(_generated: Path, out: Path) -> dict:
+        out.mkdir(parents=True)
+        row = {
+            "sample_id": "sample-public",
+            "prompt_id": "prompt-public",
+            "prompt": "red sword",
+            "seed": 7,
+            "category": "weapon",
+            "checkpoint": windows_path,
+            "image": posix_path,
+            "inference_path": file_uri,
+            "metrics": {
+                "hard_validity": {"pass": True, "adapter_payload": {"password": secret}},
+                "pixel_art": {
+                    "unique_palette_size": 8,
+                    "silhouette_occupancy": 0.4,
+                    "border_clipping": False,
+                    "adapter_payload": {
+                        "api_key": secret,
+                        "posix": posix_path,
+                        "windows": windows_path,
+                        "uri": file_uri,
+                    },
+                },
+                "adapter_payload": {"credential": secret},
+            },
+            "conditional_adherence": 1.0,
+            "memorization_evidence_class": "no_material_match",
+            "low_evidence_reason": hostile_text,
+            "adapter_payload": {"authorization": f"Bearer {secret}"},
+        }
+        (out / "per_image_metrics.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+        return {
+            "schema_version": "generation_benchmark_v1.0",
+            "comparison_method": hostile_text,
+            "generated": posix_path,
+            "training_manifests": [windows_path, file_uri],
+            "summary": {
+                "sample_count": 1,
+                "hard_validity": {"pass_rate": 1.0},
+                "conditional": {"represented_rate": 1.0},
+                "pixel_art": {
+                    "palette_size_mean": 8.0,
+                    "adapter_payload": {"secret": secret, "path": posix_path},
+                },
+                "diversity": {"exact_duplicate_rate": 0.0},
+                "memorization": {
+                    "hard_evidence_count": 0,
+                    "review_required_count": 0,
+                    "adapter_payload": {"file_uri": file_uri},
+                },
+            },
+            "promotion": {
+                "pass": True,
+                "memorization_machine_status": "pass",
+                "checks": {"palette": True, "adapter_secret": secret},
+                "adapter_payload": {"password": secret},
+            },
+            "artifacts": {"report": posix_path, "adapter_uri": file_uri},
+            "adapter_payload": {"api_key": secret},
+        }
+
+    hostile_memorization = {
+        "schema_version": "spritelab.product.memorization-display.v2",
+        "evidence_state": "complete",
+        "review_required_count": 0,
+        "review_message": hostile_text,
+        "review_contract": "spritelab.evaluation.memorization_review.signed-v2",
+        "review_action_available": False,
+        "writes_review_log": False,
+        "items": [
+            {
+                "pair_id": "pair-public",
+                "evidence_class": "no_material_match",
+                "display_state": "No material match",
+                "current_review_state": "no_material_match",
+                "review_authoritative": True,
+                "event_chain_valid": True,
+                "review_action_available": False,
+                "clear_action_available": False,
+                "action_unavailable_reason": hostile_text,
+                "generated_image": posix_path,
+                "training_comparison_image": windows_path,
+                "candidate_bundle_path": file_uri,
+                "diagnostics": {"api_key": secret},
+                "metrics": {"adapter_secret": secret},
+            }
+        ],
+        "validation_reasons": [hostile_text],
+        "legacy_reviews": [{"password": secret, "path": posix_path}],
+        "adapter_payload": {"credential": secret},
+    }
+    monkeypatch.setattr(
+        evaluation_service_module,
+        "memorization_display",
+        lambda *_args, **_kwargs: deepcopy(hostile_memorization),
+    )
+    service = EvaluationService(
+        project_root=tmp_path,
+        config=config,
+        generator=FakeEvaluationGenerator(),
+        evaluator=hostile_evaluator,
+        output_root=tmp_path / "evaluation-output",
+    )
+    context = ProjectContext(tmp_path, config=config, runs_directory=tmp_path / "runs")
+    app = create_product_app(context)
+    app.include_router(create_evaluation_router(context, service=service))
+    client = TestClient(app)
+
+    run_response = client.post("/evaluation/api/run", json={"explicit_action": True})
+    planned_checkpoint, planned_benchmark, planned_stages = service.plan(EvaluationRequest(dry_run=True))
+    hostile_stage = deepcopy(planned_stages[-1])
+    hostile_stage.message = hostile_text
+    hostile_stage.metrics = {"adapter_payload": {"api_key": secret, "path": posix_path, "uri": file_uri}}
+    monkeypatch.setattr(
+        service,
+        "plan",
+        lambda _request: (planned_checkpoint, planned_benchmark, [hostile_stage]),
+    )
+    report_response = client.get("/evaluation/api/report-data")
+    dashboard_response = client.get("/evaluation/api/dashboard")
+    gallery_response = client.get("/evaluation/api/gallery")
+    plan_response = client.get("/evaluation/api/plan")
+    page_response = client.get("/evaluation")
+
+    assert run_response.status_code == 200
+    assert (
+        report_response.status_code
+        == dashboard_response.status_code
+        == gallery_response.status_code
+        == plan_response.status_code
+        == page_response.status_code
+        == 200
+    )
+    run_payload = run_response.json()
+    report_payload = report_response.json()
+    dashboard_payload = dashboard_response.json()
+    assert run_payload["data"]["report"]["summary"]["hard_validity"]["pass_rate"] == 1.0
+    assert run_payload["data"]["report"]["promotion"]["pass"] is True
+    assert run_payload["data"]["report"]["promotion"]["checks"]["palette"] is True
+    assert run_payload["data"]["memorization"]["items"][0]["review_authoritative"] is True
+    public_row = report_payload["per_image_metrics"][0]
+    assert public_row["metrics"]["hard_validity"]["pass"] is True
+    assert public_row["metrics"]["pixel_art"]["border_clipping"] is False
+    assert public_row["metrics"]["pixel_art"]["unique_palette_size"] == 8
+    assert dashboard_payload["gallery"][0]["metrics"]["pixel_art"]["silhouette_occupancy"] == 0.4
+    assert gallery_response.json()["samples"][0]["metrics"]["pixel_art"]["unique_palette_size"] == 8
+    assert plan_response.json()["stages"][0]["metrics"] == {}
+
+    assert service.latest_report is not None and secret in json.dumps(service.latest_report)
+    assert secret in json.dumps(service.latest_rows)
+    assert secret in json.dumps(service.latest_memorization)
+    combined_public = "\n".join(
+        (
+            json.dumps(run_payload, sort_keys=True),
+            json.dumps(report_payload, sort_keys=True),
+            json.dumps(dashboard_payload, sort_keys=True),
+            json.dumps(gallery_response.json(), sort_keys=True),
+            json.dumps(plan_response.json(), sort_keys=True),
+            page_response.text,
+        )
+    ).replace("\\\\", "\\")
+    assert "adapter_payload" not in combined_public
+    assert "generated_image" not in combined_public
+    assert "candidate_bundle_path" not in combined_public
+    for private in (secret, posix_path, windows_path, file_uri):
+        assert private not in combined_public
+
+
+@pytest.mark.parametrize(
     ("identity", "value"),
     (
         ("dataset", ["not", "a", "string"]),
@@ -335,7 +740,7 @@ def test_benchmark_changed_to_nan_after_planning_blocks_before_generator(
     assert result.status.value == "FAILED"
     assert result.data["generation_runs"] == 0
     assert fake.calls == 0
-    assert any("Benchmark changed after planning" in blocker.message for blocker in result.blockers)
+    assert any("adapter diagnostics remain private" in blocker.message for blocker in result.blockers)
     assert result.data["promotion_actions"] == 0
 
 

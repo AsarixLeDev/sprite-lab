@@ -11,6 +11,9 @@
   let selectedJob = "";
   let selectedJobData = null;
   let selectedPublication = null;
+  let trainingAuditOptions = [];
+  let trainingAuditOptionsError = "";
+  let trainingAuditResult = null;
   let previewResult = null;
   let pollTimer = null;
   let pollInFlight = false;
@@ -84,6 +87,11 @@
     selectedJob = jobId;
     selectedJobData = null;
     selectedPublication = null;
+    trainingAuditOptions = [];
+    trainingAuditOptionsError = "";
+    trainingAuditResult = null;
+    renderTrainingAuditOptions();
+    renderTrainingAuditResult();
     resetJobAuthorizations();
   };
 
@@ -91,7 +99,11 @@
     const anyBusy = busy.size > 0;
     const build = get("cv5-build");
     const publish = get("cv5-publish");
+    const trainingAudit = get("cv5-training-audit");
     const activate = get("cv5-activate");
+    const auditReady = Boolean(
+      selectedJobData?.candidate && selectedJobData?.status === "NEEDS_REVIEW" && !selectedPublication,
+    );
     const evidenceReady = Boolean(
       selectedJobData?.candidate &&
         selectedJobData?.evidence?.label_audit &&
@@ -107,20 +119,116 @@
         get("cv5-authorize-dataset")?.checked &&
         get("cv5-authorize-training")?.checked,
     );
+    const publicationReadyForAudit = Boolean(
+      selectedJob &&
+        selectedJobData?.status === "COMPLETE" &&
+        selectedJobData?.candidate &&
+        selectedPublication &&
+        selectedPublication.configuration_activated === false,
+    );
+    const selectedSmokeId = get("cv5-training-smoke")?.value || "";
+    const registeredSmokeReady = trainingAuditOptions.some((item) => item.smoke_id === selectedSmokeId);
+    const trainingAuditReady = Boolean(
+      publicationReadyForAudit &&
+        registeredSmokeReady &&
+        !trainingAuditResult &&
+        state.config_sha256?.match(/^[0-9a-f]{64}$/),
+    );
     if (build) build.disabled = anyBusy || previewResult?.ready_to_build !== true;
     if (publish) {
       publish.disabled = anyBusy || !evidenceReady || Boolean(selectedPublication) || !get("cv5-authorize")?.checked;
     }
     if (activate) activate.disabled = anyBusy || !activationReady;
-    for (const id of [
-      "cv5-refresh",
-      "cv5-preview",
-      "cv5-upload-label",
-      "cv5-upload-validation",
-    ]) {
+    if (trainingAudit) trainingAudit.disabled = anyBusy || !trainingAuditReady;
+    const trainingAuditControls = get("cv5-training-audit-controls");
+    if (trainingAuditControls) {
+      trainingAuditControls.hidden = !publicationReadyForAudit || trainingAuditOptions.length === 0;
+    }
+    const trainingAuditPrerequisite = get("cv5-training-audit-prerequisite");
+    if (trainingAuditPrerequisite) {
+      if (!selectedPublication) {
+        trainingAuditPrerequisite.textContent = "Publish the exact freeze and campaign first.";
+      } else if (selectedPublication.configuration_activated !== false) {
+        trainingAuditPrerequisite.textContent = "This publication is already activated; audit must precede activation.";
+      } else if (trainingAuditOptions.length === 0) {
+        trainingAuditPrerequisite.textContent =
+          trainingAuditOptionsError || "Complete and register this publication's CPU/CUDA smoke in Playground first.";
+      } else if (trainingAuditResult) {
+        trainingAuditPrerequisite.textContent =
+          `The server-managed audit returned ${trainingAuditResult.verdict || "UNKNOWN"}. It did not activate or start training.`;
+      } else {
+        trainingAuditPrerequisite.textContent =
+          "A registered exploratory smoke is bound to this exact freeze and campaign. The audit does not activate or start training.";
+      }
+    }
+    for (const id of ["cv5-refresh", "cv5-preview"]) {
       const button = get(id);
       if (button) button.disabled = anyBusy;
     }
+    for (const id of ["cv5-audit-label", "cv5-audit-validation"]) {
+      const button = get(id);
+      if (button) button.disabled = anyBusy || !auditReady;
+    }
+  }
+
+  function renderTrainingAuditOptions() {
+    const select = get("cv5-training-smoke");
+    if (!select) return;
+    const previous = select.value;
+    select.replaceChildren(
+      ...trainingAuditOptions.map((item) => {
+        const option = document.createElement("option");
+        option.value = item.smoke_id;
+        option.textContent = `${item.registration_id} · ${item.smoke_id}`;
+        return option;
+      }),
+    );
+    if (trainingAuditOptions.some((item) => item.smoke_id === previous)) select.value = previous;
+  }
+
+  function renderTrainingAuditResult() {
+    const output = get("cv5-training-audit-result");
+    if (!output) return;
+    if (!trainingAuditResult) {
+      output.textContent = "No training infrastructure audit run.";
+      return;
+    }
+    output.textContent = JSON.stringify(
+      {
+        schema_version: trainingAuditResult.schema_version,
+        verdict: trainingAuditResult.verdict,
+        smoke_id: trainingAuditResult.smoke_id,
+        operation_identity: trainingAuditResult.operation_identity,
+        config_unchanged: trainingAuditResult.config_unchanged,
+        configuration_activated: trainingAuditResult.configuration_activated,
+        training_started: trainingAuditResult.training_started,
+        paths_exposed: trainingAuditResult.paths_exposed,
+      },
+      null,
+      2,
+    );
+  }
+
+  async function loadTrainingAuditOptions(jobId, job) {
+    trainingAuditOptions = [];
+    trainingAuditOptionsError = "";
+    const publication = job?.publication;
+    if (!publication || publication.configuration_activated !== false) {
+      renderTrainingAuditOptions();
+      return;
+    }
+    try {
+      const result = await request(
+        `/dataset-v5/api/jobs/${encodeURIComponent(jobId)}/training-audit-options`,
+      );
+      if (selectedJob !== jobId) return;
+      trainingAuditOptions = Array.isArray(result.eligible) ? result.eligible : [];
+    } catch (error) {
+      if (selectedJob !== jobId) return;
+      trainingAuditOptionsError =
+        error instanceof Error ? error.message : "Registered smoke options are unavailable.";
+    }
+    renderTrainingAuditOptions();
   }
 
   async function runExclusive(key, action) {
@@ -151,7 +259,7 @@
           checkbox.checked = preservedReferences.has(item.dataset_reference);
           const body = document.createElement("span");
           const heading = document.createElement("strong");
-          heading.textContent = item.source_title || item.source_id;
+          heading.textContent = item.dataset_reference;
           const summary = document.createElement("p");
           summary.textContent = `${item.accepted_count} accepted · ${item.quarantined_count} quarantined · ${item.status}`;
           body.append(heading, summary);
@@ -216,6 +324,7 @@
     if (selectedPublication && activationAuthorization && !activationAuthorization.value) {
       activationAuthorization.value = authorizationId("activation-auth");
     }
+    await loadTrainingAuditOptions(jobId, job);
     setPolling(startPolling && ["RUNNING", "CANCELLING"].includes(job.status));
     updateControls();
     return job;
@@ -283,27 +392,26 @@
     });
   });
 
-  const uploadEvidence = async (kind, inputId) => {
+  const runIndependentAudit = async (kind) => {
     if (!selectedJob) throw new Error("Select a completed candidate job first.");
-    const file = get(inputId)?.files?.[0];
-    if (!file) throw new Error("Select a JSON report file.");
-    const documentValue = JSON.parse(await file.text());
+    setStatus(`Running independent ${kind.replace("_", " ")} on the server...`);
     await request(`/dataset-v5/api/jobs/${encodeURIComponent(selectedJob)}/evidence`, {
       method: "POST",
-      body: JSON.stringify({ kind, document: documentValue }),
+      body: JSON.stringify({ kind, explicit_action: true }),
     });
     await loadJob(selectedJob);
-    setStatus(`${kind.replace("_", " ")} attached.`);
+    setStatus(`${kind.replace("_", " ")} completed and attached.`);
   };
 
-  get("cv5-upload-label")?.addEventListener("click", () => {
-    void runExclusive("upload-label", () => uploadEvidence("label_audit", "cv5-label-file"));
+  get("cv5-audit-label")?.addEventListener("click", () => {
+    void runExclusive("audit-label", () => runIndependentAudit("label_audit"));
   });
-  get("cv5-upload-validation")?.addEventListener("click", () => {
-    void runExclusive("upload-validation", () => uploadEvidence("dataset_validation", "cv5-validation-file"));
+  get("cv5-audit-validation")?.addEventListener("click", () => {
+    void runExclusive("audit-validation", () => runIndependentAudit("dataset_validation"));
   });
 
   get("cv5-authorize")?.addEventListener("change", updateControls);
+  get("cv5-training-smoke")?.addEventListener("change", updateControls);
   for (const id of ["cv5-authorize-dataset", "cv5-authorize-training", "cv5-activation-auth"]) {
     get(id)?.addEventListener("input", updateControls);
     get(id)?.addEventListener("change", updateControls);
@@ -333,6 +441,44 @@
     });
   });
 
+  get("cv5-training-audit")?.addEventListener("click", () => {
+    void runExclusive("training-audit", async () => {
+      if (!selectedJob) throw new Error("Select a published conditioned job first.");
+      await refreshInventory();
+      const job = selectedJobData;
+      const publication = job?.publication;
+      const smokeId = get("cv5-training-smoke")?.value || "";
+      if (!job?.candidate || !publication || publication.configuration_activated !== false) {
+        throw new Error("Select an inactive published conditioned job first.");
+      }
+      if (!trainingAuditOptions.some((item) => item.smoke_id === smokeId)) {
+        throw new Error("Select a registered smoke bound to this publication.");
+      }
+      setStatus("Running the server-managed 18-gate training audit. Configuration and training remain unchanged...");
+      trainingAuditResult = await request(
+        `/dataset-v5/api/jobs/${encodeURIComponent(selectedJob)}/training-audit`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            candidate_identity: job.candidate.candidate_identity,
+            publication_identity_sha256: publication.publication_identity_sha256,
+            activation_manifest_sha256: publication.activation_manifest_sha256,
+            campaign_config_sha256: publication.campaign_config_sha256,
+            campaign_identity_sha256: publication.campaign_identity_sha256,
+            expected_config_sha256: state.config_sha256 || "",
+            smoke_id: smokeId,
+            operation_nonce: authorizationId("training-audit"),
+            explicit_action: true,
+          }),
+        },
+      );
+      renderTrainingAuditResult();
+      setStatus(
+        `Training infrastructure audit verdict: ${trainingAuditResult.verdict || "UNKNOWN"}. Configuration was not activated and training was not started.`,
+      );
+    });
+  });
+
   get("cv5-activate")?.addEventListener("click", () => {
     void runExclusive("activate", async () => {
       if (!selectedJob) throw new Error("Select a published conditioned job first.");
@@ -359,7 +505,7 @@
       selectedJobData = result;
       selectedPublication = result.publication;
       const config = get("cv5-config-sha");
-      if (config) config.value = result.activation_authorization?.config_after_sha256 || "";
+      if (config) config.value = result.activated_config_sha256 || "";
       resetJobAuthorizations();
       setStatus("Audited Dataset-v5 and three-seed campaign activated. Training was not started.");
     });

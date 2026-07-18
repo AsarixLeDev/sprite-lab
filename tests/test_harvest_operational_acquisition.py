@@ -15,7 +15,6 @@ import pytest
 
 import spritelab.harvest.archive as archive_module
 import spritelab.harvest.download as download_module
-import spritelab.product_features.harvest.catalog_writer as catalog_writer_module
 from _harvest_testdata import make_zip_of_pngs
 from spritelab.harvest.archive import ArchiveCancelled, ArchiveSnapshot, archive_member_summary, extract_archive
 from spritelab.harvest.download import (
@@ -29,6 +28,7 @@ from spritelab.product_core import ProductStatus, ProjectContext
 from spritelab.product_core.events import strict_json_dumps
 from spritelab.product_features.harvest import build_plugin
 from spritelab.product_features.harvest.catalog import (
+    TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH,
     TRUSTED_CATALOG_RELATIVE_PATH,
     TRUSTED_CATALOG_SCHEMA,
     CatalogAutomationTermsBinding,
@@ -38,6 +38,7 @@ from spritelab.product_features.harvest.catalog import (
     automation_terms_decision_identity,
     load_trusted_catalog,
     trusted_catalog_identity,
+    trusted_catalog_source_filename,
     trusted_catalog_source_record,
     url_identity,
 )
@@ -69,7 +70,7 @@ from spritelab.product_features.harvest.trusted_backend import (
     hardened_backend_module_hashes,
     hardened_backend_runtime_dependencies,
 )
-from spritelab.utils.safe_fs import AnchoredDirectory, UnsafeFilesystemOperation
+from spritelab.utils.safe_fs import AnchoredDirectory, OwnedFileIdentity, UnsafeFilesystemOperation
 
 SOURCE_PAGE = "https://catalog.example.test/source"
 LICENSE_PAGE = "https://catalog.example.test/license"
@@ -160,6 +161,10 @@ def _binding() -> CatalogEvidenceBinding:
         license_http_status=200,
         license_content_sha256=hashlib.sha256(b"license page").hexdigest(),
         automation_terms=terms,
+        zero_cost_reviewed=True,
+        zero_cost_verification_identity_sha256="1" * 64,
+        zero_cost_evidence_text_sha256="2" * 64,
+        zero_cost_probe_receipt_identity_sha256="3" * 64,
         attestation_identity_sha256="0" * 64,
     )
     return replace(provisional, attestation_identity_sha256=provisional.expected_attestation_identity)
@@ -233,33 +238,71 @@ def _write_catalog(project: Path, source: HarvestSource) -> Path:
     return path
 
 
-def test_catalog_promotion_reopens_target_and_preserves_injected_race(
+def test_append_only_catalog_publication_rejects_staged_inode_substitution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
     project.mkdir()
     first = _source(b"first")
-    catalog_path = _write_catalog(project, first)
-    foreign_bytes = catalog_path.read_bytes() + b"\n"
+    _write_catalog(project, first)
     second = replace(_source(b"second"), source_id="open.second")
-    real_read = catalog_writer_module._read_bound_catalog
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel.write_bytes(b"outside bytes must remain unchanged")
+    real_publish = AnchoredDirectory.publish_held_file_no_replace
     raced = False
 
-    def swap_before_final_comparison(anchor: AnchoredDirectory, name: str) -> tuple[bytes, os.stat_result]:
+    def substitute_staged_inode(
+        anchor: AnchoredDirectory,
+        source_descriptor: int,
+        source_name: str | None,
+        destination_name: str,
+        *,
+        identity: OwnedFileIdentity,
+    ) -> None:
         nonlocal raced
         if not raced:
             raced = True
-            anchor.atomic_write_bytes(name, foreign_bytes)
-        return real_read(anchor, name)
+            assert source_name is not None
+            foreign = anchor.directory / f".stage-{'f' * 32}"
+            foreign.write_bytes(b"foreign stage must never become trusted")
+            os.replace(foreign, anchor.directory / source_name)
+        real_publish(
+            anchor,
+            source_descriptor,
+            source_name,
+            destination_name,
+            identity=identity,
+        )
 
-    monkeypatch.setattr(catalog_writer_module, "_read_bound_catalog", swap_before_final_comparison)
-    with pytest.raises(CatalogPromotionError, match="changed"):
+    monkeypatch.setattr(AnchoredDirectory, "publish_held_file_no_replace", substitute_staged_inode)
+    with pytest.raises(CatalogPromotionError, match="published exactly"):
         publish_trusted_catalog_source(project, project, second)
 
     assert raced is True
-    assert catalog_path.read_bytes() == foreign_bytes
+    record = project / TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH / trusted_catalog_source_filename(second.source_id)
+    assert not record.exists()
+    assert sentinel.read_bytes() == b"outside bytes must remain unchanged"
     assert load_trusted_catalog(project)[0].catalog_identity == first.catalog_identity
+
+    monkeypatch.setattr(AnchoredDirectory, "publish_held_file_no_replace", real_publish)
+    catalog, changed = publish_trusted_catalog_source(project, project, second)
+    assert changed is True
+    assert [source.source_id for source in catalog] == ["open.second", "open.sprites"]
+    assert record.is_file()
+    replay, changed = publish_trusted_catalog_source(project, project, second)
+    assert changed is False
+    assert replay == catalog
+    with pytest.raises(CatalogPromotionError, match="different trusted catalog record"):
+        publish_trusted_catalog_source(project, project, replace(second, title="conflict"))
+    alias = outside / "record-alias.json"
+    os.link(record, alias)
+    with pytest.raises(TrustedCatalogError, match=r"hard-link|retained publication stage"):
+        load_trusted_catalog(project)
+    assert alias.read_bytes() == record.read_bytes()
+    assert sentinel.read_bytes() == b"outside bytes must remain unchanged"
 
 
 def _write_capability_evidence(project: Path, capabilities: CertifiedBackendCapabilities) -> None:

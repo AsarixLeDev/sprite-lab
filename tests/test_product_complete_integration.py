@@ -751,7 +751,51 @@ def test_33_logs_and_report(synthetic_project: SyntheticProject) -> None:
     logs = synthetic_project.client.get("/runs/train-synthetic/logs")
     report = synthetic_project.client.get("/runs/train-synthetic/report")
     assert logs.status_code == 200 and "loss=0.42" in logs.text
-    assert report.status_code == 200 and "Synthetic offline report" in report.text
+    assert report.status_code == 200
+    assert report.headers["content-type"].startswith("application/json")
+    assert report.headers["content-disposition"] == 'attachment; filename="train-synthetic-public-report.json"'
+    assert report.headers["cache-control"] == "no-store"
+    assert report.headers["content-security-policy"] == "sandbox; default-src 'none'"
+    assert report.headers["x-content-type-options"] == "nosniff"
+    payload = report.json()
+    assert set(payload) == {
+        "schema_version",
+        "run_id",
+        "feature",
+        "stage",
+        "status",
+        "message",
+        "progress",
+        "timing",
+        "event_count",
+        "terminal",
+        "resumable",
+        "report_available",
+        "invalid_event_count",
+    }
+    assert payload["schema_version"] == "spritelab.product.public-run-report.v1"
+    assert payload["run_id"] == "train-synthetic"
+    assert payload["feature"] == "train"
+    assert payload["stage"] == "complete"
+    assert payload["status"] == "NOT_COMPARABLE"
+    assert isinstance(payload["message"], str) and payload["message"]
+    assert payload["progress"] == {"current": 0, "total": None, "percent": None}
+    assert payload["timing"] == {
+        "started_at": "2026-07-13T10:00:00+00:00",
+        "ended_at": "2026-07-13T10:05:00+00:00",
+        "elapsed_seconds": None,
+        "eta_seconds": None,
+    }
+    assert payload["event_count"] == 0
+    assert payload["terminal"] is True
+    assert payload["resumable"] is False
+    assert payload["report_available"] is True
+    assert payload["invalid_event_count"] == 0
+    assert "Synthetic offline report" not in report.text
+    assert str(synthetic_project.root) not in report.text
+    assert synthetic_project.root.as_posix() not in report.text
+    assert "project_root" not in report.text
+    assert "<h1>" not in report.text
 
 
 def test_34_narrow_screen_route_structure(synthetic_project: SyntheticProject) -> None:

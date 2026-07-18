@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -56,6 +57,15 @@ class TrainingLaunchRejected(ComputeBackendError):
     """A process or remote seam refused an absent, forged, or stale receipt."""
 
 
+@runtime_checkable
+class LaunchAuthorizationVerifier(Protocol):
+    """Live, non-serializable capability proving retained audit evidence is unchanged."""
+
+    launch_authorization_evidence_sha256: str
+
+    def verify_unchanged(self) -> None: ...
+
+
 @dataclass(frozen=True)
 class ComputeEstimate:
     duration_seconds: int | None = None
@@ -84,9 +94,16 @@ class ComputeJobRequest:
     environment: Mapping[str, str] = field(default_factory=dict)
     execution_spec_identity: str = ""
     output_root_identity: str = ""
+    launch_authorization_evidence_sha256: str = ""
     compute_backend_id: str = ""
     launch_receipt: TrainingLaunchReceipt | None = None
     validator_context: TrainingLaunchContext | None = None
+    launch_authorization_verifier: LaunchAuthorizationVerifier | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+        metadata={"serialize": False},
+    )
 
     def __post_init__(self) -> None:
         if not self.command or any("\x00" in item for item in self.command):
@@ -95,17 +112,53 @@ class ComputeJobRequest:
             raise ValueError("idempotency_key is required.")
 
 
-def verify_compute_job_request(request: ComputeJobRequest, *, backend_id: str) -> ValidatedTrainingLaunch:
+def verify_launch_authorization_capability(request: ComputeJobRequest) -> None:
+    """Recheck live retained audit evidence; hashes alone never confer launch authority."""
+
+    verifier = request.launch_authorization_verifier
+    if verifier is None or not isinstance(verifier, LaunchAuthorizationVerifier):
+        raise TrainingLaunchRejected("a live retained launch-authorization verifier is required")
+    receipt = request.launch_receipt
+    context = request.validator_context
+    identities = {
+        "compute request": request.launch_authorization_evidence_sha256,
+        "live verifier": verifier.launch_authorization_evidence_sha256,
+        "launch receipt": None if receipt is None else receipt.launch_authorization_evidence_sha256,
+        "validator context": None if context is None else context.launch_authorization_evidence_sha256,
+    }
+    malformed = [label for label, value in identities.items() if not is_concrete_hash(value)]
+    if malformed:
+        raise TrainingLaunchRejected(
+            "launch-authorization evidence contains malformed or placeholder identities: " + ", ".join(malformed)
+        )
+    expected = request.launch_authorization_evidence_sha256
+    mismatched = [label for label, value in identities.items() if not hmac.compare_digest(expected, str(value))]
+    if mismatched:
+        raise TrainingLaunchRejected("launch-authorization evidence identity mismatch: " + ", ".join(mismatched))
+    try:
+        verifier.verify_unchanged()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise TrainingLaunchRejected("retained launch-authorization evidence changed: " + str(exc)) from exc
+
+
+def verify_compute_job_request(
+    request: ComputeJobRequest,
+    *,
+    backend_id: str,
+    filesystem_snapshot: Any | None = None,
+) -> ValidatedTrainingLaunch:
     """Revalidate a request at an adapter's lowest process/transport boundary."""
 
     if request.launch_receipt is None or request.validator_context is None:
         raise TrainingLaunchRejected("validated training launch receipt and validator context are required")
+    verify_launch_authorization_capability(request)
     receipt = request.launch_receipt
     protected = {
         "campaign_identity": request.campaign_identity,
         "run_identity": request.run_identity,
         "execution_spec_identity": request.execution_spec_identity,
         "output_root_identity": request.output_root_identity,
+        "launch_authorization_evidence_sha256": request.launch_authorization_evidence_sha256,
     }
     malformed = [name for name, value in protected.items() if not is_concrete_hash(value)]
     if malformed:
@@ -119,7 +172,7 @@ def verify_compute_job_request(request: ComputeJobRequest, *, backend_id: str) -
     if request.output_root_identity != receipt.output_root_identity:
         raise TrainingLaunchRejected("compute request output-root identity does not match its receipt")
     try:
-        return verify_validated_training_launch(
+        validated = verify_validated_training_launch(
             receipt,
             request.validator_context,
             compute_backend_id=backend_id,
@@ -128,7 +181,10 @@ def verify_compute_job_request(request: ComputeJobRequest, *, backend_id: str) -
             output_root=request.output_root,
             campaign_identity=request.campaign_identity,
             run_identity=request.run_identity,
+            filesystem_snapshot=filesystem_snapshot,
         )
+        verify_launch_authorization_capability(request)
+        return validated
     except (CampaignValidationError, OSError, ValueError) as exc:
         raise TrainingLaunchRejected(str(exc)) from exc
 

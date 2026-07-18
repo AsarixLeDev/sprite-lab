@@ -10,7 +10,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from PIL import Image
@@ -390,7 +390,7 @@ def load_candidate_bundle(
     pairs = [dict(pair) for pair in raw_pairs if isinstance(pair, dict)] if isinstance(raw_pairs, list) else []
     if not isinstance(raw_pairs, list) or len(pairs) != len(raw_pairs):
         reasons.append("candidate evidence pairs must be a list of objects")
-    pair_order = [pair.get("pair_id") for pair in pairs]
+    pair_order = cast(list[str], [pair.get("pair_id") for pair in pairs])
     if bundle.get("candidate_order") != pair_order:
         reasons.append("candidate ordering contract mismatch")
     if bundle.get("candidate_count") != len(pairs):

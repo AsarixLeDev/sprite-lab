@@ -7,6 +7,7 @@ verification, and publication never contact a provider or network endpoint.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import json
@@ -18,7 +19,7 @@ import time
 import unicodedata
 import uuid
 from collections import Counter, defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -32,7 +33,9 @@ from PIL import Image, UnidentifiedImageError
 
 from spritelab.dataset_maker.exporter import (
     DatasetMakerExportConfig,
-    export_dataset_from_imported_sprites,
+    commit_anchored_dataset_maker_export,
+    export_dataset_from_imported_sprites_anchored,
+    verify_anchored_dataset_maker_export,
 )
 from spritelab.dataset_maker.importer import (
     ImportedSprite,
@@ -43,7 +46,6 @@ from spritelab.dataset_maker.model import DatasetMakerItem, normalize_sprite_id
 from spritelab.dataset_maker.qa import qa_dataset
 from spritelab.dataset_maker.training_manifest import (
     build_training_manifest,
-    write_training_manifest,
 )
 from spritelab.dataset_maker.training_manifest_qa import qa_training_manifest
 from spritelab.harvest.semantic_v3 import (
@@ -54,6 +56,17 @@ from spritelab.harvest.semantic_v3 import (
     semantic_v3_to_json,
 )
 from spritelab.product_core import strict_json_dumps, strict_json_loads
+from spritelab.product_features.conditioned_v5.audit_receipts import (
+    AUDIT_ACTION_RECORD_ARTIFACTS,
+    AUDIT_OPERATION_SCHEMA,
+    AUDIT_RECEIPT_ARTIFACTS,
+    ConditionedAuditReceiptError,
+    audit_operation_identity,
+    build_audit_action_record,
+    build_audit_receipt,
+    validate_audit_action_record,
+    validate_audit_receipt,
+)
 from spritelab.product_features.conditioned_v5.identity import (
     TRUSTED_AUDITOR_IDS,
     conditioned_code_inventory,
@@ -65,18 +78,47 @@ from spritelab.product_features.conditioned_v5.intake import (
     managed_intake_inventory,
     read_receipt_bound_derived_frame,
 )
+from spritelab.product_features.conditioned_v5.publication_commit import (
+    PUBLICATION_JOURNAL_NAME,
+    PublicationCommitError,
+    build_campaign_commit,
+    build_dataset_commit,
+    build_publication_journal,
+    campaign_commit_name,
+    canonical_publication_commit_bytes,
+    dataset_commit_name,
+    validate_campaign_commit,
+    validate_dataset_commit,
+    validate_publication_journal,
+)
 from spritelab.product_features.harvest.storage import scan_artifacts
 from spritelab.product_features.harvest.trusted_backend import AcquiredFile, HarvestLimits
-from spritelab.training.campaign import file_sha256, stable_hash
+from spritelab.product_features.training.action_lock import (
+    ACTION_LOCK_PROTOCOL_IDENTITY,
+    TrainingActionLock,
+    TrainingActionLockError,
+)
+from spritelab.product_features.training.activation_commit import (
+    ACTIVATION_PROJECT_COMMIT_NAME,
+    ActivationCommitError,
+    build_activation_commit_documents,
+    build_activation_project_commit,
+    canonical_activation_commit_bytes,
+    validate_activation_commit_documents,
+    validate_activation_project_commit,
+)
+from spritelab.training.campaign import stable_hash
 from spritelab.utils.portable_paths import canonical_portable_relative_path
 from spritelab.utils.safe_fs import (
     AnchoredDirectory,
+    ExactPublicationUnsupported,
     OwnedFileIdentity,
     UnsafeFilesystemOperation,
-    atomic_write_text,
+    open_anchored_directory,
     require_confined_path,
 )
 from spritelab.v3.config import ProjectConfig
+from spritelab.v3.config import _validate as _validate_project_config
 
 HANDOFF_SCHEMA = "spritelab.harvest.dataset-handoff.v2"
 CANDIDATE_SCHEMA = "spritelab.dataset.conditioned-candidate.v1"
@@ -359,6 +401,8 @@ HandoffLoader = Callable[[str], Mapping[str, Any]]
 CampaignBuilder = Callable[..., Any]
 ManagedIntakeLoader = Callable[[str], Mapping[str, Any]]
 ActivationLoader = Callable[..., Any]
+IndependentAuditRunner = Callable[..., Mapping[str, Any]]
+TrainingInfrastructureAuditRunner = Callable[..., Any]
 
 
 class ConditionedDatasetService:
@@ -372,6 +416,8 @@ class ConditionedDatasetService:
         managed_intake_loader: ManagedIntakeLoader | None = None,
         campaign_builder: CampaignBuilder | None = None,
         activation_loader: ActivationLoader | None = None,
+        independent_audit_runner: IndependentAuditRunner | None = None,
+        training_infrastructure_audit_runner: TrainingInfrastructureAuditRunner | None = None,
         policy: CandidatePolicy | None = None,
     ) -> None:
         self.project_root = Path(project_root).resolve()
@@ -384,6 +430,12 @@ class ConditionedDatasetService:
         self._managed_intake_loader = managed_intake_loader
         self._campaign_builder = campaign_builder
         self._activation_loader = activation_loader
+        if independent_audit_runner is not None and not callable(independent_audit_runner):
+            raise TypeError("independent_audit_runner must be callable")
+        self._independent_audit_runner = independent_audit_runner
+        if training_infrastructure_audit_runner is not None and not callable(training_infrastructure_audit_runner):
+            raise TypeError("training_infrastructure_audit_runner must be callable")
+        self._training_infrastructure_audit_runner = training_infrastructure_audit_runner
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.RLock()
         self._instance_id = uuid.uuid4().hex
@@ -516,6 +568,8 @@ class ConditionedDatasetService:
                 "events": [],
                 "candidate": None,
                 "evidence": {},
+                "audit_operations": {},
+                "audit_operation_history": [],
                 "publication": None,
                 "freeze_authorization": None,
                 "activation_authorization": None,
@@ -549,7 +603,7 @@ class ConditionedDatasetService:
                 "The durable worker lease expired before this build completed; start a new build to retry."
             )
             return projected
-        return state
+        return self._project_activation_state(root, state)
 
     def cancel(self, job_id: str, *, explicit_action: bool) -> dict[str, Any]:
         if explicit_action is not True:
@@ -567,7 +621,7 @@ class ConditionedDatasetService:
                 "explicit_action": True,
                 "paths_exposed": False,
             }
-            with AnchoredDirectory(root, root) as anchor:
+            with open_anchored_directory(root, self.project_root) as anchor:
                 anchor.atomic_write_bytes(
                     "cancel.json",
                     (strict_json_dumps(cancel, indent=2, sort_keys=True) + "\n").encode("utf-8"),
@@ -578,49 +632,299 @@ class ConditionedDatasetService:
             state["updated_at"] = _now()
         return self.job(job_id)
 
-    def attach_evidence(self, job_id: str, *, kind: str, document: Mapping[str, Any]) -> dict[str, Any]:
-        """Verify and persist externally supplied independent PASS evidence."""
+    def run_independent_audit(self, job_id: str, *, kind: str, explicit_action: bool) -> dict[str, Any]:
+        """Own one durable audit lane until its terminal action record is selected."""
 
+        if explicit_action is not True:
+            raise ConditionedDatasetError(
+                "explicit_audit_action_required",
+                "A server-managed independent audit requires an explicit action.",
+                status_code=422,
+            )
         if kind not in {"label_audit", "dataset_validation"}:
             raise ConditionedDatasetError(
                 "evidence_kind", "Evidence kind must be label_audit or dataset_validation.", status_code=422
             )
         root = self._job_root(job_id)
-        with self._state_transaction(root) as state:
-            if state["status"] not in {"NEEDS_REVIEW", "COMPLETE"} or not isinstance(state.get("candidate"), Mapping):
+        try:
+            with _ConditionedMutationLock(root, f".conditioned-{kind}.lock", timeout_seconds=0.05):
+                return self._run_independent_audit_owned(job_id, kind=kind)
+        except ConditionedDatasetError as exc:
+            if exc.code == "mutation_conflict":
                 raise ConditionedDatasetError(
-                    "candidate_not_ready", "Complete the candidate build before attaching audit evidence."
+                    "independent_audit_conflict",
+                    "That independent audit kind already has a live server operation.",
+                ) from exc
+            raise
+
+    def _run_independent_audit_owned(self, job_id: str, *, kind: str) -> dict[str, Any]:
+        """Run after acquiring the process-released durable ownership lane."""
+
+        root = self._job_root(job_id)
+        operation_id = f"audit-{uuid.uuid4().hex}"
+        started_at = _now()
+        initial_candidate: dict[str, Any]
+        initial_inventory: dict[str, Any]
+        operation_identity: str
+        with self._state_transaction(root) as state:
+            if state.get("status") != "NEEDS_REVIEW" or not isinstance(state.get("candidate"), Mapping):
+                raise ConditionedDatasetError(
+                    "candidate_not_ready", "Complete an unpublished candidate before running its independent audit."
                 )
-            candidate = self._load_candidate(root, state)
-            self._revalidate_candidate_context(root, state, candidate)
-            normalized = self._validate_evidence(kind, document, candidate)
-            payload = (strict_json_dumps(normalized, indent=2, sort_keys=True) + "\n").encode("utf-8")
-            digest = hashlib.sha256(payload).hexdigest()
-            evidence_root = _ensure_anchored_child_directory(root, root, "evidence")
-            filename = f"{kind}-{digest}.json"
-            path = evidence_root / filename
-            with AnchoredDirectory(evidence_root, root) as anchor:
-                if anchor.lexists(filename):
-                    existing = _read_anchored_regular_bytes(anchor, filename, max_bytes=64 * 1024 * 1024)
-                    if existing != payload:
-                        raise ConditionedDatasetError(
-                            "evidence_identity_conflict", "Existing evidence bytes do not match their identity."
-                        )
-                else:
-                    anchor.atomic_write_bytes(filename, payload)
-            evidence = dict(state.get("evidence") or {})
-            evidence[kind] = {
-                "relative_path": path.relative_to(root).as_posix(),
-                "sha256": digest,
-                "byte_count": len(payload),
-                "auditor_id": normalized["auditor"]["auditor_id"],
-                "audit_run_identity": normalized["audit_run_identity"],
+            initial_candidate = self._load_candidate(root, state)
+            self._revalidate_candidate_context(root, state, initial_candidate)
+            initial_inventory = trusted_auditor_inventory(kind)
+            auditor_id = TRUSTED_AUDITOR_IDS[kind]
+            inventory_identity = str(initial_inventory.get("inventory_sha256") or "")
+            if initial_inventory.get("auditor_id") != auditor_id or not SHA256_PATTERN.fullmatch(inventory_identity):
+                raise ConditionedDatasetError(
+                    "evidence_auditor", "The current trusted auditor inventory is unavailable."
+                )
+            try:
+                operation_identity = audit_operation_identity(
+                    kind=kind,
+                    job_id=job_id,
+                    operation_id=operation_id,
+                    candidate_identity=str(initial_candidate["candidate_identity"]),
+                    payload_inventory_sha256=str(initial_candidate["payload_inventory_sha256"]),
+                    image_count=int(initial_candidate["image_count"]),
+                    auditor_id=auditor_id,
+                    auditor_code_identity_sha256=inventory_identity,
+                    auditor_inventory_sha256=inventory_identity,
+                    started_at=started_at,
+                )
+            except ConditionedAuditReceiptError as exc:
+                raise ConditionedDatasetError(
+                    "independent_audit_operation", "The independent audit operation binding is invalid."
+                ) from exc
+            operations_raw = state.get("audit_operations")
+            operations = dict(operations_raw) if isinstance(operations_raw, Mapping) else {}
+            previous = operations.get(kind)
+            if isinstance(previous, Mapping) and previous.get("terminal_status") == "RUNNING":
+                interrupted = {
+                    **dict(previous),
+                    "terminal_status": "INTERRUPTED",
+                    "completed_at": started_at,
+                }
+                history = list(state.get("audit_operation_history") or ())
+                history.append(interrupted)
+                state["audit_operation_history"] = history[-100:]
+            operations[kind] = {
+                "schema_version": AUDIT_OPERATION_SCHEMA,
+                "audit_kind": kind,
+                "job_id": job_id,
+                "operation_id": operation_id,
+                "operation_identity": operation_identity,
+                "terminal_status": "RUNNING",
+                "server_managed": True,
+                "owner_instance_id": self._instance_id,
+                "candidate_identity": initial_candidate["candidate_identity"],
+                "payload_inventory_sha256": initial_candidate["payload_inventory_sha256"],
+                "image_count": initial_candidate["image_count"],
+                "auditor_id": auditor_id,
+                "auditor_code_identity_sha256": inventory_identity,
+                "auditor_inventory_sha256": inventory_identity,
+                "started_at": started_at,
+                "completed_at": None,
+                "paths_exposed": False,
             }
+            state["audit_operations"] = operations
+            evidence = dict(state.get("evidence") or {})
+            evidence.pop(kind, None)
             state["evidence"] = evidence
-            state["status"] = "NEEDS_REVIEW"
-            state["message"] = "Independent evidence recorded; both reports remain required before publication."
+            state["message"] = "A server-managed independent audit is running over the exact candidate."
             state["updated_at"] = _now()
+
+        try:
+            runner = self._independent_audit_runner
+            if runner is None:
+                from spritelab.product_features.conditioned_v5.audit_runner import run_independent_audit
+
+                runner = run_independent_audit
+            produced = runner(
+                kind,
+                root,
+                initial_candidate,
+                project_root=self.project_root,
+                progress=lambda _stage, _current, _total, _message: None,
+                cancelled=lambda: False,
+            )
+            if not isinstance(produced, Mapping):
+                raise ConditionedDatasetError(
+                    "independent_audit_report", "The trusted independent auditor returned an invalid report."
+                )
+            report = dict(produced)
+        except Exception as exc:
+            self._mark_audit_operation_failed(root, kind=kind, operation_identity=operation_identity)
+            if isinstance(exc, ConditionedDatasetError):
+                raise
+            raise ConditionedDatasetError(
+                "independent_audit_failed",
+                "The server-managed independent audit did not complete; no PASS receipt was published.",
+            ) from exc
+
+        try:
+            completed_at = _now()
+            with self._state_transaction(root) as state:
+                active_operations = state.get("audit_operations")
+                active = active_operations.get(kind) if isinstance(active_operations, Mapping) else None
+                if (
+                    not isinstance(active, Mapping)
+                    or active.get("operation_id") != operation_id
+                    or active.get("operation_identity") != operation_identity
+                    or active.get("terminal_status") != "RUNNING"
+                ):
+                    raise ConditionedDatasetError(
+                        "independent_audit_operation_changed",
+                        "The independent audit operation changed before terminal publication.",
+                    )
+                candidate = self._load_candidate(root, state)
+                self._revalidate_candidate_context(root, state, candidate)
+                if (
+                    candidate.get("candidate_identity") != initial_candidate.get("candidate_identity")
+                    or candidate.get("payload_inventory_sha256") != initial_candidate.get("payload_inventory_sha256")
+                    or candidate.get("image_count") != initial_candidate.get("image_count")
+                ):
+                    raise ConditionedDatasetError(
+                        "independent_audit_candidate_changed",
+                        "The conditioned candidate changed while its independent audit was running.",
+                    )
+                current_inventory = trusted_auditor_inventory(kind)
+                if current_inventory != initial_inventory:
+                    raise ConditionedDatasetError(
+                        "independent_audit_auditor_changed",
+                        "The trusted auditor implementation changed while its audit was running.",
+                    )
+                normalized = self._validate_evidence(kind, report, candidate)
+                report_content = (strict_json_dumps(normalized, indent=2, sort_keys=True) + "\n").encode("utf-8")
+                report_sha256 = hashlib.sha256(report_content).hexdigest()
+                receipt = build_audit_receipt(
+                    kind=kind,
+                    job_id=job_id,
+                    operation_id=operation_id,
+                    report_sha256=report_sha256,
+                    report_byte_count=len(report_content),
+                    report=normalized,
+                    candidate=candidate,
+                    current_auditor_inventory=current_inventory,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                )
+                receipt_content = (strict_json_dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+                receipt_sha256 = hashlib.sha256(receipt_content).hexdigest()
+                action_record = build_audit_action_record(
+                    kind=kind,
+                    job_id=job_id,
+                    report_sha256=report_sha256,
+                    report_byte_count=len(report_content),
+                    report=normalized,
+                    receipt_sha256=receipt_sha256,
+                    receipt_byte_count=len(receipt_content),
+                    receipt=receipt,
+                    candidate=candidate,
+                    current_auditor_inventory=current_inventory,
+                    committed_at=_now(),
+                )
+                action_content = (strict_json_dumps(action_record, indent=2, sort_keys=True) + "\n").encode("utf-8")
+                action_sha256 = hashlib.sha256(action_content).hexdigest()
+                evidence_root = _ensure_anchored_child_directory(root, self.project_root, "evidence")
+                actions_root = _ensure_anchored_child_directory(root, self.project_root, "audit_actions")
+                report_name = f"{kind}-{report_sha256}.json"
+                receipt_name = f"{kind}-receipt-{receipt['receipt_identity']}.json"
+                action_name = f"{kind}-{operation_id}.json"
+                with open_anchored_directory(evidence_root, self.project_root) as anchor:
+                    _publish_or_reuse_immutable_file(
+                        anchor,
+                        report_name,
+                        report_content,
+                        residue_prefix=f".rollback-{kind}-report-",
+                    )
+                    _publish_or_reuse_immutable_file(
+                        anchor,
+                        receipt_name,
+                        receipt_content,
+                        residue_prefix=f".rollback-{kind}-receipt-",
+                    )
+                with open_anchored_directory(actions_root, self.project_root) as action_anchor:
+                    _publish_fresh_immutable_file(
+                        action_anchor,
+                        action_name,
+                        action_content,
+                        residue_prefix=f".rollback-{kind}-action-",
+                    )
+                evidence = dict(state.get("evidence") or {})
+                evidence[kind] = {
+                    "relative_path": (evidence_root / report_name).relative_to(root).as_posix(),
+                    "sha256": report_sha256,
+                    "byte_count": len(report_content),
+                    "auditor_id": normalized["auditor"]["auditor_id"],
+                    "audit_run_identity": normalized["audit_run_identity"],
+                    "operation_id": operation_id,
+                    "operation_identity": operation_identity,
+                    "receipt": {
+                        "relative_path": (evidence_root / receipt_name).relative_to(root).as_posix(),
+                        "sha256": receipt_sha256,
+                        "byte_count": len(receipt_content),
+                        "receipt_identity": receipt["receipt_identity"],
+                    },
+                    "action": {
+                        "relative_path": (actions_root / action_name).relative_to(root).as_posix(),
+                        "sha256": action_sha256,
+                        "byte_count": len(action_content),
+                        "record_identity": action_record["record_identity"],
+                    },
+                }
+                state["evidence"] = evidence
+                operations = dict(active_operations)
+                operations[kind] = {
+                    **dict(active),
+                    "terminal_status": "PASS",
+                    "completed_at": completed_at,
+                    "report_sha256": report_sha256,
+                    "audit_run_identity": normalized["audit_run_identity"],
+                    "receipt_identity": receipt["receipt_identity"],
+                    "action_record_identity": action_record["record_identity"],
+                }
+                state["audit_operations"] = operations
+                state["message"] = (
+                    "Server-managed independent PASS evidence recorded; both audit kinds remain required."
+                )
+                state["updated_at"] = _now()
+        except Exception as exc:
+            self._mark_audit_operation_failed(root, kind=kind, operation_identity=operation_identity)
+            if isinstance(exc, ConditionedDatasetError):
+                raise
+            if isinstance(exc, ConditionedAuditReceiptError):
+                raise ConditionedDatasetError(
+                    "independent_audit_receipt", "The server-managed independent audit receipt is invalid."
+                ) from exc
+            raise
         return self.job(job_id)
+
+    def _mark_audit_operation_failed(self, root: Path, *, kind: str, operation_identity: str) -> None:
+        """Terminalize only the still-owned audit operation without masking its error."""
+
+        try:
+            with self._state_transaction(root) as state:
+                raw_operations = state.get("audit_operations")
+                operations = dict(raw_operations) if isinstance(raw_operations, Mapping) else {}
+                active = operations.get(kind)
+                if (
+                    not isinstance(active, Mapping)
+                    or active.get("operation_identity") != operation_identity
+                    or active.get("terminal_status") != "RUNNING"
+                ):
+                    return
+                operations[kind] = {
+                    **dict(active),
+                    "terminal_status": "FAILED",
+                    "completed_at": _now(),
+                }
+                state["audit_operations"] = operations
+                state["message"] = "The server-managed independent audit failed; no PASS receipt was selected."
+                state["updated_at"] = _now()
+        except Exception:
+            return
 
     def publish(
         self,
@@ -648,37 +952,34 @@ class ConditionedDatasetService:
                 status_code=422,
             )
         root = self._job_root(job_id)
-        publication_rollback: dict[str, Any] = {}
 
-        def rollback_publication() -> None:
-            with _ConditionedMutationLock(self.project_root, ".conditioned-publication.lock"):
-                entries: list[tuple[Path, Path, Mapping[str, Mapping[str, Any]], OwnedFileIdentity]] = []
-                for prefix in ("campaign", "dataset"):
-                    path = publication_rollback.get(f"{prefix}_path")
-                    boundary = publication_rollback.get(f"{prefix}_boundary")
-                    inventory = publication_rollback.get(f"{prefix}_inventory")
-                    identity = publication_rollback.get(f"{prefix}_identity")
-                    if (
-                        isinstance(path, Path)
-                        and isinstance(boundary, Path)
-                        and isinstance(inventory, Mapping)
-                        and isinstance(identity, OwnedFileIdentity)
-                    ):
-                        entries.append((path, boundary, inventory, identity))
-                _rollback_published_directories(entries)
+        def recover_publication_state() -> None:
+            # Direct-final publication is append-only. A failed state write never
+            # rolls back marker-bound bytes; an exact retry adopts them instead.
             current = self._read_state(root)
             current["publication"] = None
             current["status"] = "FAILED"
             current["stage"] = "publication_state_failed"
-            current["message"] = "Publication state commit failed; fresh outputs were rolled back."
+            current["message"] = "Publication state commit failed; exact immutable outputs were retained for retry."
             current["updated_at"] = _now()
             self._write_state_payload(root, current)
 
-        with self._state_transaction(root, write_failure_rollback=rollback_publication) as state:
-            if state.get("freeze_authorization") is not None:
+        with self._state_transaction(root, write_failure_rollback=recover_publication_state) as state:
+            authorization_binding = {
+                "authorization_id_sha256": hashlib.sha256(authorization_id.encode("utf-8")).hexdigest(),
+                "candidate_identity": candidate_identity,
+                "label_audit_sha256": label_audit_sha256,
+                "dataset_validation_sha256": dataset_validation_sha256,
+                "one_time": True,
+            }
+            existing_authorization = state.get("freeze_authorization")
+            if existing_authorization is not None and (
+                not isinstance(existing_authorization, Mapping)
+                or any(existing_authorization.get(key) != value for key, value in authorization_binding.items())
+            ):
                 raise ConditionedDatasetError(
                     "freeze_authorization_consumed",
-                    "This candidate's one-time freeze authorization was already consumed.",
+                    "This candidate's one-time freeze authorization was already consumed by another request.",
                 )
             candidate = self._load_candidate(root, state)
             if candidate.get("candidate_identity") != candidate_identity:
@@ -686,7 +987,7 @@ class ConditionedDatasetService:
                     "candidate_identity_changed",
                     "The candidate identity no longer matches the authorized build.",
                 )
-            actual_inventory = _inventory(root / "candidate" / "phase7")
+            actual_inventory = _inventory(root / "candidate" / "phase7", self.project_root)
             if actual_inventory != candidate.get("payload_inventory"):
                 raise ConditionedDatasetError(
                     "candidate_bytes_changed",
@@ -700,14 +1001,8 @@ class ConditionedDatasetService:
                 dataset_validation_sha256=dataset_validation_sha256,
             )
             self._revalidate_candidate_context(root, state, candidate)
-            state["freeze_authorization"] = {
-                "authorization_id_sha256": hashlib.sha256(authorization_id.encode("utf-8")).hexdigest(),
-                "candidate_identity": candidate_identity,
-                "label_audit_sha256": label_audit_sha256,
-                "dataset_validation_sha256": dataset_validation_sha256,
-                "consumed_at": _now(),
-                "one_time": True,
-            }
+            if existing_authorization is None:
+                state["freeze_authorization"] = {**authorization_binding, "consumed_at": _now()}
             state["status"] = "RUNNING"
             state["stage"] = "publishing"
             state["message"] = "Publishing the authorized immutable freeze."
@@ -715,7 +1010,7 @@ class ConditionedDatasetService:
             self._write_state_unlocked(root, state)
             try:
                 with _ConditionedMutationLock(self.project_root, ".conditioned-publication.lock"):
-                    publication = self._publish(root, candidate, evidence, rollback_record=publication_rollback)
+                    publication = self._publish(root, candidate, evidence)
             except ConditionedDatasetError:
                 state["status"] = "FAILED"
                 state["stage"] = "publication_failed"
@@ -742,6 +1037,318 @@ class ConditionedDatasetService:
             )
             state["updated_at"] = _now()
         return self.job(job_id)
+
+    def run_training_infrastructure_audit(
+        self,
+        job_id: str,
+        *,
+        candidate_identity: str,
+        publication_identity_sha256: str,
+        activation_manifest_sha256: str,
+        campaign_config_sha256: str,
+        campaign_identity_sha256: str,
+        expected_config_sha256: str,
+        smoke_id: str,
+        operation_nonce: str,
+        explicit_action: bool,
+    ) -> dict[str, Any]:
+        """Audit the exact Phase-J prospective overlay without activating it."""
+
+        if explicit_action is not True:
+            raise ConditionedDatasetError(
+                "training_audit_explicit_action_required",
+                "The training-infrastructure audit requires an explicit action.",
+                status_code=422,
+            )
+        if not KEY_PATTERN.fullmatch(str(smoke_id)) or not KEY_PATTERN.fullmatch(str(operation_nonce)):
+            raise ConditionedDatasetError(
+                "training_audit_operation",
+                "A completed smoke-bundle ID and unique audit operation nonce are required.",
+                status_code=422,
+            )
+        identities = (
+            candidate_identity,
+            publication_identity_sha256,
+            activation_manifest_sha256,
+            campaign_config_sha256,
+            campaign_identity_sha256,
+            expected_config_sha256,
+        )
+        if any(SHA256_PATTERN.fullmatch(str(value)) is None for value in identities):
+            raise ConditionedDatasetError(
+                "training_audit_identity",
+                "Every selected training-audit identity must be an exact SHA-256.",
+                status_code=422,
+            )
+        if any(os.environ.get(name) for name in ("SPRITELAB_CONFIG", "SPRITELAB_PROJECT_ROOT", "SPRITELAB_RUNS_DIR")):
+            raise ConditionedDatasetError(
+                "training_audit_config_override",
+                "The training audit is unavailable while project configuration path overrides are active.",
+            )
+
+        root = self._job_root(job_id)
+        state = self.job(job_id)
+        if state.get("status") != "COMPLETE":
+            raise ConditionedDatasetError(
+                "publication_not_ready", "Publish the exact conditioned freeze before its training audit."
+            )
+        candidate = state.get("candidate")
+        publication = state.get("publication")
+        if not isinstance(candidate, Mapping) or candidate.get("candidate_identity") != candidate_identity:
+            raise ConditionedDatasetError("training_audit_candidate_changed", "The selected candidate changed.")
+        expected_publication = {
+            "publication_identity_sha256": publication_identity_sha256,
+            "activation_manifest_sha256": activation_manifest_sha256,
+            "campaign_config_sha256": campaign_config_sha256,
+            "campaign_identity_sha256": campaign_identity_sha256,
+            "campaign_launch_ready": True,
+            "campaign_seeds": [731001, 731002, 731003],
+            "campaign_steps": 5_000,
+            "configuration_activated": False,
+            "training_started": False,
+            "paths_exposed": False,
+        }
+        if not isinstance(publication, Mapping) or any(
+            publication.get(key) != value for key, value in expected_publication.items()
+        ):
+            raise ConditionedDatasetError(
+                "training_audit_publication_changed", "The selected publication or campaign changed."
+            )
+        activation_relative = _canonical_relative(str(publication.get("activation_manifest") or ""))
+        campaign_relative = _canonical_relative(str(publication.get("campaign_config") or ""))
+        activation_path = require_confined_path(
+            self.project_root.joinpath(*PurePosixPath(activation_relative).parts), self.project_root
+        )
+        campaign_path = require_confined_path(
+            self.project_root.joinpath(*PurePosixPath(campaign_relative).parts), self.project_root
+        )
+        if (
+            _anchored_file_sha256(activation_path.parent, activation_path.name, self.project_root)
+            != activation_manifest_sha256
+        ):
+            raise ConditionedDatasetError("training_audit_freeze_changed", "The published freeze bytes changed.")
+        if _anchored_file_sha256(campaign_path.parent, campaign_path.name, self.project_root) != campaign_config_sha256:
+            raise ConditionedDatasetError("training_audit_campaign_changed", "The campaign configuration changed.")
+
+        config_path = require_confined_path(self.project_root / "spritelab.yaml", self.project_root)
+        with (
+            _ConditionedMutationLock(self.project_root, ".conditioned-config.lock"),
+            AnchoredDirectory(self.project_root, self.project_root) as config_anchor,
+        ):
+            before = _read_anchored_regular_bytes(
+                config_anchor,
+                "spritelab.yaml",
+                max_bytes=16 * 1024 * 1024,
+            )
+            before_sha256 = hashlib.sha256(before).hexdigest()
+            if before_sha256 != expected_config_sha256:
+                raise ConditionedDatasetError(
+                    "training_audit_config_changed", "Project configuration changed before the audit."
+                )
+            try:
+                current = _project_config_from_bytes(self.project_root, config_path, before)
+            except ValueError as exc:
+                raise ConditionedDatasetError(
+                    "training_audit_config_invalid", "Project configuration is unavailable or invalid."
+                ) from exc
+            if current.root != self.project_root or current.path != config_path:
+                raise ConditionedDatasetError(
+                    "training_audit_config_scope", "The audit requires the canonical project configuration."
+                )
+            execution_policy = current.values.get("execution")
+            if not isinstance(execution_policy, Mapping) or any(
+                execution_policy.get(key) is not False for key in ("allow_dataset_production_freeze", "allow_training")
+            ):
+                raise ConditionedDatasetError(
+                    "training_audit_requires_inactive_config",
+                    "Phase I requires the still-inactive project configuration.",
+                )
+
+            values = deepcopy(current.values)
+            view_relative = _canonical_relative(
+                (PurePosixPath(activation_relative).parent / "view_manifest.json").as_posix()
+            )
+            values["dataset"]["view_manifest"] = view_relative
+            values["dataset"]["freeze_manifest"] = activation_relative
+            values["training"]["dataset_freeze"] = activation_relative
+            values["training"]["campaign_config"] = campaign_relative
+            values["execution"]["allow_dataset_production_freeze"] = True
+            values["execution"]["allow_training"] = True
+            prospective = ProjectConfig(self.project_root, config_path, values)
+
+            runner = self._training_infrastructure_audit_runner
+            if runner is None:
+                from spritelab.product_features.training.audit import run_training_infrastructure_audit
+
+                runner = run_training_infrastructure_audit
+            try:
+                execution = runner(
+                    prospective,
+                    operation_nonce=operation_nonce,
+                    smoke_id=smoke_id,
+                    source_job_id=job_id,
+                )
+            except ConditionedDatasetError:
+                raise
+            except ValueError as exc:
+                code = str(getattr(exc, "code", "training_audit_failed"))
+                message = str(
+                    getattr(
+                        exc,
+                        "public_message",
+                        "The training-infrastructure audit failed closed without authorizing training.",
+                    )
+                )
+                raise ConditionedDatasetError(code, message) from exc
+            except (OSError, TypeError, KeyError) as exc:
+                raise ConditionedDatasetError(
+                    "training_audit_failed",
+                    "The training-infrastructure audit failed closed without authorizing training.",
+                ) from exc
+
+            after = _read_anchored_regular_bytes(
+                config_anchor,
+                "spritelab.yaml",
+                max_bytes=16 * 1024 * 1024,
+            )
+            if after != before:
+                raise ConditionedDatasetError(
+                    "training_audit_config_mutated",
+                    "The project configuration changed during the audit; its result is not applicable.",
+                )
+
+        verdict = getattr(execution, "verdict", None)
+        verdict_value = getattr(verdict, "value", verdict)
+        operation_identity = getattr(execution, "operation_identity", None)
+        if (
+            verdict_value not in {"PASS", "FAIL", "INCONCLUSIVE"}
+            or not isinstance(operation_identity, str)
+            or SHA256_PATTERN.fullmatch(operation_identity) is None
+        ):
+            raise ConditionedDatasetError(
+                "training_audit_result", "The server-managed training audit returned an invalid result."
+            )
+
+        def relative_output(name: str) -> str:
+            output = getattr(execution, name, None)
+            if not isinstance(output, Path):
+                raise ConditionedDatasetError(
+                    "training_audit_result", "The server-managed training audit returned invalid artifacts."
+                )
+            return require_confined_path(output, self.project_root).relative_to(self.project_root).as_posix()
+
+        from spritelab.product_features.training.audit import (
+            TRAINING_AUDIT_ACTION_RECORD_SCHEMA,
+            training_audit_action_record_path,
+            training_audit_receipt_path,
+        )
+
+        expected_outputs = {
+            "report_path": require_confined_path(
+                self.project_root.joinpath(*PurePosixPath(str(values["training"]["audit_report"])).parts),
+                self.project_root,
+            ),
+            "hashes_path": require_confined_path(
+                self.project_root.joinpath(*PurePosixPath(str(values["training"]["audit_hashes"])).parts),
+                self.project_root,
+            ),
+            "receipt_path": training_audit_receipt_path(prospective),
+        }
+        output_records: dict[str, dict[str, Any]] = {}
+        for name, expected in expected_outputs.items():
+            output = getattr(execution, name, None)
+            if not isinstance(output, Path) or require_confined_path(output, self.project_root) != expected:
+                raise ConditionedDatasetError(
+                    "training_audit_result", "The server-managed training audit returned invalid artifacts."
+                )
+            with AnchoredDirectory(expected.parent, self.project_root) as output_anchor:
+                content = _read_anchored_regular_bytes(output_anchor, expected.name, max_bytes=128 * 1024 * 1024)
+            output_records[name] = {
+                "path": expected.relative_to(self.project_root).as_posix(),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "byte_count": len(content),
+                "content": content,
+            }
+        try:
+            receipt_document = strict_json_loads(output_records["receipt_path"]["content"])
+        except (RecursionError, TypeError, ValueError) as exc:
+            raise ConditionedDatasetError(
+                "training_audit_result", "The server-managed training audit returned an invalid receipt."
+            ) from exc
+        receipt_identity = receipt_document.get("receipt_identity") if isinstance(receipt_document, Mapping) else None
+        if not isinstance(receipt_identity, str) or SHA256_PATTERN.fullmatch(receipt_identity) is None:
+            raise ConditionedDatasetError(
+                "training_audit_result", "The server-managed training audit returned an invalid receipt."
+            )
+
+        prospective_identity = stable_hash(values)
+        record_payload = {
+            "schema_version": TRAINING_AUDIT_ACTION_RECORD_SCHEMA,
+            "source_job_id": job_id,
+            "operation_identity": operation_identity,
+            "prospective_configuration_identity_sha256": prospective_identity,
+            "base_config_sha256": expected_config_sha256,
+            "verdict": verdict_value,
+            "report_sha256": output_records["report_path"]["sha256"],
+            "hash_inventory_sha256": output_records["hashes_path"]["sha256"],
+            "receipt_sha256": output_records["receipt_path"]["sha256"],
+            "receipt_identity": receipt_identity,
+            "config_unchanged": True,
+            "configuration_activated": False,
+            "training_started": False,
+            "paths_exposed": False,
+        }
+        action_record = {**record_payload, "record_identity": stable_hash(record_payload)}
+        action_record_path = training_audit_action_record_path(self.project_root, job_id, operation_identity)
+        with (
+            _ConditionedMutationLock(self.project_root, ".conditioned-config.lock"),
+            AnchoredDirectory(self.project_root, self.project_root) as config_anchor,
+        ):
+            final_config = _read_anchored_regular_bytes(
+                config_anchor,
+                "spritelab.yaml",
+                max_bytes=16 * 1024 * 1024,
+            )
+            if final_config != before:
+                raise ConditionedDatasetError(
+                    "training_audit_config_mutated",
+                    "The project configuration changed before audit commitment; its result is not applicable.",
+                )
+            action_records_root = _ensure_anchored_child_directory(root, self.project_root, "training_audits")
+            if action_records_root != action_record_path.parent:
+                raise ConditionedDatasetError(
+                    "training_audit_record_scope", "The server-managed audit record location changed."
+                )
+            with AnchoredDirectory(action_records_root, self.project_root) as record_anchor:
+                if record_anchor.lexists(action_record_path.name):
+                    raise ConditionedDatasetError(
+                        "training_audit_record_exists", "That immutable server audit action already exists."
+                    )
+                _publish_or_reuse_immutable_file(
+                    record_anchor,
+                    action_record_path.name,
+                    (strict_json_dumps(action_record, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+                    residue_prefix=".training-audit-record-residue-",
+                )
+
+        return {
+            "schema_version": "spritelab.training.infrastructure-audit-action.v1",
+            "job_id": job_id,
+            "smoke_id": smoke_id,
+            "operation_identity": operation_identity,
+            "verdict": verdict_value,
+            "prospective_configuration_identity_sha256": prospective_identity,
+            "base_config_sha256": expected_config_sha256,
+            "config_unchanged": True,
+            "report_path": relative_output("report_path"),
+            "hashes_path": relative_output("hashes_path"),
+            "receipt_path": relative_output("receipt_path"),
+            "action_record_path": action_record_path.relative_to(self.project_root).as_posix(),
+            "action_record_identity": action_record["record_identity"],
+            "configuration_activated": False,
+            "training_started": False,
+            "paths_exposed": False,
+        }
 
     def activate(
         self,
@@ -788,84 +1395,53 @@ class ConditionedDatasetService:
                 "Activation is unavailable while project configuration path overrides are active.",
             )
 
+        try:
+            with TrainingActionLock(self.project_root):
+                return self._activate_crash_atomic(
+                    job_id,
+                    candidate_identity=candidate_identity,
+                    publication_identity_sha256=publication_identity_sha256,
+                    activation_manifest_sha256=activation_manifest_sha256,
+                    campaign_config_sha256=campaign_config_sha256,
+                    campaign_identity_sha256=campaign_identity_sha256,
+                    expected_config_sha256=expected_config_sha256,
+                    activation_authorization_id=activation_authorization_id,
+                )
+        except TrainingActionLockError as exc:
+            raise ConditionedDatasetError(
+                "activation_launch_conflict",
+                "Another activation, Start, or Resume action owns the launch boundary.",
+            ) from exc
+
+    def _activate_crash_atomic(
+        self,
+        job_id: str,
+        *,
+        candidate_identity: str,
+        publication_identity_sha256: str,
+        activation_manifest_sha256: str,
+        campaign_config_sha256: str,
+        campaign_identity_sha256: str,
+        expected_config_sha256: str,
+        activation_authorization_id: str,
+    ) -> dict[str, Any]:
+        """Prepare every durable commit byte, then make the config CAS last."""
+
         root = self._job_root(job_id)
-        rollback_state: dict[str, Any] = {"committed": False}
-
-        def rollback_activation() -> None:
-            if rollback_state.get("committed") is True:
-                return
-            cleanup_actions: list[Callable[[], Any]] = []
-
-            def rollback_config() -> None:
-                config_path = rollback_state.get("config_path")
-                before = rollback_state.get("config_before")
-                before_sha256 = rollback_state.get("config_before_sha256")
-                after_sha256 = rollback_state.get("config_after_sha256")
-                if not (isinstance(config_path, Path) and isinstance(before, bytes) and isinstance(after_sha256, str)):
-                    return
-                with (
-                    _ConditionedMutationLock(self.project_root, ".conditioned-config.lock"),
-                    AnchoredDirectory(self.project_root, self.project_root) as config_anchor,
-                ):
-                    current_bytes = _read_anchored_regular_bytes(
-                        config_anchor,
-                        "spritelab.yaml",
-                        max_bytes=16 * 1024 * 1024,
-                    )
-                    current_sha256 = hashlib.sha256(current_bytes).hexdigest()
-                    if current_sha256 == after_sha256:
-                        config_anchor.atomic_write_bytes("spritelab.yaml", before)
-                    elif current_sha256 != before_sha256:
-                        raise ConditionedDatasetError(
-                            "activation_rollback_conflict",
-                            "Project configuration changed before activation rollback could complete.",
-                        )
-
-            cleanup_actions.append(rollback_config)
-            receipt_final = rollback_state.get("receipt_final")
-            receipt_inventory = rollback_state.get("receipt_inventory")
-            receipt_identity = rollback_state.get("receipt_identity")
-            if (
-                isinstance(receipt_final, Path)
-                and isinstance(receipt_inventory, Mapping)
-                and isinstance(receipt_identity, OwnedFileIdentity)
-            ):
-                cleanup_actions.append(
-                    lambda: _rollback_published_directory(receipt_final, root, receipt_inventory, receipt_identity)
-                )
-            receipt_staging = rollback_state.get("receipt_staging")
-            receipt_staging_identity = rollback_state.get("receipt_staging_identity")
-            if isinstance(receipt_staging, Path) and isinstance(receipt_staging_identity, OwnedFileIdentity):
-                cleanup_actions.append(
-                    lambda: _quarantine_owned_directory(
-                        receipt_staging,
-                        root,
-                        receipt_staging_identity,
-                        prefix=".rollback-activation-receipt-",
-                    )
-                )
-            _run_cleanup_actions(cleanup_actions)
-
-        def rollback_activation_state_write() -> None:
-            rollback_activation()
-            before_state = rollback_state.get("state_before")
-            if isinstance(before_state, Mapping) and self._read_state(root) != before_state:
-                self._write_state_unlocked(root, before_state)
-
-        with self._state_transaction(
-            root,
-            rollback=rollback_activation,
-            write_failure_rollback=rollback_activation_state_write,
-        ) as state:
-            rollback_state["state_before"] = deepcopy(state)
-            if state.get("status") != "COMPLETE":
-                raise ConditionedDatasetError("publication_not_ready", "Publish the exact freeze before activation.")
-            if state.get("activation_authorization") is not None:
-                raise ConditionedDatasetError(
-                    "activation_authorization_consumed", "This job already consumed its activation authorization."
-                )
+        request_bindings = {
+            "candidate_identity": candidate_identity,
+            "publication_identity_sha256": publication_identity_sha256,
+            "activation_manifest_sha256": activation_manifest_sha256,
+            "campaign_config_sha256": campaign_config_sha256,
+            "campaign_identity_sha256": campaign_identity_sha256,
+        }
+        authorization_digest = hashlib.sha256(activation_authorization_id.encode("utf-8")).hexdigest()
+        with self._lock, _ConditionedMutationLock(root, ".conditioned-state.lock"):
+            state = self._read_state(root)
             candidate = state.get("candidate")
             publication = state.get("publication")
+            if state.get("status") != "COMPLETE":
+                raise ConditionedDatasetError("publication_not_ready", "Publish the exact freeze before activation.")
             if not isinstance(candidate, Mapping) or candidate.get("candidate_identity") != candidate_identity:
                 raise ConditionedDatasetError(
                     "activation_candidate_changed", "The selected candidate identity changed."
@@ -885,9 +1461,17 @@ class ConditionedDatasetService:
             if not isinstance(publication, Mapping) or any(
                 publication.get(key) != value for key, value in expected_publication.items()
             ):
-                raise ConditionedDatasetError(
-                    "activation_publication_changed", "The selected publication or campaign identity changed."
-                )
+                projected = self._project_activation_state(root, state)
+                projected_publication = projected.get("publication")
+                if not isinstance(projected_publication, Mapping) or any(
+                    projected_publication.get(key) != value
+                    for key, value in {**expected_publication, "configuration_activated": True}.items()
+                ):
+                    raise ConditionedDatasetError(
+                        "activation_publication_changed", "The selected publication or campaign identity changed."
+                    )
+                return projected
+
             activation_relative = _canonical_relative(str(publication.get("activation_manifest") or ""))
             campaign_relative = _canonical_relative(str(publication.get("campaign_config") or ""))
             activation_path = require_confined_path(
@@ -896,196 +1480,439 @@ class ConditionedDatasetService:
             campaign_path = require_confined_path(
                 self.project_root.joinpath(*PurePosixPath(campaign_relative).parts), self.project_root
             )
-            if _anchored_file_sha256(activation_path.parent, activation_path.name) != activation_manifest_sha256:
+            if (
+                _anchored_file_sha256(activation_path.parent, activation_path.name, self.project_root)
+                != activation_manifest_sha256
+            ):
                 raise ConditionedDatasetError("activation_freeze_changed", "The published freeze bytes changed.")
-            if _anchored_file_sha256(campaign_path.parent, campaign_path.name) != campaign_config_sha256:
+            if (
+                _anchored_file_sha256(campaign_path.parent, campaign_path.name, self.project_root)
+                != campaign_config_sha256
+            ):
                 raise ConditionedDatasetError("activation_campaign_changed", "The campaign configuration changed.")
-
-            receipt_final = require_confined_path(root / "activation_receipt", root)
-            with AnchoredDirectory(root, root) as receipt_parent:
-                if receipt_parent.lexists(receipt_final.name):
-                    raise ConditionedDatasetError(
-                        "activation_receipt_exists", "An activation receipt already exists for this job."
-                    )
-                receipt_staging_name, receipt_staging_identity = receipt_parent.mkdir_unique(
-                    ".activation-receipt-staging-"
-                )
-            receipt_staging = root / receipt_staging_name
-            rollback_state["receipt_final"] = receipt_final
-            rollback_state["receipt_staging"] = receipt_staging
-            rollback_state["receipt_staging_identity"] = receipt_staging_identity
 
             config_path = require_confined_path(self.project_root / "spritelab.yaml", self.project_root)
             with (
                 _ConditionedMutationLock(self.project_root, ".conditioned-config.lock"),
                 AnchoredDirectory(self.project_root, self.project_root) as config_anchor,
-            ):
-                before = _read_anchored_regular_bytes(
+                _held_regular_file_snapshot(
                     config_anchor,
                     "spritelab.yaml",
                     max_bytes=16 * 1024 * 1024,
-                )
-                before_sha256 = hashlib.sha256(before).hexdigest()
-                rollback_state["config_path"] = config_path
-                rollback_state["config_before"] = before
-                rollback_state["config_before_sha256"] = before_sha256
-                if before_sha256 != expected_config_sha256:
-                    raise ConditionedDatasetError(
-                        "activation_config_changed", "Project configuration changed before activation."
+                ) as held_config,
+            ):
+                before = held_config.content
+                current_sha256 = hashlib.sha256(before).hexdigest()
+                receipt_root = require_confined_path(root / "activation_receipt", root)
+                if os.path.lexists(receipt_root):
+                    summary = self._load_activation_commit_summary(root, current_sha256=current_sha256)
+                    self._require_matching_activation_summary(
+                        summary,
+                        request_bindings=request_bindings,
+                        authorization_digest=authorization_digest,
+                        expected_config_sha256=expected_config_sha256,
                     )
-                try:
-                    current = ProjectConfig.load(config_path)
-                except ValueError as exc:
-                    raise ConditionedDatasetError(
-                        "activation_config_invalid", "Project configuration is unavailable or invalid."
-                    ) from exc
-                if current.root != self.project_root or current.path != config_path:
-                    raise ConditionedDatasetError(
-                        "activation_config_scope", "Activation requires the canonical project configuration."
+                    if summary["committed"] is True:
+                        return self._project_activation_state(root, state)
+                    prepared_state = self._prepared_activation_state(
+                        state,
+                        publication,
+                        summary,
                     )
-                values = deepcopy(current.values)
-                view_relative = _canonical_relative(
-                    (PurePosixPath(activation_relative).parent / "view_manifest.json").as_posix()
-                )
-                values["dataset"]["view_manifest"] = view_relative
-                values["dataset"]["freeze_manifest"] = activation_relative
-                values["training"]["dataset_freeze"] = activation_relative
-                values["training"]["campaign_config"] = campaign_relative
-                values["execution"]["allow_dataset_production_freeze"] = True
-                values["execution"]["allow_training"] = True
-                prospective = ProjectConfig(self.project_root, config_path, values)
-                activation_loader = self._activation_loader
-                if activation_loader is None:
-                    from spritelab.product_features.training.activation import (
-                        load_conditioned_training_activation,
+                    if state != prepared_state:
+                        self._write_state_unlocked(root, prepared_state)
+                        state = prepared_state
+                    config_after_sha256 = str(summary["config_after_sha256"])
+                    payload = self._prospective_activation_payload(
+                        config_path,
+                        before,
+                        activation_relative=activation_relative,
+                        campaign_relative=campaign_relative,
+                        campaign_identity_sha256=campaign_identity_sha256,
+                        activation_manifest_sha256=activation_manifest_sha256,
+                        campaign_config_sha256=campaign_config_sha256,
+                    )
+                    if hashlib.sha256(payload).hexdigest() != config_after_sha256:
+                        raise ConditionedDatasetError(
+                            "activation_recovery_changed",
+                            "The exact PREPARED activation no longer produces its intended configuration.",
+                        )
+                else:
+                    if state.get("activation_authorization") is not None:
+                        raise ConditionedDatasetError(
+                            "activation_authorization_consumed",
+                            "This job already consumed its activation authorization.",
+                        )
+                    if current_sha256 != expected_config_sha256:
+                        raise ConditionedDatasetError(
+                            "activation_config_changed", "Project configuration changed before activation."
+                        )
+                    payload = self._prospective_activation_payload(
+                        config_path,
+                        before,
+                        activation_relative=activation_relative,
+                        campaign_relative=campaign_relative,
+                        campaign_identity_sha256=campaign_identity_sha256,
+                        activation_manifest_sha256=activation_manifest_sha256,
+                        campaign_config_sha256=campaign_config_sha256,
+                    )
+                    config_after_sha256 = hashlib.sha256(payload).hexdigest()
+                    if config_after_sha256 == current_sha256:
+                        raise ConditionedDatasetError(
+                            "activation_config_unchanged", "Activation must change the blocked project configuration."
+                        )
+                    operation_id = f"activation-{uuid.uuid4().hex}"
+                    prepared_at = _now()
+                    receipt, journal, record = build_activation_commit_documents(
+                        job_id=job_id,
+                        operation_id=operation_id,
+                        **request_bindings,
+                        authorization_id_sha256=authorization_digest,
+                        config_before_sha256=current_sha256,
+                        config_after_sha256=config_after_sha256,
+                        prepared_at=prepared_at,
+                    )
+                    summary = self._publish_activation_commit_documents(root, receipt, journal, record)
+                    prepared_state = self._prepared_activation_state(state, publication, summary)
+                    self._write_state_unlocked(root, prepared_state)
+                    state = prepared_state
+
+                _verify_held_regular_file_snapshot(config_anchor, "spritelab.yaml", held_config)
+                if current_sha256 == str(summary["config_before_sha256"]):
+                    _replace_held_config_if_supported(
+                        config_anchor,
+                        held_config,
+                        payload,
+                        expected_sha256=config_after_sha256,
+                    )
+                elif current_sha256 != config_after_sha256:
+                    raise ConditionedDatasetError(
+                        "activation_config_changed",
+                        "Project configuration differs from both activation commit boundaries.",
                     )
 
-                    activation_loader = load_conditioned_training_activation
+                receipt, journal, record = self._load_activation_commit_documents(root)
                 try:
-                    selected = activation_loader(
-                        prospective,
-                        expected_campaign={"campaign_identity": campaign_identity_sha256},
-                        require_audit=True,
+                    marker = build_activation_project_commit(
+                        receipt=receipt,
+                        journal=journal,
+                        record=record,
+                        config_after_bytes=payload,
                     )
-                except ValueError as exc:
+                except ActivationCommitError as exc:
                     raise ConditionedDatasetError(
-                        "activation_audit_blocked",
-                        "The exact prospective freeze and campaign lack an applicable PASS training audit.",
+                        "activation_commit_invalid",
+                        "The immutable project activation marker could not be built.",
                     ) from exc
-                selected_training = dict(selected.campaign.get("training") or {})
-                if (
-                    not selected.ready
-                    or selected.freeze_sha256 != activation_manifest_sha256
-                    or selected.campaign_config_sha256 != campaign_config_sha256
-                    or selected.campaign.get("campaign_identity") != campaign_identity_sha256
-                    or selected.campaign.get("seeds") != [731001, 731002, 731003]
-                    or selected_training.get("max_optimizer_steps") != 5_000
-                ):
-                    raise ConditionedDatasetError(
-                        "activation_contract_changed", "The prospective training activation contract changed."
-                    )
-                payload = yaml.safe_dump(values, sort_keys=False, allow_unicode=True).encode("utf-8")
-                if (
-                    hashlib.sha256(
-                        _read_anchored_regular_bytes(
-                            config_anchor,
-                            "spritelab.yaml",
-                            max_bytes=16 * 1024 * 1024,
-                        )
-                    ).hexdigest()
-                    != expected_config_sha256
-                ):
-                    raise ConditionedDatasetError(
-                        "activation_config_changed", "Project configuration changed during activation."
-                    )
-                config_anchor.atomic_write_bytes("spritelab.yaml", payload)
-                after_sha256 = hashlib.sha256(payload).hexdigest()
-                rollback_state["config_after_sha256"] = after_sha256
-                reloaded = ProjectConfig.load(config_path)
-                revalidated = activation_loader(
-                    reloaded,
-                    expected_campaign={"campaign_identity": campaign_identity_sha256},
-                    require_audit=True,
+                marker_bytes = canonical_activation_commit_bytes(marker)
+                _publish_or_reuse_immutable_file(
+                    config_anchor,
+                    ACTIVATION_PROJECT_COMMIT_NAME,
+                    marker_bytes,
+                    residue_prefix=".activation-project-marker-residue-",
                 )
-                if (
-                    hashlib.sha256(
-                        _read_anchored_regular_bytes(
-                            config_anchor,
-                            "spritelab.yaml",
-                            max_bytes=16 * 1024 * 1024,
-                        )
-                    ).hexdigest()
-                    != after_sha256
-                    or not revalidated.ready
-                    or revalidated.freeze_sha256 != activation_manifest_sha256
-                    or revalidated.campaign_config_sha256 != campaign_config_sha256
-                ):
+                marker_summary = self._load_activation_project_commit_summary(
+                    root,
+                    current_sha256=(config_after_sha256 if held_config.replaced else current_sha256),
+                )
+                if marker_summary.get("committed") is not True:
                     raise ConditionedDatasetError(
-                        "activation_reload_failed", "The activated configuration failed exact reload validation."
+                        "activation_commit_invalid",
+                        "The immutable project activation marker did not commit exact bytes.",
                     )
-
-                receipt_without_identity = {
-                    "schema_version": "spritelab.dataset.conditioned-activation-receipt.v1",
-                    "job_id": job_id,
-                    "candidate_identity": candidate_identity,
-                    "publication_identity_sha256": publication_identity_sha256,
-                    "activation_manifest_sha256": activation_manifest_sha256,
-                    "campaign_config_sha256": campaign_config_sha256,
-                    "campaign_identity_sha256": campaign_identity_sha256,
-                    "authorization_id_sha256": hashlib.sha256(activation_authorization_id.encode("utf-8")).hexdigest(),
-                    "config_before_sha256": before_sha256,
-                    "config_after_sha256": after_sha256,
-                    "configuration_keys": [
-                        "dataset.view_manifest",
-                        "dataset.freeze_manifest",
-                        "training.dataset_freeze",
-                        "training.campaign_config",
-                        "execution.allow_dataset_production_freeze",
-                        "execution.allow_training",
-                    ],
-                    "training_started": False,
-                    "paths_exposed": False,
-                    "activated_at": _now(),
-                }
-                receipt = {
-                    **receipt_without_identity,
-                    "receipt_identity": stable_hash(receipt_without_identity),
-                }
-                receipt_path = require_confined_path(receipt_staging / "receipt.json", receipt_staging)
-                with AnchoredDirectory(receipt_staging, root) as receipt_anchor:
-                    receipt_anchor.atomic_write_bytes(
-                        receipt_path.name,
-                        (strict_json_dumps(receipt, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-                    )
-                receipt_inventory = _inventory(receipt_staging)
-                rollback_state["receipt_inventory"] = receipt_inventory
-                rollback_state["receipt_identity"] = receipt_staging_identity
-                with AnchoredDirectory(root, root) as receipt_parent:
-                    _publish_directory_noreplace(
-                        receipt_parent,
-                        receipt_staging.name,
-                        receipt_final.name,
-                        receipt_staging_identity,
-                    )
-                if _inventory(receipt_final) != receipt_inventory:
-                    raise ConditionedDatasetError(
-                        "activation_receipt_changed", "The activation receipt changed during publication."
-                    )
-                publication_value = dict(publication)
-                publication_value["configuration_activated"] = True
-                state["publication"] = publication_value
-                state["activation_authorization"] = {
-                    "receipt_identity": receipt["receipt_identity"],
-                    "receipt_relative_path": "activation_receipt/receipt.json",
-                    "config_after_sha256": after_sha256,
-                    "consumed_at": receipt["activated_at"],
-                    "one_time": True,
-                }
-                state["stage"] = "activated"
-                state["message"] = "Conditioned freeze and audited campaign activated; training was not started."
-                state["updated_at"] = _now()
-        rollback_state["committed"] = True
         return self.job(job_id)
+
+    def _prospective_activation_payload(
+        self,
+        config_path: Path,
+        before: bytes,
+        *,
+        activation_relative: str,
+        campaign_relative: str,
+        campaign_identity_sha256: str,
+        activation_manifest_sha256: str,
+        campaign_config_sha256: str,
+    ) -> bytes:
+        try:
+            current = _project_config_from_bytes(self.project_root, config_path, before)
+        except ValueError as exc:
+            raise ConditionedDatasetError(
+                "activation_config_invalid", "Project configuration is unavailable or invalid."
+            ) from exc
+        if current.root != self.project_root or current.path != config_path:
+            raise ConditionedDatasetError(
+                "activation_config_scope", "Activation requires the canonical project configuration."
+            )
+        values = deepcopy(current.values)
+        view_relative = _canonical_relative(
+            (PurePosixPath(activation_relative).parent / "view_manifest.json").as_posix()
+        )
+        values["dataset"]["view_manifest"] = view_relative
+        values["dataset"]["freeze_manifest"] = activation_relative
+        values["training"]["dataset_freeze"] = activation_relative
+        values["training"]["campaign_config"] = campaign_relative
+        values["execution"]["allow_dataset_production_freeze"] = True
+        values["execution"]["allow_training"] = True
+        prospective = ProjectConfig(self.project_root, config_path, values)
+        activation_loader = self._activation_loader
+        if activation_loader is None:
+            from spritelab.product_features.training.activation import load_conditioned_training_activation
+
+            activation_loader = load_conditioned_training_activation
+        try:
+            selected = activation_loader(
+                prospective,
+                expected_campaign={"campaign_identity": campaign_identity_sha256},
+                require_audit=True,
+                require_activation_commit=False,
+            )
+        except ValueError as exc:
+            raise ConditionedDatasetError(
+                "activation_audit_blocked",
+                "The exact prospective freeze and campaign lack an applicable PASS training audit.",
+            ) from exc
+        selected_training = dict(selected.campaign.get("training") or {})
+        audit_status = getattr(getattr(selected, "audit_status", None), "value", None)
+        audit_ready = audit_status == "PASS" if audit_status is not None else bool(getattr(selected, "ready", False))
+        if (
+            not audit_ready
+            or selected.freeze_sha256 != activation_manifest_sha256
+            or selected.campaign_config_sha256 != campaign_config_sha256
+            or selected.campaign.get("campaign_identity") != campaign_identity_sha256
+            or selected.campaign.get("seeds") != [731001, 731002, 731003]
+            or selected_training.get("max_optimizer_steps") != 5_000
+        ):
+            raise ConditionedDatasetError(
+                "activation_contract_changed", "The prospective training activation contract changed."
+            )
+        return yaml.safe_dump(values, sort_keys=False, allow_unicode=True).encode("utf-8")
+
+    def _publish_activation_commit_documents(
+        self,
+        root: Path,
+        receipt: Mapping[str, Any],
+        journal: Mapping[str, Any],
+        record: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        final = require_confined_path(root / "activation_receipt", root)
+        with open_anchored_directory(root, self.project_root) as parent:
+            if parent.lexists(final.name):
+                raise ConditionedDatasetError(
+                    "activation_receipt_exists", "An activation PREPARED record already exists for this job."
+                )
+            receipt_identity = parent.mkdir(final.name, exist_ok=False)
+            with parent.open_directory_immovable(final.name) as anchor:
+                if not receipt_identity.matches(anchor.directory_metadata()):
+                    raise ConditionedDatasetError(
+                        "activation_receipt_staging", "Activation PREPARED directory identity changed."
+                    )
+                for name, value in (
+                    ("receipt.json", receipt),
+                    ("record.json", record),
+                    ("journal.json", journal),
+                ):
+                    _publish_or_reuse_immutable_file(
+                        anchor,
+                        name,
+                        canonical_activation_commit_bytes(value),
+                        residue_prefix=".activation-receipt-residue-",
+                    )
+                expected_inventory = _inventory_from_anchor(anchor)
+                if set(expected_inventory) != {"journal.json", "receipt.json", "record.json"}:
+                    raise ConditionedDatasetError(
+                        "activation_receipt_inventory", "Activation PREPARED evidence has an unexpected inventory."
+                    )
+        if _inventory(final, self.project_root) != expected_inventory:
+            raise ConditionedDatasetError(
+                "activation_receipt_changed", "Activation PREPARED evidence changed during publication."
+            )
+        return self._load_activation_commit_summary(
+            root,
+            current_sha256=str(receipt["config_before_sha256"]),
+        )
+
+    def _load_activation_commit_summary(self, root: Path, *, current_sha256: str) -> dict[str, Any]:
+        receipt, journal, record = self._load_activation_commit_documents(root)
+        try:
+            prepared = validate_activation_commit_documents(
+                receipt=receipt,
+                journal=journal,
+                record=record,
+                expected_job_id=root.name,
+                current_config_sha256=current_sha256,
+                require_committed=False,
+            )
+        except ActivationCommitError as exc:
+            raise ConditionedDatasetError(
+                "activation_commit_invalid", "Activation PREPARED evidence is invalid or conflicts with config."
+            ) from exc
+        with AnchoredDirectory(self.project_root, self.project_root) as project_anchor:
+            marker_exists = project_anchor.lexists(ACTIVATION_PROJECT_COMMIT_NAME)
+        if marker_exists:
+            return self._load_activation_project_commit_summary(root, current_sha256=current_sha256)
+        return {**prepared, "committed": False, "reconciliation_required": False}
+
+    def _load_activation_commit_documents(
+        self,
+        root: Path,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        directory = require_confined_path(root / "activation_receipt", root)
+        if not _safe_directory(directory) or set(_inventory(directory, self.project_root)) != {
+            "journal.json",
+            "receipt.json",
+            "record.json",
+        }:
+            raise ConditionedDatasetError(
+                "activation_commit_invalid", "Activation PREPARED evidence is unavailable or unsafe."
+            )
+        receipt = _read_json_mapping(directory / "receipt.json", max_bytes=1024 * 1024)
+        journal = _read_json_mapping(directory / "journal.json", max_bytes=1024 * 1024)
+        record = _read_json_mapping(directory / "record.json", max_bytes=1024 * 1024)
+        return receipt, journal, record
+
+    def _load_activation_project_commit_summary(
+        self,
+        root: Path,
+        *,
+        current_sha256: str,
+    ) -> dict[str, Any]:
+        receipt, journal, record = self._load_activation_commit_documents(root)
+        with AnchoredDirectory(self.project_root, self.project_root) as project_anchor:
+            try:
+                marker_bytes = _read_anchored_regular_bytes(
+                    project_anchor,
+                    ACTIVATION_PROJECT_COMMIT_NAME,
+                    max_bytes=32 * 1024 * 1024,
+                )
+                marker_raw = strict_json_loads(marker_bytes)
+            except (OSError, ValueError) as exc:
+                raise ConditionedDatasetError(
+                    "activation_commit_invalid",
+                    "The immutable project activation marker is unavailable or invalid.",
+                ) from exc
+        if not isinstance(marker_raw, Mapping):
+            raise ConditionedDatasetError(
+                "activation_commit_invalid",
+                "The immutable project activation marker must be an object.",
+            )
+        marker = dict(marker_raw)
+        if canonical_activation_commit_bytes(marker) != marker_bytes:
+            raise ConditionedDatasetError(
+                "activation_commit_invalid",
+                "The immutable project activation marker is not canonical.",
+            )
+        try:
+            summary, config_after = validate_activation_project_commit(
+                marker,
+                receipt=receipt,
+                journal=journal,
+                record=record,
+                current_config_sha256=current_sha256,
+                expected_job_id=root.name,
+            )
+        except ActivationCommitError as exc:
+            raise ConditionedDatasetError(
+                "activation_commit_invalid",
+                "The immutable project activation marker is invalid or conflicts with config.",
+            ) from exc
+        if hashlib.sha256(config_after).hexdigest() != summary["config_after_sha256"]:
+            raise ConditionedDatasetError(
+                "activation_commit_invalid",
+                "The immutable project activation marker configuration changed.",
+            )
+        return summary
+
+    def _require_matching_activation_summary(
+        self,
+        summary: Mapping[str, Any],
+        *,
+        request_bindings: Mapping[str, str],
+        authorization_digest: str,
+        expected_config_sha256: str,
+    ) -> None:
+        directory = self._job_root(str(summary["job_id"])) / "activation_receipt"
+        receipt = _read_json_mapping(directory / "receipt.json", max_bytes=1024 * 1024)
+        if (
+            any(summary.get(name) != value for name, value in request_bindings.items())
+            or receipt.get("authorization_id_sha256") != authorization_digest
+        ):
+            raise ConditionedDatasetError(
+                "activation_recovery_mismatch", "Only the exact PREPARED activation may be recovered."
+            )
+        if summary.get("config_before_sha256") != expected_config_sha256:
+            raise ConditionedDatasetError(
+                "activation_recovery_config", "Recovery requires the original blocked configuration identity."
+            )
+
+    def _prepared_activation_state(
+        self,
+        state: Mapping[str, Any],
+        publication: Mapping[str, Any],
+        summary: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        prepared = deepcopy(dict(state))
+        prepared["activation_authorization"] = {
+            "status": "PREPARED",
+            "operation_id": summary["operation_id"],
+            "receipt_identity": summary["receipt_identity"],
+            "record_identity": summary["record_identity"],
+            "journal_identity": summary["journal_identity"],
+            "receipt_relative_path": "activation_receipt/receipt.json",
+            "record_relative_path": "activation_receipt/record.json",
+            "journal_relative_path": "activation_receipt/journal.json",
+            "config_before_sha256": summary["config_before_sha256"],
+            "config_after_sha256": summary["config_after_sha256"],
+            "action_lock_protocol_identity": ACTION_LOCK_PROTOCOL_IDENTITY,
+            "one_time": True,
+        }
+        prepared["publication"] = dict(publication)
+        prepared["stage"] = "activation_prepared"
+        prepared["message"] = "Activation PREPARED durably; the immutable project commit marker remains pending."
+        prepared["updated_at"] = _now()
+        return prepared
+
+    def _project_activation_state(self, root: Path, state: Mapping[str, Any]) -> dict[str, Any]:
+        publication = state.get("publication")
+        if not isinstance(publication, Mapping) or publication.get("configuration_activated") is True:
+            return dict(state)
+        receipt_root = root / "activation_receipt"
+        if not os.path.lexists(receipt_root):
+            return dict(state)
+        current_sha256 = self._config_sha256()
+        if current_sha256 is None:
+            raise ConditionedDatasetError(
+                "activation_commit_config", "The canonical project configuration is unavailable."
+            )
+        summary = self._load_activation_commit_summary(root, current_sha256=current_sha256)
+        projected = deepcopy(dict(state))
+        if summary["committed"] is not True:
+            projected["stage"] = "activation_prepared"
+            projected["message"] = "Activation PREPARED; project configuration remains blocked."
+            return projected
+        publication_value = dict(publication)
+        publication_value["configuration_activated"] = True
+        projected["publication"] = publication_value
+        authorization = dict(projected.get("activation_authorization") or {})
+        authorization.update(
+            {
+                "status": "COMMITTED",
+                "operation_id": summary["operation_id"],
+                "receipt_identity": summary["receipt_identity"],
+                "record_identity": summary["record_identity"],
+                "journal_identity": summary["journal_identity"],
+                "receipt_relative_path": "activation_receipt/receipt.json",
+                "record_relative_path": "activation_receipt/record.json",
+                "journal_relative_path": "activation_receipt/journal.json",
+                "config_before_sha256": summary["config_before_sha256"],
+                "config_after_sha256": summary["config_after_sha256"],
+                "action_lock_protocol_identity": ACTION_LOCK_PROTOCOL_IDENTITY,
+                "one_time": True,
+            }
+        )
+        projected["activation_authorization"] = authorization
+        projected["stage"] = "activated"
+        projected["message"] = "Conditioned freeze and audited campaign activated; training was not started."
+        return projected
 
     def _handoff_inventory(self) -> list[dict[str, Any]]:
         if not self.harvest_root.is_dir() or _is_link_or_reparse(self.harvest_root):
@@ -1502,7 +2329,11 @@ class ConditionedDatasetService:
                 state["candidate"] = {
                     "candidate_identity": candidate["candidate_identity"],
                     "manifest_relative_path": "candidate_manifest.json",
-                    "manifest_sha256": _anchored_file_sha256(root, "candidate_manifest.json"),
+                    "manifest_sha256": _anchored_file_sha256(
+                        root,
+                        "candidate_manifest.json",
+                        self.project_root,
+                    ),
                     "image_count": candidate["image_count"],
                     "category_counts": candidate["category_counts"],
                     "source_counts": candidate["source_counts"],
@@ -1683,22 +2514,52 @@ class ConditionedDatasetService:
                     f"Conditioned {index} of {len(selected)} selected sprites.",
                 )
 
-        candidate_root, _ = _create_anchored_named_directory(root, root, "candidate")
-        result = export_dataset_from_imported_sprites(
-            imported,
-            DatasetMakerExportConfig(
-                dataset_name="phase7",
-                output_root=candidate_root,
-                max_palette_slots=32,
-                train_fraction=0.8,
-                val_fraction=0.1,
-                test_fraction=0.1,
-                seed=731001,
-                overwrite=False,
-            ),
+        candidate_root, candidate_root_identity = _create_anchored_named_directory(
+            root,
+            self.project_root,
+            "candidate",
         )
-        phase7 = result.output_dir
-        _enrich_manifests(phase7, metadata_by_id)
+        with open_anchored_directory(candidate_root, self.project_root) as candidate_anchor:
+            if not candidate_root_identity.matches(candidate_anchor.directory_metadata()):
+                raise ConditionedDatasetError(
+                    "candidate_root_changed", "The candidate publication root changed before export."
+                )
+            anchored_export = export_dataset_from_imported_sprites_anchored(
+                imported,
+                DatasetMakerExportConfig(
+                    dataset_name="phase7",
+                    output_root=candidate_root,
+                    max_palette_slots=32,
+                    train_fraction=0.8,
+                    val_fraction=0.1,
+                    test_fraction=0.1,
+                    seed=731001,
+                    overwrite=False,
+                ),
+                output_parent=candidate_anchor,
+            )
+            result = anchored_export.result
+            phase7 = result.output_dir
+            if phase7 != candidate_root / "phase7":
+                raise ConditionedDatasetError(
+                    "candidate_root_changed", "The candidate exporter returned an unexpected publication root."
+                )
+            candidate_anchor.verify()
+            with candidate_anchor.open_directory_immovable("phase7") as phase7_anchor:
+                if not anchored_export.directory_identity.matches(phase7_anchor.directory_metadata()):
+                    raise ConditionedDatasetError(
+                        "candidate_root_changed", "The candidate output directory changed before enrichment."
+                    )
+                _enrich_manifests(phase7, phase7_anchor, metadata_by_id)
+
+        def open_bound_phase7() -> AbstractContextManager[AnchoredDirectory]:
+            return _open_bound_candidate_phase7(
+                candidate_root,
+                self.project_root,
+                candidate_identity=candidate_root_identity,
+                phase7_identity=anchored_export.directory_identity,
+            )
+
         self._check_cancel(root.name)
 
         training_result = build_training_manifest(
@@ -1708,30 +2569,38 @@ class ConditionedDatasetService:
             seed=731001,
         )
         training_manifest = phase7 / "training_manifest.jsonl"
-        write_training_manifest(training_manifest, _portable_training_rows(training_result.rows))
-        _write_json(
-            phase7 / "conditioning_vocabulary.json",
-            _conditioning_vocabulary(imported, training_result.rows),
-        )
-        _write_jsonl(
-            phase7 / "conditioned_records.jsonl",
-            [
-                _conditioned_record(item, metadata_by_id[item.item.sprite_id])
-                for item in sorted(imported, key=lambda value: value.item.sprite_id)
-            ],
-        )
-        _write_jsonl(
-            phase7 / "split_assignments.jsonl",
-            [
-                {
-                    "sprite_id": item.item.sprite_id,
-                    "split": item.item.split,
-                    "duplicate_family_id": metadata_by_id[item.item.sprite_id]["duplicate_family_id"],
-                    "source_group": metadata_by_id[item.item.sprite_id]["source_group"],
-                }
-                for item in sorted(imported, key=lambda value: value.item.sprite_id)
-            ],
-        )
+        with open_bound_phase7() as phase7_anchor:
+            _write_training_manifest(
+                phase7_anchor,
+                training_manifest.name,
+                _portable_training_rows(training_result.rows),
+            )
+            _write_json(
+                phase7_anchor,
+                "conditioning_vocabulary.json",
+                _conditioning_vocabulary(imported, training_result.rows),
+            )
+            _write_jsonl(
+                phase7_anchor,
+                "conditioned_records.jsonl",
+                [
+                    _conditioned_record(item, metadata_by_id[item.item.sprite_id])
+                    for item in sorted(imported, key=lambda value: value.item.sprite_id)
+                ],
+            )
+            _write_jsonl(
+                phase7_anchor,
+                "split_assignments.jsonl",
+                [
+                    {
+                        "sprite_id": item.item.sprite_id,
+                        "split": item.item.split,
+                        "duplicate_family_id": metadata_by_id[item.item.sprite_id]["duplicate_family_id"],
+                        "source_group": metadata_by_id[item.item.sprite_id]["source_group"],
+                    }
+                    for item in sorted(imported, key=lambda value: value.item.sprite_id)
+                ],
+            )
         split_check = _split_integrity(phase7 / "split_assignments.jsonl")
         if not split_check["ok"]:
             raise ConditionedDatasetError(
@@ -1742,48 +2611,54 @@ class ConditionedDatasetService:
             raise ConditionedDatasetError(
                 "representative_coverage", "The candidate covers fewer than four known taxonomy categories."
             )
-        _write_json(phase7 / "coverage_report.json", coverage)
-        _write_json(phase7 / "split_integrity_report.json", split_check)
+        with open_bound_phase7() as phase7_anchor:
+            _write_json(phase7_anchor, "coverage_report.json", coverage)
+            _write_json(phase7_anchor, "split_integrity_report.json", split_check)
         retained_near_duplicate_gate = _retained_near_duplicate_gate(selected)
         if retained_near_duplicate_gate["ok"] is not True:
             raise ConditionedDatasetError(
                 "retained_near_duplicate",
                 "The conditioned candidate retained a pair inside the conservative near-duplicate bound.",
             )
-        _write_json(
-            phase7 / "duplicate_report.json",
-            {
-                "schema_version": "spritelab.dataset.conditioned-duplicates.v2",
-                "exact_byte_and_pixel_duplicates_excluded": int(
-                    Counter(exclusions)["exact_byte_duplicate"] + Counter(exclusions)["exact_pixel_duplicate"]
-                ),
-                "near_duplicate_algorithm": NEAR_DUPLICATE_ALGORITHM,
-                "near_duplicate_config": NEAR_DUPLICATE_CONFIG,
-                "near_duplicate_config_identity": NEAR_DUPLICATE_CONFIG_IDENTITY,
-                "near_duplicate_implementation_code_inventory_sha256": implementation_code_identity,
-                "near_duplicate_excluded_count": len(near_duplicate_exclusions),
-                "near_duplicate_exclusions": [dict(value) for value in near_duplicate_exclusions],
-                "retained_near_duplicate_gate": retained_near_duplicate_gate,
-                "broader_variant_family_config": VARIANT_FAMILY_CONFIG,
-                "family_count": len(set(family_by_key.values())),
-                "whole_family_split_gate": split_check["ok"],
-            },
-        )
+        with open_bound_phase7() as phase7_anchor:
+            _write_json(
+                phase7_anchor,
+                "duplicate_report.json",
+                {
+                    "schema_version": "spritelab.dataset.conditioned-duplicates.v2",
+                    "exact_byte_and_pixel_duplicates_excluded": int(
+                        Counter(exclusions)["exact_byte_duplicate"] + Counter(exclusions)["exact_pixel_duplicate"]
+                    ),
+                    "near_duplicate_algorithm": NEAR_DUPLICATE_ALGORITHM,
+                    "near_duplicate_config": NEAR_DUPLICATE_CONFIG,
+                    "near_duplicate_config_identity": NEAR_DUPLICATE_CONFIG_IDENTITY,
+                    "near_duplicate_implementation_code_inventory_sha256": implementation_code_identity,
+                    "near_duplicate_excluded_count": len(near_duplicate_exclusions),
+                    "near_duplicate_exclusions": [dict(value) for value in near_duplicate_exclusions],
+                    "retained_near_duplicate_gate": retained_near_duplicate_gate,
+                    "broader_variant_family_config": VARIANT_FAMILY_CONFIG,
+                    "family_count": len(set(family_by_key.values())),
+                    "whole_family_split_gate": split_check["ok"],
+                },
+            )
         source_evidence = [_conditioned_source_binding(source) for source in sources]
-        _write_json(
-            phase7 / "provenance_manifest.json",
-            {
-                "schema_version": "spritelab.dataset.conditioned-provenance.v1",
-                "sources": source_evidence,
-                "all_source_files_rehashed": True,
-                "license_policy": sorted(ALLOWED_LICENSES),
-                "paths_are_portable": True,
-            },
-        )
+        with open_bound_phase7() as phase7_anchor:
+            _write_json(
+                phase7_anchor,
+                "provenance_manifest.json",
+                {
+                    "schema_version": "spritelab.dataset.conditioned-provenance.v1",
+                    "sources": source_evidence,
+                    "all_source_files_rehashed": True,
+                    "license_policy": sorted(ALLOWED_LICENSES),
+                    "paths_are_portable": True,
+                },
+            )
         benchmark = _benchmark_manifest(imported, metadata_by_id)
-        _write_json(phase7 / "benchmark_manifest.json", benchmark)
         audit_subjects = _label_audit_subjects(imported)
-        _write_json(phase7 / "label_audit_subjects.json", audit_subjects)
+        with open_bound_phase7() as phase7_anchor:
+            _write_json(phase7_anchor, "benchmark_manifest.json", benchmark)
+            _write_json(phase7_anchor, "label_audit_subjects.json", audit_subjects)
         dataset_qa = qa_dataset(phase7, require_semantic_v3=True)
         training_qa = qa_training_manifest(phase7, training_manifest)
         dataset_qa_value = dataset_qa.to_json_dict()
@@ -1791,20 +2666,44 @@ class ConditionedDatasetService:
         training_qa_value = training_qa.to_json_dict()
         training_qa_value["dataset_dir"] = "."
         training_qa_value["manifest_path"] = "training_manifest.jsonl"
-        _write_json(phase7 / "dataset_qa_report.json", dataset_qa_value)
-        _write_json(phase7 / "training_manifest_qa_report.json", training_qa_value)
+        with open_bound_phase7() as phase7_anchor:
+            _write_json(phase7_anchor, "dataset_qa_report.json", dataset_qa_value)
+            _write_json(phase7_anchor, "training_manifest_qa_report.json", training_qa_value)
         if dataset_qa.errors or training_qa.errors:
             raise ConditionedDatasetError(
                 "candidate_qa_failed", "The Phase-7 dataset or training manifest failed local structural QA."
             )
         loader = _loader_check(phase7)
-        _write_json(phase7 / "loader_check.json", loader)
+        with open_bound_phase7() as phase7_anchor:
+            _write_json(phase7_anchor, "loader_check.json", loader)
         if not loader["ok"]:
             raise ConditionedDatasetError(
                 "candidate_loader_failed",
                 "The production-format loader check did not cover every split and vocabulary binding.",
             )
 
+        with open_bound_phase7() as phase7_anchor:
+            phase7_device = phase7_anchor.directory_metadata().st_dev
+            records_sha256 = _stable_file_identity(
+                phase7_anchor,
+                "conditioned_records.jsonl",
+                phase7_device,
+            )["sha256"]
+            training_manifest_sha256 = _stable_file_identity(
+                phase7_anchor,
+                training_manifest.name,
+                phase7_device,
+            )["sha256"]
+            split_integrity_sha256 = _stable_file_identity(
+                phase7_anchor,
+                "split_integrity_report.json",
+                phase7_device,
+            )["sha256"]
+            coverage_report_sha256 = _stable_file_identity(
+                phase7_anchor,
+                "coverage_report.json",
+                phase7_device,
+            )["sha256"]
         view_manifest = {
             "schema_version": "spritelab.dataset.conditioned-view.v1",
             "view_identity": stable_hash(
@@ -1813,22 +2712,35 @@ class ConditionedDatasetService:
                         source["managed_intake_receipt_identity"] for source in sources
                     ],
                     "image_count": len(imported),
-                    "records_sha256": file_sha256(phase7 / "conditioned_records.jsonl"),
+                    "records_sha256": records_sha256,
                 }
             ),
             "image_count": len(imported),
             "records_path": "conditioned_records.jsonl",
-            "records_sha256": file_sha256(phase7 / "conditioned_records.jsonl"),
+            "records_sha256": records_sha256,
             "training_manifest_path": "training_manifest.jsonl",
-            "training_manifest_sha256": file_sha256(training_manifest),
-            "split_integrity_sha256": file_sha256(phase7 / "split_integrity_report.json"),
-            "coverage_report_sha256": file_sha256(phase7 / "coverage_report.json"),
+            "training_manifest_sha256": training_manifest_sha256,
+            "split_integrity_sha256": split_integrity_sha256,
+            "coverage_report_sha256": coverage_report_sha256,
             "requires_semantic_labels": True,
             "human_truth_claim": False,
             "paths_are_portable": True,
         }
-        _write_json(phase7 / "view_manifest.json", view_manifest)
-        payload_inventory = _inventory(phase7)
+        with open_bound_phase7() as phase7_anchor:
+            _write_json(phase7_anchor, "view_manifest.json", view_manifest)
+            payload_inventory = _inventory_from_anchor(phase7_anchor)
+        with open_anchored_directory(candidate_root, self.project_root) as candidate_anchor:
+            if not candidate_root_identity.matches(candidate_anchor.directory_metadata()):
+                raise ConditionedDatasetError(
+                    "candidate_root_changed", "The candidate publication root changed before completion."
+                )
+            phase7_commit = commit_anchored_dataset_maker_export(
+                candidate_anchor,
+                "phase7",
+                expected_parent_identity=candidate_root_identity,
+                expected_directory_identity=anchored_export.directory_identity,
+                expected_inventory=payload_inventory,
+            )
         inventory_identity = _inventory_identity(payload_inventory)
         if conditioned_code_inventory() != build_code_inventory:
             raise ConditionedDatasetError(
@@ -1851,6 +2763,7 @@ class ConditionedDatasetService:
             "candidate_identity": candidate_identity,
             "payload_inventory_sha256": inventory_identity,
             "payload_inventory": payload_inventory,
+            "phase7_commit_identity": stable_hash(phase7_commit),
             "image_count": len(imported),
             "category_counts": coverage["category_counts"],
             "source_counts": coverage["source_counts"],
@@ -1887,8 +2800,9 @@ class ConditionedDatasetService:
             "production_authorized": False,
             "paths_exposed": False,
         }
-        with AnchoredDirectory(root, root) as anchor:
-            anchor.atomic_write_bytes(
+        with open_anchored_directory(root, self.project_root) as anchor:
+            _write_anchored_bytes(
+                anchor,
                 "candidate_manifest.json",
                 (strict_json_dumps(candidate, indent=2, sort_keys=True) + "\n").encode("utf-8"),
             )
@@ -1900,7 +2814,7 @@ class ConditionedDatasetService:
             raise ConditionedDatasetError("candidate_not_ready", "No complete conditioned candidate is available.")
         if reference.get("manifest_relative_path") != "candidate_manifest.json":
             raise ConditionedDatasetError("candidate_schema", "The conditioned candidate manifest location changed.")
-        with AnchoredDirectory(root, root) as anchor:
+        with open_anchored_directory(root, self.project_root) as anchor:
             content = _read_anchored_regular_bytes(
                 anchor,
                 "candidate_manifest.json",
@@ -1927,6 +2841,30 @@ class ConditionedDatasetService:
         ):
             raise ConditionedDatasetError(
                 "candidate_count", "The conditioned candidate count is outside the authorized range."
+            )
+        expected_inventory = candidate.get("payload_inventory")
+        if not isinstance(expected_inventory, Mapping):
+            raise ConditionedDatasetError("candidate_schema", "The conditioned candidate inventory is invalid.")
+        candidate_root = root / "candidate"
+        actual_inventory = _inventory(candidate_root / "phase7", self.project_root)
+        if actual_inventory != expected_inventory:
+            raise ConditionedDatasetError(
+                "candidate_payload_changed", "The conditioned candidate payload changed after construction."
+            )
+        try:
+            with open_anchored_directory(candidate_root, self.project_root) as candidate_anchor:
+                phase7_commit = verify_anchored_dataset_maker_export(
+                    candidate_anchor,
+                    "phase7",
+                    expected_inventory=actual_inventory,
+                )
+        except (OSError, UnsafeFilesystemOperation, ValueError) as exc:
+            raise ConditionedDatasetError(
+                "candidate_commit_changed", "The conditioned candidate completion marker is missing or changed."
+            ) from exc
+        if stable_hash(phase7_commit) != candidate.get("phase7_commit_identity"):
+            raise ConditionedDatasetError(
+                "candidate_commit_changed", "The conditioned candidate completion marker binding changed."
             )
         return candidate
 
@@ -1955,7 +2893,7 @@ class ConditionedDatasetService:
             raise ConditionedDatasetError(
                 "candidate_code_stale", "Conditioned production code changed after the candidate was built."
             )
-        payload_inventory = _inventory(root / "candidate" / "phase7")
+        payload_inventory = _inventory(root / "candidate" / "phase7", self.project_root)
         payload_identity = _inventory_identity(payload_inventory)
         if payload_inventory != candidate.get("payload_inventory") or payload_identity != candidate.get(
             "payload_inventory_sha256"
@@ -2006,7 +2944,7 @@ class ConditionedDatasetService:
             raise ConditionedDatasetError(
                 "evidence_schema", "Independent evidence contains unknown or private-path-bearing fields."
             )
-        if value.get("schema_version") != schema or str(value.get("verdict", "")).upper() != "PASS":
+        if value.get("schema_version") != schema or value.get("verdict") != "PASS":
             raise ConditionedDatasetError(
                 "evidence_verdict", "The selected independent report is not an applicable PASS report."
             )
@@ -2098,7 +3036,7 @@ class ConditionedDatasetService:
             raise ConditionedDatasetError(
                 "evidence_checks", "Independent evidence does not contain the complete mandatory gate set."
             )
-        if {str(result).upper() for result in checks.values()} != {"PASS"}:
+        if any(type(result) is not str or result != "PASS" for result in checks.values()):
             raise ConditionedDatasetError("evidence_checks", "Every mandatory independent evidence gate must PASS.")
         run_payload = dict(value)
         run_identity = str(run_payload.pop("audit_run_identity", ""))
@@ -2133,32 +3071,198 @@ class ConditionedDatasetService:
                     "evidence_identity", "A selected evidence identity is invalid.", status_code=422
                 )
             reference = stored.get(kind)
-            if not isinstance(reference, Mapping) or reference.get("sha256") != digest:
+            if (
+                not isinstance(reference, Mapping)
+                or set(reference)
+                != {
+                    "relative_path",
+                    "sha256",
+                    "byte_count",
+                    "auditor_id",
+                    "audit_run_identity",
+                    "operation_id",
+                    "operation_identity",
+                    "receipt",
+                    "action",
+                }
+                or reference.get("sha256") != digest
+            ):
                 raise ConditionedDatasetError(
                     "evidence_selection", "The selected evidence is not the verified report attached to this candidate."
                 )
             relative = _canonical_relative(str(reference.get("relative_path") or ""))
             parts = PurePosixPath(relative).parts
-            if len(parts) != 2 or parts[0] != "evidence":
+            if len(parts) != 2 or parts[0] != "evidence" or parts[1] != f"{kind}-{digest}.json":
                 raise ConditionedDatasetError("evidence_changed", "Independent evidence location changed.")
+            receipt_reference = reference.get("receipt")
+            if not isinstance(receipt_reference, Mapping) or set(receipt_reference) != {
+                "relative_path",
+                "sha256",
+                "byte_count",
+                "receipt_identity",
+            }:
+                raise ConditionedDatasetError(
+                    "independent_audit_receipt", "The selected evidence lacks its server-managed audit receipt."
+                )
+            receipt_relative = _canonical_relative(str(receipt_reference.get("relative_path") or ""))
+            receipt_parts = PurePosixPath(receipt_relative).parts
+            receipt_identity = str(receipt_reference.get("receipt_identity") or "")
+            receipt_digest = str(receipt_reference.get("sha256") or "")
+            if (
+                len(receipt_parts) != 2
+                or receipt_parts[0] != "evidence"
+                or receipt_parts[1] != f"{kind}-receipt-{receipt_identity}.json"
+                or not SHA256_PATTERN.fullmatch(receipt_identity)
+                or not SHA256_PATTERN.fullmatch(receipt_digest)
+            ):
+                raise ConditionedDatasetError(
+                    "independent_audit_receipt", "The selected audit receipt location or identity changed."
+                )
+            action_reference = reference.get("action")
+            if not isinstance(action_reference, Mapping) or set(action_reference) != {
+                "relative_path",
+                "sha256",
+                "byte_count",
+                "record_identity",
+            }:
+                raise ConditionedDatasetError(
+                    "independent_audit_action", "The selected evidence lacks its durable server action record."
+                )
+            action_relative = _canonical_relative(str(action_reference.get("relative_path") or ""))
+            action_parts = PurePosixPath(action_relative).parts
+            action_identity = str(action_reference.get("record_identity") or "")
+            action_digest = str(action_reference.get("sha256") or "")
+            expected_action_name = f"{kind}-{reference.get('operation_id')}.json"
+            if (
+                len(action_parts) != 2
+                or action_parts[0] != "audit_actions"
+                or action_parts[1] != expected_action_name
+                or not SHA256_PATTERN.fullmatch(action_identity)
+                or not SHA256_PATTERN.fullmatch(action_digest)
+            ):
+                raise ConditionedDatasetError(
+                    "independent_audit_action", "The selected audit action location or identity changed."
+                )
             evidence_root = require_confined_path(root / "evidence", root)
+            actions_root = require_confined_path(root / "audit_actions", root)
             path = evidence_root / parts[1]
-            with AnchoredDirectory(evidence_root, root) as anchor:
+            receipt_path = evidence_root / receipt_parts[1]
+            action_path = actions_root / action_parts[1]
+            with open_anchored_directory(evidence_root, self.project_root) as anchor:
                 content = _read_anchored_regular_bytes(anchor, parts[1], max_bytes=64 * 1024 * 1024)
+                receipt_content = _read_anchored_regular_bytes(
+                    anchor,
+                    receipt_parts[1],
+                    max_bytes=16 * 1024 * 1024,
+                )
+            with open_anchored_directory(actions_root, self.project_root) as action_anchor:
+                action_content = _read_anchored_regular_bytes(
+                    action_anchor,
+                    action_parts[1],
+                    max_bytes=16 * 1024 * 1024,
+                )
             if hashlib.sha256(content).hexdigest() != digest or len(content) != reference.get("byte_count"):
                 raise ConditionedDatasetError("evidence_changed", "Independent evidence bytes changed after selection.")
+            if hashlib.sha256(receipt_content).hexdigest() != receipt_digest or len(
+                receipt_content
+            ) != receipt_reference.get("byte_count"):
+                raise ConditionedDatasetError(
+                    "independent_audit_receipt", "The server-managed audit receipt bytes changed after selection."
+                )
+            if hashlib.sha256(action_content).hexdigest() != action_digest or len(
+                action_content
+            ) != action_reference.get("byte_count"):
+                raise ConditionedDatasetError(
+                    "independent_audit_action", "The durable audit action-record bytes changed after selection."
+                )
             try:
                 value = strict_json_loads(content)
+                receipt_value = strict_json_loads(receipt_content)
+                action_value = strict_json_loads(action_content)
             except ValueError as exc:
                 raise ConditionedDatasetError(
                     "evidence_changed", "Independent evidence is no longer readable."
                 ) from exc
+            document = self._validate_evidence(kind, value, candidate)
+            if content != (strict_json_dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8"):
+                raise ConditionedDatasetError(
+                    "evidence_changed", "Independent evidence is not the exact canonical report."
+                )
+            current_inventory = trusted_auditor_inventory(kind)
+            try:
+                validated_receipt = validate_audit_receipt(
+                    receipt_value,
+                    kind=kind,
+                    expected_job_id=root.name,
+                    expected_report_sha256=digest,
+                    expected_report_byte_count=len(content),
+                    report=document,
+                    candidate=candidate,
+                    current_auditor_inventory=current_inventory,
+                )
+            except ConditionedAuditReceiptError as exc:
+                raise ConditionedDatasetError(
+                    "independent_audit_receipt", "The server-managed audit receipt is invalid or stale."
+                ) from exc
+            if (
+                receipt_content
+                != (strict_json_dumps(validated_receipt, indent=2, sort_keys=True) + "\n").encode("utf-8")
+                or validated_receipt.get("receipt_identity") != receipt_identity
+                or validated_receipt.get("operation_id") != reference.get("operation_id")
+                or validated_receipt.get("operation_identity") != reference.get("operation_identity")
+                or validated_receipt.get("audit_run_identity") != reference.get("audit_run_identity")
+                or validated_receipt.get("auditor_id") != reference.get("auditor_id")
+            ):
+                raise ConditionedDatasetError(
+                    "independent_audit_receipt", "The selected audit receipt differs from its job-state binding."
+                )
+            try:
+                validated_action = validate_audit_action_record(
+                    action_value,
+                    kind=kind,
+                    expected_job_id=root.name,
+                    expected_report_sha256=digest,
+                    expected_report_byte_count=len(content),
+                    report=document,
+                    expected_receipt_sha256=receipt_digest,
+                    expected_receipt_byte_count=len(receipt_content),
+                    receipt=validated_receipt,
+                    candidate=candidate,
+                    current_auditor_inventory=current_inventory,
+                )
+            except ConditionedAuditReceiptError as exc:
+                raise ConditionedDatasetError(
+                    "independent_audit_action", "The durable server audit action record is invalid or stale."
+                ) from exc
+            if (
+                action_content != (strict_json_dumps(validated_action, indent=2, sort_keys=True) + "\n").encode("utf-8")
+                or validated_action.get("record_identity") != action_identity
+                or validated_action.get("operation_id") != reference.get("operation_id")
+                or validated_action.get("operation_identity") != reference.get("operation_identity")
+            ):
+                raise ConditionedDatasetError(
+                    "independent_audit_action", "The selected audit action differs from its job-state binding."
+                )
             results[kind] = {
-                "document": self._validate_evidence(kind, value, candidate),
+                "document": document,
                 "path": path,
                 "sha256": digest,
                 "byte_count": len(content),
                 "content": content,
+                "receipt": {
+                    "document": validated_receipt,
+                    "path": receipt_path,
+                    "sha256": receipt_digest,
+                    "byte_count": len(receipt_content),
+                    "content": receipt_content,
+                },
+                "action": {
+                    "document": validated_action,
+                    "path": action_path,
+                    "sha256": action_digest,
+                    "byte_count": len(action_content),
+                    "content": action_content,
+                },
             }
         return results
 
@@ -2167,193 +3271,155 @@ class ConditionedDatasetService:
         job_root: Path,
         candidate: Mapping[str, Any],
         evidence: Mapping[str, Mapping[str, Any]],
-        *,
-        rollback_record: dict[str, Any],
     ) -> dict[str, Any]:
+        """Publish an exact direct-final pair, authorized only by its final marker."""
+
         source_root = require_confined_path(job_root / "candidate" / "phase7", job_root)
-        source_inventory = _inventory(source_root)
+        source_inventory = _inventory(source_root, self.project_root)
         files: dict[str, dict[str, Any]] = dict(source_inventory)
+        dataset_contents: dict[str, bytes] = {}
+        with open_anchored_directory(source_root, self.project_root) as source_anchor:
+            for relative, expected in sorted(source_inventory.items()):
+                if len(PurePosixPath(relative).parts) != 1:
+                    raise ConditionedDatasetError(
+                        "publication_layout_unsupported",
+                        "Conditioned candidate publication accepts only its fixed flat artifact layout.",
+                    )
+                content = _read_anchored_regular_bytes(
+                    source_anchor,
+                    relative,
+                    max_bytes=max(self.policy.max_source_bytes, 1024 * 1024 * 1024),
+                )
+                if hashlib.sha256(content).hexdigest() != expected["sha256"] or len(content) != expected["byte_count"]:
+                    raise ConditionedDatasetError(
+                        "candidate_copy_changed",
+                        "A candidate file changed during freeze publication.",
+                    )
+                dataset_contents[relative] = content
+
         for kind in ("label_audit", "dataset_validation"):
             record = evidence[kind]
-            files[f"evidence/{kind}.json"] = {
-                "sha256": record["sha256"],
-                "byte_count": record["byte_count"],
-            }
-        publication_identity = _inventory_identity(files)
-        datasets_root = _ensure_anchored_child_directory(self.project_root, self.project_root, "datasets")
-        if datasets_root != self.datasets_root:
-            raise ConditionedDatasetError("datasets_root_unsafe", "The project datasets directory changed.")
-        if not _safe_directory(self.datasets_root):
-            raise ConditionedDatasetError(
-                "datasets_root_unsafe", "The project datasets directory is unsafe for publication."
-            )
-        name = f"conditioned-v5-{publication_identity}"
-        final = require_confined_path(self.datasets_root / name, self.datasets_root)
-        campaigns_root = _ensure_anchored_child_directory(self.project_root, self.project_root, "campaigns")
-        if campaigns_root != self.campaigns_root:
-            raise ConditionedDatasetError("campaigns_root_unsafe", "The project campaigns directory changed.")
-        if not _safe_directory(self.campaigns_root):
-            raise ConditionedDatasetError(
-                "campaigns_root_unsafe", "The project campaigns directory is unsafe for publication."
-            )
-        campaign_name = f"conditioned-v5-{publication_identity}"
-        campaign_directory = require_confined_path(self.campaigns_root / campaign_name, self.campaigns_root)
-        with AnchoredDirectory(self.datasets_root, self.project_root) as dataset_parent:
-            if dataset_parent.lexists(final.name):
+            report_content = record.get("content")
+            if not isinstance(report_content, bytes):
                 raise ConditionedDatasetError(
-                    "fresh_publication_required",
-                    "This content-addressed publication already exists; it was not overwritten.",
+                    "evidence_changed",
+                    "Independent evidence bytes are unavailable for publication.",
                 )
-            staging_name, staging_identity = dataset_parent.mkdir_unique(f".{name}.staging-")
-        staging = self.datasets_root / staging_name
-        try:
-            with AnchoredDirectory(self.campaigns_root, self.project_root) as campaign_parent:
-                if campaign_parent.lexists(campaign_directory.name):
-                    raise ConditionedDatasetError(
-                        "fresh_campaign_required",
-                        "The conditioned campaign directory already exists and was not reused.",
-                    )
-                campaign_staging_name, campaign_staging_identity = campaign_parent.mkdir_unique(
-                    f".{campaign_name}.staging-"
-                )
-        except BaseException:
-            _quarantine_owned_directory(
-                staging,
-                self.datasets_root,
-                staging_identity,
-                prefix=f".rollback-{name}-",
-            )
-            raise
-        campaign_staging = self.campaigns_root / campaign_staging_name
-        staged_dataset_inventory: dict[str, dict[str, Any]] | None = None
-        try:
-            with (
-                AnchoredDirectory(source_root, job_root) as source_anchor,
-                AnchoredDirectory(staging, self.datasets_root) as staging_anchor,
-            ):
-                for relative, expected in sorted(source_inventory.items()):
-                    if len(PurePosixPath(relative).parts) != 1:
-                        raise ConditionedDatasetError(
-                            "publication_layout_unsupported",
-                            "Conditioned candidate publication accepts only its fixed flat artifact layout.",
-                        )
-                    content = _read_anchored_regular_bytes(
-                        source_anchor,
-                        relative,
-                        max_bytes=max(self.policy.max_source_bytes, 1024 * 1024 * 1024),
-                    )
-                    if (
-                        hashlib.sha256(content).hexdigest() != expected["sha256"]
-                        or len(content) != expected["byte_count"]
-                    ):
-                        raise ConditionedDatasetError(
-                            "candidate_copy_changed", "A candidate file changed during freeze publication."
-                        )
-                    staging_anchor.atomic_write_bytes(relative, content)
-            evidence_staging = _ensure_anchored_child_directory(staging, self.datasets_root, "evidence")
-            with AnchoredDirectory(evidence_staging, staging) as evidence_anchor:
-                for kind in ("label_audit", "dataset_validation"):
-                    record = evidence[kind]
-                    content = record.get("content")
-                    if not isinstance(content, bytes):
-                        raise ConditionedDatasetError(
-                            "evidence_changed", "Independent evidence bytes are unavailable for publication."
-                        )
-                    evidence_anchor.atomic_write_bytes(f"{kind}.json", content)
-            actual = _inventory(staging)
-            if actual != files:
-                raise ConditionedDatasetError(
-                    "publication_copy_mismatch", "The staged publication inventory does not match the authorized bytes."
-                )
-            inventory_payload = _inventory_payload(actual)
-            artifact_names = {
-                "view_manifest": "view_manifest.json",
-                "split_manifest": "training_manifest.jsonl",
-                "conditioning_vocabulary": "conditioning_vocabulary.json",
-                "benchmark_manifest": "benchmark_manifest.json",
-                "labeling_audit": "evidence/label_audit.json",
-                "validation_report": "evidence/dataset_validation.json",
+            report_relative = f"evidence/{kind}.json"
+            dataset_contents[report_relative] = report_content
+            files[report_relative] = {
+                "sha256": str(record["sha256"]),
+                "byte_count": int(record["byte_count"]),
             }
-            artifacts = {name: {"path": path, **actual[path]} for name, path in artifact_names.items()}
-            activation = {
-                "schema_version": ACTIVATION_SCHEMA,
-                "dataset_version": 5,
-                "dataset_kind": "conditioned",
-                "requires_semantic_labels": True,
-                "status": "complete",
-                "production_authorized": True,
-                "immutable": True,
-                "image_count": candidate["image_count"],
-                "dataset_identity": candidate["candidate_identity"],
-                "publication_identity_sha256": publication_identity,
-                "labeling_audit_sha256": evidence["label_audit"]["sha256"],
-                "validation_report_sha256": evidence["dataset_validation"]["sha256"],
-                "artifacts": artifacts,
-                "publication_inventory": {
-                    **inventory_payload,
-                    "inventory_sha256": _inventory_identity(actual),
-                },
-                "licenses": list(candidate["license_ids"]),
-                "paths_are_relative": True,
-                "paths_exposed": False,
-            }
-            with AnchoredDirectory(staging, self.datasets_root) as staging_anchor:
-                staging_anchor.atomic_write_bytes(
-                    "activation.json",
-                    (strict_json_dumps(activation, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-                )
-            staged_dataset_inventory = _inventory(staging)
-            activation_sha256 = staged_dataset_inventory["activation.json"]["sha256"]
-            with AnchoredDirectory(self.datasets_root, self.project_root) as dataset_parent:
-                _publish_directory_noreplace(
-                    dataset_parent,
-                    staging.name,
-                    final.name,
-                    staging_identity,
-                )
-            if _inventory(final) != staged_dataset_inventory:
+            _receipt_artifact_name, receipt_relative = AUDIT_RECEIPT_ARTIFACTS[kind]
+            receipt = record.get("receipt")
+            receipt_content = receipt.get("content") if isinstance(receipt, Mapping) else None
+            if not isinstance(receipt, Mapping) or not isinstance(receipt_content, bytes):
                 raise ConditionedDatasetError(
-                    "publication_post_rename_changed",
-                    "The freeze bytes changed across atomic no-replace publication.",
+                    "independent_audit_receipt",
+                    "Server-managed audit receipt bytes are required for publication.",
                 )
-            rollback_record.update(
-                {
-                    "dataset_path": final,
-                    "dataset_boundary": self.datasets_root,
-                    "dataset_inventory": staged_dataset_inventory,
-                    "dataset_identity": staging_identity,
-                }
-            )
-        except BaseException:
-            cleanup_actions: list[Callable[[], Any]] = [
-                lambda: _quarantine_owned_directory(
-                    campaign_staging,
-                    self.campaigns_root,
-                    campaign_staging_identity,
-                    prefix=f".rollback-{campaign_name}-",
-                ),
-                lambda: _quarantine_owned_directory(
-                    staging,
-                    self.datasets_root,
-                    staging_identity,
-                    prefix=f".rollback-{name}-",
-                ),
-            ]
-            if staged_dataset_inventory is not None:
-                cleanup_actions.append(
-                    lambda: _rollback_published_directory(
-                        final,
-                        self.datasets_root,
-                        staged_dataset_inventory,
-                        staging_identity,
-                    )
+            dataset_contents[receipt_relative] = receipt_content
+            files[receipt_relative] = {
+                "sha256": str(receipt["sha256"]),
+                "byte_count": int(receipt["byte_count"]),
+            }
+            _action_artifact_name, action_relative = AUDIT_ACTION_RECORD_ARTIFACTS[kind]
+            action = record.get("action")
+            action_content = action.get("content") if isinstance(action, Mapping) else None
+            if not isinstance(action, Mapping) or not isinstance(action_content, bytes):
+                raise ConditionedDatasetError(
+                    "independent_audit_action",
+                    "A durable server audit action record is required for publication.",
                 )
-            _run_cleanup_actions(cleanup_actions)
-            raise
+            dataset_contents[action_relative] = action_content
+            files[action_relative] = {
+                "sha256": str(action["sha256"]),
+                "byte_count": int(action["byte_count"]),
+            }
 
-        activation_path = final / "activation.json"
-        activation_relative = activation_path.relative_to(self.project_root).as_posix()
-        campaign_staging_relative = campaign_staging.relative_to(self.project_root).as_posix()
+        if _content_inventory(dataset_contents) != files:
+            raise ConditionedDatasetError(
+                "publication_copy_mismatch",
+                "The exact publication bytes do not match their authorized inventory.",
+            )
+        publication_identity = _inventory_identity(files)
+        name = f"conditioned-v5-{publication_identity}"
+        datasets_root = _ensure_anchored_child_directory(self.project_root, self.project_root, "datasets")
+        campaigns_root = _ensure_anchored_child_directory(self.project_root, self.project_root, "campaigns")
+        if datasets_root != self.datasets_root or not _safe_directory(self.datasets_root):
+            raise ConditionedDatasetError(
+                "datasets_root_unsafe",
+                "The project datasets directory is unsafe for publication.",
+            )
+        if campaigns_root != self.campaigns_root or not _safe_directory(self.campaigns_root):
+            raise ConditionedDatasetError(
+                "campaigns_root_unsafe",
+                "The project campaigns directory is unsafe for publication.",
+            )
+        final = require_confined_path(self.datasets_root / name, self.datasets_root)
+        campaign_directory = require_confined_path(self.campaigns_root / name, self.campaigns_root)
+
+        inventory_payload = _inventory_payload(files)
+        artifact_names = {
+            "view_manifest": "view_manifest.json",
+            "split_manifest": "training_manifest.jsonl",
+            "conditioning_vocabulary": "conditioning_vocabulary.json",
+            "benchmark_manifest": "benchmark_manifest.json",
+            "labeling_audit": "evidence/label_audit.json",
+            "labeling_audit_receipt": "evidence/label_audit_receipt.json",
+            "labeling_audit_action_record": "evidence/label_audit_action.json",
+            "validation_report": "evidence/dataset_validation.json",
+            "validation_receipt": "evidence/dataset_validation_receipt.json",
+            "validation_action_record": "evidence/dataset_validation_action.json",
+        }
+        artifacts = {artifact: {"path": path, **files[path]} for artifact, path in artifact_names.items()}
+        activation = {
+            "schema_version": ACTIVATION_SCHEMA,
+            "dataset_version": 5,
+            "dataset_kind": "conditioned",
+            "requires_semantic_labels": True,
+            "status": "complete",
+            "production_authorized": True,
+            "immutable": True,
+            "image_count": candidate["image_count"],
+            "dataset_identity": candidate["candidate_identity"],
+            "publication_identity_sha256": publication_identity,
+            "labeling_audit_sha256": evidence["label_audit"]["sha256"],
+            "validation_report_sha256": evidence["dataset_validation"]["sha256"],
+            "artifacts": artifacts,
+            "publication_inventory": {
+                **inventory_payload,
+                "inventory_sha256": _inventory_identity(files),
+            },
+            "licenses": list(candidate["license_ids"]),
+            "paths_are_relative": True,
+            "paths_exposed": False,
+        }
+        activation_content = (strict_json_dumps(activation, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        dataset_contents["activation.json"] = activation_content
+        dataset_inventory = _content_inventory(dataset_contents)
+        activation_sha256 = dataset_inventory["activation.json"]["sha256"]
+
+        with open_anchored_directory(self.datasets_root, self.project_root) as dataset_parent:
+            with _open_or_create_direct_final_directory(dataset_parent, final.name) as (
+                dataset_anchor,
+                dataset_created,
+            ):
+                if dataset_created:
+                    _publish_direct_final_contents(
+                        dataset_anchor,
+                        dataset_contents,
+                        residue_prefix=".dataset-publication-residue-",
+                    )
+                if _inventory_from_anchor(dataset_anchor) != dataset_inventory:
+                    raise ConditionedDatasetError(
+                        "publication_copy_mismatch",
+                        "The direct-final dataset inventory differs from the intended exact bytes.",
+                    )
+
+        activation_relative = (final / "activation.json").relative_to(self.project_root).as_posix()
+        campaign_relative = campaign_directory.relative_to(self.project_root).as_posix()
         builder = self._campaign_builder
         if builder is None:
             from spritelab.product_features.training.activation import build_conditioned_three_seed_campaign
@@ -2362,7 +3428,7 @@ class ConditionedDatasetService:
         try:
             built = builder(
                 self.project_root,
-                campaign_directory=campaign_staging_relative,
+                campaign_directory=campaign_relative,
                 activation_manifest=activation_relative,
                 activation_manifest_sha256=activation_sha256,
                 view_manifest=(final / "view_manifest.json").relative_to(self.project_root).as_posix(),
@@ -2378,26 +3444,20 @@ class ConditionedDatasetService:
             resolved_campaign = dict(built.campaign)
             validation = dict(built.validation)
         except (OSError, ValueError, TypeError, KeyError) as exc:
-            _run_cleanup_actions(
-                [
-                    lambda: _quarantine_owned_directory(
-                        campaign_staging,
-                        self.campaigns_root,
-                        campaign_staging_identity,
-                        prefix=f".rollback-{campaign_name}-",
-                    ),
-                    lambda: _rollback_published_directory(
-                        final,
-                        self.datasets_root,
-                        staged_dataset_inventory,
-                        staging_identity,
-                    ),
-                ]
-            )
             raise ConditionedDatasetError(
                 "campaign_build_failed",
-                "Freeze and campaign publication failed transactionally; configuration was not changed.",
+                "The exact conditioned campaign could not be built; uncommitted bytes were retained.",
             ) from exc
+        if (
+            validation.get("launch_ready") is not True
+            or portable.get("seeds") != [731001, 731002, 731003]
+            or dict(portable.get("training") or {}).get("max_optimizer_steps") != 5_000
+            or not SHA256_PATTERN.fullmatch(str(resolved_campaign.get("campaign_identity") or ""))
+        ):
+            raise ConditionedDatasetError(
+                "campaign_build_failed",
+                "The exact conditioned campaign is not launch-ready.",
+            )
         campaign_document = {
             "schema_version": "spritelab.training.conditioned-campaign-config.v1",
             "product_profiles": {
@@ -2407,84 +3467,95 @@ class ConditionedDatasetService:
                 }
             },
         }
-        if (
-            validation.get("launch_ready") is not True
-            or portable.get("seeds") != [731001, 731002, 731003]
-            or dict(portable.get("training") or {}).get("max_optimizer_steps") != 5_000
-            or not SHA256_PATTERN.fullmatch(str(resolved_campaign.get("campaign_identity") or ""))
-        ):
-            _run_cleanup_actions(
-                [
-                    lambda: _quarantine_owned_directory(
-                        campaign_staging,
-                        self.campaigns_root,
-                        campaign_staging_identity,
-                        prefix=f".rollback-{campaign_name}-",
-                    ),
-                    lambda: _rollback_published_directory(
-                        final,
-                        self.datasets_root,
-                        staged_dataset_inventory,
-                        staging_identity,
-                    ),
-                ]
-            )
-            raise ConditionedDatasetError(
-                "campaign_build_failed", "The exact conditioned campaign is not launch-ready."
-            )
-        staged_campaign_inventory: dict[str, dict[str, Any]] | None = None
+        campaign_content = (strict_json_dumps(campaign_document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        campaign_contents = {"campaign.json": campaign_content}
+        campaign_inventory = _content_inventory(campaign_contents)
+        campaign_sha256 = campaign_inventory["campaign.json"]["sha256"]
+        with open_anchored_directory(self.campaigns_root, self.project_root) as campaign_parent:
+            if campaign_parent.lexists(campaign_directory.name):
+                with campaign_parent.open_directory_immovable(campaign_directory.name) as existing_campaign:
+                    if _inventory_from_anchor(existing_campaign) != campaign_inventory:
+                        raise ConditionedDatasetError(
+                            "campaign_copy_mismatch",
+                            "A pre-existing campaign directory differs from the intended exact bytes.",
+                        )
         try:
-            with AnchoredDirectory(campaign_staging, self.campaigns_root) as campaign_staging_anchor:
-                campaign_staging_anchor.atomic_write_bytes(
-                    "campaign.json",
-                    (strict_json_dumps(campaign_document, indent=2, sort_keys=True) + "\n").encode("utf-8"),
-                )
-            staged_campaign_inventory = _inventory(campaign_staging)
-            campaign_sha256 = staged_campaign_inventory["campaign.json"]["sha256"]
-            with AnchoredDirectory(self.campaigns_root, self.project_root) as campaign_parent:
-                _publish_directory_noreplace(
-                    campaign_parent,
-                    campaign_staging.name,
-                    campaign_directory.name,
-                    campaign_staging_identity,
-                )
-            if _inventory(campaign_directory) != staged_campaign_inventory:
+            journal = build_publication_journal(
+                publication_identity=publication_identity,
+                dataset_inventory=dataset_inventory,
+                campaign_inventory=campaign_inventory,
+            )
+            dataset_marker = build_dataset_commit(
+                journal=journal,
+                dataset_inventory=dataset_inventory,
+                campaign_inventory=campaign_inventory,
+            )
+            campaign_marker = build_campaign_commit(
+                journal=journal,
+                dataset_commit=dataset_marker,
+                dataset_inventory=dataset_inventory,
+                campaign_inventory=campaign_inventory,
+            )
+        except PublicationCommitError as exc:
+            raise ConditionedDatasetError(
+                "publication_commit_invalid",
+                "The conditioned publication commit evidence could not be built.",
+            ) from exc
+
+        with open_anchored_directory(job_root, self.project_root) as job_anchor:
+            if not dataset_created and not job_anchor.lexists(PUBLICATION_JOURNAL_NAME):
                 raise ConditionedDatasetError(
-                    "campaign_post_rename_changed",
-                    "The campaign bytes changed across atomic no-replace publication.",
+                    "publication_recovery_unbound",
+                    "A pre-existing uncommitted dataset directory has no exact PREPARED journal.",
                 )
-            rollback_record.update(
-                {
-                    "campaign_path": campaign_directory,
-                    "campaign_boundary": self.campaigns_root,
-                    "campaign_inventory": staged_campaign_inventory,
-                    "campaign_identity": campaign_staging_identity,
-                }
+            _publish_or_reuse_immutable_file(
+                job_anchor,
+                PUBLICATION_JOURNAL_NAME,
+                canonical_publication_commit_bytes(journal),
+                residue_prefix=".publication-journal-residue-",
             )
-        except BaseException:
-            entries = []
-            if os.path.lexists(campaign_directory) and staged_campaign_inventory is not None:
-                entries.append(
-                    (
-                        campaign_directory,
-                        self.campaigns_root,
-                        staged_campaign_inventory,
-                        campaign_staging_identity,
+        with open_anchored_directory(self.datasets_root, self.project_root) as dataset_parent:
+            _publish_or_reuse_immutable_file(
+                dataset_parent,
+                dataset_commit_name(publication_identity),
+                canonical_publication_commit_bytes(dataset_marker),
+                residue_prefix=".dataset-commit-residue-",
+            )
+        _conditioned_publication_checkpoint("dataset_marker_committed")
+
+        with open_anchored_directory(self.campaigns_root, self.project_root) as campaign_parent:
+            with _open_or_create_direct_final_directory(campaign_parent, campaign_directory.name) as (
+                campaign_anchor,
+                campaign_created,
+            ):
+                if campaign_created:
+                    _publish_direct_final_contents(
+                        campaign_anchor,
+                        campaign_contents,
+                        residue_prefix=".campaign-publication-residue-",
                     )
-                )
-            entries.append((final, self.datasets_root, staged_dataset_inventory, staging_identity))
-            _run_cleanup_actions(
-                [
-                    lambda: _quarantine_owned_directory(
-                        campaign_staging,
-                        self.campaigns_root,
-                        campaign_staging_identity,
-                        prefix=f".rollback-{campaign_name}-",
-                    ),
-                    lambda: _rollback_published_directories(entries),
-                ]
+                if _inventory_from_anchor(campaign_anchor) != campaign_inventory:
+                    raise ConditionedDatasetError(
+                        "campaign_copy_mismatch",
+                        "The direct-final campaign inventory differs from the intended exact bytes.",
+                    )
+            _publish_or_reuse_immutable_file(
+                campaign_parent,
+                campaign_commit_name(publication_identity),
+                canonical_publication_commit_bytes(campaign_marker),
+                residue_prefix=".campaign-commit-residue-",
             )
-            raise
+        _conditioned_publication_checkpoint("campaign_marker_committed")
+
+        _verify_conditioned_publication_pair(
+            project_root=self.project_root,
+            job_root=job_root,
+            dataset_directory=final,
+            campaign_directory=campaign_directory,
+            publication_identity=publication_identity,
+            dataset_inventory=dataset_inventory,
+            campaign_inventory=campaign_inventory,
+        )
         campaign_path = campaign_directory / "campaign.json"
         return {
             "publication_identity_sha256": publication_identity,
@@ -2515,7 +3586,7 @@ class ConditionedDatasetService:
         return root
 
     def _read_state(self, root: Path) -> dict[str, Any]:
-        with AnchoredDirectory(root, root) as anchor:
+        with open_anchored_directory(root, self.project_root) as anchor:
             content = _read_anchored_regular_bytes(anchor, "state.json", max_bytes=16 * 1024 * 1024)
         try:
             value = strict_json_loads(content)
@@ -2548,8 +3619,8 @@ class ConditionedDatasetService:
             raise ConditionedDatasetError(
                 "private_path_persistence", "A private project path was refused from durable job state."
             )
-        with AnchoredDirectory(root, root) as anchor:
-            anchor.atomic_write_bytes("state.json", payload.encode("utf-8"))
+        with open_anchored_directory(root, self.project_root) as anchor:
+            _write_anchored_bytes(anchor, "state.json", payload.encode("utf-8"))
 
     @contextmanager
     def _state_transaction(
@@ -2672,7 +3743,7 @@ def _safe_directory(path: Path) -> bool:
 def _ensure_anchored_child_directory(parent: Path, boundary: Path, name: str) -> Path:
     """Create or validate one fixed direct-child directory through a stable parent."""
 
-    with AnchoredDirectory(parent, boundary) as anchor:
+    with open_anchored_directory(parent, boundary) as anchor:
         try:
             anchor.mkdir(name, exist_ok=True)
         except (OSError, UnsafeFilesystemOperation) as exc:
@@ -2689,7 +3760,7 @@ def _create_anchored_named_directory(
 ) -> tuple[Path, OwnedFileIdentity]:
     """Publish one fresh fixed-name directory and retain its inode identity."""
 
-    with AnchoredDirectory(parent, boundary) as anchor:
+    with open_anchored_directory(parent, boundary) as anchor:
         try:
             identity = anchor.mkdir(name, exist_ok=False)
         except FileExistsError as exc:
@@ -2820,119 +3891,499 @@ def _require_same_directory_metadata(before: os.stat_result, after: os.stat_resu
         raise ConditionedDatasetError("mutation_root_changed", message)
 
 
-def _publish_directory_noreplace(
-    anchor: AnchoredDirectory,
-    source_name: str,
-    target_name: str,
-    identity: OwnedFileIdentity,
-) -> None:
-    """Atomically publish one exact owned directory through its stable parent."""
+def _content_inventory(contents: Mapping[str, bytes]) -> dict[str, dict[str, Any]]:
+    return {
+        relative: {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "byte_count": len(content),
+        }
+        for relative, content in sorted(contents.items())
+    }
 
-    if not anchor.lexists(source_name) or not identity.matches(anchor.lstat(source_name)):
-        raise ConditionedDatasetError(
-            "publication_staging_unsafe", "A conditioned publication staging identity changed."
+
+@contextmanager
+def _open_or_create_direct_final_directory(
+    parent: AnchoredDirectory,
+    name: str,
+) -> Iterator[tuple[AnchoredDirectory, bool]]:
+    """Create one final directory directly, or retain an existing one for validation."""
+
+    created = not parent.lexists(name)
+    identity = parent.mkdir(name, exist_ok=False) if created else None
+    with parent.open_directory_immovable(name) as child:
+        if identity is not None and not identity.matches(child.directory_metadata()):
+            raise ConditionedDatasetError(
+                "publication_directory_changed",
+                "A direct-final publication directory changed immediately after creation.",
+            )
+        child.verify()
+        yield child, created
+        child.verify()
+
+
+def _publish_direct_final_contents(
+    root: AnchoredDirectory,
+    contents: Mapping[str, bytes],
+    *,
+    residue_prefix: str,
+) -> None:
+    """Populate one newly-created direct-final directory through retained anchors."""
+
+    flat: dict[str, bytes] = {}
+    evidence: dict[str, bytes] = {}
+    for relative, content in sorted(contents.items()):
+        parts = PurePosixPath(_canonical_relative(relative)).parts
+        if len(parts) == 1:
+            flat[parts[0]] = content
+        elif len(parts) == 2 and parts[0] == "evidence":
+            evidence[parts[1]] = content
+        else:
+            raise ConditionedDatasetError(
+                "publication_layout_unsupported",
+                "Direct-final publication accepts only its fixed flat/evidence layout.",
+            )
+    for name, content in sorted(flat.items()):
+        _publish_or_reuse_immutable_file(
+            root,
+            name,
+            content,
+            residue_prefix=residue_prefix,
         )
-    if anchor.lexists(target_name):
-        raise ConditionedDatasetError("fresh_publication_required", "A conditioned publication target already exists.")
+    if not evidence:
+        return
     try:
-        anchor.rename(source_name, target_name, replace=False)
+        identity = root.mkdir("evidence", exist_ok=False)
     except FileExistsError as exc:
         raise ConditionedDatasetError(
-            "fresh_publication_required", "A conditioned publication target appeared concurrently."
+            "publication_directory_changed",
+            "The direct-final evidence directory appeared concurrently.",
         ) from exc
+    with root.open_directory_immovable("evidence") as evidence_anchor:
+        if not identity.matches(evidence_anchor.directory_metadata()):
+            raise ConditionedDatasetError(
+                "publication_directory_changed",
+                "The direct-final evidence directory changed immediately after creation.",
+            )
+        for name, content in sorted(evidence.items()):
+            _publish_or_reuse_immutable_file(
+                evidence_anchor,
+                name,
+                content,
+                residue_prefix=residue_prefix,
+            )
+        evidence_anchor.verify()
+
+
+def _read_canonical_publication_commit(
+    anchor: AnchoredDirectory,
+    name: str,
+) -> dict[str, Any]:
+    content = _read_anchored_regular_bytes(anchor, name, max_bytes=64 * 1024 * 1024)
+    try:
+        value = strict_json_loads(content)
+    except ValueError as exc:
+        raise ConditionedDatasetError(
+            "publication_commit_invalid",
+            "A conditioned publication commit document is invalid JSON.",
+        ) from exc
+    if not isinstance(value, Mapping):
+        raise ConditionedDatasetError(
+            "publication_commit_invalid",
+            "A conditioned publication commit document must be an object.",
+        )
+    document = dict(value)
+    if canonical_publication_commit_bytes(document) != content:
+        raise ConditionedDatasetError(
+            "publication_commit_invalid",
+            "A conditioned publication commit document is not canonical.",
+        )
+    return document
+
+
+def _verify_conditioned_publication_pair(
+    *,
+    project_root: Path,
+    job_root: Path,
+    dataset_directory: Path,
+    campaign_directory: Path,
+    publication_identity: str,
+    dataset_inventory: Mapping[str, Mapping[str, Any]],
+    campaign_inventory: Mapping[str, Mapping[str, Any]],
+) -> None:
+    if _inventory(dataset_directory, project_root) != dict(dataset_inventory):
+        raise ConditionedDatasetError(
+            "publication_commit_invalid",
+            "The marker-bound dataset inventory changed.",
+        )
+    if _inventory(campaign_directory, project_root) != dict(campaign_inventory):
+        raise ConditionedDatasetError(
+            "publication_commit_invalid",
+            "The marker-bound campaign inventory changed.",
+        )
+    with open_anchored_directory(job_root, project_root) as job_anchor:
+        journal = _read_canonical_publication_commit(job_anchor, PUBLICATION_JOURNAL_NAME)
+    with open_anchored_directory(dataset_directory.parent, project_root) as dataset_parent:
+        dataset_marker = _read_canonical_publication_commit(
+            dataset_parent,
+            dataset_commit_name(publication_identity),
+        )
+    with open_anchored_directory(campaign_directory.parent, project_root) as campaign_parent:
+        campaign_marker = _read_canonical_publication_commit(
+            campaign_parent,
+            campaign_commit_name(publication_identity),
+        )
+    try:
+        validate_publication_journal(
+            journal,
+            dataset_inventory=dataset_inventory,
+            campaign_inventory=campaign_inventory,
+        )
+        validate_dataset_commit(
+            dataset_marker,
+            journal=journal,
+            dataset_inventory=dataset_inventory,
+            campaign_inventory=campaign_inventory,
+        )
+        validated = validate_campaign_commit(
+            campaign_marker,
+            journal=journal,
+            dataset_commit=dataset_marker,
+            dataset_inventory=dataset_inventory,
+            campaign_inventory=campaign_inventory,
+        )
+    except PublicationCommitError as exc:
+        raise ConditionedDatasetError(
+            "publication_commit_invalid",
+            "The conditioned dataset/campaign pair marker is invalid.",
+        ) from exc
+    if validated.get("pair_authority") is not True:
+        raise ConditionedDatasetError(
+            "publication_commit_invalid",
+            "The conditioned campaign marker is not pair-authoritative.",
+        )
+
+
+def _conditioned_publication_checkpoint(_step: str) -> None:
+    """Deterministic fault-injection seam after durable publication steps."""
+
+
+def _publish_or_reuse_immutable_file(
+    anchor: AnchoredDirectory,
+    target_name: str,
+    content: bytes,
+    *,
+    residue_prefix: str,
+) -> None:
+    """Publish one direct-child artifact once, or accept identical immutable bytes."""
+
+    if anchor.lexists(target_name):
+        existing = _read_anchored_regular_bytes(anchor, target_name, max_bytes=max(1, len(content)))
+        if existing != content:
+            raise ConditionedDatasetError(
+                "evidence_identity_conflict", "Existing independent evidence bytes conflict with their identity."
+            )
+        return
+    temporary: str | None = None
+    try:
+        descriptor = anchor.open_anonymous_file()
+    except (UnsafeFilesystemOperation, OSError) as exc:
+        if isinstance(exc, OSError) and exc.errno not in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}:
+            raise
+        temporary = f".{target_name}.staging-{uuid.uuid4().hex}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0))
+        descriptor = anchor.open_file(temporary, flags, 0o600)
+    identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            if not identity.matches(os.fstat(handle.fileno())):
+                raise ConditionedDatasetError(
+                    "evidence_staging_changed", "An independent evidence staging file changed while written."
+                )
+        if temporary is not None and not identity.matches(anchor.lstat(temporary)):
+            raise ConditionedDatasetError(
+                "evidence_staging_changed", "An independent evidence staging path changed before publication."
+            )
+        try:
+            anchor.publish_held_file_no_replace(
+                descriptor,
+                temporary,
+                target_name,
+                identity=identity,
+            )
+        except FileExistsError:
+            existing = _read_anchored_regular_bytes(anchor, target_name, max_bytes=max(1, len(content)))
+            if existing != content:
+                raise ConditionedDatasetError(
+                    "evidence_identity_conflict",
+                    "Existing independent evidence bytes conflict with their identity.",
+                ) from None
+            if temporary is not None:
+                anchor.quarantine_if_owned(temporary, identity, prefix=residue_prefix)
+            return
+        if not identity.matches(anchor.lstat(target_name)):
+            raise ConditionedDatasetError(
+                "evidence_publication_changed", "An independent evidence file changed during publication."
+            )
+        if _read_anchored_regular_bytes(anchor, target_name, max_bytes=max(1, len(content))) != content:
+            raise ConditionedDatasetError(
+                "evidence_publication_changed", "Independent evidence bytes changed during publication."
+            )
+    except BaseException:
+        anchor.quarantine_if_owned(target_name, identity, prefix=residue_prefix)
+        if temporary is not None:
+            anchor.quarantine_if_owned(temporary, identity, prefix=residue_prefix)
+        raise
+    finally:
+        os.close(descriptor)
+
+
+def _publish_fresh_immutable_file(
+    anchor: AnchoredDirectory,
+    target_name: str,
+    content: bytes,
+    *,
+    residue_prefix: str,
+) -> None:
+    """Publish one direct-child action record with strict no-replace semantics."""
+
+    if anchor.lexists(target_name):
+        raise ConditionedDatasetError(
+            "audit_action_record_exists",
+            "A durable independent-audit action record already exists for that operation.",
+        )
+    temporary: str | None = None
+    try:
+        descriptor = anchor.open_anonymous_file()
+    except (UnsafeFilesystemOperation, OSError) as exc:
+        if isinstance(exc, OSError) and exc.errno not in {errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}:
+            raise
+        temporary = f".{target_name}.staging-{uuid.uuid4().hex}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0))
+        descriptor = anchor.open_file(temporary, flags, 0o600)
+    identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            if not identity.matches(os.fstat(handle.fileno())):
+                raise ConditionedDatasetError(
+                    "audit_action_staging_changed", "An audit action staging file changed while written."
+                )
+        if temporary is not None and not identity.matches(anchor.lstat(temporary)):
+            raise ConditionedDatasetError(
+                "audit_action_staging_changed", "An audit action staging path changed before publication."
+            )
+        try:
+            anchor.publish_held_file_no_replace(
+                descriptor,
+                temporary,
+                target_name,
+                identity=identity,
+            )
+        except FileExistsError as exc:
+            raise ConditionedDatasetError(
+                "audit_action_record_exists",
+                "A durable independent-audit action record appeared concurrently.",
+            ) from exc
+        if (
+            not identity.matches(anchor.lstat(target_name))
+            or _read_anchored_regular_bytes(anchor, target_name, max_bytes=max(1, len(content))) != content
+        ):
+            raise ConditionedDatasetError(
+                "audit_action_publication_changed", "An audit action record changed during no-replace publication."
+            )
+    except BaseException:
+        anchor.quarantine_if_owned(target_name, identity, prefix=residue_prefix)
+        if temporary is not None:
+            anchor.quarantine_if_owned(temporary, identity, prefix=residue_prefix)
+        raise
+    finally:
+        os.close(descriptor)
+
+
+@dataclass
+class _HeldRegularFileSnapshot:
+    descriptor: int
+    identity: OwnedFileIdentity
+    metadata: os.stat_result
+    content: bytes
+    replaced: bool = False
+
+
+@contextmanager
+def _held_regular_file_snapshot(
+    anchor: AnchoredDirectory,
+    name: str,
+    *,
+    max_bytes: int,
+) -> Iterator[_HeldRegularFileSnapshot]:
+    """Retain one exact file capability across a compare/commit operation."""
+
+    descriptor = anchor.open_file(name, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or _metadata_is_link_or_reparse(metadata)
+            or metadata.st_nlink != 1
+            or metadata.st_size > max_bytes
+        ):
+            raise ConditionedDatasetError(
+                "managed_file_unsafe",
+                "A retained managed file is not a singly linked bounded regular file.",
+            )
+        identity = OwnedFileIdentity.from_stat(metadata)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        content = b""
+        while len(content) <= max_bytes:
+            chunk = os.read(descriptor, min(1024 * 1024, max_bytes + 1 - len(content)))
+            if not chunk:
+                break
+            content += chunk
+        if len(content) != metadata.st_size or len(content) > max_bytes:
+            raise ConditionedDatasetError("managed_file_changed", "A retained managed file changed while read.")
+        snapshot = _HeldRegularFileSnapshot(descriptor, identity, metadata, content)
+        _verify_held_regular_file_snapshot(anchor, name, snapshot)
+        yield snapshot
+        if not snapshot.replaced:
+            _verify_held_regular_file_snapshot(anchor, name, snapshot)
+    finally:
+        os.close(descriptor)
+
+
+def _verify_held_regular_file_snapshot(
+    anchor: AnchoredDirectory,
+    name: str,
+    snapshot: _HeldRegularFileSnapshot,
+) -> None:
+    """Verify that the held descriptor and its public name still contain the same bytes."""
+
+    opened = os.fstat(snapshot.descriptor)
+    current = anchor.lstat(name)
+    expected = snapshot.metadata
+    for metadata in (opened, current):
+        if (
+            not snapshot.identity.matches(metadata)
+            or metadata.st_nlink != 1
+            or metadata.st_size != expected.st_size
+            or metadata.st_mtime_ns != expected.st_mtime_ns
+        ):
+            raise ConditionedDatasetError(
+                "managed_file_changed",
+                "A retained managed file changed before its commit boundary.",
+            )
+    os.lseek(snapshot.descriptor, 0, os.SEEK_SET)
+    observed = b""
+    while len(observed) <= len(snapshot.content):
+        chunk = os.read(snapshot.descriptor, min(1024 * 1024, len(snapshot.content) + 1 - len(observed)))
+        if not chunk:
+            break
+        observed += chunk
+    if observed != snapshot.content:
+        raise ConditionedDatasetError(
+            "managed_file_changed",
+            "A retained managed file's exact bytes changed before its commit boundary.",
+        )
+
+
+def _replace_held_config_if_supported(
+    anchor: AnchoredDirectory,
+    destination: _HeldRegularFileSnapshot,
+    payload: bytes,
+    *,
+    expected_sha256: str,
+) -> bool:
+    """Perform the exact Windows held-handle CAS; POSIX uses marker authority."""
+
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise ConditionedDatasetError("activation_reload_failed", "Activation payload identity changed.")
+    if os.name != "nt":
+        return False
+    temporary = f".spritelab.yaml.activation-{uuid.uuid4().hex}"
+    descriptor = anchor.open_file(
+        temporary,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0)),
+        0o600,
+    )
+    identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _verify_held_regular_file_snapshot(anchor, "spritelab.yaml", destination)
+        try:
+            anchor.replace_held_file_if_owned(
+                descriptor,
+                temporary,
+                "spritelab.yaml",
+                identity=identity,
+                destination_descriptor=destination.descriptor,
+                destination_identity=destination.identity,
+            )
+        except ExactPublicationUnsupported:
+            return False
+        destination.replaced = True
+        committed = _read_anchored_regular_bytes(
+            anchor,
+            "spritelab.yaml",
+            max_bytes=16 * 1024 * 1024,
+        )
+        if committed != payload or hashlib.sha256(committed).hexdigest() != expected_sha256:
+            raise ConditionedDatasetError(
+                "activation_reload_failed",
+                "The exact held configuration replacement did not commit intended bytes.",
+            )
+        return True
+    finally:
+        os.close(descriptor)
+        anchor.quarantine_if_owned(
+            temporary,
+            identity,
+            prefix=".activation-config-source-residue-",
+        )
+
+
+def _retained_stage_alias(
+    anchor: AnchoredDirectory,
+    target_name: str,
+    metadata: os.stat_result,
+) -> str:
+    """Return the sole exact named POSIX stage retained for a two-link target."""
+
+    prefix = f".{target_name}.staging-"
+    candidates = [
+        candidate
+        for candidate in anchor.names()
+        if re.fullmatch(re.escape(prefix) + r"[0-9a-f]{32}", candidate) is not None
+    ]
+    if len(candidates) != 1:
+        raise ConditionedDatasetError(
+            "managed_file_unsafe",
+            "A two-link managed file lost its sole retained publication stage.",
+        )
+    candidate = candidates[0]
+    current = anchor.lstat(candidate)
     if (
-        anchor.lexists(source_name)
-        or not anchor.lexists(target_name)
-        or not identity.matches(anchor.lstat(target_name))
+        not stat.S_ISREG(metadata.st_mode)
+        or _metadata_is_link_or_reparse(metadata)
+        or metadata.st_nlink != 2
+        or not stat.S_ISREG(current.st_mode)
+        or _metadata_is_link_or_reparse(current)
+        or current.st_dev != metadata.st_dev
+        or current.st_ino != metadata.st_ino
+        or current.st_nlink != 2
+        or current.st_size != metadata.st_size
     ):
         raise ConditionedDatasetError(
-            "publication_noreplace_failed", "Atomic no-replace publication could not be verified."
+            "managed_file_unsafe",
+            "A retained publication stage differs from its exact target inode.",
         )
-
-
-def _rollback_published_directory(
-    path: Path,
-    boundary: Path,
-    expected_inventory: Mapping[str, Mapping[str, Any]],
-    identity: OwnedFileIdentity,
-) -> str | None:
-    """Quarantine an exact owned publication without deleting any tree."""
-
-    if path.parent != boundary:
-        raise ConditionedDatasetError("publication_rollback_scope", "A publication rollback path changed scope.")
-    with AnchoredDirectory(boundary, boundary) as anchor:
-        if not anchor.lexists(path.name):
-            return None
-        if not identity.matches(anchor.lstat(path.name)):
-            raise ConditionedDatasetError(
-                "publication_rollback_identity_changed",
-                "A publication directory identity changed; the foreign path was left untouched.",
-            )
-        # Inventory drift is retained inside the residue; inode drift is never moved.
-        inventory_changed = _inventory(path) != expected_inventory
-        residue = anchor.quarantine_if_owned(
-            path.name,
-            identity,
-            prefix=f".rollback-{'drift-' if inventory_changed else ''}{path.name}-",
-        )
-        if residue is None or anchor.lexists(path.name):
-            raise ConditionedDatasetError(
-                "publication_rollback_failed", "A fresh publication could not be quarantined safely."
-            )
-        return residue
-
-
-def _quarantine_owned_directory(
-    path: Path,
-    boundary: Path,
-    identity: OwnedFileIdentity,
-    *,
-    prefix: str,
-) -> str | None:
-    """Move one still-owned staging directory aside without recursive deletion."""
-
-    if path.parent != boundary:
-        raise ConditionedDatasetError("publication_rollback_scope", "A staging rollback path changed scope.")
-    with AnchoredDirectory(boundary, boundary) as anchor:
-        if not anchor.lexists(path.name):
-            return None
-        residue = anchor.quarantine_if_owned(path.name, identity, prefix=prefix)
-        if residue is None:
-            raise ConditionedDatasetError(
-                "publication_rollback_identity_changed",
-                "A staging directory identity changed; the foreign path was left untouched.",
-            )
-        return residue
-
-
-def _rollback_published_directories(
-    entries: Sequence[tuple[Path, Path, Mapping[str, Mapping[str, Any]], OwnedFileIdentity]],
-) -> None:
-    """Attempt every exact-owned rollback while preserving the first refusal."""
-
-    first_error: BaseException | None = None
-    for path, boundary, inventory, identity in entries:
-        try:
-            _rollback_published_directory(path, boundary, inventory, identity)
-        except BaseException as exc:
-            if first_error is None:
-                first_error = exc
-    if first_error is not None:
-        raise first_error
-
-
-def _run_cleanup_actions(actions: Sequence[Callable[[], Any]]) -> None:
-    """Attempt every independent cleanup while preserving the first refusal."""
-
-    first_error: BaseException | None = None
-    for action in actions:
-        try:
-            action()
-        except BaseException as exc:
-            if first_error is None:
-                first_error = exc
-    if first_error is not None:
-        raise first_error
+    return candidate
 
 
 def _read_anchored_regular_bytes(
@@ -2941,7 +4392,7 @@ def _read_anchored_regular_bytes(
     *,
     max_bytes: int,
 ) -> bytes:
-    """Read one bounded single-link child through its already anchored parent."""
+    """Read one bounded child, binding any exact retained POSIX stage alias."""
 
     try:
         before = anchor.lstat(name)
@@ -2952,12 +4403,13 @@ def _read_anchored_regular_bytes(
     if (
         not stat.S_ISREG(before.st_mode)
         or _metadata_is_link_or_reparse(before)
-        or before.st_nlink != 1
+        or before.st_nlink not in {1, 2}
         or before.st_size > max_bytes
     ):
         raise ConditionedDatasetError(
             "managed_file_unsafe", "A required managed file is not a singly linked bounded regular file."
         )
+    retained_alias = _retained_stage_alias(anchor, name, before) if before.st_nlink == 2 else None
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     try:
         descriptor = anchor.open_file(name, flags)
@@ -2971,7 +4423,7 @@ def _read_anchored_regular_bytes(
             opened.st_dev != before.st_dev
             or opened.st_ino != before.st_ino
             or opened.st_size != before.st_size
-            or opened.st_nlink != 1
+            or opened.st_nlink != before.st_nlink
         ):
             raise ConditionedDatasetError("managed_file_changed", "A managed file changed while it was opened.")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
@@ -2984,17 +4436,28 @@ def _read_anchored_regular_bytes(
     after = anchor.lstat(name)
     if (
         len(content) != before.st_size
+        or not stat.S_ISREG(after.st_mode)
+        or _metadata_is_link_or_reparse(after)
         or after.st_dev != before.st_dev
         or after.st_ino != before.st_ino
         or after.st_size != before.st_size
         or after.st_mtime_ns != before.st_mtime_ns
+        or after.st_nlink != before.st_nlink
+        or not stat.S_ISREG(opened_after.st_mode)
+        or _metadata_is_link_or_reparse(opened_after)
         or opened_after.st_dev != before.st_dev
         or opened_after.st_ino != before.st_ino
         or opened_after.st_size != before.st_size
         or opened_after.st_mtime_ns != before.st_mtime_ns
-        or opened_after.st_nlink != 1
+        or opened_after.st_nlink != before.st_nlink
     ):
         raise ConditionedDatasetError("managed_file_changed", "A managed file changed while it was read.")
+    if retained_alias is not None:
+        if _retained_stage_alias(anchor, name, after) != retained_alias:
+            raise ConditionedDatasetError(
+                "managed_file_changed",
+                "A retained managed publication stage changed while its target was read.",
+            )
     return content
 
 
@@ -3012,8 +4475,8 @@ def _read_anchored_relative_bytes(
         return _read_anchored_regular_bytes(current, parts[-1], max_bytes=max_bytes)
 
 
-def _anchored_file_sha256(parent: Path, name: str) -> str:
-    with AnchoredDirectory(parent, parent) as anchor:
+def _anchored_file_sha256(parent: Path, name: str, boundary: Path) -> str:
+    with open_anchored_directory(parent, boundary) as anchor:
         content = _read_anchored_regular_bytes(anchor, name, max_bytes=128 * 1024 * 1024)
     return hashlib.sha256(content).hexdigest()
 
@@ -3021,52 +4484,12 @@ def _anchored_file_sha256(parent: Path, name: str) -> str:
 def _read_regular_bytes(path: Path, root: Path, *, max_bytes: int) -> bytes:
     try:
         target = require_confined_path(path, root)
-        before = target.lstat()
+        with open_anchored_directory(target.parent, root) as anchor:
+            return _read_anchored_regular_bytes(anchor, target.name, max_bytes=max_bytes)
     except (OSError, UnsafeFilesystemOperation) as exc:
         raise ConditionedDatasetError(
             "managed_file_unsafe", "A required managed file is unavailable or unsafe."
         ) from exc
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or _metadata_is_link_or_reparse(before)
-        or before.st_nlink != 1
-        or before.st_size > max_bytes
-    ):
-        raise ConditionedDatasetError(
-            "managed_file_unsafe", "A required managed file is not a singly linked bounded regular file."
-        )
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(target, flags)
-    except OSError as exc:
-        raise ConditionedDatasetError(
-            "managed_file_unreadable", "A required managed file could not be opened safely."
-        ) from exc
-    try:
-        opened = os.fstat(descriptor)
-        if (
-            opened.st_dev != before.st_dev
-            or opened.st_ino != before.st_ino
-            or opened.st_size != before.st_size
-            or opened.st_nlink != 1
-        ):
-            raise ConditionedDatasetError("managed_file_changed", "A managed file changed while it was opened.")
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            content = handle.read(max_bytes + 1)
-    finally:
-        os.close(descriptor)
-    if len(content) > max_bytes:
-        raise ConditionedDatasetError("managed_file_oversized", "A required managed file exceeds its byte limit.")
-    after = target.lstat()
-    if (
-        after.st_dev != before.st_dev
-        or after.st_ino != before.st_ino
-        or after.st_size != before.st_size
-        or after.st_mtime_ns != before.st_mtime_ns
-        or _metadata_is_link_or_reparse(after)
-    ):
-        raise ConditionedDatasetError("managed_file_changed", "A managed file changed while it was read.")
-    return content
 
 
 def _read_json_mapping(path: Path, *, max_bytes: int) -> dict[str, Any]:
@@ -3754,10 +5177,14 @@ def _conditioned_record(item: ImportedSprite, metadata: Mapping[str, Any]) -> di
     }
 
 
-def _enrich_manifests(dataset: Path, metadata: Mapping[str, Mapping[str, Any]]) -> None:
+def _enrich_manifests(
+    dataset: Path,
+    anchor: AnchoredDirectory,
+    metadata: Mapping[str, Mapping[str, Any]],
+) -> None:
     for split in ("train", "val", "test"):
-        path = dataset / f"manifest_{split}.jsonl"
-        rows = _read_jsonl(path)
+        name = f"manifest_{split}.jsonl"
+        rows = _read_anchored_jsonl(anchor, name)
         enriched: list[dict[str, Any]] = []
         for row in rows:
             sprite_id = str(row.get("sprite_id") or "")
@@ -3802,7 +5229,10 @@ def _enrich_manifests(dataset: Path, metadata: Mapping[str, Mapping[str, Any]]) 
                 }
             )
             enriched.append(updated)
-        _write_jsonl(path, enriched)
+        _write_jsonl(anchor, name, enriched)
+    anchor.verify()
+    if anchor.directory != dataset:
+        raise ConditionedDatasetError("candidate_root_changed", "The candidate publication root changed.")
 
 
 def _portable_training_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -4099,7 +5529,22 @@ def _loader_check(dataset: Path) -> dict[str, Any]:
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ConditionedDatasetError(
+            "managed_jsonl_invalid", "A required managed JSONL document is unreadable."
+        ) from exc
+    return _parse_jsonl_bytes(content)
+
+
+def _read_anchored_jsonl(anchor: AnchoredDirectory, name: str) -> list[dict[str, Any]]:
+    content = _read_anchored_regular_bytes(anchor, name, max_bytes=1024 * 1024 * 1024)
+    return _parse_jsonl_bytes(content)
+
+
+def _parse_jsonl_bytes(content: bytes) -> list[dict[str, Any]]:
+    try:
+        lines = content.decode("utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
         raise ConditionedDatasetError(
             "managed_jsonl_invalid", "A required managed JSONL document is unreadable."
@@ -4120,32 +5565,133 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _write_json(path: Path, value: Mapping[str, Any]) -> None:
-    atomic_write_text(path, strict_json_dumps(dict(value), indent=2, sort_keys=True) + "\n")
+def _write_json(anchor: AnchoredDirectory, name: str, value: Mapping[str, Any]) -> None:
+    _write_anchored_bytes(
+        anchor,
+        name,
+        (strict_json_dumps(dict(value), indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    )
 
 
-def _write_jsonl(path: Path, values: Sequence[Mapping[str, Any]]) -> None:
+@contextmanager
+def _open_bound_candidate_phase7(
+    candidate_root: Path,
+    project_root: Path,
+    *,
+    candidate_identity: OwnedFileIdentity,
+    phase7_identity: OwnedFileIdentity,
+) -> Iterator[AnchoredDirectory]:
+    try:
+        with open_anchored_directory(candidate_root, project_root) as candidate_anchor:
+            if not candidate_identity.matches(candidate_anchor.directory_metadata()):
+                raise UnsafeFilesystemOperation("conditioned candidate parent identity changed")
+            with candidate_anchor.open_directory_immovable("phase7") as phase7_anchor:
+                if not phase7_identity.matches(phase7_anchor.directory_metadata()):
+                    raise UnsafeFilesystemOperation("conditioned phase7 directory identity changed")
+                yield phase7_anchor
+                phase7_anchor.verify()
+            candidate_anchor.verify()
+    except (OSError, UnsafeFilesystemOperation) as exc:
+        raise ConditionedDatasetError(
+            "candidate_root_changed",
+            "The candidate publication root changed or became unsafe.",
+        ) from exc
+
+
+def _write_jsonl(
+    anchor: AnchoredDirectory,
+    name: str,
+    values: Sequence[Mapping[str, Any]],
+) -> None:
     lines = [strict_json_dumps(dict(value), sort_keys=True, separators=(",", ":")) for value in values]
-    atomic_write_text(path, "\n".join(lines) + ("\n" if lines else ""))
+    _write_anchored_bytes(anchor, name, ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8"))
 
 
-def _inventory(root: Path) -> dict[str, dict[str, Any]]:
-    if not _safe_directory(root):
-        raise ConditionedDatasetError("inventory_root", "The artifact inventory root is unsafe or unavailable.")
-    root_metadata = root.lstat()
-    records: dict[str, dict[str, Any]] = {}
-    collision_keys: set[str] = set()
-    for directory, directory_names, file_names in os.walk(root, followlinks=False):
-        directory_path = Path(directory)
-        for name in sorted(directory_names):
-            child = require_confined_path(directory_path / name, root)
-            if not _safe_directory(child) or child.lstat().st_dev != root_metadata.st_dev:
-                raise ConditionedDatasetError(
-                    "inventory_entry", "An artifact directory is linked, mounted, or crosses a device."
-                )
-        for name in sorted(file_names):
-            child = require_confined_path(directory_path / name, root)
-            relative = child.relative_to(root).as_posix()
+def _write_training_manifest(
+    anchor: AnchoredDirectory,
+    name: str,
+    values: Sequence[Mapping[str, Any]],
+) -> None:
+    lines = [json.dumps(dict(value), sort_keys=True) for value in values]
+    _write_anchored_bytes(anchor, name, ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8"))
+
+
+def _write_anchored_bytes(anchor: AnchoredDirectory, name: str, content: bytes) -> None:
+    try:
+        anchor.verify()
+        anchor.atomic_write_bytes(name, content)
+        anchor.verify()
+    except (OSError, UnsafeFilesystemOperation) as exc:
+        raise ConditionedDatasetError(
+            "candidate_publication_unsafe",
+            "The conditioned candidate publication root changed or became unsafe.",
+        ) from exc
+
+
+def _inventory(root: Path, boundary: Path) -> dict[str, dict[str, Any]]:
+    try:
+        target = require_confined_path(root, boundary, allow_root=True)
+        current = Path(boundary).absolute()
+        for part in target.relative_to(current).parts:
+            current /= part
+            if current.is_mount():
+                raise UnsafeFilesystemOperation(f"artifact inventory crosses a mount point: {current}")
+        with open_anchored_directory(root, boundary) as anchor:
+            return _inventory_from_anchor(anchor)
+    except (OSError, UnsafeFilesystemOperation) as exc:
+        raise ConditionedDatasetError(
+            "inventory_root", "The artifact inventory root is unsafe or unavailable."
+        ) from exc
+
+
+def _inventory_from_anchor(root: AnchoredDirectory) -> dict[str, dict[str, Any]]:
+    try:
+        root_metadata = root.directory_metadata()
+    except (OSError, UnsafeFilesystemOperation) as exc:
+        raise ConditionedDatasetError(
+            "inventory_root", "The artifact inventory root is unsafe or unavailable."
+        ) from exc
+    passes: list[dict[str, dict[str, Any]]] = []
+    for _pass in range(2):
+        records: dict[str, dict[str, Any]] = {}
+        collision_keys: set[str] = set()
+        _inventory_directory(
+            root,
+            relative_parts=(),
+            root_device=root_metadata.st_dev,
+            records=records,
+            collision_keys=collision_keys,
+        )
+        passes.append(dict(sorted(records.items())))
+    if passes[0] != passes[1]:
+        raise ConditionedDatasetError(
+            "inventory_changed",
+            "An artifact changed between complete anchored inventory passes.",
+        )
+    return passes[0]
+
+
+def _inventory_directory(
+    anchor: AnchoredDirectory,
+    *,
+    relative_parts: tuple[str, ...],
+    root_device: int,
+    records: dict[str, dict[str, Any]],
+    collision_keys: set[str],
+) -> None:
+    try:
+        anchor.verify()
+        directory_before = anchor.directory_metadata()
+        before_names = anchor.names()
+        retained_aliases = {
+            name for name in before_names if _retained_stage_target_for_alias(anchor, name, before_names) is not None
+        }
+        for name in before_names:
+            metadata = anchor.lstat(name)
+            if name in retained_aliases:
+                anchor.verify()
+                continue
+            relative = PurePosixPath(*relative_parts, name).as_posix()
             _canonical_relative(relative)
             collision = unicodedata.normalize("NFC", relative).casefold()
             if collision in collision_keys:
@@ -4153,37 +5699,148 @@ def _inventory(root: Path) -> dict[str, dict[str, Any]]:
                     "inventory_collision", "Artifact paths contain a case or Unicode collision."
                 )
             collision_keys.add(collision)
-            records[relative] = _stable_file_identity(child, root_metadata.st_dev)
-    return dict(sorted(records.items()))
+            if stat.S_ISDIR(metadata.st_mode) and not _metadata_is_link_or_reparse(metadata):
+                if metadata.st_dev != root_device or (anchor.directory / name).is_mount():
+                    raise ConditionedDatasetError(
+                        "inventory_entry", "An artifact directory is linked, mounted, or crosses a device."
+                    )
+                with anchor.open_directory_immovable(name) as child:
+                    child_metadata = child.directory_metadata()
+                    if (
+                        child_metadata.st_dev != root_device
+                        or child_metadata.st_ino != metadata.st_ino
+                        or child.directory.is_mount()
+                    ):
+                        raise ConditionedDatasetError(
+                            "inventory_entry", "An artifact directory is linked, mounted, or crosses a device."
+                        )
+                    _inventory_directory(
+                        child,
+                        relative_parts=(*relative_parts, name),
+                        root_device=root_device,
+                        records=records,
+                        collision_keys=collision_keys,
+                    )
+            elif stat.S_ISREG(metadata.st_mode) and not _metadata_is_link_or_reparse(metadata):
+                records[relative] = _stable_file_identity(anchor, name, root_device)
+            else:
+                raise ConditionedDatasetError(
+                    "inventory_entry", "Artifact inventory entries must be owned regular files or directories."
+                )
+            anchor.verify()
+        directory_after = anchor.directory_metadata()
+        if (
+            anchor.names() != before_names
+            or directory_after.st_dev != directory_before.st_dev
+            or directory_after.st_ino != directory_before.st_ino
+            or directory_after.st_mtime_ns != directory_before.st_mtime_ns
+        ):
+            raise ConditionedDatasetError("inventory_changed", "An artifact changed while it was inventoried.")
+    except ConditionedDatasetError:
+        raise
+    except (OSError, UnsafeFilesystemOperation) as exc:
+        raise ConditionedDatasetError(
+            "inventory_entry", "An artifact inventory entry changed or became unsafe."
+        ) from exc
 
 
-def _stable_file_identity(path: Path, root_device: int) -> dict[str, Any]:
-    before = path.lstat()
+def _stable_file_identity(anchor: AnchoredDirectory, name: str, root_device: int) -> dict[str, Any]:
+    try:
+        before = anchor.lstat(name)
+    except OSError as exc:
+        raise ConditionedDatasetError(
+            "inventory_entry", "An artifact inventory entry changed or became unsafe."
+        ) from exc
     if (
         not stat.S_ISREG(before.st_mode)
         or _metadata_is_link_or_reparse(before)
-        or before.st_nlink != 1
+        or before.st_nlink not in {1, 2}
         or before.st_dev != root_device
     ):
         raise ConditionedDatasetError(
             "inventory_entry", "Artifact inventory entries must be owned regular files on one device."
         )
+    if before.st_nlink == 2:
+        _retained_stage_alias(anchor, name, before)
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    descriptor = -1
+    byte_count = 0
+    try:
+        descriptor = anchor.open_file(name, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        opened = os.fstat(descriptor)
+        _require_inventory_file_identity(before, opened, root_device)
         while True:
-            chunk = handle.read(1024 * 1024)
+            chunk = os.read(descriptor, 1024 * 1024)
             if not chunk:
                 break
+            byte_count += len(chunk)
             digest.update(chunk)
-    after = path.lstat()
+        opened_after = os.fstat(descriptor)
+        after = anchor.lstat(name)
+        anchor.verify()
+    except (OSError, UnsafeFilesystemOperation) as exc:
+        raise ConditionedDatasetError(
+            "inventory_changed", "An artifact changed while its identity was computed."
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    try:
+        _require_inventory_file_identity(before, opened_after, root_device)
+        _require_inventory_file_identity(before, after, root_device)
+    except ConditionedDatasetError:
+        raise ConditionedDatasetError(
+            "inventory_changed", "An artifact changed while its identity was computed."
+        ) from None
+    if byte_count != before.st_size:
+        raise ConditionedDatasetError("inventory_changed", "An artifact changed while its identity was computed.")
+    return {"sha256": digest.hexdigest(), "byte_count": byte_count}
+
+
+def _require_inventory_file_identity(
+    expected: os.stat_result,
+    actual: os.stat_result,
+    root_device: int,
+) -> None:
     if (
-        after.st_ino != before.st_ino
-        or after.st_dev != before.st_dev
-        or after.st_size != before.st_size
-        or after.st_mtime_ns != before.st_mtime_ns
+        not stat.S_ISREG(actual.st_mode)
+        or _metadata_is_link_or_reparse(actual)
+        or actual.st_nlink != expected.st_nlink
+        or expected.st_nlink not in {1, 2}
+        or actual.st_dev != root_device
+        or actual.st_dev != expected.st_dev
+        or actual.st_ino != expected.st_ino
+        or actual.st_size != expected.st_size
+        or actual.st_mtime_ns != expected.st_mtime_ns
     ):
         raise ConditionedDatasetError("inventory_changed", "An artifact changed while its identity was computed.")
-    return {"sha256": digest.hexdigest(), "byte_count": before.st_size}
+
+
+def _retained_stage_target_for_alias(
+    anchor: AnchoredDirectory,
+    alias_name: str,
+    names: Sequence[str],
+) -> str | None:
+    """Recognize only a publication alias that is exactly paired to one target."""
+
+    marker = ".staging-"
+    if not alias_name.startswith(".") or marker not in alias_name:
+        return None
+    target_name, separator, suffix = alias_name[1:].rpartition(marker)
+    if separator != marker or re.fullmatch(r"[0-9a-f]{32}", suffix) is None:
+        return None
+    if target_name not in names:
+        raise ConditionedDatasetError(
+            "inventory_entry",
+            "A retained publication stage has no exact target.",
+        )
+    target = anchor.lstat(target_name)
+    if _retained_stage_alias(anchor, target_name, target) != alias_name:
+        raise ConditionedDatasetError(
+            "inventory_entry",
+            "A retained publication stage is ambiguous.",
+        )
+    return target_name
 
 
 def _inventory_payload(files: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
@@ -4198,6 +5855,14 @@ def _inventory_payload(files: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]
 
 def _inventory_identity(files: Mapping[str, Mapping[str, Any]]) -> str:
     return stable_hash(_inventory_payload(files))
+
+
+def _project_config_from_bytes(root: Path, path: Path, content: bytes) -> ProjectConfig:
+    """Validate one project configuration from the caller's exact held bytes."""
+
+    raw = yaml.safe_load(content.decode("utf-8"))
+    values = _validate_project_config(raw)
+    return ProjectConfig(root.resolve(), path, values)
 
 
 def _now() -> str:

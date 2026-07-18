@@ -18,7 +18,7 @@ from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import ChoiceLoader, FileSystemLoader, PrefixLoader
@@ -188,7 +188,13 @@ def _duration(value: float | None) -> str:
     return f"{seconds}s"
 
 
-def _area_card(area: str, surface: PluginSurface | None, context: ProjectContext) -> dict[str, Any]:
+def _area_card(
+    area: str,
+    surface: PluginSurface | None,
+    context: ProjectContext,
+    *,
+    result: ProductResult | None = None,
+) -> dict[str, Any]:
     title = AREA_TITLES[area]
     if surface is None:
         reason = {
@@ -207,7 +213,7 @@ def _area_card(area: str, surface: PluginSurface | None, context: ProjectContext
             "value": None,
             "action": None,
         }
-    result = _status(surface.plugin, context)
+    result = result or _status(surface.plugin, context)
     missing = surface.missing_capabilities
     status = ProductStatus.UNAVAILABLE if missing else result.status
     reason = (
@@ -252,12 +258,18 @@ def _recommendation(cards: dict[str, dict[str, Any]], current_run: Any) -> dict[
     return {"title": "Try your model", "path": "/playground", "action": "Open playground"}
 
 
-def _plugin_cards(surfaces: list[PluginSurface], context: ProjectContext) -> list[dict[str, Any]]:
+def _plugin_cards(
+    surfaces: list[PluginSurface],
+    context: ProjectContext,
+    *,
+    results: Mapping[str, ProductResult] | None = None,
+) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
     for surface in surfaces:
         if not surface.plugin.navigation and surface.plugin.web_router_factory is None:
             continue
-        result = _status(surface.plugin, context)
+        result = results.get(surface.plugin.plugin_id) if results is not None else None
+        result = result or _status(surface.plugin, context)
         path = surface.plugin.navigation[0].path if surface.plugin.navigation else "/"
         supplied = result.data.get("status_cards", ()) if isinstance(result.data, Mapping) else ()
         if isinstance(supplied, (list, tuple)):
@@ -284,10 +296,16 @@ def _plugin_cards(surfaces: list[PluginSurface], context: ProjectContext) -> lis
     return cards
 
 
-def _plugin_actions(surfaces: list[PluginSurface], context: ProjectContext) -> list[dict[str, str]]:
+def _plugin_actions(
+    surfaces: list[PluginSurface],
+    context: ProjectContext,
+    *,
+    results: Mapping[str, ProductResult] | None = None,
+) -> list[dict[str, str]]:
     actions: list[dict[str, str]] = []
     for surface in surfaces:
-        result = _status(surface.plugin, context)
+        result = results.get(surface.plugin.plugin_id) if results is not None else None
+        result = result or _status(surface.plugin, context)
         path = surface.plugin.navigation[0].path if surface.plugin.navigation else "/"
         if result.action:
             actions.append({"title": result.action.title, "path": path})
@@ -416,10 +434,11 @@ def create_app(
     @app.middleware("http")
     async def security_headers(request: Request, call_next: Any) -> Any:
         response = await call_next(request)
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-            "script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
-        )
+        if "Content-Security-Policy" not in response.headers:
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+                "script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+            )
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
@@ -487,12 +506,21 @@ def create_app(
     def status_results() -> dict[str, ProductResult]:
         return {surface.plugin.plugin_id: _status(surface.plugin, context) for surface in surfaces}
 
-    def base_context(request: Request) -> dict[str, Any]:
-        results = status_results()
+    def base_context(
+        request: Request,
+        *,
+        results: Mapping[str, ProductResult] | None = None,
+        current_run: Any = None,
+    ) -> dict[str, Any]:
+        # Shell status and run projections are presentation-only. Keep them
+        # opt-in so a feature page does not synchronously evaluate every other
+        # plugin or replay the global run history. Mutating routes perform their
+        # own authoritative validation and never consume these values.
+        active_results = dict(results or {})
         blocker = next(
             (
                 _clean_text(item.message, context)
-                for result in results.values()
+                for result in active_results.values()
                 for item in result.blockers
                 if item.message
             ),
@@ -503,11 +531,11 @@ def create_app(
             "navigation": navigation,
             "current_path": request.url.path,
             "project_name": _project_name(context),
-            "current_run": repository.current_run(),
+            "current_run": current_run,
             "global_blocker": blocker,
             "csrf_token": csrf_token,
             "non_loopback": not effective.is_loopback,
-            "plugin_results": results,
+            "plugin_results": active_results,
         }
 
     def render_plugin_template(
@@ -609,29 +637,43 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     async def home(request: Request) -> Any:
-        cards = {
-            area: _area_card(area, _surface_for_area(surfaces, area), context)
-            for area in ("dataset", "training", "evaluation")
-        }
+        results = status_results()
+        cards: dict[str, dict[str, Any]] = {}
+        for area in ("dataset", "training", "evaluation"):
+            surface = _surface_for_area(surfaces, area)
+            cards[area] = _area_card(
+                area,
+                surface,
+                context,
+                result=results.get(surface.plugin.plugin_id) if surface is not None else None,
+            )
         current_run = repository.current_run()
         return templates.TemplateResponse(
             request=request,
             name="home.html",
             context={
-                **base_context(request),
+                **base_context(request, results=results, current_run=current_run),
                 "cards": cards,
                 "recommendation": _recommendation(cards, current_run),
-                "plugin_cards": _plugin_cards(surfaces, context),
-                "plugin_actions": _plugin_actions(surfaces, context),
+                "plugin_cards": _plugin_cards(surfaces, context, results=results),
+                "plugin_actions": _plugin_actions(surfaces, context, results=results),
             },
         )
 
     @app.get("/runs", response_class=HTMLResponse, include_in_schema=False)
     async def runs(request: Request) -> Any:
+        run_projection = repository.recent_runs(limit=100)
+        current_run = next(
+            (run for run in run_projection if not run.terminal),
+            run_projection[0] if run_projection else None,
+        )
         return templates.TemplateResponse(
             request=request,
             name="runs.html",
-            context={**base_context(request), "runs": repository.recent_runs()},
+            context={
+                **base_context(request, current_run=current_run),
+                "runs": run_projection[:20],
+            },
         )
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse, include_in_schema=False)
@@ -688,7 +730,41 @@ def create_app(
             return templates.TemplateResponse(
                 request=request, name="not_found.html", context=base_context(request), status_code=404
             )
-        return FileResponse(path, media_type="text/html", filename=f"{run_id}-report.html")
+        snapshot = repository.snapshot(run_id)
+        payload = {
+            "schema_version": "spritelab.product.public-run-report.v1",
+            "run_id": snapshot.run_id,
+            "feature": snapshot.feature,
+            "stage": snapshot.stage,
+            "status": snapshot.status,
+            "message": snapshot.message,
+            "progress": {
+                "current": snapshot.current,
+                "total": snapshot.total,
+                "percent": snapshot.progress_percent,
+            },
+            "timing": {
+                "started_at": snapshot.started_at,
+                "ended_at": snapshot.ended_at,
+                "elapsed_seconds": snapshot.elapsed_seconds,
+                "eta_seconds": snapshot.eta_seconds,
+            },
+            "event_count": snapshot.event_count,
+            "terminal": snapshot.terminal,
+            "resumable": snapshot.resumable,
+            "report_available": snapshot.report_available,
+            "invalid_event_count": snapshot.invalid_event_count,
+        }
+        return JSONResponse(
+            payload,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{run_id}-public-report.json"',
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": "sandbox; default-src 'none'",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
 
     @app.post("/runs/{run_id}/actions/{action}", include_in_schema=False)
     @product_api
@@ -750,19 +826,23 @@ def create_app(
             warning_sent = False
             while True:
                 replay = repository.replay(run_id, after_id=cursor)
-                items = list(replay.events)
+                items = list(replay.events) if replay.integrity_status == "VALID" else []
                 for item in items:
                     cursor = item.event_id
                     yield _sse(item.event_id, "product", item.public_dict())
-                if replay.invalid_event_count and not warning_sent:
+                if (replay.invalid_event_count or replay.integrity_status != "VALID") and not warning_sent:
                     warning_sent = True
                     yield _sse(
                         None,
                         "warning",
                         {
-                            "code": "invalid_product_events",
+                            "code": (
+                                "invalid_product_events" if replay.invalid_event_count else "unverified_product_events"
+                            ),
                             "invalid_event_count": replay.invalid_event_count,
-                            "message": replay.warnings[0],
+                            "message": replay.warnings[0]
+                            if replay.warnings
+                            else "The product event stream could not be verified safely.",
                         },
                     )
                 snapshot = repository.snapshot(run_id)

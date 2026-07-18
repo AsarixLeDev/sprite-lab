@@ -33,7 +33,8 @@ def score_conditions(record: Mapping[str, Any], rgba: np.ndarray, palette_adhere
     predictions = (
         record.get("condition_predictions") if isinstance(record.get("condition_predictions"), Mapping) else {}
     )
-    nested = record.get("conditions") if isinstance(record.get("conditions"), Mapping) else {}
+    raw_nested = record.get("conditions")
+    nested: dict[str, Any] = dict(raw_nested) if isinstance(raw_nested, Mapping) else {}
     conditions = {**record, **nested}
     result: dict[str, str] = {}
     for field in FIELDS:

@@ -2,20 +2,26 @@ from __future__ import annotations
 
 import json
 import os
+from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+import spritelab.dataset_maker.exporter as exporter_module
 from spritelab.codec.bundle import SpriteBundle, SpriteMetadata
 from spritelab.codec.roles import ROLE_MIDTONE
 from spritelab.dataset_maker.exporter import (
     DatasetMakerExportConfig,
+    commit_anchored_dataset_maker_export,
     export_dataset_from_imported_sprites,
+    export_dataset_from_imported_sprites_anchored,
     make_dataset_maker_split,
+    verify_anchored_dataset_maker_export,
 )
 from spritelab.dataset_maker.importer import ImportedSprite
 from spritelab.dataset_maker.model import DatasetMakerItem
+from spritelab.utils.safe_fs import AnchoredDirectory, UnsafeFilesystemOperation, open_anchored_directory
 
 
 def test_exports_train_val_test_npz_files(tmp_path: Path) -> None:
@@ -28,6 +34,178 @@ def test_exports_train_val_test_npz_files(tmp_path: Path) -> None:
     assert (tmp_path / "v0" / "train.npz").exists()
     assert (tmp_path / "v0" / "val.npz").exists()
     assert (tmp_path / "v0" / "test.npz").exists()
+
+
+def test_anchored_export_publishes_exact_fresh_dataset(tmp_path: Path) -> None:
+    output_root = tmp_path / "exports"
+    output_root.mkdir()
+
+    with open_anchored_directory(output_root, output_root) as output_parent:
+        anchored = export_dataset_from_imported_sprites_anchored(
+            [_imported("sprite_a")],
+            DatasetMakerExportConfig(dataset_name="v0", output_root=output_root),
+            output_parent=output_parent,
+        )
+        inventory = _flat_inventory(output_root / "v0")
+        with pytest.raises(FileNotFoundError):
+            verify_anchored_dataset_maker_export(
+                output_parent,
+                "v0",
+                expected_inventory=inventory,
+            )
+        commit_anchored_dataset_maker_export(
+            output_parent,
+            "v0",
+            expected_parent_identity=anchored.parent_identity,
+            expected_directory_identity=anchored.directory_identity,
+            expected_inventory=inventory,
+        )
+        marker = verify_anchored_dataset_maker_export(
+            output_parent,
+            "v0",
+            expected_inventory=inventory,
+        )
+
+    result = anchored.result
+    assert result.output_dir == output_root / "v0"
+    assert marker["inventory"] == inventory
+    assert (output_root / "v0.commit.json").is_file()
+    assert {path.name for path in result.output_dir.iterdir()} == {
+        "dataset_config.json",
+        "dataset_report.md",
+        "manifest_test.jsonl",
+        "manifest_train.jsonl",
+        "manifest_val.jsonl",
+        "rejected.jsonl",
+        "test.npz",
+        "train.npz",
+        "val.npz",
+        "vocab.json",
+    }
+
+
+def test_anchored_export_loader_rejects_payload_changed_after_commit(tmp_path: Path) -> None:
+    output_root = tmp_path / "exports"
+    output_root.mkdir()
+    with open_anchored_directory(output_root, output_root) as output_parent:
+        anchored = export_dataset_from_imported_sprites_anchored(
+            [_imported("sprite_a")],
+            DatasetMakerExportConfig(dataset_name="v0", output_root=output_root),
+            output_parent=output_parent,
+        )
+        inventory = _flat_inventory(output_root / "v0")
+        commit_anchored_dataset_maker_export(
+            output_parent,
+            "v0",
+            expected_parent_identity=anchored.parent_identity,
+            expected_directory_identity=anchored.directory_identity,
+            expected_inventory=inventory,
+        )
+
+    (output_root / "v0" / "vocab.json").write_bytes(b"changed-after-commit")
+    with open_anchored_directory(output_root, output_root) as output_parent:
+        with pytest.raises(UnsafeFilesystemOperation, match="export"):
+            verify_anchored_dataset_maker_export(
+                output_parent,
+                "v0",
+                expected_inventory=inventory,
+            )
+
+
+def test_anchored_export_rejects_staging_rename_to_outside_link_without_writing_outside(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = tmp_path / "exports"
+    outside = tmp_path / "outside"
+    output_root.mkdir()
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel_bytes = b"outside-must-remain-byte-identical"
+    sentinel.write_bytes(sentinel_bytes)
+    original_open = AnchoredDirectory.open_file
+    staging_path: Path | None = None
+    parked = output_root / "staging-held-by-test"
+    attacked = False
+
+    def swap_then_open(anchor: AnchoredDirectory, name: str, flags: int, mode: int = 0o600) -> int:
+        nonlocal attacked, staging_path
+        if not attacked and anchor.directory.name == "v0":
+            attacked = True
+            staging_path = anchor.directory
+            os.replace(staging_path, parked)
+            try:
+                os.symlink(outside, staging_path, target_is_directory=True)
+            except OSError as exc:
+                os.replace(parked, staging_path)
+                pytest.skip(f"directory symbolic links are unavailable in this test session: {exc}")
+        return original_open(anchor, name, flags, mode)
+
+    monkeypatch.setattr(AnchoredDirectory, "open_file", swap_then_open)
+    try:
+        with open_anchored_directory(output_root, output_root) as output_parent:
+            with pytest.raises((OSError, UnsafeFilesystemOperation)):
+                export_dataset_from_imported_sprites_anchored(
+                    [_imported("sprite_a")],
+                    DatasetMakerExportConfig(dataset_name="v0", output_root=output_root),
+                    output_parent=output_parent,
+                )
+        assert attacked is True
+        assert sentinel.read_bytes() == sentinel_bytes
+        assert {path.name for path in outside.iterdir()} == {"sentinel.bin"}
+        assert not (output_root / "v0.commit.json").exists()
+    finally:
+        if staging_path is not None and staging_path.is_symlink():
+            staging_path.unlink()
+        if staging_path is not None and parked.is_dir() and not staging_path.exists():
+            os.replace(parked, staging_path)
+
+
+def test_anchored_export_detects_hard_link_substitution_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = tmp_path / "exports"
+    outside = tmp_path / "outside"
+    output_root.mkdir()
+    outside.mkdir()
+    sentinel = outside / "sentinel.bin"
+    sentinel_bytes = b"outside-must-remain-byte-identical"
+    sentinel.write_bytes(sentinel_bytes)
+    original_open = AnchoredDirectory.open_file
+    real_fsync = exporter_module.os.fsync
+    first_output: Path | None = None
+    attacked = False
+
+    def remember_output(anchor: AnchoredDirectory, name: str, flags: int, mode: int = 0o600) -> int:
+        nonlocal first_output
+        if first_output is None and anchor.directory.name == "v0":
+            first_output = anchor.directory / name
+        return original_open(anchor, name, flags, mode)
+
+    def link_before_fsync(descriptor: int) -> None:
+        nonlocal attacked
+        if not attacked and first_output is not None:
+            try:
+                os.link(first_output, outside / "hostile-hard-link.bin")
+            except OSError as exc:
+                pytest.skip(f"hard links are unavailable in this test session: {exc}")
+            attacked = True
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(AnchoredDirectory, "open_file", remember_output)
+    monkeypatch.setattr(exporter_module.os, "fsync", link_before_fsync)
+    with open_anchored_directory(output_root, output_root) as output_parent:
+        with pytest.raises(UnsafeFilesystemOperation, match="changed after writing"):
+            export_dataset_from_imported_sprites_anchored(
+                [_imported("sprite_a")],
+                DatasetMakerExportConfig(dataset_name="v0", output_root=output_root),
+                output_parent=output_parent,
+            )
+
+    assert attacked is True
+    assert sentinel.read_bytes() == sentinel_bytes
+    assert not (output_root / "v0.commit.json").exists()
 
 
 def test_npz_files_contain_required_keys_shapes_and_dtypes(tmp_path: Path) -> None:
@@ -297,3 +475,11 @@ def _bundle(sprite_id: str) -> SpriteBundle:
         role_map=role_map,
         metadata=SpriteMetadata(id=sprite_id, palette_size=1),
     )
+
+
+def _flat_inventory(directory: Path) -> dict[str, dict[str, object]]:
+    return {
+        path.name: {"sha256": sha256(path.read_bytes()).hexdigest(), "byte_count": path.stat().st_size}
+        for path in sorted(directory.iterdir())
+        if path.is_file()
+    }

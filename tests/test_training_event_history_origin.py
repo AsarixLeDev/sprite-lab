@@ -56,7 +56,7 @@ from spritelab.training.launch import (
     load_exact_campaign_configuration,
     prepare_validated_training_launch,
 )
-from training_launch_test_utils import validated_launch
+from training_launch_test_utils import launch_authorization_verifier, validated_launch
 
 ORIGIN_HASH_EXCLUDED = "record_sha256"
 
@@ -216,9 +216,11 @@ def _request(launch: ValidatedTrainingLaunch, *, backend_id: str | None = None) 
         environment=launch.environment,
         execution_spec_identity=launch.receipt.execution_spec_sha256,
         output_root_identity=launch.receipt.output_root_identity,
+        launch_authorization_evidence_sha256=launch.receipt.launch_authorization_evidence_sha256,
         compute_backend_id=backend_id or launch.receipt.compute_backend_id,
         launch_receipt=launch.receipt,
         validator_context=launch.validator_context,
+        launch_authorization_verifier=launch_authorization_verifier(launch),
     )
 
 
@@ -716,7 +718,7 @@ def test_receipt_binds_origin_migration_and_canonical_identities(tmp_path: Path)
     launch = _continuation(initial, "local")
     root = launch.output_root
 
-    assert launch.receipt.schema_version == "spritelab_training_launch_receipt_v3"
+    assert launch.receipt.schema_version == "spritelab_training_launch_receipt_v4"
     assert launch.receipt.event_migration_state == EventMigrationState.VERIFIED_SOURCE_REMOVED.value
     assert launch.receipt.event_history_origin == EVENT_HISTORY_ORIGIN_MIGRATED_LEGACY
     assert launch.receipt.event_migration_required is True

@@ -16,6 +16,17 @@ from spritelab.product_features.evaluation.models import (
     CheckpointCandidate,
     CheckpointCatalog,
 )
+from spritelab.product_web.events import (
+    EVENT_FILENAME,
+    EVENT_HISTORY_ORIGIN_FILENAME,
+    LEGACY_EVENT_FILENAME,
+    LEGACY_MIGRATION_FILENAME,
+    EventRepository,
+    verify_event_migration,
+)
+from spritelab.product_web.events import (
+    RUN_STATE_SCHEMA as PRODUCT_RUN_STATE_SCHEMA,
+)
 
 RUN_STATE_SCHEMA = "spritelab.v3.run-state.v1"
 _STEP_PATTERN = re.compile(r"(?:step[_-]?)(\d+)", re.IGNORECASE)
@@ -24,6 +35,25 @@ _CHECKPOINT_PATTERNS = ("checkpoint*.pt", "checkpoint*.pth", "checkpoint*.ckpt",
 _CHECKPOINT_PATH_FIELDS = ("path", "checkpoint", "checkpoint_path", "file")
 _EVIDENCE_ROWS_KEY = "_checkpoint_evidence_rows"
 _EVIDENCE_SOURCE_KEY = "_checkpoint_evidence_source"
+_PRODUCT_CHECKPOINT_BINDING_SCHEMA = "spritelab.training.evaluation-checkpoint-binding.v1"
+_PRODUCT_CHECKPOINT_BINDING_KEYS = frozenset(
+    {"schema_version", "run_id", "dataset_identity", "view_identity", "checkpoints"}
+)
+_PRODUCT_CHECKPOINT_ROW_KEYS = frozenset(
+    {
+        "path",
+        "sha256",
+        "seed",
+        "optimizer_step",
+        "backend_id",
+        "remote",
+        "downloaded",
+        "hash_verified",
+        "remote_identity_verified",
+        "safe_resume",
+        "verification",
+    }
+)
 
 
 def file_sha256(path: Path) -> str:
@@ -179,6 +209,152 @@ def _safe_directory_descendant(path: Path, root: Path) -> bool:
 
 def _safe_read_object(path: Path, root: Path) -> dict[str, Any]:
     return _read_object(path) if _safe_regular_descendant(path, root) else {}
+
+
+def _v3_event_authority_error(state: Mapping[str, Any], run_directory: Path) -> str | None:
+    authority_files = (
+        EVENT_FILENAME,
+        EVENT_HISTORY_ORIGIN_FILENAME,
+        LEGACY_EVENT_FILENAME,
+        LEGACY_MIGRATION_FILENAME,
+    )
+    if not any(os.path.lexists(run_directory / name) for name in authority_files):
+        return None
+    migration_required = state.get("event_migration_required", False)
+    if type(migration_required) is not bool:
+        return "Legacy v3 event-history authentication is malformed."
+    try:
+        verification = verify_event_migration(
+            str(state.get("run_id") or ""),
+            run_directory,
+            migration_required=migration_required,
+            origin_required=True,
+        )
+        replay = EventRepository(run_directory.parent).replay(str(state.get("run_id") or ""))
+        confirmed = verify_event_migration(
+            str(state.get("run_id") or ""),
+            run_directory,
+            migration_required=migration_required,
+            origin_required=True,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return "Legacy v3 event-history authentication could not be verified."
+    if (
+        not verification.resume_compatible
+        or not replay.safe_for_resume
+        or replay.migration_state != verification.state.value
+        or not confirmed.resume_compatible
+        or confirmed.evidence_sha256 != verification.evidence_sha256
+    ):
+        return "Legacy v3 event-history authentication could not be verified."
+    indexed = tuple(replay.events)
+    if not indexed or tuple(item.event_id for item in indexed) != tuple(range(1, len(indexed) + 1)):
+        return "Legacy v3 event-history semantics are not authenticated."
+    events = tuple(item.event for item in indexed)
+    first = events[0]
+    if first.feature == "training" and first.event_type == "training_started":
+        return "Product event-history authority cannot be downgraded to a legacy run-state schema."
+    command = state.get("command")
+    if (
+        not isinstance(command, str)
+        or first.event_type != "run_started"
+        or first.feature != command
+        or any(event.feature != command for event in events)
+    ):
+        return "Legacy v3 event-history semantics are not authenticated."
+    return None
+
+
+def _run_state_contract_error(state: Mapping[str, Any], run_directory: Path) -> str | None:
+    """Recognize current v3 state or the exact Product Training writer contract."""
+
+    run_id = state.get("run_id")
+    if run_id and str(run_id) != run_directory.name:
+        return "Run identity does not match its durable directory."
+    schema = state.get("schema_version")
+    if schema == RUN_STATE_SCHEMA:
+        return _v3_event_authority_error(state, run_directory)
+    if schema != PRODUCT_RUN_STATE_SCHEMA:
+        return "Run state schema is missing or unsupported."
+    if (
+        not isinstance(run_id, str)
+        or run_id != run_directory.name
+        or state.get("feature") != "training"
+        or state.get("command") != "training.start"
+    ):
+        return "Product run state is not an authenticated TrainingService run."
+    migration_required = state.get("event_migration_required")
+    if type(migration_required) is not bool:
+        return "Product training event-history authentication is missing or malformed."
+    return None
+
+
+def _product_training_authentication_error(
+    state: Mapping[str, Any],
+    run_directory: Path,
+    checkpoint_rows: Sequence[Mapping[str, Any]],
+) -> str | None:
+    if state.get("schema_version") != PRODUCT_RUN_STATE_SCHEMA:
+        return None
+    try:
+        verification = verify_event_migration(
+            str(state["run_id"]),
+            run_directory,
+            migration_required=bool(state["event_migration_required"]),
+            origin_required=True,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return "Product training event-history authentication could not be verified."
+    if not verification.resume_compatible:
+        return "Product training event-history authentication could not be verified."
+    lock_path = run_directory / ".events.lock"
+    if not _safe_regular_descendant(lock_path, run_directory):
+        return "Product training event-history authentication could not be verified."
+    try:
+        repository = EventRepository(run_directory.parent)
+        replay = repository.replay(str(state["run_id"]))
+        confirmed = verify_event_migration(
+            str(state["run_id"]),
+            run_directory,
+            migration_required=bool(state["event_migration_required"]),
+            origin_required=True,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return "Product training event-history authentication could not be verified."
+    if (
+        not replay.safe_for_resume
+        or replay.migration_state != verification.state.value
+        or not confirmed.resume_compatible
+        or confirmed.evidence_sha256 != verification.evidence_sha256
+    ):
+        return "Product training event-history authentication could not be verified."
+    indexed = tuple(replay.events)
+    if not indexed or tuple(item.event_id for item in indexed) != tuple(range(1, len(indexed) + 1)):
+        return "Product training event semantics are not authenticated."
+    events = tuple(item.event for item in indexed)
+    first = events[0]
+    terminal = events[-1]
+    terminal_binding = {
+        "event_id": len(events),
+        "event_type": terminal.event_type,
+        "timestamp": terminal.timestamp,
+    }
+    if (
+        first.feature != "training"
+        or first.event_type != "training_started"
+        or first.status.value != "RUNNING"
+        or any(event.feature != "training" for event in events)
+        or terminal.status.value != "COMPLETE"
+        or terminal.event_type != "backend_state"
+        or terminal.metrics.get("completion_validated") is not True
+        or state.get("status") != terminal.status.value
+        or state.get("stage") != terminal.stage
+        or state.get("message") != terminal.message
+        or state.get("ended_at") != terminal.timestamp
+        or state.get("last_durable_event") != terminal_binding
+    ):
+        return "Product training event semantics are not authenticated."
+    return _product_checkpoint_binding_error(state, terminal.metrics, checkpoint_rows, run_directory)
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -368,6 +544,193 @@ def _checkpoint_hash_evidence(row: Mapping[str, Any]) -> tuple[str | None, str |
     if len(hashes) > 1:
         return None, "conflict"
     return next(iter(hashes), None), None
+
+
+def _relative_checkpoint_binding_path(
+    value: Any,
+    run_directory: Path,
+    *,
+    require_relative: bool,
+) -> str | None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    path = Path(value)
+    if ".." in path.parts or (require_relative and (path.is_absolute() or path.drive or "\\" in value)):
+        return None
+    candidate = path if path.is_absolute() else run_directory / path
+    try:
+        relative = candidate.resolve().relative_to(run_directory.resolve()).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return relative if relative and relative != "." else None
+
+
+def _canonical_bound_checkpoint_row(
+    row: Mapping[str, Any],
+    run_directory: Path,
+    *,
+    terminal: bool,
+) -> dict[str, Any] | None:
+    if terminal:
+        if set(row) != _PRODUCT_CHECKPOINT_ROW_KEYS:
+            return None
+        relative_path = _relative_checkpoint_binding_path(row.get("path"), run_directory, require_relative=True)
+    else:
+        if "checkpoint" not in row or any(
+            row.get(key) not in (None, "") for key in ("path", "checkpoint_path", "file")
+        ):
+            return None
+        relative_path = _relative_checkpoint_binding_path(row.get("checkpoint"), run_directory, require_relative=False)
+        if any(row.get(key) is not None for key in ("verified", "identity_verified", "verification_state")):
+            return None
+    if relative_path is None:
+        return None
+
+    sha256 = row.get("sha256")
+    if sha256 is not None and (
+        not isinstance(sha256, str) or sha256 != sha256.strip() or not _SHA256_PATTERN.fullmatch(sha256.lower())
+    ):
+        return None
+    seed = row.get("seed")
+    optimizer_step = row.get("optimizer_step")
+    backend_id = row.get("backend_id")
+    verification = row.get("verification")
+    if (
+        (seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)))
+        or isinstance(optimizer_step, bool)
+        or not isinstance(optimizer_step, int)
+        or optimizer_step < 0
+        or not isinstance(backend_id, str)
+        or not backend_id
+        or backend_id != backend_id.strip()
+        or not isinstance(verification, str)
+        or not verification
+        or verification != verification.strip()
+    ):
+        return None
+    boolean_fields = ("remote", "downloaded", "hash_verified", "remote_identity_verified", "safe_resume")
+    if any(type(row.get(field)) is not bool for field in boolean_fields):
+        return None
+    return {
+        "path": relative_path,
+        "sha256": sha256.lower() if isinstance(sha256, str) else None,
+        "seed": seed,
+        "optimizer_step": optimizer_step,
+        "backend_id": backend_id,
+        **{field: row[field] for field in boolean_fields},
+        "verification": verification,
+    }
+
+
+def _bound_checkpoint_sort_key(row: Mapping[str, Any]) -> tuple[str, int, bool, int]:
+    seed = row.get("seed")
+    return str(row.get("path") or ""), int(row.get("optimizer_step") or 0), seed is None, int(seed or 0)
+
+
+def _product_state_identities_bound(
+    state: Mapping[str, Any],
+    state_rows: Sequence[Mapping[str, Any]],
+    *,
+    dataset_identity: str,
+    view_identity: str,
+) -> bool:
+    backend = state.get("backend_identity")
+    if not isinstance(backend, Mapping):
+        return False
+    if (
+        state.get("dataset_identity") != dataset_identity
+        or state.get("view_identity") != view_identity
+        or state.get("training_view_identity") != view_identity
+        or backend.get("dataset_identity") != dataset_identity
+        or backend.get("view_identity") != view_identity
+        or backend.get("training_view_identity") != view_identity
+        or backend.get("dataset_view_manifest_hash") != view_identity
+    ):
+        return False
+    return all(
+        row.get("dataset_identity") == dataset_identity
+        and row.get("view_identity") == view_identity
+        and row.get("training_view_identity") == view_identity
+        for row in state_rows
+    )
+
+
+def _product_checkpoint_binding_error(
+    state: Mapping[str, Any],
+    terminal_metrics: Mapping[str, Any],
+    checkpoint_rows: Sequence[Mapping[str, Any]],
+    run_directory: Path,
+) -> str | None:
+    error = "Product training checkpoint state is not bound to its authenticated terminal event."
+    binding = terminal_metrics.get("evaluation_checkpoint_binding")
+    if not isinstance(binding, Mapping) or set(binding) != _PRODUCT_CHECKPOINT_BINDING_KEYS:
+        return error
+    dataset_identity = binding.get("dataset_identity")
+    view_identity = binding.get("view_identity")
+    if (
+        binding.get("schema_version") != _PRODUCT_CHECKPOINT_BINDING_SCHEMA
+        or binding.get("run_id") != state.get("run_id")
+        or not isinstance(dataset_identity, str)
+        or not dataset_identity
+        or dataset_identity != dataset_identity.strip()
+        or not isinstance(view_identity, str)
+        or not view_identity
+        or view_identity != view_identity.strip()
+    ):
+        return error
+    raw_bound_rows = binding.get("checkpoints")
+    raw_state_rows = state.get("checkpoints")
+    if not isinstance(raw_bound_rows, list) or not isinstance(raw_state_rows, list):
+        return error
+    if not all(isinstance(row, Mapping) for row in (*raw_bound_rows, *raw_state_rows)):
+        return error
+    if not _product_state_identities_bound(
+        state,
+        raw_state_rows,
+        dataset_identity=dataset_identity,
+        view_identity=view_identity,
+    ):
+        return error
+    bound_rows = [_canonical_bound_checkpoint_row(row, run_directory, terminal=True) for row in raw_bound_rows]
+    state_rows = [_canonical_bound_checkpoint_row(row, run_directory, terminal=False) for row in raw_state_rows]
+    if any(row is None for row in (*bound_rows, *state_rows)):
+        return error
+    canonical_bound = sorted((row for row in bound_rows if row is not None), key=_bound_checkpoint_sort_key)
+    canonical_state = sorted((row for row in state_rows if row is not None), key=_bound_checkpoint_sort_key)
+    if canonical_state != canonical_bound:
+        return error
+    bound_by_path: dict[str, Mapping[str, Any]] = {}
+    for row in canonical_bound:
+        path = str(row["path"])
+        if path in bound_by_path and bound_by_path[path] != row:
+            return error
+        bound_by_path[path] = row
+    for row in checkpoint_rows:
+        try:
+            path = _resolve_checkpoint_path(run_directory, row)
+        except (OSError, RuntimeError, ValueError):
+            return error
+        if path is None:
+            return error
+        try:
+            relative_path = path.resolve().relative_to(run_directory.resolve()).as_posix()
+        except (OSError, RuntimeError, ValueError):
+            return error
+        bound = bound_by_path.get(relative_path)
+        expected_sha256, hash_error = _checkpoint_hash_evidence(row)
+        dataset_values, malformed_dataset = _dataset_identity_values(state, row)
+        view_values, malformed_view = _view_identity_values(state, row)
+        if (
+            bound is None
+            or hash_error is not None
+            or expected_sha256 != bound["sha256"]
+            or malformed_dataset
+            or dataset_values != {dataset_identity}
+            or malformed_view
+            or view_values != {view_identity}
+        ):
+            return error
+    return None
 
 
 def _checkpoint_path_safety_reason(
@@ -606,6 +969,7 @@ def _availability(
     *,
     state: Mapping[str, Any],
     command: Mapping[str, Any],
+    state_contract_error: str | None,
     row: Mapping[str, Any],
     path: Path | None,
     run_directory: Path,
@@ -614,13 +978,10 @@ def _availability(
     expected_view: str | None,
 ) -> tuple[CheckpointAvailability, str, tuple[str, ...]]:
     reasons: list[str] = []
-    schema_valid = state.get("schema_version") == RUN_STATE_SCHEMA
     status = str(state.get("status") or "UNKNOWN").upper()
     run_command = str(state.get("command") or command.get("command") or "").lower()
-    if state.get("run_id") and str(state["run_id"]) != run_directory.name:
-        return CheckpointAvailability.INVALID, "FAILED", ("Run identity does not match its durable directory.",)
-    if not schema_valid:
-        return CheckpointAvailability.INVALID, "FAILED", ("Run state schema is missing or unsupported.",)
+    if state_contract_error is not None:
+        return CheckpointAvailability.INVALID, "FAILED", (state_contract_error,)
     if command.get("_unsafe_artifact") is True:
         return CheckpointAvailability.INVALID, "FAILED", ("Run command evidence crosses an unsafe filesystem seam.",)
     if run_command not in {"train", "training", "training.start"}:
@@ -725,12 +1086,16 @@ def discover_checkpoint_candidates(
         if not _safe_regular_descendant(state_path, run_directory):
             continue
         state = _safe_read_object(state_path, run_directory)
+        state_contract_error = _run_state_contract_error(state, run_directory)
         command_path = run_directory / "command.json"
         command = _safe_read_object(command_path, run_directory)
         if os.path.lexists(command_path) and not command:
             command = {"_unsafe_artifact": True}
         run_id = str(state.get("run_id") or run_directory.name)
-        rows = _checkpoint_rows(run_directory, state) or [{}]
+        checkpoint_rows = _checkpoint_rows(run_directory, state)
+        if state_contract_error is None and str(state.get("status") or "").upper() == "COMPLETE" and checkpoint_rows:
+            state_contract_error = _product_training_authentication_error(state, run_directory, checkpoint_rows)
+        rows = checkpoint_rows or [{}]
         for row in rows:
             try:
                 path = _resolve_checkpoint_path(run_directory, row)
@@ -743,6 +1108,7 @@ def discover_checkpoint_candidates(
             availability, verification, reasons = _availability(
                 state=state,
                 command=command,
+                state_contract_error=state_contract_error,
                 row=row,
                 path=path,
                 run_directory=run_directory,

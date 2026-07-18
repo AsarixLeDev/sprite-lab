@@ -8,6 +8,7 @@ import pytest
 import spritelab.utils.safe_fs as safe_fs
 from spritelab.utils.safe_fs import (
     AnchoredDirectory,
+    ExactPublicationUnsupported,
     OwnedFileIdentity,
     UnsafeFilesystemOperation,
     atomic_write_bytes,
@@ -15,6 +16,136 @@ from spritelab.utils.safe_fs import (
     remove_confined_tree,
     require_confined_path,
 )
+
+
+def test_exact_held_file_publication_rejects_named_source_substitution(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    source = root / "source.tmp"
+    foreign = root / "foreign.tmp"
+    outside = tmp_path / "outside.bin"
+    source.write_bytes(b"owned publication")
+    foreign.write_bytes(b"foreign must remain untrusted")
+    outside.write_bytes(b"outside sentinel")
+
+    with AnchoredDirectory(root, root) as anchor:
+        descriptor = anchor.open_file(source.name, os.O_RDONLY)
+        try:
+            identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
+            try:
+                os.replace(foreign, source)
+            except OSError:
+                anchor.publish_held_file_no_replace(
+                    descriptor,
+                    source.name,
+                    "published.bin",
+                    identity=identity,
+                )
+            else:
+                with pytest.raises(UnsafeFilesystemOperation, match="source name changed"):
+                    anchor.publish_held_file_no_replace(
+                        descriptor,
+                        source.name,
+                        "published.bin",
+                        identity=identity,
+                    )
+        finally:
+            os.close(descriptor)
+
+    if os.name == "nt":
+        assert (root / "published.bin").read_bytes() == b"owned publication"
+        assert foreign.read_bytes() == b"foreign must remain untrusted"
+    else:
+        assert source.read_bytes() == b"foreign must remain untrusted"
+        assert not (root / "published.bin").exists()
+    assert outside.read_bytes() == b"outside sentinel"
+
+
+def test_exact_held_file_publication_is_no_replace_and_inode_bound(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    source = root / "source.tmp"
+    source.write_bytes(b"exact bytes")
+
+    with AnchoredDirectory(root, root) as anchor:
+        descriptor = anchor.open_file(source.name, os.O_RDONLY)
+        try:
+            identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
+            anchor.publish_held_file_no_replace(
+                descriptor,
+                source.name,
+                "published.bin",
+                identity=identity,
+            )
+        finally:
+            os.close(descriptor)
+
+    published = root / "published.bin"
+    assert published.read_bytes() == b"exact bytes"
+    assert OwnedFileIdentity.from_stat(published.stat()) == identity
+    if os.name == "nt":
+        assert not source.exists()
+        assert published.stat().st_nlink == 1
+    else:
+        assert source.exists()
+        assert published.stat().st_nlink == 2
+
+
+def test_cooperative_atomic_write_repeats_without_alias_growth(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "lease.json"
+    target.write_bytes(b"initial")
+
+    def unsupported_anonymous(_anchor: AnchoredDirectory, _mode: int = 0o600) -> int:
+        raise ExactPublicationUnsupported("forced no-O_TMPFILE platform")
+
+    monkeypatch.setattr(AnchoredDirectory, "open_anonymous_file", unsupported_anonymous)
+    for index in range(25):
+        atomic_write_bytes(target, f"lease-{index}".encode("ascii"))
+        assert target.stat().st_nlink == 1
+
+    assert target.read_bytes() == b"lease-24"
+    assert sorted(path.name for path in root.iterdir()) == ["lease.json"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exact mutable CAS is Windows-only")
+def test_windows_atomic_replace_refuses_staged_inode_substitution(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "state.json"
+    foreign = root / "foreign.tmp"
+    outside = tmp_path / "outside.bin"
+    target.write_bytes(b"prior target")
+    foreign.write_bytes(b"foreign candidate")
+    outside.write_bytes(b"outside sentinel")
+    real_replace = AnchoredDirectory.replace_held_file_if_owned
+
+    def substitute_then_replace(
+        anchor: AnchoredDirectory,
+        source_descriptor: int,
+        source_name: str,
+        destination_name: str,
+        **kwargs,
+    ) -> None:
+        os.replace(foreign, anchor.directory / source_name)
+        real_replace(
+            anchor,
+            source_descriptor,
+            source_name,
+            destination_name,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(AnchoredDirectory, "replace_held_file_if_owned", substitute_then_replace)
+    with pytest.raises((OSError, UnsafeFilesystemOperation)):
+        atomic_write_bytes(target, b"intended")
+
+    assert target.read_bytes() == b"prior target"
+    assert outside.read_bytes() == b"outside sentinel"
 
 
 def test_confined_path_rejects_root_and_lexical_escape(tmp_path: Path) -> None:
@@ -244,6 +375,11 @@ def test_held_directory_rename_noreplace_keeps_exact_anchor_live(tmp_path: Path)
         parent.mkdir("candidate")
         with parent.open_directory("candidate") as candidate:
             candidate.atomic_write_bytes("evidence.bin", b"bound")
+            if os.name != "nt":
+                with pytest.raises(ExactPublicationUnsupported, match="held-directory"):
+                    parent.rename_held_directory_noreplace(candidate, "published")
+                assert candidate.directory == root / "candidate"
+                return
             parent.rename_held_directory_noreplace(candidate, "published")
             assert candidate.directory == root / "published"
             assert candidate.names() == ("evidence.bin",)
@@ -262,7 +398,8 @@ def test_held_directory_rename_never_replaces_destination(tmp_path: Path) -> Non
         parent.mkdir("candidate")
         parent.mkdir("winner")
         with parent.open_directory("candidate") as candidate:
-            with pytest.raises(FileExistsError):
+            expected = FileExistsError if os.name == "nt" else ExactPublicationUnsupported
+            with pytest.raises(expected):
                 parent.rename_held_directory_noreplace(candidate, "winner")
 
     assert (root / "candidate").is_dir()
@@ -286,6 +423,56 @@ def test_immovable_child_anchor_refuses_held_rename_and_blocks_windows_path_swap
 
     assert (child_path / "sentinel.bin").read_bytes() == b"bound"
     assert not (root / "moved").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exact held-directory handle rename is Windows-only")
+def test_windows_held_directory_publication_renames_exact_handle_after_source_substitution(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "root"
+    candidate_path = root / "candidate"
+    foreign_path = root / "foreign"
+    parked_path = root / "parked"
+    candidate_path.mkdir(parents=True)
+    foreign_path.mkdir()
+    (candidate_path / "bound.bin").write_bytes(b"exact held directory")
+    (foreign_path / "sentinel.bin").write_bytes(b"foreign directory")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside sentinel")
+    real_rename = safe_fs._set_windows_handle_name
+    raced = False
+
+    def substitute_then_rename(
+        descriptor: int,
+        parent_handle: int,
+        destination_name: str,
+        *,
+        information_class: int,
+        replace: bool,
+    ) -> None:
+        nonlocal raced
+        if not raced:
+            raced = True
+            os.replace(candidate_path, parked_path)
+            os.replace(foreign_path, candidate_path)
+        real_rename(
+            descriptor,
+            parent_handle,
+            destination_name,
+            information_class=information_class,
+            replace=replace,
+        )
+
+    monkeypatch.setattr(safe_fs, "_set_windows_handle_name", substitute_then_rename)
+    with AnchoredDirectory(root, root) as parent:
+        with parent.open_directory("candidate") as candidate:
+            parent.rename_held_directory_noreplace(candidate, "published")
+
+    assert raced is True
+    assert (root / "published" / "bound.bin").read_bytes() == b"exact held directory"
+    assert (root / "candidate" / "sentinel.bin").read_bytes() == b"foreign directory"
+    assert outside.read_bytes() == b"outside sentinel"
 
 
 def test_anchored_public_operations_fail_closed_before_enter(tmp_path: Path) -> None:

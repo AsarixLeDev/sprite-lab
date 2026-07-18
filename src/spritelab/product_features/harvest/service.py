@@ -608,6 +608,9 @@ class HarvestService:
         *,
         explicit_action: bool,
         authorize_catalog_promotion: bool,
+        authorize_zero_cost_evidence_review: bool,
+        reviewed_verification_identity: str | None,
+        reviewed_source_pack_evidence_sha256: str | None,
     ) -> dict[str, Any]:
         evidence = self._current_probe_capability_evidence()
         try:
@@ -615,6 +618,9 @@ class HarvestService:
                 probe_id,
                 explicit_action=explicit_action,
                 authorize_catalog_promotion=authorize_catalog_promotion,
+                authorize_zero_cost_evidence_review=authorize_zero_cost_evidence_review,
+                reviewed_verification_identity=reviewed_verification_identity,
+                reviewed_source_pack_evidence_sha256=reviewed_source_pack_evidence_sha256,
                 capability_evidence=evidence,
             )
         except CatalogProbeError as exc:

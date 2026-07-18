@@ -111,7 +111,7 @@ def create_plugin(
             except BackendCapabilityCertificateError as exc:
                 active_capabilities = None
                 configuration_error = exc
-            if active_capabilities is not None and catalog:
+            if active_capabilities is not None:
                 certified = active_capabilities
 
                 def repository_backend_factory() -> HardenedArchiveAcquisitionBackend:

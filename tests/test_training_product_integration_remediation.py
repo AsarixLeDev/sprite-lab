@@ -9,8 +9,12 @@ import pytest
 
 from spritelab.product_core import ProductResult, ProductRun, ProductStatus, ProjectContext
 from spritelab.product_features.training import activation as activation_module
+from spritelab.product_features.training.models import ResolvedTrainingPlan, TrainingProfile
+from spritelab.product_features.training.plans import synthetic_training_path_contract_for_tests
+from spritelab.product_features.training.service import TrainingService
 from spritelab.remote_compute import (
     ArtifactReference,
+    ComputeEstimate,
     ComputeJob,
     ComputeStatus,
     FakeComputeBackend,
@@ -92,7 +96,94 @@ def _config(root: Path) -> ProjectConfig:
     values = copy.deepcopy(DEFAULT_CONFIG)
     values["paths"]["runs"] = "runs/v3"
     values["execution"]["allow_training"] = True
+    values.update(synthetic_training_path_contract_for_tests(root))
     return ProjectConfig(root, root / "spritelab.yaml", values)
+
+
+class _AuthorizedActivation:
+    def __init__(self, campaign: dict) -> None:
+        self.campaign = campaign
+        self.selected_spec = campaign
+        self.audit_status = AuditStatus.PASS
+        self.manifest = {"image_count": 1_800}
+        self.ready = True
+        self.activation_commit = {
+            "committed": True,
+            "record_identity": "a" * 64,
+            "config_after_sha256": "b" * 64,
+            "campaign_identity_sha256": campaign["campaign_identity"],
+        }
+
+    def to_contract_dict(self) -> dict:
+        return {
+            "schema_version": "spritelab.training.conditioned-dataset-contract.v2",
+            "ready": True,
+            "campaign_identity_sha256": self.campaign["campaign_identity"],
+            "activation_commit_record_identity": self.activation_commit["record_identity"],
+            "paths_exposed": False,
+        }
+
+
+class _StaticAuditSnapshot:
+    status = AuditStatus.PASS
+    launch_authorization_evidence_sha256 = "9" * 64
+
+    def __init__(self) -> None:
+        self.active = False
+
+    def __enter__(self) -> _StaticAuditSnapshot:
+        self.active = True
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        del exc_type, exc, traceback
+        self.active = False
+
+    def verify_unchanged(self) -> None:
+        if not self.active:
+            raise ValueError("synthetic audit capability is closed")
+
+
+def _authorized_activation_loader(
+    context: ProjectContext,
+    _profile,
+    *,
+    expected_campaign: dict | None = None,
+    **_kwargs,
+) -> _AuthorizedActivation:
+    campaign = expected_campaign
+    if campaign is None:
+        configured = Path(context.config["training"]["campaign_config"])
+        campaign_path = configured if configured.is_absolute() else context.project_root / configured
+        campaign = json.loads(campaign_path.read_text(encoding="utf-8"))
+    return _AuthorizedActivation(campaign)
+
+
+def _authorized_training_service(context: ProjectContext, backend) -> TrainingService:
+    campaign = _authorized_activation_loader(context, TrainingProfile.RECOMMENDED).campaign
+    plan = ResolvedTrainingPlan(
+        profile=TrainingProfile.RECOMMENDED,
+        model_label="Recommended baseline",
+        dataset_count=1_800,
+        dataset_ready=True,
+        backend_id=backend.backend_id,
+        campaign=campaign,
+        gates=(),
+        estimate=ComputeEstimate(60, 0, trustworthy=True),
+        resume_report={"safe": True, "runs": []},
+    )
+
+    class Resolver:
+        def resolve(self, *_args, **_kwargs):
+            return plan
+
+    return TrainingService(
+        context,
+        backend,
+        resolver=Resolver(),
+        activation_loader=_authorized_activation_loader,
+        audit_snapshot_opener=lambda *_args: _StaticAuditSnapshot(),
+    )
 
 
 @pytest.mark.parametrize("inert_command", [[], ["never", "run"]])
@@ -121,12 +212,9 @@ def test_v3_invalid_campaign_and_changed_code_identity_block_without_handoff(
     config.values["training"]["campaign_config"] = str(campaign_path)
     backend = FakeComputeBackend()
     monkeypatch.setattr("spritelab.v3.orchestration.build_project_state", lambda *_: _ready_state(tmp_path))
-    monkeypatch.setattr(
-        "spritelab.product_features.training.plans.build_project_state", lambda *_: _ready_state(tmp_path)
-    )
     monkeypatch.setattr("spritelab.v3.orchestration.backend_from_context", lambda *_: backend)
     result = train(config, [], ExecutionOptions(dry_run=True))
-    assert result.status == "BLOCKED"
+    assert result.status == "STALE", result.to_dict()
     assert "prepare" not in backend.calls and "launch" not in backend.calls
 
     launch = validated_launch(tmp_path / "stale", "fake")
@@ -136,7 +224,7 @@ def test_v3_invalid_campaign_and_changed_code_identity_block_without_handoff(
     changed["sha256"] = stable_hash({key: value for key, value in changed.items() if key != "sha256"})
     monkeypatch.setattr(campaign_module, "_code_identity", lambda: changed)
     result = train(config, [], ExecutionOptions(dry_run=True))
-    assert result.status == "BLOCKED"
+    assert result.status == "STALE", json.dumps(result.to_dict(), sort_keys=True)
     assert "prepare" not in backend.calls and "launch" not in backend.calls
 
 
@@ -148,30 +236,10 @@ def test_v3_valid_dry_run_issues_no_receipt_and_valid_fake_launches_exact_matrix
     config.values["training"]["campaign_config"] = str(prepared.validator_context.campaign_config_path)
     backend = FakeComputeBackend()
     monkeypatch.setattr("spritelab.v3.orchestration.build_project_state", lambda *_: _ready_state(tmp_path))
-    monkeypatch.setattr(
-        "spritelab.product_features.training.plans.build_project_state", lambda *_: _ready_state(tmp_path)
-    )
     monkeypatch.setattr("spritelab.v3.orchestration.backend_from_context", lambda *_: backend)
-
-    class AuthorizedActivation:
-        def __init__(self, campaign: dict) -> None:
-            self.campaign = campaign
-            self.selected_spec = campaign
-
-        def to_contract_dict(self) -> dict:
-            return {
-                "schema_version": "spritelab.training.conditioned-dataset-contract.v2",
-                "ready": True,
-                "campaign_identity_sha256": self.campaign["campaign_identity"],
-                "paths_exposed": False,
-            }
-
-    monkeypatch.setattr(
-        "spritelab.product_features.training.service.load_conditioned_training_activation",
-        lambda *_args, **kwargs: AuthorizedActivation(kwargs["expected_campaign"]),
-    )
+    monkeypatch.setattr("spritelab.v3.orchestration.TrainingService", _authorized_training_service)
     dry_run = train(config, [], ExecutionOptions(dry_run=True))
-    assert dry_run.status == "COMPLETE"
+    assert dry_run.status == "COMPLETE", json.dumps(dry_run.to_dict(), sort_keys=True)
     assert dry_run.data["validation"]["receipts_issued"] == 0
     assert "prepare" not in backend.calls and "launch" not in backend.calls
 
@@ -201,17 +269,15 @@ def test_v3_declined_confirmation_is_not_misreported_as_resumable(
     config.values["training"]["campaign_config"] = str(prepared.validator_context.campaign_config_path)
     backend = FakeComputeBackend()
     monkeypatch.setattr("spritelab.v3.orchestration.build_project_state", lambda *_: _ready_state(tmp_path))
-    monkeypatch.setattr(
-        "spritelab.product_features.training.plans.build_project_state", lambda *_: _ready_state(tmp_path)
-    )
     monkeypatch.setattr("spritelab.v3.orchestration.backend_from_context", lambda *_: backend)
+    monkeypatch.setattr("spritelab.v3.orchestration.TrainingService", _authorized_training_service)
     monkeypatch.setattr("spritelab.v3.orchestration.sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _prompt: "")
 
     result = train(config, [], ExecutionOptions())
 
     state = json.loads((config.runs_dir / result.run_id / "state.json").read_text(encoding="utf-8"))
-    assert result.status == ProductStatus.PAUSED.value
+    assert result.status == ProductStatus.PAUSED.value, json.dumps(result.to_dict(), sort_keys=True)
     assert result.next_command == "python -m spritelab v3 train"
     assert state["resumable"] is False
     assert "prepare" not in backend.calls and "launch" not in backend.calls

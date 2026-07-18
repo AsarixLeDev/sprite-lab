@@ -16,6 +16,10 @@ class UnsafeFilesystemOperation(ValueError):
     """Raised when a filesystem mutation cannot prove its target is confined."""
 
 
+class ExactPublicationUnsupported(UnsafeFilesystemOperation):
+    """Raised before mutation when an exact held-inode primitive is unavailable."""
+
+
 @dataclass(frozen=True)
 class OwnedFileIdentity:
     """Stable identity used to condition cleanup of an operation-owned file."""
@@ -171,6 +175,56 @@ class AnchoredDirectory(AbstractContextManager["AnchoredDirectory"]):
             raise UnsafeFilesystemOperation("mutable parent anchor is not open")
         return self._before
 
+    def fixed_directory_path(self) -> Path:
+        """Return a pathname that stays bound to this held directory.
+
+        POSIX exposes the inherited descriptor through the process descriptor
+        namespace. Windows keeps the lexical path stable by holding a directory
+        handle that deliberately denies delete/rename sharing.
+        """
+
+        self.verify()
+        if self._descriptor is None:
+            if self._windows_handle is None:
+                raise UnsafeFilesystemOperation("mutable parent anchor is closed")
+            return self.directory
+        for namespace in (Path("/proc/self/fd"), Path("/dev/fd")):
+            candidate = namespace / str(self._descriptor)
+            try:
+                metadata = candidate.stat()
+            except OSError:
+                continue
+            if self._before is not None and OwnedFileIdentity.from_stat(metadata) == OwnedFileIdentity.from_stat(
+                self._before
+            ):
+                return candidate
+        raise UnsafeFilesystemOperation("this POSIX platform has no stable inherited-descriptor pathname")
+
+    @contextmanager
+    def inheritable_token(self) -> Iterator[tuple[str, int]]:
+        """Temporarily make the exact held directory inheritable by one child."""
+
+        self.verify()
+        if self._descriptor is not None:
+            descriptor = self._descriptor
+            before = os.get_inheritable(descriptor)
+            os.set_inheritable(descriptor, True)
+            try:
+                yield "posix_fd", descriptor
+            finally:
+                os.set_inheritable(descriptor, before)
+            return
+        if self._windows_handle is not None:
+            handle = self._windows_handle
+            before = os.get_handle_inheritable(handle)
+            os.set_handle_inheritable(handle, True)
+            try:
+                yield "windows_handle", handle
+            finally:
+                os.set_handle_inheritable(handle, before)
+            return
+        raise UnsafeFilesystemOperation("mutable parent anchor is closed")
+
     def lstat(self, name: str) -> os.stat_result:
         child = self._child_name(name)
         if self._descriptor is not None:
@@ -194,6 +248,31 @@ class AnchoredDirectory(AbstractContextManager["AnchoredDirectory"]):
                 dir_fd=self._descriptor,
             )
         return _open_windows_child(self._required_windows_handle(), child, flags, mode)
+
+    def open_file_immovable(self, name: str, flags: int, mode: int = 0o600) -> int:
+        """Open one exact child while denying Windows rename/delete sharing.
+
+        POSIX descriptor-relative opens already pin the selected inode.  On
+        Windows this variant additionally omits ``FILE_SHARE_DELETE`` so the
+        visible directory entry cannot be exchanged while a caller validates
+        and consumes the held descriptor.
+        """
+
+        child = self._child_name(name)
+        if self._descriptor is not None:
+            return os.open(
+                child,
+                flags | int(getattr(os, "O_NOFOLLOW", 0)),
+                mode,
+                dir_fd=self._descriptor,
+            )
+        return _open_windows_child(
+            self._required_windows_handle(),
+            child,
+            flags,
+            mode,
+            share_delete=False,
+        )
 
     def open_anonymous_file(self, mode: int = 0o600) -> int:
         """Create an unnamed regular file relative to this held directory.
@@ -244,6 +323,124 @@ class AnchoredDirectory(AbstractContextManager["AnchoredDirectory"]):
             _windows_replace_child(self._required_windows_handle(), source, destination, replace=replace)
         self._sync_directory()
 
+    def publish_held_file_no_replace(
+        self,
+        source_descriptor: int,
+        source_name: str | None,
+        destination_name: str,
+        *,
+        identity: OwnedFileIdentity,
+    ) -> None:
+        """Publish the exact held regular-file inode without replacing a name.
+
+        Windows renames a freshly re-opened exact source handle while denying
+        delete sharing. POSIX links directly from the held descriptor. The
+        latter intentionally leaves a named source as a second hard link;
+        callers that require a single-link artifact should stage anonymously
+        where ``O_TMPFILE`` is available or retain and validate that alias.
+        """
+
+        destination = self._child_name(destination_name)
+        source = self._child_name(source_name) if source_name is not None else None
+        self._validate_held_file(source_descriptor, source, identity)
+        if self.lexists(destination):
+            raise FileExistsError(self.directory / destination)
+        if self._windows_handle is not None:
+            if source is None:
+                raise ExactPublicationUnsupported("Windows held-file publication requires a named source")
+            publish_descriptor = _open_windows_publishable_child(self._required_windows_handle(), source)
+            try:
+                self._validate_held_file(publish_descriptor, source, identity)
+                _windows_rename_descriptor(
+                    publish_descriptor,
+                    self._required_windows_handle(),
+                    destination,
+                    replace=False,
+                )
+            finally:
+                os.close(publish_descriptor)
+        elif self._descriptor is not None:
+            _posix_link_descriptor_noreplace(source_descriptor, self._descriptor, destination)
+        else:
+            raise UnsafeFilesystemOperation("mutable parent anchor is not open")
+        if not identity.matches(self.lstat(destination)):
+            raise UnsafeFilesystemOperation("held-file publication changed inode identity")
+        self._sync_directory()
+
+    def replace_held_file_if_owned(
+        self,
+        source_descriptor: int,
+        source_name: str,
+        destination_name: str,
+        *,
+        identity: OwnedFileIdentity,
+        destination_descriptor: int,
+        destination_identity: OwnedFileIdentity,
+    ) -> None:
+        """Replace one exact held destination with one exact held source.
+
+        Windows implements this as two exact handle renames: the prior inode is
+        first moved to an unpredictable recovery name, then the source handle
+        is published no-replace. The prior handle is restored or retained as a
+        recovery residue on failure. Portable POSIX has no rename-by-file-
+        descriptor primitive, so the exact CAS contract fails before mutation.
+        Generic atomic writes use a separately documented recovery fallback.
+        """
+
+        source = self._child_name(source_name)
+        destination = self._child_name(destination_name)
+        self._validate_held_file(source_descriptor, source, identity)
+        self._validate_held_file(destination_descriptor, destination, destination_identity)
+        if self._windows_handle is None:
+            raise ExactPublicationUnsupported("exact held-file replacement is unsupported on this platform")
+
+        parent_handle = self._required_windows_handle()
+        source_publish = _open_windows_publishable_child(parent_handle, source)
+        destination_publish = _open_windows_publishable_child(parent_handle, destination)
+        recovery = f".spritelab-recovery-{uuid.uuid4().hex}"
+        moved_destination = False
+        published_source = False
+        try:
+            self._validate_held_file(source_publish, source, identity)
+            self._validate_held_file(destination_publish, destination, destination_identity)
+            _windows_rename_descriptor(destination_publish, parent_handle, recovery, replace=False)
+            moved_destination = True
+            if not destination_identity.matches(self.lstat(recovery)):
+                raise UnsafeFilesystemOperation("held destination changed while entering recovery")
+            _windows_rename_descriptor(source_publish, parent_handle, destination, replace=False)
+            published_source = True
+            if not identity.matches(self.lstat(destination)):
+                raise UnsafeFilesystemOperation("held source changed during exact replacement")
+            _windows_delete_descriptor(destination_publish, destination_identity)
+        except BaseException:
+            if moved_destination and not published_source and not self.lexists(destination):
+                try:
+                    _windows_rename_descriptor(destination_publish, parent_handle, destination, replace=False)
+                    moved_destination = False
+                except BaseException:
+                    pass
+            raise
+        finally:
+            os.close(destination_publish)
+            os.close(source_publish)
+        self._sync_directory()
+
+    def _validate_held_file(
+        self,
+        descriptor: int,
+        source_name: str | None,
+        identity: OwnedFileIdentity,
+    ) -> os.stat_result:
+        self.verify()
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or not identity.matches(opened):
+            raise UnsafeFilesystemOperation("held publication descriptor identity changed")
+        if source_name is not None:
+            current = self.lstat(source_name)
+            if not _same_held_file(opened, current) or not identity.matches(current):
+                raise UnsafeFilesystemOperation("held publication source name changed")
+        return opened
+
     def rename_held_directory_noreplace(
         self,
         child: AnchoredDirectory,
@@ -263,7 +460,6 @@ class AnchoredDirectory(AbstractContextManager["AnchoredDirectory"]):
             raise UnsafeFilesystemOperation("held directory is not a direct child of this anchor")
         if not child._rename_capable:
             raise UnsafeFilesystemOperation("held directory was opened as an immovable anchor")
-        source = child._entry_name
         identity = OwnedFileIdentity.from_stat(child.directory_metadata())
         if self._windows_handle is not None:
             _set_windows_handle_name(
@@ -274,7 +470,7 @@ class AnchoredDirectory(AbstractContextManager["AnchoredDirectory"]):
                 replace=False,
             )
         elif self._descriptor is not None:
-            self.rename(source, destination, replace=False)
+            raise ExactPublicationUnsupported("exact held-directory publication is unsupported on this POSIX platform")
         else:
             raise UnsafeFilesystemOperation("mutable parent anchor is not open")
         moved = self.lstat(destination)
@@ -484,35 +680,67 @@ class AnchoredDirectory(AbstractContextManager["AnchoredDirectory"]):
         return True
 
     def atomic_write_bytes(self, name: str, content: bytes) -> Path:
-        """Atomically replace one direct child while this parent is anchored."""
+        """Durably replace one cooperative direct-child namespace entry.
+
+        This bounded mutable writer leaves one single-link canonical file and
+        no successful staging aliases. It is not an adversarial compare-and-
+        swap authority on POSIX; audit-bound publication must use
+        :meth:`publish_held_file_no_replace` or immutable commit records.
+        """
 
         target = self._child_name(name)
         temporary = f".spritelab-{uuid.uuid4().hex}.tmp"
         descriptor = self.open_file(
             temporary,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0)),
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0)),
         )
         identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
+        destination_descriptor = -1
         try:
-            handle = os.fdopen(descriptor, "wb")
-            descriptor = -1
-            with handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-                written_identity = OwnedFileIdentity.from_stat(os.fstat(handle.fileno()))
-                if written_identity != identity:
-                    raise UnsafeFilesystemOperation("atomic temporary descriptor identity changed while writing")
+            writer_descriptor = os.dup(descriptor)
+            try:
+                handle = os.fdopen(writer_descriptor, "wb")
+                writer_descriptor = -1
+                with handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    written_identity = OwnedFileIdentity.from_stat(os.fstat(handle.fileno()))
+                    if written_identity != identity:
+                        raise UnsafeFilesystemOperation("atomic temporary descriptor identity changed while writing")
+            finally:
+                if writer_descriptor >= 0:
+                    os.close(writer_descriptor)
             if not identity.matches(self.lstat(temporary)):
                 raise UnsafeFilesystemOperation("atomic temporary path changed before publication")
-            self.replace(temporary, target)
+            if self._windows_handle is not None and self.lexists(target):
+                destination_descriptor = self.open_file(
+                    target,
+                    os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+                )
+                destination_identity = OwnedFileIdentity.from_stat(os.fstat(destination_descriptor))
+                self.replace_held_file_if_owned(
+                    descriptor,
+                    temporary,
+                    target,
+                    identity=identity,
+                    destination_descriptor=destination_descriptor,
+                    destination_identity=destination_identity,
+                )
+            elif self._windows_handle is not None:
+                self.publish_held_file_no_replace(descriptor, temporary, target, identity=identity)
+            else:
+                self._validate_held_file(descriptor, temporary, identity)
+                self.replace(temporary, target)
             if not identity.matches(self.lstat(target)):
                 raise UnsafeFilesystemOperation("atomic publication changed inode identity")
         except BaseException:
-            if descriptor >= 0:
-                os.close(descriptor)
             self.unlink_if_owned(temporary, identity)
             raise
+        finally:
+            if destination_descriptor >= 0:
+                os.close(destination_descriptor)
+            os.close(descriptor)
         return self.directory / target
 
     def _sync_directory(self) -> None:
@@ -691,6 +919,26 @@ def _require_same_directory(before: os.stat_result, after: os.stat_result, path:
         raise UnsafeFilesystemOperation(f"mutable parent identity changed while anchored: {path}")
 
 
+def _same_held_file(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        stat.S_IFMT(left.st_mode),
+        left.st_nlink,
+        left.st_size,
+        left.st_mtime_ns,
+        _metadata_is_link_or_reparse(left),
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        stat.S_IFMT(right.st_mode),
+        right.st_nlink,
+        right.st_size,
+        right.st_mtime_ns,
+        _metadata_is_link_or_reparse(right),
+    )
+
+
 def _open_windows_directory_handle(path: Path, before: os.stat_result) -> int:
     import ctypes
     from ctypes import wintypes
@@ -823,7 +1071,14 @@ def _duplicate_windows_handle(handle: int) -> int:
     return int(duplicated.value)
 
 
-def _open_windows_child(parent_handle: int, name: str, flags: int, mode: int) -> int:
+def _open_windows_child(
+    parent_handle: int,
+    name: str,
+    flags: int,
+    mode: int,
+    *,
+    share_delete: bool = True,
+) -> int:
     del mode
     import msvcrt
 
@@ -851,6 +1106,7 @@ def _open_windows_child(parent_handle: int, name: str, flags: int, mode: int) ->
         desired_access=desired_access,
         disposition=disposition,
         options=0x00200000 | 0x00000040 | 0x00000020,
+        share_access=0x00000001 | 0x00000002 | (0x00000004 if share_delete else 0),
     )
     try:
         attributes, _file_index = _windows_handle_information(handle)
@@ -871,6 +1127,69 @@ def _open_windows_child(parent_handle: int, name: str, flags: int, mode: int) ->
     finally:
         if handle >= 0:
             _close_windows_handle(handle)
+
+
+def _open_windows_publishable_child(parent_handle: int, name: str) -> int:
+    """Open one regular child for exact handle rename without DELETE sharing."""
+
+    import msvcrt
+
+    handle = _nt_open_relative(
+        parent_handle,
+        name,
+        desired_access=0x00010000 | 0x80 | 0x00100000,  # DELETE | READ_ATTRIBUTES | SYNCHRONIZE
+        disposition=1,
+        options=0x00200000 | 0x00000040 | 0x00000020,
+        share_access=0x00000001 | 0x00000002,
+    )
+    try:
+        attributes, _file_index = _windows_handle_information(handle)
+        if attributes & (0x10 | 0x400):
+            raise UnsafeFilesystemOperation(f"held publication source is unsafe: {name}")
+        descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY | int(getattr(os, "O_BINARY", 0)))
+        handle = -1
+        return descriptor
+    finally:
+        if handle >= 0:
+            _close_windows_handle(handle)
+
+
+def _windows_rename_descriptor(
+    descriptor: int,
+    parent_handle: int,
+    destination_name: str,
+    *,
+    replace: bool,
+) -> None:
+    import msvcrt
+
+    _set_windows_handle_name(
+        int(msvcrt.get_osfhandle(descriptor)),
+        parent_handle,
+        destination_name,
+        information_class=10,  # FileRenameInformation
+        replace=replace,
+    )
+
+
+def _windows_delete_descriptor(descriptor: int, identity: OwnedFileIdentity) -> None:
+    import ctypes
+    import msvcrt
+
+    metadata = os.fstat(descriptor)
+    if not identity.matches(metadata):
+        raise UnsafeFilesystemOperation("held recovery inode changed before deletion")
+
+    class _FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+    information = _FileDispositionInfo(True)
+    _set_file_information(
+        int(msvcrt.get_osfhandle(descriptor)),
+        13,
+        ctypes.byref(information),
+        ctypes.sizeof(information),
+    )
 
 
 def _windows_relative_stat(parent_handle: int, name: str) -> os.stat_result:
@@ -1053,6 +1372,56 @@ def _posix_rename_noreplace(descriptor: int, source: str, destination: str) -> N
     if error == errno.EEXIST:
         raise FileExistsError(error, os.strerror(error), destination)
     raise OSError(error, os.strerror(error), destination)
+
+
+def _posix_link_descriptor_noreplace(
+    source_descriptor: int,
+    destination_directory_descriptor: int,
+    destination: str,
+) -> None:
+    """Create one exact no-replace hard link from an already held file."""
+
+    import ctypes
+    import errno
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    linkat = getattr(libc, "linkat", None)
+    if linkat is None:
+        raise ExactPublicationUnsupported("exact held-file publication is unsupported on this platform")
+    linkat.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    linkat.restype = ctypes.c_int
+    destination_bytes = os.fsencode(destination)
+    result = linkat(
+        source_descriptor,
+        b"",
+        destination_directory_descriptor,
+        destination_bytes,
+        0x1000,  # AT_EMPTY_PATH
+    )
+    if result == 0:
+        return
+    first_error = ctypes.get_errno()
+    if first_error == errno.EEXIST:
+        raise FileExistsError(first_error, os.strerror(first_error), destination)
+
+    for namespace in ("/proc/self/fd", "/dev/fd"):
+        descriptor_path = os.fsencode(f"{namespace}/{source_descriptor}")
+        ctypes.set_errno(0)
+        result = linkat(
+            -100,  # AT_FDCWD
+            descriptor_path,
+            destination_directory_descriptor,
+            destination_bytes,
+            0x400,  # AT_SYMLINK_FOLLOW
+        )
+        if result == 0:
+            return
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(error, os.strerror(error), destination)
+    raise ExactPublicationUnsupported(
+        f"exact held-file publication is unsupported by this filesystem (error {first_error})"
+    )
 
 
 def _windows_unlink_child(parent_handle: int, name: str, identity: OwnedFileIdentity) -> None:
@@ -1250,6 +1619,7 @@ def _close_windows_handle(handle: int) -> None:
 
 __all__ = [
     "AnchoredDirectory",
+    "ExactPublicationUnsupported",
     "OwnedFileIdentity",
     "UnsafeFilesystemOperation",
     "atomic_write_bytes",

@@ -138,7 +138,7 @@ def _synthetic_harvest_fixture(
         "artifacts_root": artifacts,
         "handoff": handoff,
         "handoff_identity": stable_hash(handoff),
-        "request_handoff_identity": _digest("request-handoff"),
+        "request_handoff_identity": stable_hash(handoff),
         "artifact_manifest": manifest,
         "artifact_manifest_identity": stable_hash(manifest),
         "artifact_manifest_file_sha256": _digest("artifact-manifest-file"),

@@ -152,7 +152,8 @@ class PaletteConditionLibrary:
         by_family = [entry for entry in candidates if family and entry.family == family]
         candidates = by_family or candidates
         by_category = [entry for entry in candidates if category and entry.category == category]
-        return (by_category or candidates or [None])[0]
+        selected = by_category or candidates
+        return selected[0] if selected else None
 
 
 def build_palette_condition_library(

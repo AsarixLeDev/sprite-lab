@@ -23,7 +23,12 @@ def _require_torch() -> Any:
     return torch
 
 
-def load_checkpoint(checkpoint: str | Path, *, expected_sha256: str | None = None) -> dict[str, Any]:
+def load_checkpoint(
+    checkpoint: str | Path,
+    *,
+    expected_sha256: str | None = None,
+    retained_descriptor: int | None = None,
+) -> dict[str, Any]:
     th = _require_torch()
     path = Path(checkpoint)
     if expected_sha256 is not None and (
@@ -32,19 +37,27 @@ def load_checkpoint(checkpoint: str | Path, *, expected_sha256: str | None = Non
         or any(character not in "0123456789abcdef" for character in expected_sha256)
     ):
         raise ValueError("expected checkpoint SHA-256 is malformed")
+    if retained_descriptor is not None and (type(retained_descriptor) is not int or retained_descriptor < 0):
+        raise ValueError("retained checkpoint descriptor is malformed")
+    if retained_descriptor is not None and expected_sha256 is None:
+        raise ValueError("retained checkpoint loading requires an exact expected SHA-256")
     flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
-    before_open = path.lstat()
-    descriptor = os.open(path, flags)
+    before_open = path.lstat() if retained_descriptor is None else None
+    descriptor = os.open(path, flags) if retained_descriptor is None else os.dup(retained_descriptor)
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or int(getattr(before, "st_nlink", 1)) != 1:
             raise ValueError("checkpoint must be one regular single-link file")
         before_open_identity = (
-            before_open.st_dev,
-            before_open.st_ino,
-            before_open.st_size,
-            before_open.st_nlink,
-            getattr(before_open, "st_mtime_ns", None),
+            None
+            if before_open is None
+            else (
+                before_open.st_dev,
+                before_open.st_ino,
+                before_open.st_size,
+                before_open.st_nlink,
+                getattr(before_open, "st_mtime_ns", None),
+            )
         )
         opened_identity = (
             before.st_dev,
@@ -53,7 +66,7 @@ def load_checkpoint(checkpoint: str | Path, *, expected_sha256: str | None = Non
             before.st_nlink,
             getattr(before, "st_mtime_ns", None),
         )
-        if before_open_identity != opened_identity:
+        if before_open_identity is not None and before_open_identity != opened_identity:
             raise RuntimeError("checkpoint changed while it was opened")
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             digest_before = sha256()
@@ -74,7 +87,6 @@ def load_checkpoint(checkpoint: str | Path, *, expected_sha256: str | None = Non
             if digest_after.hexdigest() != loaded_sha256:
                 raise RuntimeError("checkpoint bytes changed while they were loaded")
         after = os.fstat(descriptor)
-        current = os.stat(path, follow_symlinks=False)
         before_identity = (
             before.st_dev,
             before.st_ino,
@@ -89,14 +101,17 @@ def load_checkpoint(checkpoint: str | Path, *, expected_sha256: str | None = Non
             after.st_nlink,
             getattr(after, "st_mtime_ns", None),
         )
-        current_identity = (
-            current.st_dev,
-            current.st_ino,
-            current.st_size,
-            current.st_nlink,
-            getattr(current, "st_mtime_ns", None),
-        )
-        if before_identity != after_identity or after_identity != current_identity:
+        current_identity = None
+        if retained_descriptor is None:
+            current = os.stat(path, follow_symlinks=False)
+            current_identity = (
+                current.st_dev,
+                current.st_ino,
+                current.st_size,
+                current.st_nlink,
+                getattr(current, "st_mtime_ns", None),
+            )
+        if before_identity != after_identity or (current_identity is not None and after_identity != current_identity):
             raise RuntimeError("checkpoint changed while it was loaded")
     finally:
         os.close(descriptor)

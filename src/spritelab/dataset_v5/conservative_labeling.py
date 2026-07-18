@@ -1823,7 +1823,8 @@ def build_calibration_inputs(
         comparisons = record.get("comparisons") if isinstance(record.get("comparisons"), Mapping) else {}
         for field_name in CALIBRATION_FIELDS:
             result = fields.get(field_name) if isinstance(fields.get(field_name), Mapping) else {}
-            comparison = comparisons.get(field_name) if isinstance(comparisons.get(field_name), Mapping) else {}
+            raw_comparison = comparisons.get(field_name)
+            comparison: dict[str, Any] = dict(raw_comparison) if isinstance(raw_comparison, Mapping) else {}
             if (
                 field_name in CONDITIONAL_FIELDS
                 and result.get("state") == "labeled"

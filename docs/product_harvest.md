@@ -74,8 +74,16 @@ The retained creator page must visibly bind the exact title, creator, direct
 download, selected license (or its exact evidence link), and an explicit
 zero-cost declaration inside one structural source-pack block. Split-card
 evidence is not composable. Paid indicators, license negation, all-rights-
-reserved language, or other restrictive terms fail closed on both the pack
-block and retained license page. Inert parsing ignores script, style, template,
+reserved language, historical or negated gratis wording, or other restrictive
+terms fail closed on both the pack block and retained license page. Explicit
+counted offers such as `100 FREE tiles`, subject-bound declarations such as
+`assets are available for free`, `archive ... totally free`, and pack-count
+statements ending in `ALL FOR FREE` qualify only as complete visible block or
+sentence declarations. Prefixes, suffixes, partial-quantity qualifiers, free
+documentation/previews/shipping, and license-only wording such as
+`royalty-free`, `free to use`, or `use freely` do not establish the pack's
+acquisition price. Inert parsing ignores script,
+style, template,
 canvas, SVG, and other non-visible declarations. Likely governing Terms, ToS,
 acceptable-use, or automation-policy links are detected from normalized anchor
 labels and URL paths, while license/legal-code links are excluded. A submitted
@@ -100,11 +108,30 @@ The direct response is downloaded once into a single-link quarantine file only
 to bind its SHA-256. A probe never opens, decodes, extracts, discovers,
 classifies, imports, or publishes those bytes. Durable request, robots/pages,
 raw receipt, events, lease, result, and terminal commit precede a separate
-explicit promotion. Promotion reopens and rehashes every retained page and raw
-file, reruns robots/provenance/license/terms verification, rechecks current
-capability evidence, and transactionally publishes the sorted trusted catalog.
-Catalog-target changes detected immediately before replacement fail closed;
-idempotent replay does not overwrite a conflicting source ID. A live-view
+explicit promotion. The operator must first load the retained evidence and the
+promotion request must echo its exact verification identity and source-pack
+evidence-text SHA-256 under a separate zero-cost-review authorization. The
+immutable promotion receipt binds those reviewed values. Promotion then
+reopens and rehashes every retained page and raw file, reruns
+robots/provenance/license/terms verification, rechecks current capability
+evidence, and publishes one immutable no-replace source record below
+`artifacts/harvest/trusted_catalog.d`. Record filenames are private SHA-256
+identities of source IDs; the passive loader validates each record's exact
+self-identity, source identity, inode/link contract, and then returns a
+deterministically sorted merged catalog. The former single
+`artifacts/harvest/trusted_catalog.json` file remains strict passive read-only
+compatibility input and is never replaced by promotion. Conflicting source IDs
+across legacy and append-only records fail closed. Each catalog source
+atomically embeds the reviewed verification identity,
+source-pack text hash, and probe-receipt identity in its v3 evidence
+attestation. A crash before the separate promotion receipt is published cannot
+leave an unreviewed trusted source; exact replay recovers that receipt.
+Catalog publication never replaces an existing record; staged-inode
+substitution, an unexpected hard link, or a target that appears concurrently
+fails closed without changing prior trusted sources. POSIX named-fd
+publication retains one validator-bound stage alias when anonymous staging is
+unavailable; Windows moves the exact held handle and leaves a single link.
+Idempotent replay does not overwrite a conflicting source ID. A live-view
 refresh callback may be retried without turning a durable successful promotion
 into a failed response.
 

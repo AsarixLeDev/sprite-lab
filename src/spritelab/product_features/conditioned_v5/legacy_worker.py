@@ -31,9 +31,7 @@ WINDOWS_PARENT_ANCHORS_STRATEGY = _WRITE_CONFINEMENT.WINDOWS_PARENT_ANCHORS_STRA
 WriteConfinementError = _WRITE_CONFINEMENT.WriteConfinementError
 WriteConfinementUnavailable = _WRITE_CONFINEMENT.WriteConfinementUnavailable
 enforce_linux_landlock_write_confinement = _WRITE_CONFINEMENT.enforce_linux_landlock_write_confinement
-windows_current_process_confinement_evidence = (
-    _WRITE_CONFINEMENT.windows_current_process_confinement_evidence
-)
+windows_current_process_confinement_evidence = _WRITE_CONFINEMENT.windows_current_process_confinement_evidence
 
 REQUEST_SCHEMA = "spritelab.dataset.conditioned-legacy-intake-request.v1"
 RESPONSE_SCHEMA = "spritelab.dataset.conditioned-legacy-intake-response.v1"

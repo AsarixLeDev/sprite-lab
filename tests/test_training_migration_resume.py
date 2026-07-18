@@ -45,7 +45,7 @@ from spritelab.remote_compute import (
 from spritelab.remote_compute.ssh import RemoteResult
 from spritelab.training.campaign import RESUME_CHECKPOINT_SCHEMA_VERSION, file_sha256, stable_hash
 from spritelab.training.launch import ValidatedTrainingLaunch, prepare_validated_training_launch
-from training_launch_test_utils import validated_launch
+from training_launch_test_utils import launch_authorization_verifier, validated_launch
 
 
 def _event_bytes(run_id: str, *, current: int = 1, terminal_newline: bool = True) -> bytes:
@@ -386,9 +386,11 @@ def _request(launch: ValidatedTrainingLaunch) -> ComputeJobRequest:
         environment=launch.environment,
         execution_spec_identity=launch.receipt.execution_spec_sha256,
         output_root_identity=launch.receipt.output_root_identity,
+        launch_authorization_evidence_sha256=launch.receipt.launch_authorization_evidence_sha256,
         compute_backend_id=launch.receipt.compute_backend_id,
         launch_receipt=launch.receipt,
         validator_context=launch.validator_context,
+        launch_authorization_verifier=launch_authorization_verifier(launch),
     )
 
 
@@ -419,6 +421,7 @@ def _durable_product_resume(
         def resolve(self, *args: Any, **kwargs: Any) -> ResolvedTrainingPlan:
             return plan
 
+    service = TrainingService(context, backend, resolver=Resolver())
     session_id = "durable-resume-identity-session"
     prepared = PreparedCompute(
         backend.backend_id,
@@ -444,6 +447,7 @@ def _durable_product_resume(
         backend_id=backend.backend_id,
         backend_identity={
             "backend_id": backend.backend_id,
+            "configuration_identity_sha256": service._backend_configuration_identity(),
             "dataset_identity": launch.receipt.dataset_identity,
             "view_identity": launch.receipt.view_identity,
             "training_view_identity": launch.receipt.view_identity,
@@ -487,7 +491,7 @@ def _durable_product_resume(
         )
     )
     state_path = context.runs_directory / session_id / "state.json"  # type: ignore[operator]
-    return TrainingService(context, backend, resolver=Resolver()), backend, state_path, launch
+    return service, backend, state_path, launch
 
 
 @pytest.mark.parametrize("identity", ["dataset", "view"])
@@ -550,7 +554,11 @@ def test_cached_resume_revalidates_deleted_durable_training_identity_before_back
     service, backend, state_path, _launch = _durable_product_resume(tmp_path)
     state = json.loads(state_path.read_text(encoding="utf-8"))
     run_id = str(state["run_id"])
-    assert service._session(run_id) is not None
+    cached = service._session(run_id)
+    assert cached is not None
+    assert cached.requests
+    assert all(request.launch_authorization_evidence_sha256 for request in cached.requests.values())
+    assert all(request.launch_authorization_verifier is None for request in cached.requests.values())
     if identity == "dataset":
         state.pop("dataset_identity")
         state["backend_identity"].pop("dataset_identity")

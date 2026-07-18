@@ -39,6 +39,7 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
@@ -150,6 +151,8 @@ _sl_advapi.SetTokenInformation.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_v
 _sl_advapi.SetTokenInformation.restype=ctypes.c_int
 _sl_advapi.GetTokenInformation.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_void_p,ctypes.c_uint32,ctypes.POINTER(ctypes.c_uint32)]
 _sl_advapi.GetTokenInformation.restype=ctypes.c_int
+_sl_advapi.IsTokenRestricted.argtypes=[ctypes.c_void_p]
+_sl_advapi.IsTokenRestricted.restype=ctypes.c_int
 _sl_advapi.ConvertStringSidToSidW.argtypes=[ctypes.c_wchar_p,ctypes.POINTER(ctypes.c_void_p)]
 _sl_advapi.ConvertStringSidToSidW.restype=ctypes.c_int
 _sl_advapi.GetLengthSid.argtypes=[ctypes.c_void_p]
@@ -181,11 +184,37 @@ def _sl_query(token):
     rid=int(_sl_advapi.GetSidSubAuthority(label.Label.Sid,count-1).contents.value)
     policy=int(_SL_TMP.from_buffer(_sl_token_info(token,27)).Policy)
     return rid,bool(policy&1)
+def _sl_restricting_sid_bytes(token):
+    restricted=bool(_sl_advapi.IsTokenRestricted(token))
+    buffer=_sl_token_info(token,11)
+    count=int(ctypes.c_uint32.from_buffer(buffer).value)
+    if count>4096:
+        raise RuntimeError("bootstrap restricting-SID evidence is excessive")
+    offset=ctypes.sizeof(ctypes.c_void_p)
+    required=offset+ctypes.sizeof(_SL_SAA)*count
+    if len(buffer)<required:
+        raise RuntimeError("bootstrap restricting-SID evidence is truncated")
+    groups=(
+        ctypes.cast(
+            ctypes.addressof(buffer)+offset,
+            ctypes.POINTER(_SL_SAA*count),
+        ).contents
+        if count
+        else ()
+    )
+    values=tuple(
+        sorted(
+            ctypes.string_at(group.Sid,int(_sl_advapi.GetLengthSid(group.Sid)))
+            for group in groups
+        )
+    )
+    return restricted,values
 
 _sl_query_handle=_sl_open_token(0x0008)
 _sl_startup=_sl_query(_sl_query_handle)
 if _sl_startup!=(4096,True):
     raise RuntimeError("bootstrap did not start at exact Low integrity")
+_sl_startup_restricted,_sl_startup_sid_bytes=_sl_restricting_sid_bytes(_sl_query_handle)
 _sl_adjust=_sl_open_token(0x0080|0x0008)
 _sl_untrusted=ctypes.c_void_p()
 try:
@@ -203,7 +232,27 @@ _sl_lowered=_sl_query(_sl_query_handle)
 if _sl_lowered!=(0,True):
     raise RuntimeError("bootstrap primary-token evidence is not exact Untrusted")
 
-import os,_thread
+import hashlib,json,os,_thread
+_sl_bound_project_root=os.environ.pop("SPRITELAB_CONFINEMENT_PROJECT_ROOT",None)
+if _sl_bound_project_root is not None and (
+    not _sl_bound_project_root or "\x00" in _sl_bound_project_root
+):
+    raise RuntimeError("bootstrap project-root binding is malformed")
+_sl_expected_restricted=os.environ.pop("SPRITELAB_CONFINEMENT_RESTRICTED_TOKEN","")
+_sl_expected_sid_hashes=os.environ.pop("SPRITELAB_CONFINEMENT_RESTRICTED_SID_HASHES","")
+try:
+    _sl_expected_sid_hashes=tuple(json.loads(_sl_expected_sid_hashes))
+except BaseException:
+    raise RuntimeError("bootstrap inherited-restriction binding is malformed")
+_sl_actual_sid_hashes=tuple(
+    sorted(hashlib.sha256(value).hexdigest() for value in _sl_startup_sid_bytes)
+)
+if (
+    _sl_expected_restricted not in ("0","1")
+    or _sl_startup_restricted!=(_sl_expected_restricted=="1")
+    or _sl_actual_sid_hashes!=_sl_expected_sid_hashes
+):
+    raise RuntimeError("bootstrap inherited restrictions changed")
 _sl_probe_results={}
 for _sl_name,_sl_environment_name in (
     ("medium","SPRITELAB_CONFINEMENT_MEDIUM_PROBE"),
@@ -282,11 +331,16 @@ sys._spritelab_windows_untrusted_evidence={
     "untrusted_world_outside_guaranteed":False,
     "job_kill_on_close":True,
     "job_active_process_limit":1,
+    "restricted_token":_sl_startup_restricted,
+    "restricted_sid_hashes":_sl_actual_sid_hashes,
 }
+if _sl_bound_project_root is not None:
+    sys._spritelab_windows_project_root=_sl_bound_project_root
 """.lstrip()
 _WINDOWS_UNTRUSTED_BOOTSTRAP_SHA256: Final = hashlib.sha256(
     WINDOWS_UNTRUSTED_BOOTSTRAP_SOURCE.encode("utf-8")
 ).hexdigest()
+WINDOWS_UNTRUSTED_BOOTSTRAP_SHA256: Final = _WINDOWS_UNTRUSTED_BOOTSTRAP_SHA256
 
 
 @dataclass(frozen=True)
@@ -539,6 +593,9 @@ class WindowsLowIntegrityProcess:
         desktop_handle: int,
         desktop_identity_sha256: str,
         confinement_probes: Mapping[str, tuple[Path, bytes]],
+        confinement_anchors: ExitStack,
+        restricted_token: bool,
+        restricted_sid_hashes: Sequence[str],
     ) -> None:
         self.args = tuple(args)
         self._handle = process_handle
@@ -553,8 +610,21 @@ class WindowsLowIntegrityProcess:
         self._desktop_handle = desktop_handle
         self.private_desktop_identity_sha256 = desktop_identity_sha256
         self._confinement_probes = dict(confinement_probes)
+        self._confinement_anchors = confinement_anchors
+        self.restricted_token = restricted_token
+        self.restricted_sid_hashes_identity_sha256 = hashlib.sha256(
+            json.dumps(
+                tuple(restricted_sid_hashes),
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).hexdigest()
 
     def poll(self) -> int | None:
+        self._enforce_stdio_limit()
+        return self._poll_process_handle()
+
+    def _poll_process_handle(self) -> int | None:
         if self.returncode is not None:
             return self.returncode
         if not self._handle:
@@ -570,6 +640,7 @@ class WindowsLowIntegrityProcess:
         return self.returncode
 
     def wait(self, timeout: float | None = None) -> int:
+        self._enforce_stdio_limit()
         if self.returncode is not None:
             return self.returncode
         if not self._handle:
@@ -579,12 +650,7 @@ class WindowsLowIntegrityProcess:
         kernel32 = _windows_kernel32()
         started = _windows_monotonic()
         while True:
-            if any(
-                os.fstat(descriptor).st_size > self._max_stdout_bytes
-                for descriptor in (self._stdout_descriptor, self._stderr_descriptor)
-            ):
-                self.terminate()
-                raise OSError("restricted child stdout exceeded its byte limit")
+            self._enforce_stdio_limit()
             if timeout is None:
                 interval = 50
             else:
@@ -616,13 +682,24 @@ class WindowsLowIntegrityProcess:
         return output, error_output
 
     def terminate(self) -> None:
-        if self.poll() is not None:
+        if self._poll_process_handle() is not None:
             return
         kernel32 = _windows_kernel32()
         if not kernel32.TerminateProcess(self._handle, 1):
             raise OSError("unable to terminate the restricted child process")
 
     kill = terminate
+
+    def _enforce_stdio_limit(self) -> None:
+        descriptors = (self._stdout_descriptor, self._stderr_descriptor)
+        open_descriptors = tuple(descriptor for descriptor in descriptors if descriptor >= 0)
+        if not open_descriptors:
+            return
+        if len(open_descriptors) != len(descriptors):
+            raise OSError("restricted child stdio is unavailable")
+        if any(os.fstat(descriptor).st_size > self._max_stdout_bytes for descriptor in open_descriptors):
+            self.terminate()
+            raise OSError("restricted child stdout exceeded its byte limit")
 
     def _verify_confinement_probes(self) -> None:
         for name, (path, expected) in sorted(self._confinement_probes.items()):
@@ -648,6 +725,10 @@ class WindowsLowIntegrityProcess:
         if self._desktop_handle:
             _windows_user32().CloseDesktop(self._desktop_handle)
             self._desktop_handle = 0
+        anchors = getattr(self, "_confinement_anchors", None)
+        if anchors is not None:
+            anchors.close()
+            self._confinement_anchors = None
 
     def __del__(self) -> None:
         try:
@@ -689,6 +770,8 @@ def _prepare_windows_integrity_roots(
     *,
     integrity_rid: int,
 ) -> tuple[WindowsLowIntegrityRoot, ...]:
+    from spritelab.utils.safe_fs import AnchoredDirectory
+
     if integrity_rid not in {_UNTRUSTED_INTEGRITY_RID, _LOW_INTEGRITY_RID}:
         raise WriteConfinementError("The Windows workspace integrity level is unsupported.")
 
@@ -698,39 +781,44 @@ def _prepare_windows_integrity_roots(
         raise WriteConfinementError("At least one private low-integrity root is required.")
     prepared: list[WindowsLowIntegrityRoot] = []
     seen: set[str] = set()
-    for raw in roots:
-        absolute = _explicit_windows_private_root(raw)
-        key = os.path.normcase(os.fspath(absolute))
-        if key in seen:
-            raise WriteConfinementError("Duplicate low-integrity roots are not allowed.")
-        seen.add(key)
-        before = absolute.lstat()
-        if not stat.S_ISDIR(before.st_mode) or _metadata_is_link_or_reparse(before):
-            raise WriteConfinementError("A private Windows workspace root is unsafe.")
-        try:
-            with os.scandir(absolute) as entries:
-                populated = next(entries, None) is not None
-            if populated:
-                raise WriteConfinementError("A private Windows workspace must be labeled before population.")
-        except OSError as exc:
-            raise WriteConfinementError("A private Windows workspace root could not be inspected.") from exc
-        _set_windows_mandatory_integrity_label(
-            absolute,
-            directory=True,
-            integrity_rid=integrity_rid,
-        )
-        after = absolute.lstat()
-        if _windows_metadata_binding(after) != _windows_metadata_binding(before):
-            raise WriteConfinementError("A private Windows workspace root changed while it was labeled.")
-        rid, no_write_up = _windows_path_integrity_label(absolute)
-        if rid != integrity_rid or not no_write_up:
-            raise WriteConfinementError("A private root lacks its exact mandatory-integrity write label.")
-        prepared.append(
-            WindowsLowIntegrityRoot(
-                identity=DirectoryIdentity.from_stat(after),
-                entry_count=1,
-            )
-        )
+    try:
+        with ExitStack() as anchors:
+            for raw in roots:
+                absolute = _explicit_windows_private_root(raw)
+                key = os.path.normcase(os.fspath(absolute))
+                if key in seen:
+                    raise WriteConfinementError("Duplicate low-integrity roots are not allowed.")
+                seen.add(key)
+                anchor = anchors.enter_context(AnchoredDirectory(absolute, absolute))
+                before = anchor.directory_metadata()
+                if anchor.names():
+                    raise WriteConfinementError("A private Windows workspace must be labeled before population.")
+                _set_windows_mandatory_integrity_label_handle(
+                    anchor._required_windows_handle(),
+                    directory=True,
+                    integrity_rid=integrity_rid,
+                )
+                anchor.verify()
+                after = anchor.directory_metadata()
+                if _windows_metadata_binding(after) != _windows_metadata_binding(before):
+                    raise WriteConfinementError("A private Windows workspace root changed while it was labeled.")
+                if _windows_handle_integrity_label(anchor._required_windows_handle(), directory=True) != (
+                    integrity_rid,
+                    True,
+                ):
+                    raise WriteConfinementError("A private root lacks its exact mandatory-integrity write label.")
+                if anchor.names():
+                    raise WriteConfinementError("A private Windows workspace changed while it was labeled.")
+                prepared.append(
+                    WindowsLowIntegrityRoot(
+                        identity=DirectoryIdentity.from_stat(after),
+                        entry_count=1,
+                    )
+                )
+    except WriteConfinementError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise WriteConfinementError("A private Windows workspace root could not be anchored safely.") from exc
     return tuple(prepared)
 
 
@@ -741,23 +829,112 @@ def _verify_windows_integrity_roots(
 ) -> tuple[WindowsLowIntegrityRoot, ...]:
     """Read-only verification of inherited labels across bounded private trees."""
 
+    verified, anchors = _retain_verified_windows_integrity_roots(roots, integrity_rid=integrity_rid)
+    anchors.close()
+    return verified
+
+
+def _retain_verified_windows_integrity_roots(
+    roots: Sequence[str | Path],
+    *,
+    integrity_rid: int,
+) -> tuple[tuple[WindowsLowIntegrityRoot, ...], ExitStack]:
+    """Verify every entry through exact handles and retain all root anchors."""
+
+    from spritelab.utils.safe_fs import AnchoredDirectory
+
+    anchors = ExitStack()
     verified: list[WindowsLowIntegrityRoot] = []
-    for raw in roots:
-        absolute = _explicit_windows_private_root(raw)
-        snapshot = _snapshot_windows_private_tree(absolute)
-        for relative in snapshot:
-            candidate = absolute if not relative else absolute.joinpath(*relative.split("/"))
-            if _windows_path_integrity_label(candidate) != (integrity_rid, True):
-                raise WriteConfinementError("A private-tree entry lacks its inherited mandatory-integrity label.")
-        if _snapshot_windows_private_tree(absolute) != snapshot:
-            raise WriteConfinementError("A private Windows workspace changed during label verification.")
-        verified.append(
-            WindowsLowIntegrityRoot(
-                identity=DirectoryIdentity.from_stat(absolute.lstat()),
-                entry_count=len(snapshot),
+    seen: set[str] = set()
+    try:
+        for raw in roots:
+            absolute = _explicit_windows_private_root(raw)
+            key = os.path.normcase(os.fspath(absolute))
+            if key in seen:
+                raise WriteConfinementError("Duplicate low-integrity roots are not allowed.")
+            seen.add(key)
+            anchor = anchors.enter_context(AnchoredDirectory(absolute, absolute))
+            entry_count = _verify_windows_integrity_tree_anchor(
+                anchor,
+                integrity_rid=integrity_rid,
+                device=int(anchor.directory_metadata().st_dev),
             )
-        )
-    return tuple(verified)
+            verified.append(
+                WindowsLowIntegrityRoot(
+                    identity=DirectoryIdentity.from_stat(anchor.directory_metadata()),
+                    entry_count=entry_count,
+                )
+            )
+        return tuple(verified), anchors
+    except BaseException:
+        anchors.close()
+        raise
+
+
+def _verify_windows_integrity_tree_anchor(
+    anchor: Any,
+    *,
+    integrity_rid: int,
+    device: int,
+    depth: int = 0,
+) -> int:
+    from spritelab.utils.safe_fs import OwnedFileIdentity
+
+    if depth > 128:
+        raise WriteConfinementError("A private Windows workspace exceeds its depth limit.")
+    anchor.verify()
+    if _windows_handle_integrity_label(anchor._required_windows_handle(), directory=True) != (
+        integrity_rid,
+        True,
+    ):
+        raise WriteConfinementError("A private-tree entry lacks its inherited mandatory-integrity label.")
+    before_names = anchor.names()
+    collision_keys: set[str] = set()
+    count = 1
+    for name in before_names:
+        collision_key = unicodedata.normalize("NFKC", name).casefold()
+        if collision_key in collision_keys:
+            raise WriteConfinementError("A private Windows workspace contains a name collision.")
+        collision_keys.add(collision_key)
+        metadata = anchor.lstat(name)
+        if _metadata_is_link_or_reparse(metadata) or int(metadata.st_dev) != device:
+            raise WriteConfinementError("A private Windows workspace crosses a link or device seam.")
+        if stat.S_ISDIR(metadata.st_mode):
+            with anchor.open_directory_immovable(name) as child:
+                count += _verify_windows_integrity_tree_anchor(
+                    child,
+                    integrity_rid=integrity_rid,
+                    device=device,
+                    depth=depth + 1,
+                )
+        elif stat.S_ISREG(metadata.st_mode):
+            descriptor = anchor.open_file_immovable(
+                name,
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+            try:
+                held = os.fstat(descriptor)
+                identity = OwnedFileIdentity.from_stat(held)
+                if int(held.st_nlink) != 1 or not identity.matches(metadata):
+                    raise WriteConfinementError("A private Windows workspace contains an unsafe file.")
+                if _windows_handle_integrity_label(_windows_os_handle(descriptor), directory=False) != (
+                    integrity_rid,
+                    True,
+                ):
+                    raise WriteConfinementError("A private-tree entry lacks its inherited mandatory-integrity label.")
+                if not identity.matches(anchor.lstat(name)):
+                    raise WriteConfinementError("A private Windows workspace changed during label verification.")
+            finally:
+                os.close(descriptor)
+            count += 1
+        else:
+            raise WriteConfinementError("A private Windows workspace contains a non-regular entry.")
+        if count > _MAX_WINDOWS_LABELED_ENTRIES:
+            raise WriteConfinementError("A private Windows workspace exceeds its entry limit.")
+    if anchor.names() != before_names:
+        raise WriteConfinementError("A private Windows workspace changed during label verification.")
+    anchor.verify()
+    return count
 
 
 def _windows_untrusted_bootstrap_arguments(
@@ -769,12 +946,10 @@ def _windows_untrusted_bootstrap_arguments(
     values = tuple(arguments)
     if (
         len(values) < 6
-        or values[1:5] != ("-I", "-S", "-B", "-c")
+        or values[1:5] not in {("-I", "-S", "-B", "-c"), ("-I", "-B", "-S", "-c")}
         or values.count("-c") != 1
     ):
-        raise WriteConfinementError(
-            "The Windows bootstrap requires the exact -I -S -B -c interpreter boundary."
-        )
+        raise WriteConfinementError("The Windows bootstrap requires the exact -I -S -B -c interpreter boundary.")
     worker_source = values[5]
     if not worker_source or "\x00" in worker_source:
         raise WriteConfinementError("The Windows worker bootstrap source is invalid.")
@@ -796,57 +971,83 @@ def _windows_untrusted_bootstrap_arguments(
 
 def _create_windows_untrusted_confinement_probes(
     boundary: Path,
-) -> dict[str, tuple[Path, bytes]]:
+) -> tuple[dict[str, tuple[Path, bytes]], ExitStack]:
+    from spritelab.utils.safe_fs import AnchoredDirectory, OwnedFileIdentity
+
     parent = _explicit_windows_private_root(boundary)
-    probe_root = parent / f".spritelab-confinement-probe-{uuid.uuid4().hex}"
-    medium_root = probe_root / "medium"
-    low_root = probe_root / "low-world"
-    probe_root.mkdir()
-    _set_windows_mandatory_integrity_label(
-        probe_root,
-        directory=True,
-        integrity_rid=_MEDIUM_INTEGRITY_RID,
-    )
-    medium_root.mkdir()
-    low_root.mkdir()
-    _set_windows_mandatory_integrity_label(
-        low_root,
-        directory=True,
-        integrity_rid=_LOW_INTEGRITY_RID,
-    )
-    world_sid = _windows_string_sid("S-1-1-0")
+    anchors = ExitStack()
     try:
-        _grant_windows_path_sid(low_root, world_sid, directory=True)
-    finally:
-        _windows_kernel32().LocalFree(world_sid)
-    payloads = {
-        "medium": b"spritelab-medium-confinement-probe-v1",
-        "low_world": b"spritelab-low-world-confinement-probe-v1",
-    }
-    result: dict[str, tuple[Path, bytes]] = {}
-    for name, directory in (("medium", medium_root), ("low_world", low_root)):
-        path = directory / "sentinel.bin"
-        descriptor = os.open(
-            path,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | int(getattr(os, "O_BINARY", 0)),
-            0o600,
+        parent_anchor = anchors.enter_context(AnchoredDirectory(parent, parent))
+        probe_name, probe_identity = parent_anchor.mkdir_unique(".spritelab-confinement-probe-")
+        if not probe_identity.matches(parent_anchor.lstat(probe_name)):
+            raise WriteConfinementError("A Windows confinement probe root changed during creation.")
+        probe_anchor = anchors.enter_context(parent_anchor.open_directory_immovable(probe_name))
+        _set_windows_mandatory_integrity_label_handle(
+            probe_anchor._required_windows_handle(),
+            directory=True,
+            integrity_rid=_MEDIUM_INTEGRITY_RID,
         )
+        if _windows_handle_integrity_label(probe_anchor._required_windows_handle(), directory=True) != (
+            _MEDIUM_INTEGRITY_RID,
+            True,
+        ):
+            raise WriteConfinementError("A Windows confinement probe root lacks its Medium label.")
+        probe_anchor.mkdir("medium")
+        probe_anchor.mkdir("low-world")
+        medium_anchor = anchors.enter_context(probe_anchor.open_directory_immovable("medium"))
+        low_anchor = anchors.enter_context(probe_anchor.open_directory_immovable("low-world"))
+        _set_windows_mandatory_integrity_label_handle(
+            low_anchor._required_windows_handle(),
+            directory=True,
+            integrity_rid=_LOW_INTEGRITY_RID,
+        )
+        world_sid = _windows_string_sid("S-1-1-0")
         try:
+            _grant_windows_handle_sid(low_anchor._required_windows_handle(), world_sid, directory=True)
+        finally:
+            _windows_kernel32().LocalFree(world_sid)
+        payloads = {
+            "medium": b"spritelab-medium-confinement-probe-v1",
+            "low_world": b"spritelab-low-world-confinement-probe-v1",
+        }
+        result: dict[str, tuple[Path, bytes]] = {}
+        for name, directory_anchor, directory_name in (
+            ("medium", medium_anchor, "medium"),
+            ("low_world", low_anchor, "low-world"),
+        ):
+            descriptor = directory_anchor.open_file_immovable(
+                "sentinel.bin",
+                os.O_CREAT | os.O_EXCL | os.O_RDWR | int(getattr(os, "O_BINARY", 0)),
+                0o600,
+            )
+            anchors.callback(os.close, descriptor)
+            identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
             if os.write(descriptor, payloads[name]) != len(payloads[name]):
                 raise OSError("unable to initialize a Windows confinement probe")
             os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
             metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1
+                or not identity.matches(directory_anchor.lstat("sentinel.bin"))
+            ):
                 raise WriteConfinementError("A Windows confinement probe is unsafe.")
-        finally:
-            os.close(descriptor)
-        result[name] = (path, payloads[name])
-    for name, (path, expected) in result.items():
-        rid, no_write_up = _windows_path_integrity_label(path)
-        expected_rid = _MEDIUM_INTEGRITY_RID if name == "medium" else _LOW_INTEGRITY_RID
-        if rid != expected_rid or not no_write_up or path.read_bytes() != expected:
-            raise WriteConfinementError("A Windows confinement probe lacks its exact protected identity.")
-    return result
+            expected_rid = _MEDIUM_INTEGRITY_RID if name == "medium" else _LOW_INTEGRITY_RID
+            if _windows_handle_integrity_label(_windows_os_handle(descriptor), directory=False) != (
+                expected_rid,
+                True,
+            ):
+                raise WriteConfinementError("A Windows confinement probe lacks its exact protected identity.")
+            if _read_windows_stdio_descriptor(descriptor, len(payloads[name])) != payloads[name]:
+                raise WriteConfinementError("A Windows confinement probe changed during initialization.")
+            result[name] = (parent / probe_name / directory_name / "sentinel.bin", payloads[name])
+        parent_anchor.verify()
+        probe_anchor.verify()
+        return result, anchors
+    except BaseException:
+        anchors.close()
+        raise
 
 
 def create_windows_bootstrap_untrusted_process(
@@ -857,6 +1058,7 @@ def create_windows_bootstrap_untrusted_process(
     stdin_payload: bytes,
     writable_roots: Sequence[str | Path] | None = None,
     stdio_root: str | Path | None = None,
+    inherited_handles: Sequence[int] = (),
     max_stdout_bytes: int = 16 * 1024 * 1024,
 ) -> WindowsLowIntegrityProcess:
     """Create a suspended Low-startup process that bootstraps to Untrusted.
@@ -882,30 +1084,42 @@ def create_windows_bootstrap_untrusted_process(
         raise WriteConfinementError("The restricted child input must be exact bytes.")
     if type(max_stdout_bytes) is not int or not 0 < max_stdout_bytes <= 128 * 1024 * 1024:
         raise WriteConfinementError("The restricted child stdout limit is invalid.")
+    if (
+        not isinstance(inherited_handles, Sequence)
+        or any(type(handle) is not int or handle <= 0 for handle in inherited_handles)
+        or len(set(inherited_handles)) != len(inherited_handles)
+        or len(inherited_handles) > 16
+    ):
+        raise WriteConfinementError("The restricted child handle list is invalid.")
     working_directory = _explicit_windows_private_root(cwd)
     selected_roots = tuple(writable_roots or (working_directory,))
-    verified_roots = _verify_windows_integrity_roots(
+    verified_roots, retained_root_anchors = _retain_verified_windows_integrity_roots(
         selected_roots,
         integrity_rid=_UNTRUSTED_INTEGRITY_RID,
     )
-    if not any(
-        _path_is_same_or_descendant(working_directory, _explicit_windows_private_root(root))
-        for root in selected_roots
-    ):
-        raise WriteConfinementError("The bootstrap-confined child cwd is outside its writable roots.")
-    del verified_roots
-    io_directory = working_directory / "tmp" if stdio_root is None else _explicit_windows_private_root(stdio_root)
-    if not _path_is_same_or_descendant(io_directory, working_directory):
-        raise WriteConfinementError("The bootstrap-confined child stdio root is outside its private workspace.")
-    io_metadata = io_directory.lstat()
-    if not stat.S_ISDIR(io_metadata.st_mode) or _metadata_is_link_or_reparse(io_metadata):
-        raise WriteConfinementError("The bootstrap-confined child stdio root is unsafe.")
-    confinement_probes = _create_windows_untrusted_confinement_probes(working_directory)
+    confinement_anchors = ExitStack()
+    confinement_anchors.callback(retained_root_anchors.close)
+    try:
+        if not any(
+            _path_is_same_or_descendant(working_directory, _explicit_windows_private_root(root))
+            for root in selected_roots
+        ):
+            raise WriteConfinementError("The bootstrap-confined child cwd is outside its writable roots.")
+        del verified_roots
+        io_directory = working_directory / "tmp" if stdio_root is None else _explicit_windows_private_root(stdio_root)
+        if not _path_is_same_or_descendant(io_directory, working_directory):
+            raise WriteConfinementError("The bootstrap-confined child stdio root is outside its private workspace.")
+        io_metadata = io_directory.lstat()
+        if not stat.S_ISDIR(io_metadata.st_mode) or _metadata_is_link_or_reparse(io_metadata):
+            raise WriteConfinementError("The bootstrap-confined child stdio root is unsafe.")
+        confinement_probes, probe_anchors = _create_windows_untrusted_confinement_probes(working_directory)
+        confinement_anchors.callback(probe_anchors.close)
+    except BaseException:
+        confinement_anchors.close()
+        raise
     child_environment = dict(env)
     child_environment["SPRITELAB_CONFINEMENT_MEDIUM_PROBE"] = os.fspath(confinement_probes["medium"][0])
-    child_environment["SPRITELAB_CONFINEMENT_LOW_WORLD_PROBE"] = os.fspath(
-        confinement_probes["low_world"][0]
-    )
+    child_environment["SPRITELAB_CONFINEMENT_LOW_WORLD_PROBE"] = os.fspath(confinement_probes["low_world"][0])
 
     stdin_descriptor = -1
     stdout_descriptor = -1
@@ -914,6 +1128,7 @@ def create_windows_bootstrap_untrusted_process(
     process_handle = 0
     desktop_handle = 0
     attribute_buffer: ctypes.Array[ctypes.c_char] | None = None
+    inherited_handle_states: dict[int, bool] = {}
     kernel32 = _windows_kernel32()
     try:
         stdin_descriptor = _exclusive_windows_stdio_file(
@@ -934,14 +1149,32 @@ def create_windows_bootstrap_untrusted_process(
             b"",
             integrity_rid=_UNTRUSTED_INTEGRITY_RID,
         )
-        handles = tuple(_windows_os_handle(fd) for fd in (stdin_descriptor, stdout_descriptor, stderr_descriptor))
+        stdio_handles = tuple(_windows_os_handle(fd) for fd in (stdin_descriptor, stdout_descriptor, stderr_descriptor))
+        if set(stdio_handles).intersection(inherited_handles):
+            raise WriteConfinementError("The restricted child handle list overlaps its private stdio.")
+        for handle in inherited_handles:
+            try:
+                inherited_handle_states[handle] = os.get_handle_inheritable(handle)
+            except OSError as exc:
+                raise WriteConfinementError("A restricted child inherited handle is unavailable.") from exc
+        handles = (*stdio_handles, *inherited_handles)
         for handle in handles:
             os.set_handle_inheritable(handle, True)
 
         token = _create_windows_low_startup_token()
         restricted, integrity_rid, no_write_up, restricted_sid_hashes = _windows_token_confinement(token)
-        if restricted or integrity_rid != _LOW_INTEGRITY_RID or not no_write_up or restricted_sid_hashes:
+        if (
+            integrity_rid != _LOW_INTEGRITY_RID
+            or not no_write_up
+            or restricted != bool(restricted or restricted_sid_hashes)
+        ):
             raise WriteConfinementError("The bootstrap startup token failed exact Low-integrity verification.")
+        child_environment["SPRITELAB_CONFINEMENT_RESTRICTED_TOKEN"] = "1" if restricted else "0"
+        child_environment["SPRITELAB_CONFINEMENT_RESTRICTED_SID_HASHES"] = json.dumps(
+            restricted_sid_hashes,
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
         desktop_handle, desktop_name, desktop_identity_sha256 = _create_windows_private_desktop()
 
         startup = _StartupInfoEx()
@@ -995,13 +1228,14 @@ def create_windows_bootstrap_untrusted_process(
             ctypes.byref(process_information),
         ):
             code = ctypes.get_last_error()
-            raise WriteConfinementUnavailable(
-                f"Windows could not create the bootstrap-confined child (error {code})."
-            )
+            raise WriteConfinementUnavailable(f"Windows could not create the bootstrap-confined child (error {code}).")
         process_handle = int(process_information.hProcess)
         kernel32.CloseHandle(process_information.hThread)
-        for handle in handles:
+        for handle in stdio_handles:
             os.set_handle_inheritable(handle, False)
+        for handle, was_inheritable in inherited_handle_states.items():
+            os.set_handle_inheritable(handle, was_inheritable)
+        inherited_handle_states.clear()
         process = WindowsLowIntegrityProcess(
             args=raw_arguments,
             process_handle=process_handle,
@@ -1015,10 +1249,14 @@ def create_windows_bootstrap_untrusted_process(
             desktop_handle=desktop_handle,
             desktop_identity_sha256=desktop_identity_sha256,
             confinement_probes=confinement_probes,
+            confinement_anchors=confinement_anchors,
+            restricted_token=restricted,
+            restricted_sid_hashes=restricted_sid_hashes,
         )
         process_handle = 0
         desktop_handle = 0
         stdin_descriptor = stdout_descriptor = stderr_descriptor = -1
+        confinement_anchors = ExitStack()
         return process
     finally:
         if attribute_buffer is not None:
@@ -1033,12 +1271,18 @@ def create_windows_bootstrap_untrusted_process(
             kernel32.CloseHandle(process_handle)
         if desktop_handle:
             _windows_user32().CloseDesktop(desktop_handle)
+        for handle, was_inheritable in inherited_handle_states.items():
+            try:
+                os.set_handle_inheritable(handle, was_inheritable)
+            except OSError:
+                pass
         for descriptor in (stdin_descriptor, stdout_descriptor, stderr_descriptor):
             if descriptor >= 0:
                 try:
                     os.close(descriptor)
                 except OSError:
                     pass
+        confinement_anchors.close()
 
 
 def windows_current_process_confinement_evidence(
@@ -1074,14 +1318,14 @@ def windows_current_process_confinement_evidence(
         "untrusted_world_outside_guaranteed": False,
         "job_kill_on_close": True,
         "job_active_process_limit": 1,
+        "restricted_token": restricted,
+        "restricted_sid_hashes": restricted_sid_hashes,
     }
     if (
-        restricted
-        or integrity_rid != _UNTRUSTED_INTEGRITY_RID
+        integrity_rid != _UNTRUSTED_INTEGRITY_RID
         or not mandatory_no_write_up
         or workspace_rid != _UNTRUSTED_INTEGRITY_RID
         or not workspace_no_write_up
-        or restricted_sid_hashes
         or not isinstance(bootstrap, Mapping)
         or dict(bootstrap) != expected_bootstrap
     ):
@@ -1094,7 +1338,7 @@ def windows_current_process_confinement_evidence(
         handled_access_fs=0,
         allowed_access_fs=0,
         no_new_privileges=False,
-        restricted_token=False,
+        restricted_token=restricted,
         integrity_level_rid=integrity_rid,
         mandatory_no_write_up=True,
         workspace_integrity_level_rid=workspace_rid,
@@ -1203,6 +1447,21 @@ def _set_windows_mandatory_integrity_label(
     directory: bool,
     integrity_rid: int,
 ) -> None:
+    absolute = Path(path).absolute()
+    with _pinned_windows_path_handle(absolute, directory=directory) as handle:
+        _set_windows_mandatory_integrity_label_handle(
+            handle,
+            directory=directory,
+            integrity_rid=integrity_rid,
+        )
+
+
+def _set_windows_mandatory_integrity_label_handle(
+    handle: int,
+    *,
+    directory: bool,
+    integrity_rid: int,
+) -> None:
     advapi32 = _windows_advapi32()
     kernel32 = _windows_kernel32()
     if integrity_rid not in {
@@ -1227,17 +1486,18 @@ def _set_windows_mandatory_integrity_label(
             sid,
         ):
             raise WriteConfinementUnavailable("Windows could not construct a mandatory-label ACE.")
-        result = int(
-            advapi32.SetNamedSecurityInfoW(
-                os.fspath(path),
-                1,
-                0x10,
-                None,
-                None,
-                None,
-                acl,
+        with _reopened_windows_security_handle(handle, directory=directory, write_owner=True) as security_handle:
+            result = int(
+                advapi32.SetSecurityInfo(
+                    ctypes.c_void_p(security_handle),
+                    1,
+                    0x10,
+                    None,
+                    None,
+                    None,
+                    acl,
+                )
             )
-        )
         if result:
             raise WriteConfinementUnavailable(
                 f"Windows could not label the private workspace at low integrity (error {result})."
@@ -1247,22 +1507,33 @@ def _set_windows_mandatory_integrity_label(
 
 
 def _windows_path_integrity_label(path: Path) -> tuple[int, bool]:
+    absolute = Path(path).absolute()
+    metadata = absolute.lstat()
+    directory = stat.S_ISDIR(metadata.st_mode)
+    if (not directory and not stat.S_ISREG(metadata.st_mode)) or _metadata_is_link_or_reparse(metadata):
+        raise WriteConfinementError("The Windows integrity-label target is unsafe.")
+    with _pinned_windows_path_handle(absolute, directory=directory) as handle:
+        return _windows_handle_integrity_label(handle, directory=directory)
+
+
+def _windows_handle_integrity_label(handle: int, *, directory: bool) -> tuple[int, bool]:
     advapi32 = _windows_advapi32()
     kernel32 = _windows_kernel32()
     security_descriptor = ctypes.c_void_p()
     sacl = ctypes.c_void_p()
-    result = int(
-        advapi32.GetNamedSecurityInfoW(
-            os.fspath(path),
-            1,
-            0x10,
-            None,
-            None,
-            None,
-            ctypes.byref(sacl),
-            ctypes.byref(security_descriptor),
+    with _reopened_windows_security_handle(handle, directory=directory, write_owner=False) as security_handle:
+        result = int(
+            advapi32.GetSecurityInfo(
+                ctypes.c_void_p(security_handle),
+                1,
+                0x10,
+                None,
+                None,
+                None,
+                ctypes.byref(sacl),
+                ctypes.byref(security_descriptor),
+            )
         )
-    )
     if result:
         raise WriteConfinementError(f"Windows could not query the workspace integrity label (error {result}).")
     try:
@@ -1290,22 +1561,29 @@ def _windows_path_integrity_label(path: Path) -> tuple[int, bool]:
 
 
 def _grant_windows_path_sid(path: Path, sid: ctypes.c_void_p, *, directory: bool) -> None:
+    absolute = Path(path).absolute()
+    with _pinned_windows_path_handle(absolute, directory=directory) as handle:
+        _grant_windows_handle_sid(handle, sid, directory=directory)
+
+
+def _grant_windows_handle_sid(handle: int, sid: ctypes.c_void_p, *, directory: bool) -> None:
     advapi32 = _windows_advapi32()
     kernel32 = _windows_kernel32()
     descriptor = ctypes.c_void_p()
     old_dacl = ctypes.c_void_p()
-    result = int(
-        advapi32.GetNamedSecurityInfoW(
-            os.fspath(path),
-            1,
-            0x4,
-            None,
-            None,
-            ctypes.byref(old_dacl),
-            None,
-            ctypes.byref(descriptor),
+    with _reopened_windows_security_handle(handle, directory=directory, write_dac=True) as security_handle:
+        result = int(
+            advapi32.GetSecurityInfo(
+                ctypes.c_void_p(security_handle),
+                1,
+                0x4,
+                None,
+                None,
+                ctypes.byref(old_dacl),
+                None,
+                ctypes.byref(descriptor),
+            )
         )
-    )
     if result:
         raise WriteConfinementUnavailable(f"Windows could not query the private workspace DACL (error {result}).")
     new_dacl = ctypes.c_void_p()
@@ -1324,17 +1602,18 @@ def _grant_windows_path_sid(path: Path, sid: ctypes.c_void_p, *, directory: bool
             raise WriteConfinementUnavailable(
                 f"Windows could not construct the private workspace DACL (error {result})."
             )
-        result = int(
-            advapi32.SetNamedSecurityInfoW(
-                os.fspath(path),
-                1,
-                0x4,
-                None,
-                None,
-                new_dacl,
-                None,
+        with _reopened_windows_security_handle(handle, directory=directory, write_dac=True) as security_handle:
+            result = int(
+                advapi32.SetSecurityInfo(
+                    ctypes.c_void_p(security_handle),
+                    1,
+                    0x4,
+                    None,
+                    None,
+                    new_dacl,
+                    None,
+                )
             )
-        )
         if result:
             raise WriteConfinementUnavailable(
                 f"Windows could not bind the requested private-tree SID (error {result})."
@@ -1344,6 +1623,139 @@ def _grant_windows_path_sid(path: Path, sid: ctypes.c_void_p, *, directory: bool
             kernel32.LocalFree(new_dacl)
         if descriptor:
             kernel32.LocalFree(descriptor)
+
+
+@contextmanager
+def _pinned_windows_path_handle(path: Path, *, directory: bool):
+    """Pin one exact path without DELETE sharing before handle security APIs."""
+
+    absolute = Path(path).absolute()
+    before = absolute.lstat()
+    if (
+        _metadata_is_link_or_reparse(before)
+        or directory is not stat.S_ISDIR(before.st_mode)
+        or (not directory and not stat.S_ISREG(before.st_mode))
+    ):
+        raise WriteConfinementError("A Windows security target is unsafe.")
+    kernel32 = _windows_kernel32()
+    flags = 0x00200000 | (0x02000000 if directory else 0)
+    opened = kernel32.CreateFileW(
+        os.fspath(absolute),
+        0x80,
+        0x00000001 | 0x00000002,
+        None,
+        3,
+        flags,
+        None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    handle = int(opened or 0)
+    if not handle or handle == invalid:
+        code = ctypes.get_last_error()
+        raise WriteConfinementUnavailable(f"Windows could not pin an exact security target (error {code}).")
+    try:
+        attributes, file_index = _windows_handle_file_binding(handle)
+        if (
+            bool(attributes & 0x10) is not directory
+            or bool(attributes & 0x400)
+            or file_index != int(before.st_ino)
+            or _windows_metadata_binding(absolute.lstat()) != _windows_metadata_binding(before)
+        ):
+            raise WriteConfinementError("A Windows security target changed while it was pinned.")
+        yield handle
+        if _windows_handle_file_binding(handle) != (attributes, file_index) or _windows_metadata_binding(
+            absolute.lstat()
+        ) != _windows_metadata_binding(before):
+            raise WriteConfinementError("A Windows security target changed while its ACL was accessed.")
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+@contextmanager
+def _reopened_windows_security_handle(
+    handle: int,
+    *,
+    directory: bool,
+    write_owner: bool = False,
+    write_dac: bool = False,
+):
+    """Reopen one exact object with security rights and no DELETE sharing."""
+
+    if type(handle) is not int or handle <= 0:
+        raise WriteConfinementError("A Windows security target handle is unavailable.")
+    kernel32 = _windows_kernel32()
+    before = _windows_handle_file_binding(handle)
+    desired_access = 0x00020000  # READ_CONTROL
+    if write_owner:
+        desired_access |= 0x00080000  # WRITE_OWNER
+    if write_dac:
+        desired_access |= 0x00040000  # WRITE_DAC
+    flags = 0x00200000 | (0x02000000 if directory else 0)
+    required = int(kernel32.GetFinalPathNameByHandleW(ctypes.c_void_p(handle), None, 0, 0))
+    if required <= 0 or required > 32_768:
+        code = ctypes.get_last_error()
+        raise WriteConfinementUnavailable(f"Windows could not resolve an exact security target (error {code}).")
+    path_buffer = ctypes.create_unicode_buffer(required + 1)
+    copied = int(
+        kernel32.GetFinalPathNameByHandleW(
+            ctypes.c_void_p(handle),
+            path_buffer,
+            len(path_buffer),
+            0,
+        )
+    )
+    if copied <= 0 or copied >= len(path_buffer):
+        code = ctypes.get_last_error()
+        raise WriteConfinementUnavailable(f"Windows could not resolve an exact security target (error {code}).")
+    reopened = kernel32.CreateFileW(
+        path_buffer.value,
+        desired_access,
+        0x00000001 | 0x00000002,
+        None,
+        3,
+        flags,
+        None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    numeric = int(reopened or 0)
+    if not numeric or numeric == invalid:
+        code = ctypes.get_last_error()
+        raise WriteConfinementUnavailable(f"Windows could not open an exact security target (error {code}).")
+    try:
+        if _windows_handle_file_binding(numeric) != before:
+            raise WriteConfinementError("A Windows security target changed while it was reopened.")
+        yield numeric
+        if _windows_handle_file_binding(numeric) != before or _windows_handle_file_binding(handle) != before:
+            raise WriteConfinementError("A Windows security target changed during ACL access.")
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(numeric))
+
+
+def _windows_handle_file_binding(handle: int) -> tuple[int, int]:
+    from ctypes import wintypes
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    get_information = ctypes.WinDLL("kernel32", use_last_error=True).GetFileInformationByHandle
+    get_information.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ByHandleFileInformation)]
+    get_information.restype = wintypes.BOOL
+    information = _ByHandleFileInformation()
+    if not get_information(wintypes.HANDLE(handle), ctypes.byref(information)):
+        raise OSError(ctypes.get_last_error(), "could not inspect an exact Windows security handle")
+    file_index = (int(information.nFileIndexHigh) << 32) | int(information.nFileIndexLow)
+    return int(information.dwFileAttributes), file_index
 
 
 def _create_windows_low_startup_token() -> int:
@@ -1361,37 +1773,50 @@ def _create_windows_low_startup_token() -> int:
         inherited_restricted, _integrity_rid, _no_write_up, inherited_restricted_sids = _windows_token_confinement(
             current_token
         )
-        if inherited_restricted or inherited_restricted_sids:
-            # CreateRestrictedToken can only add restrictions; it cannot remove
-            # restrictions inherited from the caller.  The fixed bootstrap
-            # contract deliberately requires an unrestricted startup token so
-            # its eventual Untrusted-integrity evidence is exact and portable.
-            # Some nested sandbox tokens make the native call fail with
-            # ERROR_INVALID_PARAMETER instead.  Refuse that parent explicitly
-            # rather than trying a duplicate-token fallback that would silently
-            # carry foreign restricting SIDs into the worker.
-            raise WriteConfinementUnavailable(
-                "Windows cannot establish the exact startup token from an already restricted caller."
-            )
-        # Disable removable privileges but do not use restricting SIDs.  On
-        # this host every restricting-SID composition prevents the Windows
-        # loader from initializing Python.  The fixed bootstrap instead lowers
-        # the primary token from Low to Untrusted before any worker code.
-        if not advapi32.CreateRestrictedToken(
-            current_token,
-            0x1,
-            0,
-            None,
-            0,
-            None,
-            0,
-            None,
-            ctypes.byref(startup_token),
-        ):
-            code = ctypes.get_last_error()
-            raise WriteConfinementUnavailable(
-                f"Windows could not create the Low startup token (error {code})."
-            )
+        if inherited_restricted:
+            if not inherited_restricted_sids:
+                raise WriteConfinementUnavailable("Windows returned an unbound inherited restricted-token state.")
+            # A restricted token cannot be passed back through
+            # CreateRestrictedToken reliably (Windows returns
+            # ERROR_INVALID_PARAMETER for the Codex host token). Duplicate it
+            # as a primary token instead. This is not a fallback to weaker
+            # confinement: the complete restricting-SID set is compared before
+            # and after duplication, passed to the fixed bootstrap, and checked
+            # again inside the child before any worker source executes.
+            if not advapi32.DuplicateTokenEx(
+                current_token,
+                desired_access,
+                None,
+                2,
+                1,
+                ctypes.byref(startup_token),
+            ):
+                code = ctypes.get_last_error()
+                raise WriteConfinementUnavailable(
+                    f"Windows could not duplicate the inherited restricted startup token (error {code})."
+                )
+            duplicated = _windows_token_confinement(startup_token)
+            if not duplicated[0] or duplicated[3] != inherited_restricted_sids:
+                raise WriteConfinementError("Windows changed inherited restrictions during token duplication.")
+        else:
+            if inherited_restricted_sids:
+                raise WriteConfinementUnavailable("Windows returned restricting SIDs without a restricted token.")
+            # Disable removable privileges but do not add synthetic restricting
+            # SIDs. The fixed bootstrap lowers the primary token from Low to
+            # Untrusted before any worker code.
+            if not advapi32.CreateRestrictedToken(
+                current_token,
+                0x1,
+                0,
+                None,
+                0,
+                None,
+                0,
+                None,
+                ctypes.byref(startup_token),
+            ):
+                code = ctypes.get_last_error()
+                raise WriteConfinementUnavailable(f"Windows could not create the Low startup token (error {code}).")
         low_sid = _windows_string_sid("S-1-16-4096")
         label = _TokenMandatoryLabel(_SidAndAttributes(low_sid, 0x20))
         label_size = ctypes.sizeof(label) + int(advapi32.GetLengthSid(low_sid))
@@ -1411,6 +1836,14 @@ def _create_windows_low_startup_token() -> int:
                 raise WriteConfinementUnavailable(
                     f"Windows could not establish the startup token mandatory policy (error {code})."
                 )
+        final_restricted, final_rid, final_no_write_up, final_sids = _windows_token_confinement(startup_token)
+        if (
+            final_rid != _LOW_INTEGRITY_RID
+            or not final_no_write_up
+            or final_sids != inherited_restricted_sids
+            or (inherited_restricted and not final_restricted)
+        ):
+            raise WriteConfinementError("Windows changed the startup token restriction boundary.")
         result = int(startup_token.value)
         startup_token = ctypes.c_void_p()
         return result
@@ -1521,36 +1954,52 @@ def _exclusive_windows_stdio_file(
     *,
     integrity_rid: int,
 ) -> int:
+    from spritelab.utils.safe_fs import AnchoredDirectory, OwnedFileIdentity
+
     name = f".restricted-{label}-{uuid.uuid4().hex}.bin"
-    path = directory / name
-    descriptor = os.open(
-        path,
-        os.O_CREAT | os.O_EXCL | os.O_RDWR | int(getattr(os, "O_BINARY", 0)),
-        0o600,
-    )
+    descriptor = -1
     try:
-        view = memoryview(payload)
-        written = 0
-        while written < len(view):
-            count = os.write(descriptor, view[written:])
-            if count <= 0:
-                raise OSError("unable to preload restricted child stdio")
-            written += count
-        os.fsync(descriptor)
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or int(metadata.st_nlink) != 1:
-            raise WriteConfinementError("A restricted child stdio file is unsafe.")
-        _set_windows_mandatory_integrity_label(
-            path,
-            directory=False,
-            integrity_rid=integrity_rid,
-        )
-        if _windows_path_integrity_label(path) != (integrity_rid, True):
-            raise WriteConfinementError("A confined child stdio file lacks its exact integrity label.")
+        with AnchoredDirectory(directory, directory) as anchor:
+            descriptor = anchor.open_file_immovable(
+                name,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR | int(getattr(os, "O_BINARY", 0)),
+                0o600,
+            )
+            identity = OwnedFileIdentity.from_stat(os.fstat(descriptor))
+            if not identity.matches(anchor.lstat(name)):
+                raise WriteConfinementError("A restricted child stdio file changed during creation.")
+            view = memoryview(payload)
+            written = 0
+            while written < len(view):
+                count = os.write(descriptor, view[written:])
+                if count <= 0:
+                    raise OSError("unable to preload restricted child stdio")
+                written += count
+            os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or int(metadata.st_nlink) != 1
+                or not identity.matches(metadata)
+                or not identity.matches(anchor.lstat(name))
+            ):
+                raise WriteConfinementError("A restricted child stdio file is unsafe.")
+            os_handle = _windows_os_handle(descriptor)
+            _set_windows_mandatory_integrity_label_handle(
+                os_handle,
+                directory=False,
+                integrity_rid=integrity_rid,
+            )
+            if _windows_handle_integrity_label(os_handle, directory=False) != (integrity_rid, True):
+                raise WriteConfinementError("A confined child stdio file lacks its exact integrity label.")
+            if not identity.matches(anchor.lstat(name)) or not identity.matches(os.fstat(descriptor)):
+                raise WriteConfinementError("A restricted child stdio path changed during labeling.")
+            anchor.verify()
         return descriptor
     except BaseException:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
         raise
 
 
@@ -1706,6 +2155,30 @@ def _windows_kernel32() -> Any:
     kernel32.GetExitCodeProcess.restype = ctypes.c_int
     kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     kernel32.TerminateProcess.restype = ctypes.c_int
+    kernel32.ReOpenFile.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+    ]
+    kernel32.ReOpenFile.restype = ctypes.c_void_p
+    kernel32.GetFinalPathNameByHandleW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+    ]
+    kernel32.GetFinalPathNameByHandleW.restype = ctypes.c_uint32
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    kernel32.CreateFileW.restype = ctypes.c_void_p
     kernel32.InitializeProcThreadAttributeList.argtypes = [
         ctypes.c_void_p,
         ctypes.c_uint32,
@@ -1754,6 +2227,15 @@ def _windows_advapi32() -> Any:
         ctypes.POINTER(ctypes.c_void_p),
     ]
     advapi32.CreateRestrictedToken.restype = ctypes.c_int
+    advapi32.DuplicateTokenEx.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.DuplicateTokenEx.restype = ctypes.c_int
     advapi32.SetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     advapi32.SetTokenInformation.restype = ctypes.c_int
     advapi32.IsTokenRestricted.argtypes = [ctypes.c_void_p]
@@ -1808,6 +2290,27 @@ def _windows_advapi32() -> Any:
         ctypes.c_void_p,
     ]
     advapi32.SetNamedSecurityInfoW.restype = ctypes.c_uint32
+    advapi32.GetSecurityInfo.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.GetSecurityInfo.restype = ctypes.c_uint32
+    advapi32.SetSecurityInfo.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    advapi32.SetSecurityInfo.restype = ctypes.c_uint32
     advapi32.GetAclInformation.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_int]
     advapi32.GetAclInformation.restype = ctypes.c_int
     advapi32.GetAce.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
@@ -1932,9 +2435,7 @@ def enforce_linux_landlock_write_confinement_fd(
     ``root_fd`` remains with the caller.
     """
 
-    return enforce_linux_landlock_write_confinement_fds(
-        ((root_fd, expected_device, expected_inode),)
-    )
+    return enforce_linux_landlock_write_confinement_fds(((root_fd, expected_device, expected_inode),))
 
 
 def enforce_linux_landlock_write_confinement_fds(
@@ -2073,10 +2574,7 @@ def enforce_linux_landlock_write_confinement_fds(
     if len(identities) == 1:
         root_identity_sha256 = identities[0].identity_sha256
     else:
-        identity_payload = [
-            {"device": identity.device, "inode": identity.inode}
-            for identity in identities
-        ]
+        identity_payload = [{"device": identity.device, "inode": identity.inode} for identity in identities]
         root_identity_sha256 = hashlib.sha256(
             json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode("ascii")
         ).hexdigest()
@@ -2136,6 +2634,7 @@ __all__ = [
     "WINDOWS_BOOTSTRAP_UNTRUSTED_STRATEGY",
     "WINDOWS_LOW_INTEGRITY_STRATEGY",
     "WINDOWS_PARENT_ANCHORS_STRATEGY",
+    "WINDOWS_UNTRUSTED_BOOTSTRAP_SHA256",
     "WINDOWS_UNTRUSTED_BOOTSTRAP_SOURCE",
     "DirectoryIdentity",
     "WriteConfinementError",

@@ -109,9 +109,19 @@ def test_local_backend_launch_uses_argument_array_and_no_shell(tmp_path: Path) -
     backend = LocalComputeBackend(process_factory=factory)
     request = _request(tmp_path, "local")
     prepared = backend.prepare(_context(tmp_path), request)
-    backend.launch(prepared, request)
-    assert captured["command"] == list(request.command)
-    assert captured["shell"] is False
+    try:
+        backend.launch(prepared, request)
+        command = captured["command"]
+        assert command[0] == request.command[0]
+        assert command[1:3] == ["-I", "-c"]
+        assert command[4:] == list(request.command[1:])
+        assert captured["shell"] is False
+        assert set(captured["env"]) == set(request.environment) | {
+            "SPRITELAB_VALIDATED_TRAINING_BOUNDARY",
+            "SPRITELAB_VALIDATED_TRAINING_CODE_BUNDLE",
+        }
+    finally:
+        backend.cleanup(prepared)
 
 
 def test_hosted_registry_accepts_plugin_backend_and_rejects_non_cloud() -> None:

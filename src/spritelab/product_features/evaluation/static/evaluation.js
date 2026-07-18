@@ -217,9 +217,11 @@
     renderSmokeDevice("cuda", status.devices.cuda);
     $("run-cpu-smoke").disabled = status.devices.cpu.status !== "NOT_STARTED";
     $("run-cuda-smoke").disabled = status.devices.cpu.status !== "COMPLETE" || status.devices.cuda.status !== "NOT_STARTED";
+    $("cancel-cpu-smoke").disabled = !["STARTING", "RUNNING"].includes(status.devices.cpu.status);
+    $("cancel-cuda-smoke").disabled = !["STARTING", "RUNNING"].includes(status.devices.cuda.status);
     $("register-smoke").disabled = !status.registration_ready;
     const active = Object.values(status.devices).some((value) => ["STARTING", "RUNNING"].includes(value.status));
-    const terminalFailure = Object.values(status.devices).some((value) => ["FAILED", "INTERRUPTED"].includes(value.status));
+    const terminalFailure = Object.values(status.devices).some((value) => ["FAILED", "INTERRUPTED", "CANCELLED", "TIMED_OUT"].includes(value.status));
     if (terminalFailure) $("smoke-registration-status").textContent = "A device run failed or was interrupted. Use a fresh retry nonce to prepare a new bundle; this bundle cannot resume.";
     if (active && !smokePoll) smokePoll = window.setInterval(() => refreshSmokeStatus().catch((error) => toast(error.message)), 1500);
     if (!active && smokePoll) { window.clearInterval(smokePoll); smokePoll = null; }
@@ -233,6 +235,21 @@
       });
       renderSmokeDevice(device, result);
       $("smoke-registration-status").textContent = `${device.toUpperCase()} smoke started by Sprite Lab.`;
+      await refreshSmokeStatus();
+    } catch (error) {
+      $("smoke-registration-status").textContent = error.message;
+      toast(error.message);
+    } finally { busy(control, false); }
+  };
+  const cancelSmoke = async (device, control) => {
+    busy(control, true);
+    try {
+      const result = await jsonRequest(`/evaluation/api/playground/smokes/cancel-${device}`, {
+        method:"POST",
+        body:JSON.stringify({...smokeIdentityPayload(), explicit_action:true}),
+      });
+      renderSmokeDevice(device, result);
+      $("smoke-registration-status").textContent = `${device.toUpperCase()} smoke cancelled; contained work was terminated.`;
       await refreshSmokeStatus();
     } catch (error) {
       $("smoke-registration-status").textContent = error.message;
@@ -299,6 +316,8 @@
   });
   $("run-cpu-smoke")?.addEventListener("click", (event) => runSmoke("cpu", event.currentTarget));
   $("run-cuda-smoke")?.addEventListener("click", (event) => runSmoke("cuda", event.currentTarget));
+  $("cancel-cpu-smoke")?.addEventListener("click", (event) => cancelSmoke("cpu", event.currentTarget));
+  $("cancel-cuda-smoke")?.addEventListener("click", (event) => cancelSmoke("cuda", event.currentTarget));
   $("register-smoke")?.addEventListener("click", (event) => registerSmoke(event.currentTarget));
   $("load-technical")?.addEventListener("click", async (event) => {
     busy(event.currentTarget, true);

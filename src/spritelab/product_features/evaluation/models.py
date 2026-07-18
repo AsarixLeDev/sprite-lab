@@ -7,6 +7,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from spritelab.product_web.events import sanitize_public_text
+
 
 class CheckpointAvailability(StrEnum):
     ELIGIBLE = "ELIGIBLE"
@@ -47,31 +49,46 @@ class CheckpointCandidate:
     def eligible(self) -> bool:
         return self.availability is CheckpointAvailability.ELIGIBLE
 
-    def to_dict(self, *, technical_details: bool = False) -> dict[str, Any]:
+    def to_dict(
+        self,
+        *,
+        technical_details: bool = False,
+        private_roots: tuple[Path, ...] = (),
+    ) -> dict[str, Any]:
         value: dict[str, Any] = {
-            "checkpoint_id": self.checkpoint_id,
-            "run_id": self.run_id,
-            "friendly_run_name": self.friendly_run_name,
-            "date": self.date,
-            "training_profile": self.training_profile,
-            "completion_state": self.completion_state,
-            "dataset_identity_summary": self.dataset_identity_summary,
-            "view_identity_summary": self.view_identity_summary,
-            "checkpoint_step": self.checkpoint_step,
-            "weights": self.weights,
-            "verification_state": self.verification_state,
+            "checkpoint_id": sanitize_public_text(self.checkpoint_id, private_roots),
+            "run_id": sanitize_public_text(self.run_id, private_roots),
+            "friendly_run_name": sanitize_public_text(self.friendly_run_name, private_roots),
+            "date": sanitize_public_text(self.date, private_roots) if self.date is not None else None,
+            "training_profile": sanitize_public_text(self.training_profile, private_roots),
+            "completion_state": sanitize_public_text(self.completion_state, private_roots),
+            "dataset_identity_summary": sanitize_public_text(self.dataset_identity_summary, private_roots),
+            "view_identity_summary": sanitize_public_text(self.view_identity_summary, private_roots),
+            "checkpoint_step": self.checkpoint_step
+            if isinstance(self.checkpoint_step, int) and not isinstance(self.checkpoint_step, bool)
+            else None,
+            "weights": sanitize_public_text(self.weights, private_roots),
+            "verification_state": sanitize_public_text(self.verification_state, private_roots),
             "availability": self.availability.value,
             "eligible": self.eligible,
-            "unavailable_reasons": list(self.unavailable_reasons),
+            "unavailable_reasons": [sanitize_public_text(reason, private_roots) for reason in self.unavailable_reasons],
         }
         if technical_details:
             value.update(
                 {
-                    "dataset_identity": self.dataset_identity,
-                    "view_identity": self.view_identity,
-                    "checkpoint_path": str(self.path) if self.path else None,
-                    "checkpoint_sha256": self.checkpoint_sha256,
-                    "run_directory": str(self.run_directory) if self.run_directory else None,
+                    "dataset_identity": sanitize_public_text(self.dataset_identity, private_roots)
+                    if self.dataset_identity is not None
+                    else None,
+                    "view_identity": sanitize_public_text(self.view_identity, private_roots)
+                    if self.view_identity is not None
+                    else None,
+                    "checkpoint_reference": sanitize_public_text(self.path.name, private_roots) if self.path else None,
+                    "checkpoint_sha256": sanitize_public_text(self.checkpoint_sha256, private_roots)
+                    if self.checkpoint_sha256 is not None
+                    else None,
+                    "run_reference": sanitize_public_text(self.run_directory.name, private_roots)
+                    if self.run_directory
+                    else None,
                 }
             )
         return value
@@ -104,14 +121,27 @@ class CheckpointCatalog:
             None,
         )
 
-    def to_dict(self, *, include_unavailable: bool = False, technical_details: bool = False) -> dict[str, Any]:
+    def to_dict(
+        self,
+        *,
+        include_unavailable: bool = False,
+        technical_details: bool = False,
+        private_roots: tuple[Path, ...] = (),
+    ) -> dict[str, Any]:
         value = {
             "label": "baseline — latest complete checkpoint",
-            "default_checkpoint_id": self.default_checkpoint_id,
-            "eligible": [item.to_dict(technical_details=technical_details) for item in self.eligible],
+            "default_checkpoint_id": sanitize_public_text(self.default_checkpoint_id, private_roots)
+            if self.default_checkpoint_id is not None
+            else None,
+            "eligible": [
+                item.to_dict(technical_details=technical_details, private_roots=private_roots) for item in self.eligible
+            ],
         }
         if include_unavailable:
-            value["unavailable"] = [item.to_dict(technical_details=technical_details) for item in self.unavailable]
+            value["unavailable"] = [
+                item.to_dict(technical_details=technical_details, private_roots=private_roots)
+                for item in self.unavailable
+            ]
         return value
 
 

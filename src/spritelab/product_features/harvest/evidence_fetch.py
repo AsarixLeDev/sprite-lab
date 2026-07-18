@@ -549,14 +549,14 @@ def verify_evidence_pages(
         )
     }
     matching_blocks = [
-        block
-        for block in source_blocks
+        (index, block)
+        for index, block in enumerate(source_blocks)
         if canonical_direct in block.links
         and _contains_bound_phrase(block.text, normalized_title)
         and _contains_bound_phrase(block.text, normalized_creator)
     ]
     unit_bound_blocks = [
-        block for block in matching_blocks if not evidence_unit_indices.intersection(block.descendants)
+        (index, block) for index, block in matching_blocks if not evidence_unit_indices.intersection(block.descendants)
     ]
     if matching_blocks and not unit_bound_blocks:
         raise EvidenceFetchError(
@@ -567,7 +567,10 @@ def verify_evidence_pages(
         raise EvidenceFetchError(
             "The exact title, creator, license, zero-cost declaration, and download link are not bound to one source-pack block."
         )
-    chosen = min(unit_bound_blocks, key=lambda block: (len(block.text), block.tag, block.text))
+    chosen_index, chosen = min(
+        unit_bound_blocks,
+        key=lambda item: (len(item[1].text), item[1].tag, item[1].text),
+    )
     pack_text, pack_links = chosen.text, chosen.links
     folded_pack = pack_text.casefold()
     if _license_conflict(folded_pack, normalized_license):
@@ -576,7 +579,10 @@ def verify_evidence_pages(
         raise EvidenceFetchError(
             "The retained source-pack block neither declares the selected license nor links its exact evidence page."
         )
-    if _paid_conflict(folded_pack) or not _zero_cost_declared(folded_pack):
+    declaration_blocks = (chosen_index, *chosen.descendants)
+    if _paid_conflict(folded_pack) or not any(
+        _zero_cost_declared(source_blocks[index].text.casefold()) for index in declaration_blocks
+    ):
         raise EvidenceFetchError(
             "The retained source-pack block does not provide conflict-free explicit zero-cost evidence."
         )
@@ -586,7 +592,7 @@ def verify_evidence_pages(
     license_excerpt = license_text[:4000].strip()
     if len(license_excerpt) < 2:
         raise EvidenceFetchError("The retained license evidence text is empty.")
-    source_pack_excerpt = pack_text[:4000].strip()
+    source_pack_excerpt = pack_text.strip()
     identity_payload = "\n".join(
         (
             source_snapshot.content_sha256,
@@ -958,14 +964,46 @@ def _license_conflict(folded_text: str, license_id: str) -> bool:
 
 
 def _zero_cost_declared(folded_text: str) -> bool:
-    return any(
-        re.search(pattern, folded_text) is not None
-        for pattern in (
-            r"\bzero[- ]cost\b",
-            r"\bno[- ]cost\b",
-            r"\bfree (?:download|to download|asset|pack|dataset)\b",
-            r"\bprice\s*(?::|=|-)?\s*(?:0(?:\.00)?|[$€£]\s*0(?:\.00)?)\b",
+    if _paid_conflict(folded_text):
+        return False
+    normalized = _normalize_text(folded_text)
+    declarations = tuple(part for part in re.split(r"(?<=[.!?])\s+", normalized) if part)
+    single_declaration_patterns = (
+        r"(?:free )?(?:zero|no)[- ]cost (?:assets?|packs?|datasets?|downloads?)[.!]?",
+        r"(?:the )?(?:assets?|packs?|datasets?|downloads?) (?:are |is )?(?:zero|no)[- ]cost[.!]?",
+        r"free (?:assets?|packs?|datasets?)[.!]?",
+        r"free high[- ]quality pixel art tiles(?:,? 32x32)?[.!]?",
+        r"(?:the )?(?:assets?|packs?|datasets?|tiles?|sprites?|components?) (?:are |is )?available for free[.!]?",
+        r"all (?:assets?|packs?|datasets?|tiles?|sprites?|components?)(?: are| is)? for free[.!]?",
+        r"(?:a series of |included are |over |more than |at least )?[1-9][0-9,]* free(?: [a-z0-9][a-z0-9-]*){0,5} (?:assets?|packs?|datasets?|tiles?|sprites?|components?)(?: to use in (?:your|the) games?)?[.!]?",
+        r"(?:over |more than |at least )?[1-9][0-9,]*(?: [a-z0-9][a-z0-9-]*){0,5} (?:assets?|packs?|datasets?|tiles?|sprites?|components?) for free[.!]?",
+        r"(?:the )?(?:assets?|packs?|datasets?|tiles?|sprites?|components?) for free[.!]?",
+        r"(?:asset|pack|dataset) price\s*(?::|=|-)?\s*(?:0(?:\.00)?|[$€£]\s*0(?:\.00)?)[.!]?",
+        r"price\s*(?::|=|-)?\s*(?:0(?:\.00)?|[$€£]\s*0(?:\.00)?) for (?:the )?(?:asset|pack|dataset)[.!]?",
+        r"(?:(?:i(?:'?m| am) )?uploading )?(?:my|our|the|this) (?:archive|pack|dataset) (?:is )?totally free(?: in the public domain)?[.!]?",
+    )
+    if any(
+        re.fullmatch(pattern, declaration) is not None
+        for declaration in declarations
+        for pattern in single_declaration_patterns
+    ):
+        return True
+    if (
+        re.search(
+            r"(?:^|,\s*)(?:(?:i(?:'?m| am) )?uploading )"
+            r"(?:my|our|the|this) (?:archive|pack|dataset) (?:is )?totally free"
+            r"(?: in the public domain)?(?=\s*[,;.!]|$)",
+            normalized,
         )
+        is not None
+    ):
+        return True
+    return (
+        re.fullmatch(
+            r"(?:this|the) (?:pack|dataset) (?:includes|contains|has) [1-9][0-9,]*(?: [a-z0-9][a-z0-9-]*){0,5} (?:assets?|tiles?|sprites?|components?)[.!] all for free[.!]?",
+            normalized,
+        )
+        is not None
     )
 
 
@@ -974,8 +1012,20 @@ def _paid_conflict(folded_text: str) -> bool:
         re.search(pattern, folded_text) is not None
         for pattern in (
             r"\bnot (?:free|zero[- ]cost)\b",
+            r"\b(?:not|never|no longer|formerly|previously|once|was|were|used to be)\b[^.!?]{0,96}\b(?:free|zero[- ]cost|no[- ]cost|price)\b",
+            r"\b(?:no|none of (?:the )?|not (?:all|every|each)|half (?:of (?:the )?)?|only (?:some|selected|certain|[1-9][0-9,]*)|some|selected|certain|a few)\s+(?:of (?:the )?)?(?:[a-z0-9][a-z0-9-]*\s+){0,3}(?:assets?|packs?|datasets?|tiles?|sprites?|components?)\b[^.!?]{0,64}\b(?:free|zero[- ]cost|no[- ]cost)\b",
+            r"\b[1-9][0-9,]*\s+of\s+[1-9][0-9,]*\s+(?:assets?|packs?|datasets?|tiles?|sprites?|components?)\b[^.!?]{0,64}\b(?:free|zero[- ]cost|no[- ]cost)\b",
+            r"\bfree\b[^.!?]{0,64}\bout of\s+[1-9][0-9,]*\b",
+            r"\b(?:fee|fees|payment|payments|donation|donations|membership|members?|subscribers?|customers?|credits?|charge|charges)\b",
+            r"\b(?:not anymore|offers? (?:has |have )?(?:expired|ended)|expired|expiry|revoked|withdrawn|discontinued|unavailable)\b",
+            r"\bonly (?:the )?(?:first|selected|certain|some)\b[^.!?]{0,64}\b(?:qualif|free|available)\w*\b",
+            r"\b(?:surcharge applies|handling (?:is )?required|tips? (?:is |are )?required|contributions? (?:is |are )?(?:mandatory|required))\b",
+            r"\b(?:must|need to|required to) pay\b|\bpay at checkout\b",
+            r"\baccess (?:is )?limited to\b|\bpremium account (?:is )?required\b",
+            r"\b(?:redeem\s+)?(?:[a-z]+|[1-9][0-9,]*) (?:tokens?|points?)\b|\bcoupon(?: code)? (?:is )?required\b",
             r"\b(?:purchase|required purchase|paid|subscription|trial)\b",
             r"\b(?:buy|purchase) (?:now|this|the|pack|asset|dataset)\b",
+            r"\b(?:now )?costs?\s+(?:[1-9][0-9]*(?:\.[0-9]{1,2})?|[a-z]+ credits?)\b",
             r"(?:[$€£]\s*[1-9][0-9]*(?:\.[0-9]{1,2})?)",
             r"\bprice\s*(?::|=|-)\s*[1-9][0-9]*(?:\.[0-9]{1,2})?\b",
         )

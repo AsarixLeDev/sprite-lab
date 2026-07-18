@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from hashlib import sha256
 from pathlib import Path
@@ -96,6 +97,179 @@ def test_manifest_hash_and_config_serialization_are_deterministic(tmp_path: Path
     assert first["experiment_hash"] == second["experiment_hash"]
     assert canonical_json({"b": 2, "a": 1}) == canonical_json({"a": 1, "b": 2})
     assert stable_hash({"a": [1, 2]}) == stable_hash({"a": [1, 2]})
+
+
+def test_bound_manifest_context_skips_probes_and_other_drift_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import spritelab.training.experiment_system as experiment_system_module
+    from spritelab.training.cli.experiment_cmds import _require_exact_smoke_manifest
+
+    source = tmp_path / "manifest.jsonl"
+    source.write_text('{"sprite_id":"a","split":"train"}\n', encoding="utf-8")
+    tokenizer = SpriteTextTokenizer.build(["red sword"]).to_json_dict()
+    software = {
+        "package_version": "0.1.0",
+        "git_commit": "a" * 40,
+        "git_dirty": True,
+        "python": "3.12.0",
+        "torch": "2.7.0",
+    }
+    hardware = {
+        "platform": "test-platform",
+        "machine": "test-machine",
+        "cpu_count": 8,
+        "cuda_available": True,
+        "cuda_device_count": 1,
+        "cuda_devices": ["selected-device-zero"],
+    }
+
+    def forbidden_probe(*_args, **_kwargs):
+        raise AssertionError("contained manifest rebuilding must not probe dynamic context")
+
+    monkeypatch.setattr(experiment_system_module.subprocess, "run", forbidden_probe)
+    monkeypatch.setattr(experiment_system_module, "hardware_summary", forbidden_probe)
+    expected = build_experiment_manifest(
+        _config(),
+        dataset_manifest=source,
+        tokenizer=tokenizer,
+        repo=tmp_path,
+        software_version_override=software,
+        hardware_summary_override=hardware,
+    )
+    assert expected["software_version"] == software
+    assert expected["hardware_summary"] == hardware
+
+    software["git_dirty"] = False
+    hardware["cuda_devices"][0] = "mutated-after-build"
+    assert expected["software_version"]["git_dirty"] is True
+    assert expected["hardware_summary"]["cuda_devices"] == ["selected-device-zero"]
+
+    drifted_config = _config()
+    drifted_config["runtime"]["max_steps"] = 3
+    drifted = build_experiment_manifest(
+        drifted_config,
+        dataset_manifest=source,
+        tokenizer=tokenizer,
+        repo=tmp_path,
+        software_version_override=expected["software_version"],
+        hardware_summary_override=expected["hardware_summary"],
+    )
+    _require_exact_smoke_manifest(expected, dict(expected))
+    with pytest.raises(ValueError, match="differs from the server-prepared manifest"):
+        _require_exact_smoke_manifest(drifted, expected)
+
+
+def test_precomputed_manifest_context_rejects_inexact_or_inconsistent_schema(tmp_path: Path) -> None:
+    from spritelab.training.experiment_system import _validated_hardware_summary
+
+    source = tmp_path / "manifest.jsonl"
+    source.write_text('{"sprite_id":"a","split":"train"}\n', encoding="utf-8")
+    tokenizer = SpriteTextTokenizer.build(["red sword"]).to_json_dict()
+    software = {
+        "package_version": "0.1.0",
+        "git_commit": "unknown",
+        "git_dirty": None,
+        "python": "3.12.0",
+        "torch": None,
+        "unexpected": "field",
+    }
+    hardware = {
+        "platform": "test-platform",
+        "machine": "test-machine",
+        "cpu_count": 8,
+        "cuda_available": False,
+        "cuda_device_count": 1,
+        "cuda_devices": ["impossible-device"],
+    }
+    with pytest.raises(ValueError, match="software version has an inexact schema"):
+        build_experiment_manifest(
+            _config(),
+            dataset_manifest=source,
+            tokenizer=tokenizer,
+            software_version_override=software,
+        )
+    with pytest.raises(ValueError, match="hardware summary CUDA projection is malformed"):
+        build_experiment_manifest(
+            _config(),
+            dataset_manifest=source,
+            tokenizer=tokenizer,
+            hardware_summary_override=hardware,
+        )
+
+    valid_cpu = {
+        "platform": "test-platform",
+        "machine": "test-machine",
+        "cpu_count": 8,
+        "cuda_available": False,
+        "cuda_device_count": 0,
+        "cuda_devices": [],
+    }
+    for field in ("cpu_count", "cuda_device_count"):
+        invalid_integer = dict(valid_cpu)
+        invalid_integer[field] = True
+        with pytest.raises(ValueError, match="malformed"):
+            _validated_hardware_summary(invalid_integer, target_device="cpu")
+    count_mismatch = {**valid_cpu, "cuda_available": True, "cuda_device_count": 1}
+    with pytest.raises(ValueError, match="projection is malformed"):
+        _validated_hardware_summary(count_mismatch, target_device="cuda")
+    cpu_exposes_cuda = {
+        **valid_cpu,
+        "cuda_available": True,
+        "cuda_device_count": 1,
+        "cuda_devices": ["gpu-0"],
+    }
+    with pytest.raises(ValueError, match="CPU hardware summary must hide CUDA"):
+        _validated_hardware_summary(cpu_exposes_cuda, target_device="cpu")
+    multiple_cuda = {
+        **valid_cpu,
+        "cuda_available": True,
+        "cuda_device_count": 2,
+        "cuda_devices": ["gpu-0", "gpu-1"],
+    }
+    with pytest.raises(ValueError, match="exactly one visible device"):
+        _validated_hardware_summary(multiple_cuda, target_device="cuda")
+
+
+def test_hardware_summary_projects_the_exact_smoke_child_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import spritelab.training.experiment_system as experiment_system_module
+
+    calls: list[str] = []
+
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            calls.append("available")
+            return True
+
+        @staticmethod
+        def device_count() -> int:
+            calls.append("count")
+            return 3
+
+        @staticmethod
+        def get_device_name(index: int) -> str:
+            calls.append(f"name:{index}")
+            return f"gpu-{index}"
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    monkeypatch.setattr(experiment_system_module, "torch", FakeTorch())
+    cpu = experiment_system_module.hardware_summary(target_device="cpu")
+    assert calls == []
+    assert cpu["cuda_available"] is False
+    assert cpu["cuda_device_count"] == 0
+    assert cpu["cuda_devices"] == []
+
+    cuda = experiment_system_module.hardware_summary(target_device="cuda")
+    assert calls == ["available", "count", "name:0"]
+    assert cuda["cuda_available"] is True
+    assert cuda["cuda_device_count"] == 1
+    assert cuda["cuda_devices"] == ["gpu-0"]
 
 
 def test_conditioning_vocabulary_schema_and_order_are_stable() -> None:
@@ -226,6 +400,41 @@ def test_checkpoint_loader_requires_weights_only_without_unsafe_fallback(
     monkeypatch.setattr(checkpoint_io, "torch", UnsupportedTorch())
     with pytest.raises(RuntimeError, match="safe weights-only"):
         checkpoint_io.load_checkpoint(checkpoint_path)
+
+
+def test_checkpoint_loader_consumes_the_retained_descriptor_without_reopening_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from spritelab.training import checkpoint_io
+
+    checkpoint_path = tmp_path / "retained-checkpoint.pt"
+    checkpoint_bytes = b"retained exact checkpoint bytes"
+    checkpoint_path.write_bytes(checkpoint_bytes)
+    descriptor = os.open(checkpoint_path, os.O_RDONLY | int(getattr(os, "O_BINARY", 0)))
+
+    class SafeTorch:
+        @staticmethod
+        def load(source, **kwargs):
+            assert kwargs == {"map_location": "cpu", "weights_only": True}
+            assert source.read() == checkpoint_bytes
+            return {"model_type": "retained"}
+
+    def unexpected_open(*_args, **_kwargs):
+        raise AssertionError("retained checkpoint loading must not reopen its lexical path")
+
+    monkeypatch.setattr(checkpoint_io, "torch", SafeTorch())
+    monkeypatch.setattr(checkpoint_io.os, "open", unexpected_open)
+    try:
+        loaded = checkpoint_io.load_checkpoint(
+            checkpoint_path,
+            expected_sha256=sha256(checkpoint_bytes).hexdigest(),
+            retained_descriptor=descriptor,
+        )
+    finally:
+        os.close(descriptor)
+
+    assert loaded == {"model_type": "retained"}
 
 
 def test_checkpoint_saves_ema_optimizer_scheduler_scaler_and_manifest(tmp_path: Path) -> None:

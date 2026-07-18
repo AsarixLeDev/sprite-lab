@@ -15,15 +15,22 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+import spritelab.product_features.harvest as harvest_plugin_module
 import spritelab.product_features.harvest.onboarding as onboarding_module
-from spritelab.product_core import ProjectContext
+import spritelab.product_features.harvest.service as harvest_service_module
+from spritelab.product_core import ProductStatus, ProjectContext
 from spritelab.product_features.harvest import create_plugin
 from spritelab.product_features.harvest.catalog import (
+    TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH,
     TRUSTED_CATALOG_RELATIVE_PATH,
     TrustedCatalogError,
     load_trusted_catalog,
+    trusted_catalog_source_filename,
 )
-from spritelab.product_features.harvest.certification import BackendCapabilityEvidence
+from spritelab.product_features.harvest.certification import (
+    BackendCapabilityCertificateError,
+    BackendCapabilityEvidence,
+)
 from spritelab.product_features.harvest.evidence_fetch import (
     EvidenceFetchError,
     FetchSnapshot,
@@ -237,6 +244,15 @@ def _wait(service: HarvestService, probe_id: str, expected: set[str]) -> dict[st
     raise AssertionError(f"probe did not reach {expected}")
 
 
+def _promotion_review(service: HarvestService, probe_id: str) -> dict[str, Any]:
+    receipt = service.probe_evidence(probe_id)["receipt"]
+    return {
+        "authorize_zero_cost_evidence_review": True,
+        "reviewed_verification_identity": receipt["verification_identity"],
+        "reviewed_source_pack_evidence_sha256": receipt["source_pack_evidence_sha256"],
+    }
+
+
 def _snapshot(url: str, payload: bytes, mime: str = "text/html") -> FetchSnapshot:
     return FetchSnapshot(
         request_url_sha256=hashlib.sha256(url.encode()).hexdigest(),
@@ -265,6 +281,13 @@ def test_probe_is_quarantine_only_and_promotion_is_explicit_idempotent(tmp_path:
     assert durable["network_actions_recorded"] == 6
     assert durable["receipt"]["terms_policy_decision"] == "ALLOW"
     assert durable["receipt"]["extraction_count"] == durable["receipt"]["decode_count"] == 0
+    assert durable["receipt"]["source_pack_evidence_text"] == (
+        "Verified Sprite Pack by Example Artist Free zero-cost download. CC0 license Automation terms Direct download"
+    )
+    assert (
+        durable["receipt"]["source_pack_evidence_sha256"]
+        == hashlib.sha256(durable["receipt"]["source_pack_evidence_text"].encode("utf-8")).hexdigest()
+    )
     run = project / "harvest_runs" / started["probe_id"]
     assert (run / "quarantine" / "raw_payload.bin").read_bytes() == RAW
     assert not (run / "artifacts").exists()
@@ -285,17 +308,36 @@ def test_probe_is_quarantine_only_and_promotion_is_explicit_idempotent(tmp_path:
         started["probe_id"],
         explicit_action=True,
         authorize_catalog_promotion=True,
+        **_promotion_review(service, started["probe_id"]),
     )
     assert promotion["raw_response_sha256"] == hashlib.sha256(RAW).hexdigest()
+    assert promotion["zero_cost_evidence_reviewed"] is True
+    assert promotion["reviewed_verification_identity"] == durable["receipt"]["verification_identity"]
+    assert promotion["reviewed_source_pack_evidence_sha256"] == durable["receipt"]["source_pack_evidence_sha256"]
     assert refresh_attempts == 1
     assert service.sources()["sources"] == []
     assert (
-        service.promote_probe(started["probe_id"], explicit_action=True, authorize_catalog_promotion=True) == promotion
+        service.promote_probe(
+            started["probe_id"],
+            explicit_action=True,
+            authorize_catalog_promotion=True,
+            **_promotion_review(service, started["probe_id"]),
+        )
+        == promotion
     )
     assert refresh_attempts == 2
     catalog = load_trusted_catalog(project)
     assert [source.source_id for source in catalog] == ["verified.pack"]
     assert catalog[0].expected_response_sha256 == hashlib.sha256(RAW).hexdigest()
+    assert catalog[0].evidence_binding.zero_cost_reviewed is True
+    assert (
+        catalog[0].evidence_binding.zero_cost_verification_identity_sha256
+        == durable["receipt"]["verification_identity"]
+    )
+    assert (
+        catalog[0].evidence_binding.zero_cost_evidence_text_sha256 == durable["receipt"]["source_pack_evidence_sha256"]
+    )
+    assert catalog[0].evidence_binding.zero_cost_probe_receipt_identity_sha256 == durable["receipt"]["receipt_identity"]
     assert catalog[0].evidence_binding.automation_terms.decision == "ALLOW"
     assert catalog[0].evidence_binding.automation_terms.evidence_url == TERMS_URL
     assert service.sources()["sources"][0]["evidence_binding"]["automation_terms"]["limited_evidence"] is False
@@ -327,12 +369,141 @@ def test_probe_is_quarantine_only_and_promotion_is_explicit_idempotent(tmp_path:
     with pytest.raises(ValueError, match="automation-terms evidence"):
         replace(source, evidence_binding=expired_binding)
 
-    catalog_path = project / TRUSTED_CATALOG_RELATIVE_PATH
+    catalog_path = project / TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH / trusted_catalog_source_filename(source.source_id)
     tampered = json.loads(catalog_path.read_text(encoding="utf-8"))
-    tampered["sources"][0]["evidence_binding"]["automation_terms"]["decision_identity_sha256"] = "0" * 64
+    tampered["source"]["evidence_binding"]["automation_terms"]["decision_identity_sha256"] = "0" * 64
     catalog_path.write_text(json.dumps(tampered), encoding="utf-8")
     with pytest.raises(TrustedCatalogError):
         load_trusted_catalog(project)
+
+
+def test_promotion_requires_exact_reviewed_zero_cost_evidence_identity(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service, evidence = _service(project, FakeTransport(_responses()))
+    started, _created = service.start_probe(_payload(service, evidence, key="probe-review-binding-0001"))
+    assert _wait(service, started["probe_id"], {"READY", "FAILED"})["status"] == "READY"
+    review = _promotion_review(service, started["probe_id"])
+
+    for override in (
+        {"authorize_zero_cost_evidence_review": False},
+        {"reviewed_verification_identity": "0" * 64},
+        {"reviewed_source_pack_evidence_sha256": "0" * 64},
+    ):
+        submitted = {**review, **override}
+        with pytest.raises(HarvestError, match=r"authorization|exact unchanged"):
+            service.promote_probe(
+                started["probe_id"],
+                explicit_action=True,
+                authorize_catalog_promotion=True,
+                **submitted,
+            )
+    assert load_trusted_catalog(project) == ()
+
+
+def test_catalog_atomically_embeds_review_binding_before_receipt_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service, evidence = _service(project, FakeTransport(_responses()))
+    started, _created = service.start_probe(_payload(service, evidence, key="probe-review-crash-0001"))
+    probe_id = started["probe_id"]
+    assert _wait(service, probe_id, {"READY", "FAILED"})["status"] == "READY"
+    review = _promotion_review(service, probe_id)
+    writer = service._probe_service._write_exclusive_json
+
+    def fail_promotion_receipt(path: Path, payload: Mapping[str, Any], anchor: AnchoredDirectory) -> None:
+        if path.name == "promotion_receipt.json":
+            raise OSError("injected promotion-receipt publication failure")
+        writer(path, payload, anchor)
+
+    monkeypatch.setattr(service._probe_service, "_write_exclusive_json", fail_promotion_receipt)
+    with pytest.raises(OSError, match="injected promotion-receipt"):
+        service.promote_probe(
+            probe_id,
+            explicit_action=True,
+            authorize_catalog_promotion=True,
+            **review,
+        )
+
+    run = project / "harvest_runs" / probe_id
+    assert not (run / "promotion_receipt.json").exists()
+    source = load_trusted_catalog(project)[0]
+    assert source.evidence_binding.zero_cost_reviewed is True
+    assert source.evidence_binding.zero_cost_verification_identity_sha256 == review["reviewed_verification_identity"]
+    assert source.evidence_binding.zero_cost_evidence_text_sha256 == review["reviewed_source_pack_evidence_sha256"]
+
+    monkeypatch.setattr(service._probe_service, "_write_exclusive_json", writer)
+    recovered = service.promote_probe(
+        probe_id,
+        explicit_action=True,
+        authorize_catalog_promotion=True,
+        **review,
+    )
+    assert recovered["catalog_changed"] is False
+    assert (run / "promotion_receipt.json").exists()
+
+
+def test_promotion_replay_rejects_tampered_immutable_receipt(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service, evidence = _service(project, FakeTransport(_responses()))
+    started, _created = service.start_probe(_payload(service, evidence, key="probe-promotion-tamper-0001"))
+    probe_id = started["probe_id"]
+    assert _wait(service, probe_id, {"READY", "FAILED"})["status"] == "READY"
+    review = _promotion_review(service, probe_id)
+    service.promote_probe(
+        probe_id,
+        explicit_action=True,
+        authorize_catalog_promotion=True,
+        **review,
+    )
+
+    promotion_path = project / "harvest_runs" / probe_id / "promotion_receipt.json"
+    tampered = json.loads(promotion_path.read_text(encoding="utf-8"))
+    tampered["catalog_identity"] = "0" * 64
+    promotion_path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(HarvestError, match="promotion evidence is invalid"):
+        service.promote_probe(
+            probe_id,
+            explicit_action=True,
+            authorize_catalog_promotion=True,
+            **review,
+        )
+    assert load_trusted_catalog(project)[0].source_id == "verified.pack"
+
+
+def test_promotion_replay_rejects_reidentified_result_substitution(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    service, evidence = _service(project, FakeTransport(_responses()))
+    started, _created = service.start_probe(_payload(service, evidence, key="probe-result-tamper-0001"))
+    probe_id = started["probe_id"]
+    assert _wait(service, probe_id, {"READY", "FAILED"})["status"] == "READY"
+    review = _promotion_review(service, probe_id)
+    service.promote_probe(
+        probe_id,
+        explicit_action=True,
+        authorize_catalog_promotion=True,
+        **review,
+    )
+
+    result_path = project / "harvest_runs" / probe_id / "result.json"
+    tampered = json.loads(result_path.read_text(encoding="utf-8"))
+    tampered["raw_response_bytes"] += 1
+    tampered["result_identity"] = onboarding_module._identity(
+        {key: value for key, value in tampered.items() if key != "result_identity"}
+    )
+    result_path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(HarvestError, match="promotion evidence is invalid"):
+        service.promote_probe(
+            probe_id,
+            explicit_action=True,
+            authorize_catalog_promotion=True,
+            **review,
+        )
 
 
 def test_probe_uses_one_monotonic_deadline_for_every_network_stage(
@@ -550,6 +721,200 @@ def test_evidence_verification_accepts_nested_wrappers_within_one_card() -> None
     assert "Free zero-cost download." in verified.source_pack_evidence_text
 
 
+def test_evidence_verification_rejects_license_wording_as_zero_cost_on_an_unbound_host() -> None:
+    source = _source_html().replace(
+        b"Free zero-cost download.",
+        b"You can use these tilesets in your program freely.",
+    )
+    license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
+
+    with pytest.raises(EvidenceFetchError, match="conflict-free explicit zero-cost"):
+        verify_evidence_pages(
+            source_url=SOURCE_URL,
+            source_snapshot=_snapshot(SOURCE_URL, source),
+            source_bytes=source,
+            license_url=LICENSE_URL,
+            license_snapshot=_snapshot(LICENSE_URL, license_page),
+            license_bytes=license_page,
+            title="Verified Sprite Pack",
+            creator="Example Artist",
+            license_id="cc0-1.0",
+            direct_download_url=DIRECT_URL,
+        )
+
+
+def test_evidence_verification_rejects_oga_cc0_and_direct_file_when_price_is_silent() -> None:
+    source_url = "https://opengameart.org/content/dungeon-crawl-32x32-tiles-supplemental"
+    license_url = "https://creativecommons.org/publicdomain/zero/1.0/"
+    direct_url = "https://opengameart.org/sites/default/files/Dungeon%20Crawl%20Stone%20Soup%20Supplemental.zip"
+    source = (
+        "<html><body><article>"
+        "<h1>Dungeon Crawl 32x32 tiles supplemental</h1>"
+        "<p>by MedicineStorm</p>"
+        "<p>You can use these tilesets in your program freely. No attribution is required.</p>"
+        f'<a href="{license_url}">CC0 1.0 public domain</a>'
+        f'<a href="{direct_url}">Dungeon Crawl Stone Soup Supplemental.zip</a>'
+        "</article></body></html>"
+    ).encode()
+    license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
+
+    with pytest.raises(EvidenceFetchError, match="conflict-free explicit zero-cost"):
+        verify_evidence_pages(
+            source_url=source_url,
+            source_snapshot=_snapshot(source_url, source),
+            source_bytes=source,
+            license_url=license_url,
+            license_snapshot=_snapshot(license_url, license_page),
+            license_bytes=license_page,
+            title="Dungeon Crawl 32x32 tiles supplemental",
+            creator="MedicineStorm",
+            license_id="cc0-1.0",
+            direct_download_url=direct_url,
+        )
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    (
+        "Free high quality pixel art tiles, 32x32.",
+        "The assets are available for free.",
+        "Over 1000 game components for free!",
+        "A series of 100 FREE Tiny Top Down Tiles to use in your games.",
+        "This pack includes 170 sprites. ALL FOR FREE.",
+        "Included are 50 FREE high quality epic weapon sprites.",
+        "im uploading my archive totally free in the public domain.",
+        "Hey guys, I have been spriting for some years now, im uploading my archive totally free in the public domain.",
+    ),
+)
+def test_evidence_verification_accepts_explicit_gratis_pack_wording(declaration: str) -> None:
+    source = _source_html().replace(b"Free zero-cost download.", declaration.encode())
+    license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
+
+    verified = verify_evidence_pages(
+        source_url=SOURCE_URL,
+        source_snapshot=_snapshot(SOURCE_URL, source),
+        source_bytes=source,
+        license_url=LICENSE_URL,
+        license_snapshot=_snapshot(LICENSE_URL, license_page),
+        license_bytes=license_page,
+        title="Verified Sprite Pack",
+        creator="Example Artist",
+        license_id="cc0-1.0",
+        direct_download_url=DIRECT_URL,
+    )
+
+    assert verified.zero_cost_verified is True
+    assert declaration in verified.source_pack_evidence_text
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    (
+        "A series of 100 royalty-free tiles.",
+        "A series of 100 FREE trial tiles.",
+        "A series of 100 FREE tiles after purchase.",
+        "The assets are not available for free.",
+        "The assets are no longer available for free.",
+        "The assets were available for free.",
+        "The assets are not all for free.",
+        "The documentation is available for free.",
+        "The preview is available for free.",
+        "The pack was zero-cost.",
+        "The pack is no longer zero-cost.",
+        "Formerly a free download.",
+        "This is not a free download.",
+        "Not every asset is available for free.",
+        "Only some assets are available for free.",
+        "Not all assets are for free.",
+        "The documentation is a free download.",
+        "Documentation price: 0.",
+        "100 free tiles out of 1000.",
+        "Assets are available for free; a fee is required.",
+        "Free download; a donation is required.",
+        "Assets are available for free to members.",
+        "Formerly a free pack, now costs 5 credits.",
+        "Free asset; payment is required.",
+        "No assets are available for free.",
+        "None of the assets are available for free.",
+        "Half the assets are available for free.",
+        "10 of 100 assets are available for free.",
+        "Assets are available for free shipping.",
+        "Assets are available for free previews.",
+        "A surcharge applies; assets are available for free.",
+        "Assets are available for free; handling is required.",
+        "Assets are available for free after you pay.",
+        "Assets are available for free; a tip is required.",
+        "Assets are available for free after a contribution.",
+        "Assets are available for free to Patreon patrons.",
+        "Assets are available for free with a premium account.",
+        "Assets are available for free for five tokens.",
+        "Assets are available for free for 500 points.",
+        "Assets are available for free? No.",
+        "Assets are available for free. Not anymore.",
+        "Assets are available for free. This offer expired yesterday.",
+        "Assets are available for free. Only the first ten qualify.",
+        "Assets are available for free. A surcharge applies.",
+        "Assets are available for free. You must pay at checkout.",
+        "Assets are available for free. A tip is required.",
+        "Assets are available for free. A contribution is mandatory.",
+        "Assets are available for free. Access is limited to Patreon patrons.",
+        "Assets are available for free. A premium account is required.",
+        "Assets are available for free. Redeem five tokens.",
+        "Assets are available for free. 500 points are required.",
+        "Assets are available for free. A coupon code is required.",
+    ),
+)
+def test_evidence_verification_rejects_ambiguous_or_paid_counted_free_wording(declaration: str) -> None:
+    source = _source_html().replace(b"Free zero-cost download.", declaration.encode())
+    license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
+
+    with pytest.raises(EvidenceFetchError, match="conflict-free explicit zero-cost"):
+        verify_evidence_pages(
+            source_url=SOURCE_URL,
+            source_snapshot=_snapshot(SOURCE_URL, source),
+            source_bytes=source,
+            license_url=LICENSE_URL,
+            license_snapshot=_snapshot(LICENSE_URL, license_page),
+            license_bytes=license_page,
+            title="Verified Sprite Pack",
+            creator="Example Artist",
+            license_id="cc0-1.0",
+            direct_download_url=DIRECT_URL,
+        )
+
+
+@pytest.mark.parametrize(
+    "qualifier",
+    (
+        "This offer expired yesterday.",
+        "Only the first ten qualify.",
+        "You must pay at checkout.",
+        "A contribution is mandatory.",
+        "A premium account is required.",
+    ),
+)
+def test_evidence_verification_rejects_later_sibling_price_qualifier(qualifier: str) -> None:
+    source = _source_html().replace(
+        b"<p>Free zero-cost download.</p>",
+        f"<p>Assets are available for free.</p><p>{qualifier}</p>".encode(),
+    )
+    license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
+
+    with pytest.raises(EvidenceFetchError, match="conflict-free explicit zero-cost"):
+        verify_evidence_pages(
+            source_url=SOURCE_URL,
+            source_snapshot=_snapshot(SOURCE_URL, source),
+            source_bytes=source,
+            license_url=LICENSE_URL,
+            license_snapshot=_snapshot(LICENSE_URL, license_page),
+            license_bytes=license_page,
+            title="Verified Sprite Pack",
+            creator="Example Artist",
+            license_id="cc0-1.0",
+            direct_download_url=DIRECT_URL,
+        )
+
+
 @pytest.mark.parametrize(
     ("source", "license_page", "message"),
     [
@@ -567,6 +932,24 @@ def test_evidence_verification_accepts_nested_wrappers_within_one_card() -> None
             _source_html().replace(b"Free zero-cost download.", b"Free zero-cost download. Price: $5"),
             b"<p>CC0 1.0 public domain dedication</p>",
             "conflict-free explicit zero-cost",
+        ),
+        (
+            _source_html().replace(
+                b"Free zero-cost download.",
+                b"You can use these tilesets in your program freely after purchase.",
+            ),
+            b"<p>CC0 1.0 public domain dedication</p>",
+            "conflict-free explicit zero-cost",
+        ),
+        (
+            (
+                "<html><body><article><h1>Verified Sprite Pack</h1><p>by Example Artist</p>"
+                "<p>You can use these tilesets in your program freely.</p></article><article>"
+                f'<a href="{LICENSE_URL}">CC0 1.0</a><a href="{DIRECT_URL}">Direct download</a>'
+                "</article></body></html>"
+            ).encode(),
+            b"<p>CC0 1.0 public domain dedication</p>",
+            "bound to one source-pack block",
         ),
         (
             (
@@ -638,6 +1021,35 @@ def test_evidence_verification_rejects_ambiguous_paid_or_conflicting_pack_eviden
     message: str,
 ) -> None:
     with pytest.raises(EvidenceFetchError, match=message):
+        verify_evidence_pages(
+            source_url=SOURCE_URL,
+            source_snapshot=_snapshot(SOURCE_URL, source),
+            source_bytes=source,
+            license_url=LICENSE_URL,
+            license_snapshot=_snapshot(LICENSE_URL, license_page),
+            license_bytes=license_page,
+            title="Verified Sprite Pack",
+            creator="Example Artist",
+            license_id="cc0-1.0",
+            direct_download_url=DIRECT_URL,
+        )
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    (
+        "Free use is permitted.",
+        "Royalty-free tileset.",
+        "Direct download available.",
+    ),
+)
+def test_evidence_verification_does_not_infer_zero_cost_from_generic_free_or_price_silence(
+    declaration: str,
+) -> None:
+    source = _source_html().replace(b"Free zero-cost download.", declaration.encode())
+    license_page = b"<html><body><p>CC0 1.0 public domain dedication</p></body></html>"
+
+    with pytest.raises(EvidenceFetchError, match="conflict-free explicit zero-cost"):
         verify_evidence_pages(
             source_url=SOURCE_URL,
             source_snapshot=_snapshot(SOURCE_URL, source),
@@ -933,7 +1345,12 @@ def test_promotion_rejects_linked_terms_page_drift(tmp_path: Path) -> None:
     terms.write_bytes(b"<html><body><p>Bots are forbidden</p></body></html>")
 
     with pytest.raises(HarvestError, match="changed"):
-        service.promote_probe(started["probe_id"], explicit_action=True, authorize_catalog_promotion=True)
+        service.promote_probe(
+            started["probe_id"],
+            explicit_action=True,
+            authorize_catalog_promotion=True,
+            **_promotion_review(service, started["probe_id"]),
+        )
     assert load_trusted_catalog(project) == ()
 
 
@@ -947,7 +1364,12 @@ def test_promotion_rejects_hardlinked_raw_quarantine(tmp_path: Path) -> None:
     os.link(raw, raw.with_name("attacker-link.bin"))
 
     with pytest.raises(HarvestError, match=r"changed|unsafe"):
-        service.promote_probe(started["probe_id"], explicit_action=True, authorize_catalog_promotion=True)
+        service.promote_probe(
+            started["probe_id"],
+            explicit_action=True,
+            authorize_catalog_promotion=True,
+            **_promotion_review(service, started["probe_id"]),
+        )
     assert load_trusted_catalog(project) == ()
 
 
@@ -975,6 +1397,9 @@ def test_catalog_onboarding_ui_is_visible_and_rejects_browser_paths(tmp_path: Pa
     javascript = client.get("/harvest/static/harvest.js").text
     assert "/harvest/api/probes" in javascript
     assert "authorize_catalog_promotion" in javascript
+    assert "authorize_zero_cost_evidence_review" in javascript
+    assert "reviewed_verification_identity" in javascript
+    assert "reviewed_source_pack_evidence_sha256" in javascript
     assert "Automation terms decision" in javascript
     assert "no prohibition observed; not affirmative permission" in javascript
     assert "spritelab.harvest.pending-idempotency.v1:" in javascript
@@ -991,6 +1416,110 @@ def test_catalog_onboarding_ui_is_visible_and_rejects_browser_paths(tmp_path: Pa
     )
     assert denied.status_code == 422
     assert denied.json()["error_code"] == "browser_path_not_allowed"
+
+
+def test_repository_certificate_bootstraps_first_catalog_probe_without_passive_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    capabilities = _capabilities()
+    evidence = _evidence(capabilities)
+    monkeypatch.setattr(harvest_plugin_module, "load_trusted_catalog", lambda _root: ())
+    monkeypatch.setattr(harvest_plugin_module, "load_backend_capability_evidence", lambda _root: evidence)
+    monkeypatch.setattr(
+        harvest_service_module,
+        "hardened_backend_code_identity",
+        lambda: capabilities.code_identity_sha256,
+    )
+    monkeypatch.setattr(
+        harvest_service_module,
+        "conditioned_dataset_import_callback_binding",
+        lambda: {
+            "dataset_import_callback_id": capabilities.dataset_import_callback_id,
+            "dataset_import_callback_code_identity_sha256": (capabilities.dataset_import_callback_code_identity_sha256),
+            "dataset_import_callback_runtime_identity_sha256": (
+                capabilities.dataset_import_callback_runtime_identity_sha256
+            ),
+        },
+    )
+    plugin = create_plugin(
+        load_repository_capabilities=True,
+        probe_resolver=lambda _host, _port: ("8.8.8.8",),
+        probe_transport=FakeTransport(_responses()),
+    )
+    app = create_app(ProjectContext(project), plugins=(plugin,))
+    client = TestClient(app)
+
+    inventory = client.get("/harvest/api/inventory").json()
+    catalog = client.get("/harvest/api/sources").json()
+    assert catalog["sources"] == []
+    assert catalog["backend_configured"] is False
+    assert catalog["backend_capability_evidence"]["evidence_identity"] == evidence.identity
+    assert list(project.iterdir()) == []
+
+    response = client.post(
+        "/harvest/api/probes",
+        json={
+            "source_id": "verified.pack",
+            "title": "Verified Sprite Pack",
+            "creator": "Example Artist",
+            "source_page": SOURCE_URL,
+            "license_id": "cc0-1.0",
+            "license_evidence_url": LICENSE_URL,
+            "terms_evidence_url": TERMS_URL,
+            "direct_download_url": DIRECT_URL,
+            "attribution_text": "Example Artist - Verified Sprite Pack",
+            "taxonomy_hints": ["item"],
+            "inventory_identity": inventory["inventory_identity"],
+            "backend_capability_evidence_identity": evidence.identity,
+            "idempotency_key": "repository-first-probe-0001",
+            "explicit_action": True,
+            "authorize_network": True,
+            "authorize_hash_probe": True,
+            "authorize_zero_cost": True,
+            "authorize_permissive_license": True,
+        },
+        headers={"X-CSRF-Token": app.state.spritelab_csrf_token},
+    )
+    assert response.status_code == 202
+    probe_id = response.json()["probe"]["probe_id"]
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        probe = client.get(f"/harvest/api/probes/{probe_id}").json()
+        if probe["status"] in {"READY", "FAILED"}:
+            break
+        time.sleep(0.02)
+    else:
+        raise AssertionError("repository-backed first-source probe did not finish")
+    assert probe["status"] == "READY"
+    assert load_trusted_catalog(project) == ()
+
+
+@pytest.mark.parametrize("reason", ["invalid", "stale", "mismatched"])
+def test_empty_catalog_rejects_unsafe_repository_capability_evidence_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(harvest_plugin_module, "load_trusted_catalog", lambda _root: ())
+
+    def reject_evidence(_root: Path) -> BackendCapabilityEvidence:
+        raise BackendCapabilityCertificateError(f"{reason} Harvest capability evidence")
+
+    monkeypatch.setattr(harvest_plugin_module, "load_backend_capability_evidence", reject_evidence)
+    plugin = create_plugin(load_repository_capabilities=True)
+    status = plugin.status_provider(ProjectContext(project))
+    assert status.status is ProductStatus.UNAVAILABLE
+    app = create_app(ProjectContext(project), plugins=(plugin,))
+    catalog = TestClient(app).get("/harvest/api/sources").json()
+    assert catalog["sources"] == []
+    assert catalog["backend_capabilities"] is None
+    assert catalog["backend_capability_evidence"] is None
+    assert list(project.iterdir()) == []
 
 
 def test_probe_cancellation_during_terminal_commit_prevents_ready(
@@ -1097,6 +1626,7 @@ def test_probe_ready_without_terminal_commit_is_interrupted_and_retry_recovers(
             started["probe_id"],
             explicit_action=True,
             authorize_catalog_promotion=True,
+            **_promotion_review(service, started["probe_id"]),
         )
     assert refused.value.code == "catalog_probe_not_promotable"
     inventory = service.inventory()

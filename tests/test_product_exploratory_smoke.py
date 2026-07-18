@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
+import marshal
 import os
+import runpy
 import signal
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +23,8 @@ from typing import Any
 import pytest
 import yaml
 
+import spritelab.training.smoke_bundle as smoke_bundle_module
+import spritelab.training.smoke_runner as smoke_runner_module
 from spritelab.product_features.evaluation.exploratory_smoke import (
     ExploratorySmokeWorkflow,
     SmokePreparationRequest,
@@ -32,7 +39,9 @@ from spritelab.training.smoke_bundle import (
     build_smoke_child_environment,
     expected_manifest,
     load_plan,
+    load_playground_registration,
     pinned_smoke_interpreter,
+    portable_relative_parts,
     read_stable_single_link_bytes,
     run_bundle_directory,
     smoke_launch_identity,
@@ -40,6 +49,7 @@ from spritelab.training.smoke_bundle import (
     smoke_worker_argv,
     stable_hash,
     verify_pinned_process_image,
+    verify_prepared_runtime_closure,
     write_device_receipt,
 )
 from spritelab.training.smoke_runner import ExploratorySmokeRunner, SmokeExecutionError
@@ -55,6 +65,49 @@ def _sha(value: bytes | str) -> str:
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+@contextmanager
+def _contained_child_environment(
+    fixture: SmokeFixture,
+    plan: dict[str, Any],
+    device: str,
+):
+    environment = build_smoke_child_environment(fixture.root, plan, device)
+    descriptors: list[int] = []
+    try:
+        if sys.platform.startswith("linux"):
+            flags = (
+                int(getattr(os, "O_PATH", os.O_RDONLY))
+                | int(getattr(os, "O_DIRECTORY", 0))
+                | int(getattr(os, "O_NOFOLLOW", 0))
+            )
+            for relative in plan["configurations"][device]["writable_roots"]:
+                descriptors.append(os.open(fixture.root / relative, flags))
+            environment["SPRITELAB_WRITABLE_ROOT_FDS"] = ",".join(str(value) for value in descriptors)
+        yield environment, tuple(descriptors)
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def _direct_bound_child_command(
+    fixture: SmokeFixture,
+    plan: dict[str, Any],
+    device: str,
+    argv: list[str],
+) -> tuple[list[str], Path]:
+    """Exercise the inner loader after the Windows outer bootstrap contract."""
+
+    if os.name != "nt":
+        return [sys.executable, *argv[1:]], fixture.root
+    assert argv[1:5] == ["-I", "-B", "-S", "-c"]
+    source = (
+        "import sys as _spritelab_test_sys\n"
+        f"_spritelab_test_sys._spritelab_windows_project_root={os.fspath(fixture.root)!r}\n" + argv[5]
+    )
+    execution = artifact_bundle_directory(fixture.root, str(plan["smoke_id"])) / "execution" / device
+    return [sys.executable, *argv[1:5], source, *argv[6:]], execution
 
 
 @dataclass
@@ -102,7 +155,7 @@ class SmokeFixture:
 
 
 @pytest.fixture
-def smoke_fixture(tmp_path: Path) -> SmokeFixture:
+def smoke_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SmokeFixture:
     root = tmp_path / "project"
     root.mkdir()
     config = copy.deepcopy(DEFAULT_CONFIG)
@@ -126,6 +179,66 @@ def smoke_fixture(tmp_path: Path) -> SmokeFixture:
     (root / "src/spritelab/__main__.py").write_text(
         "print('ISOLATED_BOOTSTRAP_OK')\n",
         encoding="utf-8",
+    )
+    runtime_root = root / "runtime" / "site-packages"
+    runtime_root.mkdir(parents=True)
+    stdlib_root = root / "runtime" / "stdlib"
+    stdlib_root.mkdir()
+    (stdlib_root / "runpy.py").write_bytes(Path(runpy.__file__).read_bytes())
+    import io
+
+    (stdlib_root / "io.py").write_bytes(Path(io.__file__).read_bytes())
+    (stdlib_root / "bound_stdlib.py").write_text("VALUE = 'bound-stdlib'\n", encoding="utf-8")
+    stdlib_cache = stdlib_root / "__pycache__"
+    stdlib_cache.mkdir()
+    (stdlib_cache / "bound_stdlib.test.pyc").write_bytes(b"bound-pyc-inventory")
+    sourceless_payload = (
+        importlib.util.MAGIC_NUMBER
+        + b"\0" * 12
+        + marshal.dumps(compile("print('SOURCELESS_PYC_EXECUTED')\n", "sourceless_only.pyc", "exec"))
+    )
+    (stdlib_root / "sourceless_only.pyc").write_bytes(sourceless_payload)
+    for distribution_name, import_name in (
+        ("numpy", "numpy"),
+        ("Pillow", "PIL"),
+        ("PyYAML", "yaml"),
+        ("torch", "torch"),
+    ):
+        package = runtime_root / import_name
+        package.mkdir()
+        (package / "__init__.py").write_text(
+            f"__version__ = '1.0'  # {distribution_name}\n",
+            encoding="utf-8",
+        )
+        info = runtime_root / f"{distribution_name.replace('-', '_')}-1.0.dist-info"
+        info.mkdir()
+        (info / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {distribution_name}\nVersion: 1.0\n",
+            encoding="utf-8",
+        )
+        records = [
+            f"{import_name}/__init__.py,,",
+            f"{info.name}/METADATA,,",
+            f"{info.name}/RECORD,,",
+        ]
+        (info / "RECORD").write_text("\n".join(records) + "\n", encoding="utf-8")
+    import spritelab.training.smoke_bundle as smoke_bundle_module
+
+    monkeypatch.setattr(
+        smoke_bundle_module,
+        "_isolated_import_paths",
+        lambda project: [str(Path(project).resolve() / "src"), str(runtime_root.resolve())],
+    )
+    monkeypatch.setattr(
+        smoke_bundle_module,
+        "_standard_runtime_root_specs",
+        lambda: [
+            (
+                stdlib_root.resolve(),
+                ("destshared", "platstdlib", "runtime-libraries", "stdlib"),
+                ("__pycache__", "bound_stdlib.py", "io.py", "runpy.py", "sourceless_only.pyc"),
+            )
+        ],
     )
 
     artifacts: dict[str, Path] = {}
@@ -296,16 +409,36 @@ def _complete_device(fixture: SmokeFixture, plan: dict[str, Any], device: str) -
             output / name,
         )
     if device == "cuda":
-        _write_json(
-            output / "cuda_determinism_qualification.json",
-            {
-                "qualified": True,
-                "mode": "strict",
-                "device": "cuda",
-                "steps": 2,
-                "repeated_forward_backward_bit_exact": True,
-                "resume_bit_exact": True,
-            },
+        (output / "cuda_determinism_qualification.json").write_bytes(
+            smoke_bundle_module.canonical_json_bytes(
+                {
+                    "qualified": True,
+                    "mode": "strict",
+                    "device": "cuda",
+                    "steps": 2,
+                    "interrupted_after": 1,
+                    "repeated_forward_backward_bit_exact": True,
+                    "resume_bit_exact": True,
+                    "environment": {
+                        "platform": "test-platform",
+                        "torch_version": str(torch.__version__),
+                        "cuda_runtime_version": "12.0",
+                        "cuda_driver_version": 12000,
+                        "cudnn_version": 9000,
+                        "gpus": [
+                            {
+                                "index": 0,
+                                "name": "test-gpu",
+                                "compute_capability": "8.0",
+                                "total_memory_bytes": 8 * 1024**3,
+                            }
+                        ],
+                    },
+                    "guarantee_scope": "same GPU model, driver, CUDA, cuDNN, Torch, code, and inputs only",
+                    "cross_gpu_or_version_identity_claimed": False,
+                },
+                pretty=True,
+            )
         )
     record = plan["configurations"][device]
     return write_device_receipt(
@@ -360,13 +493,154 @@ def test_prepare_is_fixed_idempotent_and_never_touches_production_roots(smoke_fi
     assert plan["configurations"]["cuda"]["environment"]["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
     assert plan["configurations"]["cpu"]["child_environment"]["temporary_root"].startswith("artifacts/")
     assert smoke_fixture.root.as_posix() not in json.dumps(plan["configurations"]["cpu"]["child_environment"])
-    assert plan["interpreter"]["isolated_flags"] == ["-I", "-B"]
+    assert plan["interpreter"]["isolated_flags"] == ["-I", "-B", "-S"]
     assert plan["interpreter"]["byte_count"] > 0
     assert str(Path(sys.executable).parent) not in json.dumps(plan["interpreter"])
+    assert plan["runtime_closure"]["paths_exposed"] is False
+    assert smoke_fixture.root.as_posix() not in json.dumps(plan["runtime_closure"])
     fresh = smoke_fixture.prepare("nonce-00000002")
     assert fresh["smoke_id"] != first["smoke_id"]
     recovered = smoke_fixture.workflow.prepared_plans()
     assert {item["smoke_id"] for item in recovered["eligible"]} == {first["smoke_id"], fresh["smoke_id"]}
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "",
+        ".",
+        "../escape",
+        "/absolute",
+        "C:drive-relative",
+        "C:/absolute",
+        "//server/share",
+        "\\\\server\\share",
+        "\\\\?\\C:\\device",
+        "\\\\.\\pipe\\name",
+        "mixed\\separator/file",
+        "double//separator",
+        "CON.txt",
+        "nested/aux.json",
+        "trailing-dot.",
+        "trailing-space ",
+        "invalid<name",
+        "invalid>name",
+        'invalid"name',
+        "invalid|name",
+        "invalid?name",
+        "invalid*name",
+        "decomposed-e\u0301.txt",
+    ),
+)
+def test_portable_relative_path_rejects_hostile_windows_and_unicode_grammar(relative: str) -> None:
+    with pytest.raises(SmokeBundleError, match="server-owned smoke reference"):
+        portable_relative_parts(relative)
+
+
+def test_portable_relative_path_accepts_canonical_paths_and_rejects_alias_collisions() -> None:
+    assert portable_relative_parts("artifacts/training/smokes/configs/cpu.json") == (
+        "artifacts",
+        "training",
+        "smokes",
+        "configs",
+        "cpu.json",
+    )
+    with pytest.raises(SmokeBundleError, match="collision"):
+        smoke_bundle_module._reject_portable_collisions(("Package/File.py", "package/file.PY"))
+    with pytest.raises(SmokeBundleError, match="collision"):
+        smoke_bundle_module._reject_portable_collisions(("Straße.py", "STRASSE.py"))
+
+
+def test_runtime_closure_rejects_same_size_file_drift(smoke_fixture: SmokeFixture) -> None:
+    prepared = smoke_fixture.prepare("nonce-runtime-same-size-drift")
+    plan = load_plan(smoke_fixture.root, prepared["smoke_id"])
+    target = smoke_fixture.root / "runtime/site-packages/torch/__init__.py"
+    original = target.read_bytes()
+    replacement = bytes((byte ^ 1) if index == 0 else byte for index, byte in enumerate(original))
+    assert len(replacement) == len(original)
+    target.write_bytes(replacement)
+
+    with pytest.raises(SmokeBundleError, match="exact bound runtime files changed"):
+        verify_prepared_runtime_closure(smoke_fixture.root, plan["runtime_closure"])
+
+
+def test_runtime_closure_rejects_unowned_file_added_after_preparation(smoke_fixture: SmokeFixture) -> None:
+    prepared = smoke_fixture.prepare("nonce-runtime-unowned")
+    plan = load_plan(smoke_fixture.root, prepared["smoke_id"])
+    (smoke_fixture.root / "runtime/site-packages/torch/hostile.py").write_text(
+        "raise RuntimeError('must never import')\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SmokeBundleError, match="exact bound runtime files changed"):
+        verify_prepared_runtime_closure(smoke_fixture.root, plan["runtime_closure"])
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ("bound_stdlib.py", "__pycache__/bound_stdlib.test.pyc"),
+)
+def test_runtime_closure_rejects_same_size_stdlib_and_pyc_drift(
+    smoke_fixture: SmokeFixture,
+    relative: str,
+) -> None:
+    prepared = smoke_fixture.prepare(f"nonce-stdlib-drift-{hashlib.sha256(relative.encode()).hexdigest()[:8]}")
+    plan = load_plan(smoke_fixture.root, prepared["smoke_id"])
+    target = smoke_fixture.root / "runtime/stdlib" / relative
+    original = target.read_bytes()
+    replacement = bytes((byte ^ 1) if index == len(original) - 1 else byte for index, byte in enumerate(original))
+    assert replacement != original
+    assert len(replacement) == len(original)
+    target.write_bytes(replacement)
+
+    with pytest.raises(SmokeBundleError, match="exact bound runtime files changed"):
+        verify_prepared_runtime_closure(smoke_fixture.root, plan["runtime_closure"])
+
+
+def test_runtime_scan_holds_the_original_tree_and_rejects_root_rename_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    package = runtime / "package"
+    package.mkdir(parents=True)
+    (package / "module.py").write_text("VALUE = 'original'\n", encoding="utf-8")
+    original_module_bytes = (package / "module.py").read_bytes()
+    outside_sentinel = tmp_path / "outside-sentinel.bin"
+    outside_before = b"outside-must-remain-identical"
+    outside_sentinel.write_bytes(outside_before)
+    entered = threading.Event()
+    release = threading.Event()
+    original_hash = smoke_bundle_module._hash_runtime_anchored_file
+
+    def paused_hash(anchor: AnchoredDirectory, name: str) -> tuple[str, int]:
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_hash(anchor, name)
+
+    monkeypatch.setattr(smoke_bundle_module, "_hash_runtime_anchored_file", paused_hash)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(smoke_bundle_module._scan_runtime_files_with_identity, runtime, ("package",))
+        assert entered.wait(timeout=5)
+        moved = tmp_path / "runtime-original-held"
+        try:
+            runtime.rename(moved)
+        except OSError:
+            rename_succeeded = False
+        else:
+            rename_succeeded = True
+            replacement = runtime / "package"
+            replacement.mkdir(parents=True)
+            (replacement / "module.py").write_text("VALUE = 'replacement'\n", encoding="utf-8")
+        finally:
+            release.set()
+        if rename_succeeded:
+            with pytest.raises(SmokeBundleError, match="root path changed"):
+                future.result(timeout=5)
+        else:
+            inventory, _metadata = future.result(timeout=5)
+            assert inventory["package/module.py"]["sha256"] == _sha(original_module_bytes)
+    assert outside_sentinel.read_bytes() == outside_before
 
 
 def test_register_requires_exact_receipts_and_is_idempotent(smoke_fixture: SmokeFixture) -> None:
@@ -570,7 +844,7 @@ def test_ancestor_rename_to_outside_symlink_fails_closed(
     outside.mkdir()
     sentinel = outside / "sentinel.txt"
     sentinel.write_text("outside-byte-identical", encoding="utf-8")
-    original_open = AnchoredDirectory.open_directory
+    original_open = AnchoredDirectory.open_directory_immovable
     attacked = False
 
     def swap_then_open(anchor: AnchoredDirectory, child: str) -> AnchoredDirectory:
@@ -584,7 +858,7 @@ def test_ancestor_rename_to_outside_symlink_fails_closed(
                 pytest.skip(f"directory symlinks unavailable: {exc}")
         return original_open(anchor, child)
 
-    monkeypatch.setattr(AnchoredDirectory, "open_directory", swap_then_open)
+    monkeypatch.setattr(AnchoredDirectory, "open_directory_immovable", swap_then_open)
     if target == "plan":
         with pytest.raises((OSError, SmokeBundleError, UnsafeFilesystemOperation)):
             load_plan(smoke_fixture.root, prepared["smoke_id"])
@@ -663,6 +937,7 @@ def test_incomplete_device_output_is_not_resumable(smoke_fixture: SmokeFixture) 
         )
     )
     assert state["status"] == "RUNNING"
+    assert state["execution_mode"] == ("windows-direct-trainer-v1" if os.name == "nt" else "linux-worker-trainer-v1")
     assert state["resumable"] is False
     assert state["retry_policy"] == "NEW_BUNDLE_REQUIRED"
     with pytest.raises(SmokeBundleError, match="incomplete"):
@@ -677,6 +952,28 @@ def test_incomplete_device_output_is_not_resumable(smoke_fixture: SmokeFixture) 
             ),
             server_execution_identities=_execution_identities(prepared["smoke_id"]),
         )
+
+
+@pytest.mark.parametrize("target", ["run-container", "device"])
+def test_run_loader_does_not_repair_missing_completion_marker(
+    smoke_fixture: SmokeFixture,
+    target: str,
+) -> None:
+    prepared = smoke_fixture.prepare(f"nonce-run-completion-{target}")
+    plan = load_plan(smoke_fixture.root, prepared["smoke_id"])
+    run_root = run_bundle_directory(smoke_fixture.root, prepared["smoke_id"])
+    if target == "device":
+        begin_device_run(smoke_fixture.root, plan, "cpu")
+        publication = run_root / "cpu"
+    else:
+        publication = run_root
+    marker = publication / smoke_bundle_module._PUBLICATION_COMPLETION_FILENAME
+    marker.rename(publication / ".held-completion-marker.json")
+
+    with pytest.raises(SmokeBundleError, match="completion marker"):
+        begin_device_run(smoke_fixture.root, plan, "cpu")
+
+    assert not marker.exists()
 
 
 def test_environment_mismatch_is_rejected_before_receipt(smoke_fixture: SmokeFixture) -> None:
@@ -702,6 +999,46 @@ def test_plan_and_registration_artifacts_are_immutable_single_publications(smoke
     smoke_fixture.prepare()
     assert plan_path.read_bytes() == plan_before
     assert not list(plan_path.parent.glob("*.partial-*"))
+
+
+@pytest.mark.parametrize("change", ["missing", "tampered"])
+def test_plan_loader_requires_untampered_completion_marker(
+    smoke_fixture: SmokeFixture,
+    change: str,
+) -> None:
+    prepared = smoke_fixture.prepare(f"nonce-plan-completion-{change}")
+    publication = artifact_bundle_directory(smoke_fixture.root, prepared["smoke_id"])
+    marker = publication / smoke_bundle_module._PUBLICATION_COMPLETION_FILENAME
+    outside_sentinel = smoke_fixture.root.parent / f"outside-plan-{change}.bin"
+    outside_sentinel.write_bytes(b"outside-byte-identical")
+    if change == "missing":
+        marker.rename(publication / ".held-completion-marker.json")
+    else:
+        marker.write_bytes(marker.read_bytes() + b" ")
+
+    with pytest.raises(SmokeBundleError, match=r"completion marker|publication"):
+        load_plan(smoke_fixture.root, prepared["smoke_id"])
+
+    assert outside_sentinel.read_bytes() == b"outside-byte-identical"
+
+
+def test_registration_loader_rejects_incomplete_final_without_marker(
+    smoke_fixture: SmokeFixture,
+) -> None:
+    prepared = smoke_fixture.prepare("nonce-registration-completion")
+    receipts = _complete_outputs(smoke_fixture, prepared)
+    registered = _register(smoke_fixture, smoke_fixture.registration_request(prepared, receipts))
+    content_id = str(registered["registration_id"])
+    publication = smoke_fixture.root / "runs/v3/playground/exploratory-checkpoints" / content_id
+    marker = publication / smoke_bundle_module._PUBLICATION_COMPLETION_FILENAME
+    marker.rename(publication / ".held-completion-marker.json")
+
+    with pytest.raises(SmokeBundleError, match="completion marker"):
+        load_playground_registration(smoke_fixture.root, content_id)
+
+    catalog = smoke_fixture.workflow.catalog()
+    assert catalog.eligible == ()
+    assert catalog.unavailable_count == 1
 
 
 class _ControlledProcess:
@@ -741,6 +1078,10 @@ def _controlled_runner(
 
     def factory(argv: list[str], **options: Any) -> _ControlledProcess:
         process = _ControlledProcess()
+        process.bootstrap_identity_sha256 = smoke_runner_module.WINDOWS_UNTRUSTED_BOOTSTRAP_SHA256
+        process.private_desktop_identity_sha256 = "a" * 64
+        process.restricted_token = True
+        process.restricted_sid_hashes_identity_sha256 = "b" * 64
         calls.append((argv, options, process))
         return process
 
@@ -756,7 +1097,9 @@ def _controlled_runner(
         ExploratorySmokeRunner(
             root,
             process_factory=factory,
+            windows_process_factory=factory,
             windows_suspended_activator=activate,
+            containment_supported=lambda: True,
         ),
         calls,
     )
@@ -785,20 +1128,37 @@ def test_server_runner_uses_fixed_argv_shell_false_and_exact_environment(smoke_f
     assert state["status"] == "RUNNING"
     assert len(calls) == 1
     argv, options, process = calls[0]
-    assert argv[:4] == [sys.executable, "-I", "-B", "-c"]
-    assert "spritelab.training.smoke_worker" in argv[4]
+    assert argv[:5] == [sys.executable, "-I", "-B", "-S", "-c"]
+    if os.name == "nt":
+        assert "spritelab.training.smoke_worker" not in argv[5]
+    else:
+        assert "spritelab.training.smoke_worker" in argv[5]
     assert argv[-2:] == [
-        "--launch-identity",
+        "--smoke-launch-identity" if os.name == "nt" else "--launch-identity",
         smoke_launch_identity(load_plan(smoke_fixture.root, prepared["smoke_id"]), "cpu"),
     ]
     assert isinstance(argv, list)
-    assert options["shell"] is False
-    assert options["cwd"] == smoke_fixture.root
-    assert options["stdin"] is subprocess.DEVNULL
-    assert options["stdout"] is subprocess.DEVNULL
-    assert options["stderr"] is subprocess.DEVNULL
     if os.name == "nt":
-        assert options["creationflags"] & int(getattr(subprocess, "CREATE_SUSPENDED", 0x00000004))
+        import spritelab.utils.write_confinement as confinement_module
+
+        execution = artifact_bundle_directory(smoke_fixture.root, prepared["smoke_id"]) / "execution" / "cpu"
+        output = run_bundle_directory(smoke_fixture.root, prepared["smoke_id"]) / "cpu"
+        assert options["cwd"] == execution
+        assert options["stdin_payload"] == b""
+        assert options["stdio_root"] == execution / "temp"
+        assert next(iter(options["writable_roots"])) == execution
+        assert state["confinement"]["bootstrap_identity_sha256"] == (
+            confinement_module.WINDOWS_UNTRUSTED_BOOTSTRAP_SHA256
+        )
+        for root in (execution, output):
+            for candidate in (root, *root.rglob("*")):
+                assert confinement_module._windows_path_integrity_label(candidate) == (0, True)
+    else:
+        assert options["shell"] is False
+        assert options["cwd"] == smoke_fixture.root
+        assert options["stdin"] is subprocess.DEVNULL
+        assert options["stdout"] is subprocess.DEVNULL
+        assert options["stderr"] is subprocess.DEVNULL
     if sys.platform.startswith("linux"):
         assert callable(options["preexec_fn"])
     assert options["env"]["CUDA_VISIBLE_DEVICES"] == "-1"
@@ -814,6 +1174,315 @@ def test_server_runner_uses_fixed_argv_shell_false_and_exact_environment(smoke_f
     _wait_for_status(runner, prepared["smoke_id"], "cpu", "FAILED")
     with pytest.raises(SmokeExecutionError, match="fresh"):
         runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
+
+
+@pytest.mark.skipif(sys.platform.startswith("linux"), reason="Linux has inherited-FD Landlock confinement.")
+def test_server_runner_fails_closed_without_an_exact_platform_write_boundary(
+    smoke_fixture: SmokeFixture,
+) -> None:
+    prepared = smoke_fixture.prepare("nonce-platform-fail-closed")
+    runner = ExploratorySmokeRunner(smoke_fixture.root, containment_supported=lambda: False)
+
+    with pytest.raises(SmokeExecutionError, match="containment is unavailable"):
+        runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
+
+
+def test_server_runner_cancellation_is_durable_and_terminates_the_live_process(
+    smoke_fixture: SmokeFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = smoke_fixture.prepare("nonce-runner-cancel")
+    runner, calls = _controlled_runner(smoke_fixture.root)
+    terminated: list[_ControlledProcess] = []
+
+    def terminate(process: _ControlledProcess) -> None:
+        terminated.append(process)
+        process.terminate()
+
+    monkeypatch.setattr(smoke_runner_module, "_terminate_worker_process", terminate)
+    runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
+    process = calls[0][2]
+
+    with pytest.raises(SmokeExecutionError, match="explicit action"):
+        runner.cancel(
+            prepared["smoke_id"],
+            prepared["plan_identity"],
+            "cpu",
+            explicit_action=False,
+        )
+    cancelled = runner.cancel(
+        prepared["smoke_id"],
+        prepared["plan_identity"],
+        "cpu",
+        explicit_action=True,
+    )
+
+    assert cancelled["status"] == "CANCELLED"
+    assert cancelled["exit_code"] == 130
+    assert process.terminated is True
+    assert process in terminated
+    assert ExploratorySmokeRunner(smoke_fixture.root).status(prepared["smoke_id"], "cpu")["status"] == "CANCELLED"
+
+
+def test_server_runner_enforces_the_durable_wall_clock_deadline(
+    smoke_fixture: SmokeFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = smoke_fixture.prepare("nonce-runner-deadline")
+    runner, calls = _controlled_runner(smoke_fixture.root)
+    terminated: list[_ControlledProcess] = []
+
+    def terminate(process: _ControlledProcess) -> None:
+        terminated.append(process)
+        process.terminate()
+
+    monkeypatch.setattr(smoke_runner_module, "_terminate_worker_process", terminate)
+    runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
+    state_path = artifact_bundle_directory(smoke_fixture.root, prepared["smoke_id"]) / "execution/cpu/state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    limit = int(state["wall_clock_limit_seconds"])
+    started = datetime.now(timezone.utc) - timedelta(seconds=limit + 5)
+    deadline = started + timedelta(seconds=limit)
+    state["started_at"] = started.isoformat()
+    state["deadline_at"] = deadline.isoformat()
+    state["updated_at"] = (deadline - timedelta(seconds=1)).isoformat()
+    state.pop("state_identity")
+    state = smoke_runner_module._finalize_state_identity(state)
+    runner._validate_state(state)
+    payload = smoke_runner_module.canonical_json_bytes(state, pretty=True)
+    with state_path.open("r+b") as handle:
+        handle.write(payload)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    timed_out = runner.status(prepared["smoke_id"], "cpu")
+
+    assert timed_out["status"] == "TIMED_OUT"
+    assert timed_out["exit_code"] == 124
+    assert calls[0][2].terminated is True
+    assert calls[0][2] in terminated
+    assert ExploratorySmokeRunner(smoke_fixture.root).status(prepared["smoke_id"], "cpu")["status"] == "TIMED_OUT"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux inherited-FD execution contract")
+def test_smoke_worker_repasses_retained_writable_root_fds_to_trainer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import spritelab.training.smoke_worker as worker_module
+
+    roots = [tmp_path / "execution", tmp_path / "output"]
+    for root in roots:
+        root.mkdir()
+    flags = (
+        int(getattr(os, "O_PATH", os.O_RDONLY)) | int(getattr(os, "O_DIRECTORY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+    )
+    descriptors = tuple(os.open(root, flags) for root in roots)
+    monkeypatch.setenv("SPRITELAB_WRITABLE_ROOT_FDS", ",".join(str(value) for value in descriptors))
+    parsed = SimpleNamespace(
+        smoke_id="smoke-" + "1" * 20,
+        device="cpu",
+        plan_identity="plan-identity",
+        launch_identity="launch-identity",
+    )
+    plan = {"smoke_id": parsed.smoke_id, "plan_identity": parsed.plan_identity}
+    process_options: dict[str, Any] = {}
+    validation_environments: list[dict[str, str]] = []
+
+    class Process:
+        pid = os.getpid()
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+        @staticmethod
+        def wait() -> int:
+            return 0
+
+    class Containment:
+        name = "LINUX_PDEATHSIG"
+
+        def __init__(self, process: Process) -> None:
+            self.process = process
+
+        def activate(self, *, verifier: Any) -> None:
+            verifier(self.process)
+
+        def terminate(self) -> None:
+            raise AssertionError("completed trainer was unexpectedly terminated")
+
+        def close(self) -> None:
+            return None
+
+    @contextmanager
+    def pinned(_plan: dict[str, Any], **_kwargs: Any):
+        yield SimpleNamespace(launch_path=sys.executable, pass_fds=())
+
+    def process_factory(_argv: list[str], **options: Any) -> Process:
+        process_options.update(options)
+        return Process()
+
+    def validate_environment(
+        _root: Path,
+        _plan: dict[str, Any],
+        _device: str,
+        environment: dict[str, str],
+    ) -> None:
+        validation_environments.append(dict(environment))
+
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    monkeypatch.setattr(worker_module, "_parse_args", lambda: parsed)
+    monkeypatch.setattr(worker_module, "load_plan", lambda *_args, **_kwargs: plan)
+    monkeypatch.setattr(worker_module, "smoke_launch_identity", lambda *_args, **_kwargs: parsed.launch_identity)
+    monkeypatch.setattr(worker_module, "validate_smoke_environment", validate_environment)
+    monkeypatch.setattr(worker_module, "validate_smoke_interpreter", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker_module, "smoke_containment_supported", lambda: True)
+    monkeypatch.setattr(worker_module, "verify_execution_guards", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker_module, "_process_identity", lambda pid: {"pid": pid, "birth_token": "1"})
+    monkeypatch.setattr(worker_module, "_publish_heartbeat", lambda *_args, **_kwargs: {"heartbeat_identity": "a" * 64})
+    monkeypatch.setattr(
+        worker_module,
+        "_read_execution_state",
+        lambda *_args, **_kwargs: {"status": "RUNNING", "deadline_at": future},
+    )
+    monkeypatch.setattr(worker_module, "smoke_training_argv", lambda *_args, **_kwargs: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(worker_module, "pinned_smoke_interpreter", pinned)
+    monkeypatch.setattr(worker_module.subprocess, "Popen", process_factory)
+    monkeypatch.setattr(worker_module, "_Containment", Containment)
+    monkeypatch.setattr(worker_module, "verify_pinned_process_image", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker_module, "load_device_receipt", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(worker_module, "_finish", lambda *_args, **_kwargs: 0)
+
+    assert worker_module.main() == 0
+    assert len(validation_environments) == 1
+    assert "SPRITELAB_WRITABLE_ROOT_FDS" not in validation_environments[0]
+    assert set(descriptors) <= set(process_options["pass_fds"])
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "exit_code"),
+    (("CANCELLED", 130), ("TIMED_OUT", 124)),
+)
+def test_smoke_worker_guard_scan_publishes_the_exact_terminal_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_status: str,
+    exit_code: int,
+) -> None:
+    import spritelab.training.smoke_worker as worker_module
+
+    parsed = SimpleNamespace(
+        smoke_id="smoke-" + "2" * 20,
+        device="cpu",
+        plan_identity="plan-identity",
+        launch_identity="launch-identity",
+    )
+    plan = {"smoke_id": parsed.smoke_id, "plan_identity": parsed.plan_identity}
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    execution_state = {"status": "RUNNING", "deadline_at": future}
+    finish_calls: list[dict[str, Any]] = []
+
+    def verify_guards(
+        _root: Path,
+        _plan: dict[str, Any],
+        *,
+        operation_check: Any,
+    ) -> None:
+        execution_state["status"] = terminal_status
+        operation_check()
+
+    def finish(
+        _root: Path,
+        _plan: dict[str, Any],
+        _device: str,
+        _launch_identity: str,
+        _heartbeat: dict[str, Any],
+        actual_exit_code: int,
+        *,
+        status_override: str | None = None,
+        **_kwargs: Any,
+    ) -> int:
+        finish_calls.append({"status": status_override, "exit_code": actual_exit_code})
+        return actual_exit_code
+
+    monkeypatch.delenv("SPRITELAB_WRITABLE_ROOT_FDS", raising=False)
+    monkeypatch.setattr(worker_module, "_parse_args", lambda: parsed)
+    monkeypatch.setattr(worker_module, "load_plan", lambda *_args, **_kwargs: plan)
+    monkeypatch.setattr(worker_module, "smoke_launch_identity", lambda *_args, **_kwargs: parsed.launch_identity)
+    monkeypatch.setattr(worker_module, "_parse_writable_root_fds", lambda _value: ())
+    monkeypatch.setattr(worker_module, "validate_smoke_environment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker_module, "validate_smoke_interpreter", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker_module, "smoke_containment_supported", lambda: True)
+    monkeypatch.setattr(worker_module, "_process_identity", lambda pid: {"pid": pid, "birth_token": "1"})
+    monkeypatch.setattr(
+        worker_module,
+        "_publish_heartbeat",
+        lambda *_args, **_kwargs: {"heartbeat_identity": "a" * 64},
+    )
+    monkeypatch.setattr(worker_module, "_read_execution_state", lambda *_args, **_kwargs: dict(execution_state))
+    monkeypatch.setattr(worker_module, "verify_execution_guards", verify_guards)
+    monkeypatch.setattr(worker_module, "_finish", finish)
+    monkeypatch.setattr(
+        worker_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: pytest.fail("the trainer started after a terminal worker state"),
+    )
+
+    assert worker_module.main() == exit_code
+    assert finish_calls == [{"status": terminal_status, "exit_code": exit_code}]
+
+
+def test_smoke_worker_finish_rejects_a_terminal_exit_code_mismatch(tmp_path: Path) -> None:
+    import spritelab.training.smoke_worker as worker_module
+
+    with pytest.raises(SmokeBundleError, match="exit code"):
+        worker_module._finish(
+            tmp_path,
+            {"smoke_id": "smoke-" + "3" * 20},
+            "cpu",
+            "launch-identity",
+            {"heartbeat_identity": "a" * 64},
+            124,
+            status_override="CANCELLED",
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "exit_code"),
+    (("COMPLETE", 70), ("FAILED", 0), ("CANCELLED", 124), ("TIMED_OUT", 130)),
+)
+def test_smoke_worker_outcome_loader_rejects_status_exit_code_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    exit_code: int,
+) -> None:
+    import spritelab.training.smoke_worker as worker_module
+
+    plan = {"smoke_id": "smoke-" + "4" * 20, "plan_identity": "plan-identity"}
+    outcome = worker_module.finalize_identity(
+        {
+            "schema_version": worker_module.SMOKE_WORKER_OUTCOME_SCHEMA,
+            "smoke_id": plan["smoke_id"],
+            "device": "cpu",
+            "plan_identity": plan["plan_identity"],
+            "launch_identity": "launch-identity",
+            "status": status,
+            "exit_code": exit_code,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "last_heartbeat_identity": "a" * 64,
+            "message": "Terminal outcome fixture.",
+        },
+        "outcome_identity",
+    )
+    monkeypatch.setattr(worker_module, "_read_json", lambda *_args, **_kwargs: outcome)
+
+    with pytest.raises(SmokeBundleError, match="outcome is invalid"):
+        worker_module.load_worker_outcome(tmp_path, plan, "cpu", "launch-identity")
 
 
 def test_smoke_orchestration_source_change_stales_plan_before_launch(smoke_fixture: SmokeFixture) -> None:
@@ -866,7 +1535,10 @@ def test_server_runner_drops_hostile_inherited_environment(
     runner, calls = _controlled_runner(smoke_fixture.root)
     runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
     environment = calls[0][1]["env"]
-    assert environment == build_smoke_child_environment(smoke_fixture.root, plan, "cpu")
+    expected_environment = build_smoke_child_environment(smoke_fixture.root, plan, "cpu")
+    if os.name == "nt":
+        expected_environment["SPRITELAB_CONFINEMENT_PROJECT_ROOT"] = os.fspath(smoke_fixture.root)
+    assert environment == expected_environment
     assert not {
         "PYTHONPATH",
         "PYTHONSTARTUP",
@@ -887,6 +1559,8 @@ def test_cuda_waits_for_cpu_wrapper_exit_after_receipt(smoke_fixture: SmokeFixtu
     runner, calls = _controlled_runner(smoke_fixture.root)
     runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
     plan = load_plan(smoke_fixture.root, prepared["smoke_id"])
+    device_root = run_bundle_directory(smoke_fixture.root, prepared["smoke_id"]) / "cpu"
+    assert (device_root / smoke_bundle_module._PUBLICATION_COMPLETION_FILENAME).is_file()
     _complete_device(smoke_fixture, plan, "cpu")
     assert runner.status(prepared["smoke_id"], "cpu")["status"] == "RUNNING"
     with pytest.raises(SmokeExecutionError, match="CPU"):
@@ -923,7 +1597,8 @@ def test_server_runner_reconstructs_receipt_completion_and_registers_without_pas
     calls[0][2].finish(0)
     _wait_for_status(runner, prepared["smoke_id"], "cpu", "COMPLETE")
     runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cuda", explicit_action=True)
-    assert calls[1][1]["shell"] is False
+    if os.name != "nt":
+        assert calls[1][1]["shell"] is False
     assert calls[1][1]["env"]["CUDA_VISIBLE_DEVICES"] == "0"
     assert calls[1][1]["env"]["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
     assert calls[1][1]["env"]["SPRITELAB_PROGRESS"] == "0"
@@ -966,6 +1641,7 @@ def test_runner_refuses_manual_output_adoption_and_reconstructs_interruption(smo
         restarted.launch(interrupted["smoke_id"], interrupted["plan_identity"], "cpu", explicit_action=True)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows launches the trainer directly without a nested worker heartbeat.")
 def test_restart_recognizes_exact_durable_worker_heartbeat(smoke_fixture: SmokeFixture) -> None:
     import spritelab.training.smoke_runner as runner_module
     import spritelab.training.smoke_worker as worker_module
@@ -1056,6 +1732,8 @@ def test_web_actions_derive_identities_and_require_csrf_without_manual_receipts(
     assert run_response.status_code == 200
     assert run_response.json()["status"] == "RUNNING"
     assert len(calls) == 1
+    with pytest.raises(SmokeExecutionError, match="Both server-run CPU and CUDA"):
+        runner.require_complete(prepared["smoke_id"])
     register_response = client.post(
         "/evaluation/api/playground/smokes/register",
         json=run_payload,
@@ -1188,43 +1866,50 @@ def test_isolated_bootstrap_imports_real_package_and_ignores_hostile_sitecustomi
 ) -> None:
     prepared = smoke_fixture.prepare("nonce-isolated-bootstrap")
     plan = load_plan(smoke_fixture.root, prepared["smoke_id"])
+    runner, calls = _controlled_runner(smoke_fixture.root)
+    runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
     argv = smoke_training_argv(plan, "cpu")
-    assert argv[1:4] == ["-I", "-B", "-c"]
+    assert argv[1:5] == ["-I", "-B", "-S", "-c"]
     marker = smoke_fixture.root / "sitecustomize-imported.txt"
     payload = f"from pathlib import Path\nPath({str(marker)!r}).write_text('unsafe', encoding='utf-8')\n"
     (smoke_fixture.root / "sitecustomize.py").write_text(payload, encoding="utf-8")
     (smoke_fixture.root / "src" / "sitecustomize.py").write_text(payload, encoding="utf-8")
-    environment = build_smoke_child_environment(smoke_fixture.root, plan, "cpu")
-    assert "PYTHONPATH" not in environment
-    isolated = subprocess.run(
-        [sys.executable, *argv[1:]],
-        cwd=smoke_fixture.root,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert isolated.returncode == 0, isolated.stderr
-    assert isolated.stdout.strip() == "ISOLATED_BOOTSTRAP_OK"
-    assert not marker.exists()
-    worker_argv = smoke_worker_argv(plan, "cpu")
-    worker = subprocess.run(
-        [sys.executable, *worker_argv[1:]],
-        cwd=smoke_fixture.root,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert worker.returncode == 0, worker.stderr
+    with _contained_child_environment(smoke_fixture, plan, "cpu") as (environment, writable_fds):
+        assert "PYTHONPATH" not in environment
+        isolated_command, isolated_cwd = _direct_bound_child_command(smoke_fixture, plan, "cpu", argv)
+        isolated = subprocess.run(
+            isolated_command,
+            cwd=isolated_cwd,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            pass_fds=writable_fds,
+        )
+        assert isolated.returncode == 0, isolated.stderr
+        assert isolated.stdout.strip() == "ISOLATED_BOOTSTRAP_OK"
+        assert not marker.exists()
+        worker_argv = smoke_worker_argv(plan, "cpu")
+        worker_command, worker_cwd = _direct_bound_child_command(smoke_fixture, plan, "cpu", worker_argv)
+        worker = subprocess.run(
+            worker_command,
+            cwd=worker_cwd,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            pass_fds=writable_fds,
+        )
+        assert worker.returncode == 0, worker.stderr
 
     (smoke_fixture.root / "src/spritelab/training/generator_challenger.py").write_text(
         "print('MUTATED_BEFORE_IMPORT')\n",
         encoding="utf-8",
     )
+    rejected_command, rejected_cwd = _direct_bound_child_command(smoke_fixture, plan, "cpu", argv)
     rejected = subprocess.run(
-        [sys.executable, *argv[1:]],
-        cwd=smoke_fixture.root,
+        rejected_command,
+        cwd=rejected_cwd,
         env=environment,
         capture_output=True,
         text=True,
@@ -1232,6 +1917,78 @@ def test_isolated_bootstrap_imports_real_package_and_ignores_hostile_sitecustomi
     )
     assert rejected.returncode == 70
     assert rejected.stdout == ""
+    calls[0][2].finish(1)
+    _wait_for_status(runner, prepared["smoke_id"], "cpu", "FAILED")
+
+
+def test_bound_runtime_refuses_sourceless_pyc_execution(smoke_fixture: SmokeFixture) -> None:
+    (smoke_fixture.root / "src/spritelab/__main__.py").write_text(
+        "import sourceless_only\nprint('UNSAFE_SOURCELESS_IMPORT_COMPLETED')\n",
+        encoding="utf-8",
+    )
+    code_identity = smoke_fixture.activation.campaign["code_identity"]
+    code_identity.pop("sha256", None)
+    for record in code_identity["files"]:
+        record["sha256"] = _sha((smoke_fixture.root / record["path"]).read_bytes())
+    code_identity["sha256"] = stable_hash(code_identity)
+    prepared = smoke_fixture.prepare("nonce-sourceless-pyc")
+    plan = load_plan(smoke_fixture.root, prepared["smoke_id"])
+    runner, calls = _controlled_runner(smoke_fixture.root)
+    runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
+    argv = smoke_training_argv(plan, "cpu")
+    rejected_command, rejected_cwd = _direct_bound_child_command(smoke_fixture, plan, "cpu", argv)
+
+    rejected = subprocess.run(
+        rejected_command,
+        cwd=rejected_cwd,
+        env=build_smoke_child_environment(smoke_fixture.root, plan, "cpu"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert rejected.returncode == 70
+    assert "SOURCELESS_PYC_EXECUTED" not in rejected.stdout
+    assert "UNSAFE_SOURCELESS_IMPORT_COMPLETED" not in rejected.stdout
+    calls[0][2].finish(1)
+    _wait_for_status(runner, prepared["smoke_id"], "cpu", "FAILED")
+
+
+def test_bound_runtime_denies_preexisting_unowned_package_code(smoke_fixture: SmokeFixture) -> None:
+    (smoke_fixture.root / "runtime/site-packages/torch/unowned.py").write_text(
+        "print('UNOWNED_PACKAGE_CODE_EXECUTED')\n",
+        encoding="utf-8",
+    )
+    (smoke_fixture.root / "src/spritelab/__main__.py").write_text(
+        "import torch.unowned\nprint('UNSAFE_UNOWNED_IMPORT_COMPLETED')\n",
+        encoding="utf-8",
+    )
+    code_identity = smoke_fixture.activation.campaign["code_identity"]
+    code_identity.pop("sha256", None)
+    for record in code_identity["files"]:
+        record["sha256"] = _sha((smoke_fixture.root / record["path"]).read_bytes())
+    code_identity["sha256"] = stable_hash(code_identity)
+    prepared = smoke_fixture.prepare("nonce-unowned-runtime-code")
+    plan = load_plan(smoke_fixture.root, prepared["smoke_id"])
+    runner, calls = _controlled_runner(smoke_fixture.root)
+    runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
+    argv = smoke_training_argv(plan, "cpu")
+    rejected_command, rejected_cwd = _direct_bound_child_command(smoke_fixture, plan, "cpu", argv)
+
+    rejected = subprocess.run(
+        rejected_command,
+        cwd=rejected_cwd,
+        env=build_smoke_child_environment(smoke_fixture.root, plan, "cpu"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert rejected.returncode == 70
+    assert "UNOWNED_PACKAGE_CODE_EXECUTED" not in rejected.stdout
+    assert "UNSAFE_UNOWNED_IMPORT_COMPLETED" not in rejected.stdout
+    calls[0][2].finish(1)
+    _wait_for_status(runner, prepared["smoke_id"], "cpu", "FAILED")
 
 
 def test_child_loader_rejects_source_changed_between_preflight_and_import(
@@ -1254,10 +2011,13 @@ def test_child_loader_rejects_source_changed_between_preflight_and_import(
     code_identity["sha256"] = stable_hash(code_identity)
     prepared = smoke_fixture.prepare("nonce-loader-race")
     plan = load_plan(smoke_fixture.root, prepared["smoke_id"])
+    runner, calls = _controlled_runner(smoke_fixture.root)
+    runner.launch(prepared["smoke_id"], prepared["plan_identity"], "cpu", explicit_action=True)
     argv = smoke_training_argv(plan, "cpu")
+    rejected_command, rejected_cwd = _direct_bound_child_command(smoke_fixture, plan, "cpu", argv)
     rejected = subprocess.run(
-        [sys.executable, *argv[1:]],
-        cwd=smoke_fixture.root,
+        rejected_command,
+        cwd=rejected_cwd,
         env=build_smoke_child_environment(smoke_fixture.root, plan, "cpu"),
         capture_output=True,
         text=True,
@@ -1265,6 +2025,8 @@ def test_child_loader_rejects_source_changed_between_preflight_and_import(
     )
     assert rejected.returncode == 70
     assert "UNSAFE_IMPORT_COMPLETED" not in rejected.stdout
+    calls[0][2].finish(1)
+    _wait_for_status(runner, prepared["smoke_id"], "cpu", "FAILED")
 
 
 def test_interpreter_swap_is_rejected_before_worker_launch(

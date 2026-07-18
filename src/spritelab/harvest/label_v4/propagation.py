@@ -7,7 +7,7 @@ import math
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 FIELD_PROPAGATION_POLICY_VERSION = "field_propagation_v4.1"
 
@@ -372,7 +372,7 @@ def propagate_fields(
     if regenerated:
         target_copy["description"] = description_generator(target_copy)
         propagated_scores = [
-            value.get("uncertainty_1_20")
+            cast(int, value.get("uncertainty_1_20"))
             for name, value in output_quality.items()
             if name in allowed and value.get("uncertainty_1_20") is not None
         ]

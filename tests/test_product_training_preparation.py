@@ -130,6 +130,8 @@ def test_preparation_builds_immutable_nonproduction_baseline_without_config_acti
     campaign = json.loads(persisted)["product_profiles"]["image_only_baseline"]["campaign"]
     assert campaign["executable"] is False
     assert campaign["launch_authorized"] is False
+    assert type(campaign["executable"]) is bool
+    assert type(campaign["launch_authorized"]) is bool
     assert "dataset_freeze_hash" not in campaign["identities"]
     assert len(campaign["seeds"]) == 3
 
@@ -246,7 +248,11 @@ def test_preparation_failure_leaves_config_and_outside_sentinel_unchanged(
     assert context.config_path.read_bytes() == config_before  # type: ignore[union-attr]
     assert sentinel.read_bytes() == b"outside user data"
     preparation_root = context.project_root / ".spritelab" / "training-preparation"
-    assert list(preparation_root.iterdir()) == []
+    assert list(preparation_root.glob(".staging-*")) == []
+    residues = list(preparation_root.glob(".spritelab-retired-tree-*"))
+    assert len(residues) == 1
+    assert set(preparation_root.iterdir()) == set(residues)
+    assert list(residues[0].iterdir()) == []
 
 
 def test_preparation_endpoint_rejects_any_training_or_freeze_authorization(tmp_path: Path) -> None:

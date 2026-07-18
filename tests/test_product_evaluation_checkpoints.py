@@ -3,10 +3,16 @@ from __future__ import annotations
 import json
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from spritelab.product_core import ProductEvent, ProductStatus
 from spritelab.product_features.evaluation import CheckpointAvailability, discover_checkpoint_candidates
+from spritelab.product_features.training.service import _evaluation_checkpoint_binding
+from spritelab.product_web.events import EventRepository
+from spritelab.v3.config import DEFAULT_CONFIG, ProjectConfig
+from spritelab.v3.run_state import RunState
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -85,12 +91,170 @@ def _checkpoint_evidence(
     return checkpoint, checkpoint_sha256
 
 
+def _product_training_run(
+    root: Path,
+    run_id: str,
+    *,
+    feature: str = "training",
+    backend_completion: bool = True,
+    bind_checkpoints: bool = True,
+) -> Path:
+    repository = EventRepository(root / "runs", private_roots=(root,))
+    repository.create_run(
+        run_id,
+        feature=feature,
+        command="training.start",
+        status=ProductStatus.RUNNING.value,
+        backend_identity={
+            "dataset_identity": "dataset-v1",
+            "view_identity": "view-v1",
+            "training_view_identity": "view-v1",
+            "dataset_view_manifest_hash": "view-v1",
+        },
+    )
+    run = root / "runs" / run_id
+    checkpoint = run / "checkpoints" / "checkpoint.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"authenticated product checkpoint")
+    checkpoint_sha256 = sha256(checkpoint.read_bytes()).hexdigest()
+    checkpoint_row = {
+        "checkpoint": str(checkpoint),
+        "seed": 1,
+        "optimizer_step": 100,
+        "sha256": checkpoint_sha256,
+        "backend_id": "local",
+        "remote": False,
+        "downloaded": False,
+        "hash_verified": True,
+        "remote_identity_verified": False,
+        "safe_resume": True,
+        "synchronization": "local",
+        "verification": "verified",
+        "dataset_identity": "dataset-v1",
+        "view_identity": "view-v1",
+        "training_view_identity": "view-v1",
+    }
+    terminal_binding = _evaluation_checkpoint_binding(
+        SimpleNamespace(
+            run_id=run_id,
+            dataset_identity="dataset-v1",
+            view_identity="view-v1",
+            dashboard=SimpleNamespace(
+                checkpoints=[
+                    SimpleNamespace(
+                        checkpoint=str(checkpoint),
+                        seed=1,
+                        optimizer_step=100,
+                        sha256=checkpoint_sha256,
+                        backend_id="local",
+                        remote=False,
+                        downloaded=False,
+                        hash_verified=True,
+                        remote_identity_verified=False,
+                        safe_resume=True,
+                        verification="verified",
+                    )
+                ]
+            ),
+        ),
+        root / "runs",
+    )
+    repository.append(
+        ProductEvent(
+            run_id=run_id,
+            timestamp="2026-07-12T10:00:00+00:00",
+            feature=feature,
+            stage="campaign",
+            event_type="training_started" if feature == "training" else "evaluation_started",
+            status=ProductStatus.RUNNING,
+            current=0,
+            total=100,
+            message="Authoritative product run started.",
+        )
+    )
+    repository.append(
+        ProductEvent(
+            run_id=run_id,
+            timestamp="2026-07-12T11:00:00+00:00",
+            feature=feature,
+            stage="training",
+            event_type="checkpoint",
+            status=ProductStatus.RUNNING if backend_completion else ProductStatus.COMPLETE,
+            current=100,
+            total=100,
+            message="Verified checkpoint retained.",
+            metrics={
+                "checkpoint": str(checkpoint),
+                "seed": 1,
+                "optimizer_step": 100,
+                "sha256": checkpoint_sha256,
+                "downloaded": False,
+                "hash_verified": True,
+                "identity_verified": True,
+            },
+        )
+    )
+    if backend_completion:
+        repository.append(
+            ProductEvent(
+                run_id=run_id,
+                timestamp="2026-07-12T11:01:00+00:00",
+                feature=feature,
+                stage="campaign",
+                event_type="backend_state",
+                status=ProductStatus.COMPLETE,
+                current=100,
+                total=100,
+                message="Backend jobs are complete.",
+                metrics={
+                    "completion_validated": True,
+                    **({"evaluation_checkpoint_binding": terminal_binding} if bind_checkpoints else {}),
+                },
+            )
+        )
+    repository.update_state(
+        run_id,
+        checkpoints=[checkpoint_row],
+        dataset_identity="dataset-v1",
+        view_identity="view-v1",
+        training_view_identity="view-v1",
+    )
+    return run
+
+
 def test_no_checkpoint_has_no_eligible_candidate(tmp_path: Path) -> None:
     _run(tmp_path, "train-empty")
     catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
     assert catalog.eligible == ()
     assert catalog.default_checkpoint_id is None
     assert catalog.unavailable[0].availability is CheckpointAvailability.MISSING
+
+
+def test_current_v3_writer_event_authority_remains_checkpoint_compatible(tmp_path: Path) -> None:
+    values = json.loads(json.dumps(DEFAULT_CONFIG))
+    values["paths"]["runs"] = "runs"
+    config = ProjectConfig(root=tmp_path, path=tmp_path / "spritelab.yaml", values=values)
+    run = RunState.create(config, command="train", argv=["train"], source_commit="abc", dry_run=False)
+    run.finish(
+        command="train",
+        status="COMPLETE",
+        exit_code=0,
+        message="Training completed.",
+        stage="campaign",
+        backend_identity={"dataset_identity": "dataset-v1", "view_identity": "view-v1"},
+    )
+    checkpoint, _checkpoint_sha256 = _checkpoint_evidence(run.directory)
+
+    catalog = discover_checkpoint_candidates(
+        config.runs_dir,
+        project_root=tmp_path,
+        active_dataset_identity="dataset-v1",
+        active_view_identity="view-v1",
+    )
+
+    assert len(catalog.eligible) == 1
+    assert catalog.unavailable == ()
+    assert catalog.eligible[0].path == checkpoint.resolve()
 
 
 def test_incomplete_checkpoint_is_hidden_from_normal_selection(tmp_path: Path) -> None:
@@ -345,6 +509,139 @@ def test_consistent_repeated_checkpoint_evidence_remains_eligible(tmp_path: Path
     assert catalog.eligible[0].path == checkpoint.resolve()
 
 
+def test_origin_bound_product_training_state_is_eligible(tmp_path: Path) -> None:
+    checkpoint = _product_training_run(tmp_path, "product-training") / "checkpoints" / "checkpoint.pt"
+
+    catalog = discover_checkpoint_candidates(
+        tmp_path / "runs",
+        project_root=tmp_path,
+        active_dataset_identity="dataset-v1",
+        active_view_identity="view-v1",
+    )
+
+    assert len(catalog.eligible) == 1
+    assert catalog.unavailable == ()
+    assert catalog.eligible[0].path == checkpoint.resolve()
+
+
+@pytest.mark.parametrize(
+    "downgrade_schema",
+    [False, True],
+    ids=["product-schema", "legacy-schema-downgrade"],
+)
+def test_post_completion_state_rewrite_cannot_select_attacker_checkpoint(
+    tmp_path: Path,
+    downgrade_schema: bool,
+) -> None:
+    run = _product_training_run(tmp_path, "product-training-rewritten")
+    attacker = run / "checkpoints" / "attacker-selected.pt"
+    attacker.write_bytes(b"attacker-selected checkpoint")
+    attacker_sha256 = sha256(attacker.read_bytes()).hexdigest()
+    state_path = run / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    row = state["checkpoints"][0]
+    row.update(
+        checkpoint=str(attacker),
+        sha256=attacker_sha256,
+        dataset_identity="attacker-dataset",
+        view_identity="attacker-view",
+        training_view_identity="attacker-view",
+    )
+    state.update(
+        dataset_identity="attacker-dataset",
+        view_identity="attacker-view",
+        training_view_identity="attacker-view",
+    )
+    state["backend_identity"].update(
+        dataset_identity="attacker-dataset",
+        view_identity="attacker-view",
+        training_view_identity="attacker-view",
+        dataset_view_manifest_hash="attacker-view",
+    )
+    if downgrade_schema:
+        state["schema_version"] = "spritelab.v3.run-state.v1"
+        state["command"] = "train"
+    _write_json(state_path, state)
+
+    catalog = discover_checkpoint_candidates(
+        tmp_path / "runs",
+        project_root=tmp_path,
+        active_dataset_identity="attacker-dataset",
+        active_view_identity="attacker-view",
+    )
+
+    assert catalog.eligible == ()
+    assert len(catalog.unavailable) == 1
+    assert catalog.unavailable[0].availability is CheckpointAvailability.INVALID
+    expected_reason = "legacy run-state schema" if downgrade_schema else "authenticated terminal event"
+    assert expected_reason in catalog.unavailable[0].unavailable_reasons[0]
+
+
+def test_unbound_product_training_schema_is_not_authenticated(tmp_path: Path) -> None:
+    run = _run(tmp_path, "unbound-product-training")
+    _checkpoint_evidence(run)
+    state_path = run / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.update(
+        schema_version="spritelab.product.run-state.v1",
+        feature="training",
+        command="training.start",
+        event_migration_required=False,
+    )
+    _write_json(state_path, state)
+
+    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+
+    assert catalog.eligible == ()
+    assert catalog.unavailable[0].availability is CheckpointAvailability.INVALID
+    assert "authentication" in catalog.unavailable[0].unavailable_reasons[0]
+
+
+def test_authenticated_legacy_completion_without_checkpoint_binding_fails_closed(tmp_path: Path) -> None:
+    _product_training_run(tmp_path, "legacy-unbound-completion", bind_checkpoints=False)
+
+    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+
+    assert catalog.eligible == ()
+    assert catalog.unavailable[0].availability is CheckpointAvailability.INVALID
+    assert "authenticated terminal event" in catalog.unavailable[0].unavailable_reasons[0]
+
+
+def test_origin_bound_foreign_product_state_is_not_training(tmp_path: Path) -> None:
+    _product_training_run(tmp_path, "product-evaluation", feature="evaluation")
+
+    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+
+    assert catalog.eligible == ()
+    assert catalog.unavailable[0].availability is CheckpointAvailability.INVALID
+    assert "TrainingService" in catalog.unavailable[0].unavailable_reasons[0]
+
+
+def test_state_feature_relabel_cannot_authenticate_foreign_event_history(tmp_path: Path) -> None:
+    run = _product_training_run(tmp_path, "relabelled-evaluation", feature="evaluation")
+    state_path = run / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["feature"] == "evaluation"
+    state["feature"] = "training"
+    _write_json(state_path, state)
+
+    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+
+    assert catalog.eligible == ()
+    assert catalog.unavailable[0].availability is CheckpointAvailability.INVALID
+    assert "event semantics" in catalog.unavailable[0].unavailable_reasons[0]
+
+
+def test_terminal_checkpoint_without_validated_backend_completion_is_not_authenticated(tmp_path: Path) -> None:
+    _product_training_run(tmp_path, "terminal-checkpoint-only", backend_completion=False)
+
+    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+
+    assert catalog.eligible == ()
+    assert catalog.unavailable[0].availability is CheckpointAvailability.INVALID
+    assert "event semantics" in catalog.unavailable[0].unavailable_reasons[0]
+
+
 def test_latest_complete_checkpoint_is_default_and_public_view_redacts_paths(tmp_path: Path) -> None:
     older = _run(tmp_path, "older")
     newer = _run(tmp_path, "newer")
@@ -399,6 +696,59 @@ def test_latest_complete_checkpoint_is_default_and_public_view_redacts_paths(tmp
     assert public["label"] == "baseline — latest complete checkpoint"
     assert "checkpoint_path" not in json.dumps(public)
     assert catalog.find(default.checkpoint_id, weights="live").weights == "live"
+
+
+def test_catalog_projection_sanitizes_state_derived_text_and_keeps_technical_rows_pathless(tmp_path: Path) -> None:
+    run = _run(tmp_path, "hostile-catalog")
+    state_path = run / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["backend_identity"].update(
+        {
+            "friendly_run_name": "Nightly Authorization=Bearer FRIENDLYSECRET C:\\private\\name.txt",
+            "training_profile": "profile api_key=PROFILESECRET file:///home/alice/profile.json",
+            "dataset_identity_summary": f"Dataset password=DATASECRET {tmp_path / 'private' / 'dataset.json'}",
+            "view_identity_summary": "View client_secret=VIEWSECRET /home/alice/private/view.json",
+        }
+    )
+    _write_json(state_path, state)
+    _checkpoint_evidence(run)
+
+    catalog = discover_checkpoint_candidates(tmp_path / "runs", project_root=tmp_path)
+    public = catalog.to_dict(include_unavailable=True, private_roots=(tmp_path,))
+    serialized = json.dumps(public)
+
+    for private_value in (
+        "FRIENDLYSECRET",
+        "PROFILESECRET",
+        "DATASECRET",
+        "VIEWSECRET",
+        str(tmp_path),
+        tmp_path.as_posix(),
+        "C:\\private",
+        "/home/alice/private",
+        "file:///home/alice",
+    ):
+        assert private_value not in serialized
+    candidate = public["eligible"][0]
+    assert "[redacted]" in candidate["friendly_run_name"]
+    assert "[redacted]" in candidate["training_profile"]
+    assert "[redacted]" in candidate["dataset_identity_summary"]
+    assert "[redacted]" in candidate["view_identity_summary"]
+    assert candidate["checkpoint_step"] is None
+    assert candidate["eligible"] is True
+
+    technical = catalog.to_dict(
+        include_unavailable=True,
+        technical_details=True,
+        private_roots=(tmp_path,),
+    )
+    technical_text = json.dumps(technical)
+    technical_candidate = technical["eligible"][0]
+    assert "checkpoint_path" not in technical_text
+    assert "run_directory" not in technical_text
+    assert str(tmp_path) not in technical_text
+    assert technical_candidate["checkpoint_reference"] == "checkpoint.pt"
+    assert technical_candidate["run_reference"] == "hostile-catalog"
 
 
 def test_foreign_checkpoint_is_not_eligible(tmp_path: Path) -> None:

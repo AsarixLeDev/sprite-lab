@@ -403,7 +403,7 @@ def same_cohort_acceptance_checks(outputs: Mapping[str, Sequence[Mapping[str, An
             "acq_idylwild_armory_leather_cap": ("cap", "clothing", "leather", "wearable_equipment"),
             "acq_idylwild_armory_chainmail_jacket": ("jacket", "armor", "chainmail", "wearable_equipment"),
         }
-        named_checks = {}
+        named_checks: dict[str, dict[str, Any]] = {}
         for sprite_id, wanted in expected.items():
             row = indexed.get(sprite_id)
             if row is None:

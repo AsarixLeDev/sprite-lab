@@ -39,12 +39,17 @@ AUTOMATION_ALLOW_DECLARATIONS = frozenset(
 )
 _UNKNOWN_CREATORS = frozenset({"unknown", "n/a", "na", "none", "anonymous", "unspecified"})
 _BLOCKED_HOST_SUFFIXES = (".local", ".internal", ".localhost", ".home", ".arpa")
-TRUSTED_CATALOG_SCHEMA = "spritelab.harvest.trusted-catalog.v2"
+TRUSTED_CATALOG_SCHEMA = "spritelab.harvest.trusted-catalog.v3"
 TRUSTED_CATALOG_RELATIVE_PATH = Path("artifacts") / "harvest" / "trusted_catalog.json"
+TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH = Path("artifacts") / "harvest" / "trusted_catalog.d"
+TRUSTED_CATALOG_SOURCE_SCHEMA = "spritelab.harvest.trusted-catalog-source.v1"
 MAX_TRUSTED_CATALOG_BYTES = 1 << 20
 MAX_TRUSTED_CATALOG_SOURCES = 256
 
 _CATALOG_KEYS = frozenset({"schema_version", "sources", "catalog_identity"})
+_CATALOG_SOURCE_DOCUMENT_KEYS = frozenset(
+    {"schema_version", "source_id", "source_catalog_identity", "source", "record_identity"}
+)
 _SOURCE_KEYS = frozenset(
     {
         "source_id",
@@ -79,6 +84,10 @@ _EVIDENCE_KEYS = frozenset(
         "license_http_status",
         "license_content_sha256",
         "automation_terms",
+        "zero_cost_reviewed",
+        "zero_cost_verification_identity_sha256",
+        "zero_cost_evidence_text_sha256",
+        "zero_cost_probe_receipt_identity_sha256",
         "attestation_identity_sha256",
     }
 )
@@ -389,6 +398,10 @@ class CatalogEvidenceBinding:
     license_http_status: int
     license_content_sha256: str
     automation_terms: CatalogAutomationTermsBinding
+    zero_cost_reviewed: bool
+    zero_cost_verification_identity_sha256: str
+    zero_cost_evidence_text_sha256: str
+    zero_cost_probe_receipt_identity_sha256: str
     attestation_identity_sha256: str
 
     def validate(self, source_page: str, license_evidence_url: str, *, now: datetime | None = None) -> None:
@@ -402,10 +415,17 @@ class CatalogEvidenceBinding:
             self.source_content_sha256,
             self.license_request_url_sha256,
             self.license_content_sha256,
+            self.zero_cost_verification_identity_sha256,
+            self.zero_cost_evidence_text_sha256,
+            self.zero_cost_probe_receipt_identity_sha256,
             self.attestation_identity_sha256,
         ):
             if SHA256_PATTERN.fullmatch(value) is None:
                 raise ValueError("Harvest evidence binding requires lowercase SHA-256 identities.")
+        if self.zero_cost_reviewed is not True:
+            raise ValueError(
+                "Harvest trusted catalog admission requires an exact operator-reviewed zero-cost snapshot."
+            )
         if not 200 <= self.source_http_status < 300 or not 200 <= self.license_http_status < 300:
             raise ValueError("Harvest evidence pages require successful retrieval status.")
         validate_public_evidence_url(self.source_final_url)
@@ -447,7 +467,7 @@ class CatalogEvidenceBinding:
 
     def attested_payload(self) -> dict[str, Any]:
         return {
-            "schema_version": "spritelab.harvest.catalog-evidence-attestation.v2",
+            "schema_version": "spritelab.harvest.catalog-evidence-attestation.v3",
             "verifier_id": self.verifier_id,
             "verifier_code_identity_sha256": self.verifier_code_identity_sha256,
             "verified_at": self.verified_at,
@@ -461,11 +481,17 @@ class CatalogEvidenceBinding:
             "license_http_status": self.license_http_status,
             "license_content_sha256": self.license_content_sha256,
             "automation_terms": self.automation_terms.attested_payload(),
+            "zero_cost_review": {
+                "reviewed": True,
+                "verification_identity_sha256": self.zero_cost_verification_identity_sha256,
+                "evidence_text_sha256": self.zero_cost_evidence_text_sha256,
+                "probe_receipt_identity_sha256": self.zero_cost_probe_receipt_identity_sha256,
+            },
         }
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": "spritelab.harvest.catalog-evidence-binding.v2",
+            "schema_version": "spritelab.harvest.catalog-evidence-binding.v3",
             "verifier_id": self.verifier_id,
             "verifier_code_identity_sha256": self.verifier_code_identity_sha256,
             "verified_at": self.verified_at,
@@ -481,6 +507,10 @@ class CatalogEvidenceBinding:
             "license_http_status": self.license_http_status,
             "license_content_sha256": self.license_content_sha256,
             "automation_terms": self.automation_terms.to_dict(),
+            "zero_cost_reviewed": True,
+            "zero_cost_verification_identity_sha256": self.zero_cost_verification_identity_sha256,
+            "zero_cost_evidence_text_sha256": self.zero_cost_evidence_text_sha256,
+            "zero_cost_probe_receipt_identity_sha256": self.zero_cost_probe_receipt_identity_sha256,
             "attestation_identity_sha256": self.attestation_identity_sha256,
         }
 
@@ -548,6 +578,10 @@ def trusted_catalog_source_record(source: HarvestSource) -> dict[str, Any]:
                 "verified_at": binding.automation_terms.verified_at,
                 "expires_at": binding.automation_terms.expires_at,
             },
+            "zero_cost_reviewed": True,
+            "zero_cost_verification_identity_sha256": binding.zero_cost_verification_identity_sha256,
+            "zero_cost_evidence_text_sha256": binding.zero_cost_evidence_text_sha256,
+            "zero_cost_probe_receipt_identity_sha256": binding.zero_cost_probe_receipt_identity_sha256,
             "attestation_identity_sha256": binding.attestation_identity_sha256,
         },
         "zero_cost": True,
@@ -569,6 +603,26 @@ def trusted_catalog_record(sources: Sequence[HarvestSource]) -> dict[str, Any]:
     }
 
 
+def trusted_catalog_source_document(source: HarvestSource) -> dict[str, Any]:
+    """Return one self-bound immutable append-only catalog record."""
+
+    payload = {
+        "schema_version": TRUSTED_CATALOG_SOURCE_SCHEMA,
+        "source_id": source.source_id,
+        "source_catalog_identity": source.catalog_identity,
+        "source": trusted_catalog_source_record(source),
+    }
+    return {**payload, "record_identity": _identity(payload)}
+
+
+def trusted_catalog_source_filename(source_id: str) -> str:
+    """Return the private deterministic filename for one source identifier."""
+
+    if not isinstance(source_id, str) or SOURCE_ID_PATTERN.fullmatch(source_id) is None:
+        raise ValueError("Harvest source_id is invalid.")
+    return f"{hashlib.sha256(source_id.encode('utf-8')).hexdigest()}.json"
+
+
 def load_trusted_catalog(project_root: str | Path) -> tuple[HarvestSource, ...]:
     """Passively load the exact repository-local trusted catalog, if present.
 
@@ -579,11 +633,7 @@ def load_trusted_catalog(project_root: str | Path) -> tuple[HarvestSource, ...]:
 
     root = Path(os.path.abspath(os.path.expanduser(os.fspath(project_root))))
     try:
-        payload, _snapshot = _read_catalog_snapshot(root)
-        if payload is None:
-            return ()
-        parsed = _strict_catalog_json(payload)
-        sources = _parse_trusted_catalog(parsed)
+        sources = _load_merged_catalog(root)
     except (OSError, UnicodeError, UnsafeFilesystemOperation, ValueError) as exc:
         if isinstance(exc, TrustedCatalogError):
             raise
@@ -598,10 +648,8 @@ def load_trusted_catalog_snapshot(
 
     root = Path(os.path.abspath(os.path.expanduser(os.fspath(project_root))))
     try:
-        payload, snapshot = _read_catalog_snapshot(root)
-        if payload is None:
-            return (), None
-        return _parse_trusted_catalog(_strict_catalog_json(payload)), snapshot
+        _payload, snapshot = _read_catalog_snapshot(root)
+        return _load_merged_catalog(root), snapshot
     except (OSError, UnicodeError, UnsafeFilesystemOperation, ValueError) as exc:
         if isinstance(exc, TrustedCatalogError):
             raise
@@ -610,6 +658,139 @@ def load_trusted_catalog_snapshot(
 
 def _read_catalog_bytes(root: Path) -> bytes | None:
     return _read_catalog_snapshot(root)[0]
+
+
+def _load_merged_catalog(root: Path) -> tuple[HarvestSource, ...]:
+    legacy_payload, _snapshot = _read_catalog_snapshot(root)
+    legacy = () if legacy_payload is None else _parse_trusted_catalog(_strict_catalog_json(legacy_payload))
+    appended = _read_append_only_catalog(root)
+    by_id = {source.source_id: source for source in legacy}
+    for source in appended:
+        prior = by_id.get(source.source_id)
+        if prior is not None and prior.catalog_identity != source.catalog_identity:
+            raise TrustedCatalogError("Harvest append-only catalog conflicts with the passive legacy catalog.")
+        by_id[source.source_id] = source
+    merged = tuple(sorted(by_id.values(), key=lambda source: source.source_id))
+    if len(merged) > MAX_TRUSTED_CATALOG_SOURCES:
+        raise TrustedCatalogError("Harvest trusted catalog source count is invalid.")
+    return merged
+
+
+def _read_append_only_catalog(root: Path) -> tuple[HarvestSource, ...]:
+    parts = TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH.parts
+    with ExitStack() as stack:
+        anchor = stack.enter_context(AnchoredDirectory(root, root))
+        for part in parts:
+            if not anchor.lexists(part):
+                return ()
+            anchor = stack.enter_context(anchor.open_directory_immovable(part))
+        names = anchor.names()
+        record_names = tuple(name for name in names if name.endswith(".json"))
+        stage_names = tuple(name for name in names if name.startswith(".stage-") and len(name) == 39)
+        if len(record_names) > MAX_TRUSTED_CATALOG_SOURCES or len(names) > 2 * MAX_TRUSTED_CATALOG_SOURCES:
+            raise TrustedCatalogError("Harvest append-only catalog contains too many entries.")
+        if any(
+            (
+                (name.endswith(".json") and len(name) != 69)
+                or (name.startswith(".stage-") and len(name) != 39)
+                or (not name.endswith(".json") and not name.startswith(".stage-"))
+            )
+            or (name.endswith(".json") and SHA256_PATTERN.fullmatch(name[:64]) is None)
+            or (name.startswith(".stage-") and re.fullmatch(r"[0-9a-f]{32}", name[7:]) is None)
+            for name in names
+        ):
+            raise TrustedCatalogError("Harvest append-only catalog contains an unexpected entry.")
+
+        stage_metadata: dict[str, os.stat_result] = {}
+        for stage in stage_names:
+            metadata = anchor.lstat(stage)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or _metadata_is_link_or_reparse(metadata)
+                or metadata.st_nlink not in {1, 2}
+                or not 0 <= metadata.st_size <= MAX_TRUSTED_CATALOG_BYTES
+            ):
+                raise TrustedCatalogError("Harvest append-only catalog stage is unsafe.")
+            stage_metadata[stage] = metadata
+
+        sources: list[HarvestSource] = []
+        record_metadata: dict[str, os.stat_result] = {}
+        total_bytes = 0
+        for name in record_names:
+            payload, metadata = _read_append_only_record(anchor, name)
+            record_metadata[name] = metadata
+            total_bytes += len(payload)
+            if total_bytes > MAX_TRUSTED_CATALOG_BYTES:
+                raise TrustedCatalogError("Harvest append-only catalog exceeds its bounded size.")
+            if metadata.st_nlink == 2:
+                matches = [
+                    stage for stage, candidate in stage_metadata.items() if _same_file_metadata(metadata, candidate)
+                ]
+                if len(matches) != 1:
+                    raise TrustedCatalogError("Harvest catalog record lost its retained publication stage.")
+            elif metadata.st_nlink != 1:
+                raise TrustedCatalogError("Harvest catalog record has an unsafe hard-link count.")
+            source = _parse_catalog_source_document(_strict_catalog_json(payload))
+            if name != trusted_catalog_source_filename(source.source_id):
+                raise TrustedCatalogError("Harvest catalog record filename does not bind its source identifier.")
+            sources.append(source)
+        source_ids = [source.source_id for source in sources]
+        if len(set(source_ids)) != len(source_ids):
+            raise TrustedCatalogError("Harvest append-only catalog source identifiers are not unique.")
+        bound_stages = {
+            stage
+            for metadata in record_metadata.values()
+            for stage, candidate in stage_metadata.items()
+            if _same_file_metadata(metadata, candidate)
+        }
+        if any(metadata.st_nlink == 2 and stage not in bound_stages for stage, metadata in stage_metadata.items()):
+            raise TrustedCatalogError("Harvest catalog contains an unbound hard-linked stage.")
+        if any(
+            not _same_file_metadata(metadata, anchor.lstat(name))
+            for name, metadata in (*record_metadata.items(), *stage_metadata.items())
+        ):
+            raise TrustedCatalogError("Harvest append-only catalog changed while it was inventoried.")
+        return tuple(sorted(sources, key=lambda source: source.source_id))
+
+
+def _read_append_only_record(anchor: AnchoredDirectory, name: str) -> tuple[bytes, os.stat_result]:
+    before = anchor.lstat(name)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or _metadata_is_link_or_reparse(before)
+        or before.st_nlink not in {1, 2}
+        or not 1 <= before.st_size <= MAX_TRUSTED_CATALOG_BYTES
+    ):
+        raise TrustedCatalogError("Harvest append-only catalog record is unsafe.")
+    descriptor = anchor.open_file_immovable(name, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if not _same_file_metadata(before, opened):
+            raise TrustedCatalogError("Harvest append-only catalog record changed while opening.")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            payload = handle.read(MAX_TRUSTED_CATALOG_BYTES + 1)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    path_after = anchor.lstat(name)
+    if (
+        len(payload) != before.st_size
+        or not _same_file_metadata(before, after)
+        or not _same_file_metadata(before, path_after)
+    ):
+        raise TrustedCatalogError("Harvest append-only catalog record changed while reading.")
+    return payload, after
+
+
+def _parse_catalog_source_document(value: Any) -> HarvestSource:
+    record = _exact_mapping(value, _CATALOG_SOURCE_DOCUMENT_KEYS, "catalog source document")
+    payload = {key: record[key] for key in record if key != "record_identity"}
+    if record["schema_version"] != TRUSTED_CATALOG_SOURCE_SCHEMA or record["record_identity"] != _identity(payload):
+        raise TrustedCatalogError("Harvest append-only catalog record identity is invalid.")
+    source = _parse_catalog_source(record["source"])
+    if record["source_id"] != source.source_id or record["source_catalog_identity"] != source.catalog_identity:
+        raise TrustedCatalogError("Harvest append-only catalog record does not bind its source.")
+    return source
 
 
 def _read_catalog_snapshot(root: Path) -> tuple[bytes | None, TrustedCatalogSnapshot | None]:
@@ -719,9 +900,16 @@ def _parse_catalog_source(value: Any) -> HarvestSource:
         or not all(isinstance(value, str) for value in taxonomy_hints)
     ):
         raise TrustedCatalogError("Harvest trusted catalog tuple fields must be string arrays.")
-    evidence_text_fields = _EVIDENCE_KEYS - {"source_http_status", "license_http_status", "automation_terms"}
-    if any(not isinstance(evidence_record[key], str) for key in evidence_text_fields) or any(
-        type(evidence_record[key]) is not int for key in ("source_http_status", "license_http_status")
+    evidence_text_fields = _EVIDENCE_KEYS - {
+        "source_http_status",
+        "license_http_status",
+        "automation_terms",
+        "zero_cost_reviewed",
+    }
+    if (
+        any(not isinstance(evidence_record[key], str) for key in evidence_text_fields)
+        or any(type(evidence_record[key]) is not int for key in ("source_http_status", "license_http_status"))
+        or evidence_record["zero_cost_reviewed"] is not True
     ):
         raise TrustedCatalogError("Harvest trusted catalog evidence field types are invalid.")
     automation_text_fields = _AUTOMATION_TERMS_KEYS - {
@@ -907,8 +1095,10 @@ __all__ = [
     "MAX_TRUSTED_CATALOG_SOURCES",
     "SHA256_PATTERN",
     "SOURCE_ID_PATTERN",
+    "TRUSTED_CATALOG_DIRECTORY_RELATIVE_PATH",
     "TRUSTED_CATALOG_RELATIVE_PATH",
     "TRUSTED_CATALOG_SCHEMA",
+    "TRUSTED_CATALOG_SOURCE_SCHEMA",
     "CatalogAutomationTermsBinding",
     "CatalogEvidenceBinding",
     "HarvestSource",
@@ -921,6 +1111,8 @@ __all__ = [
     "public_url",
     "trusted_catalog_identity",
     "trusted_catalog_record",
+    "trusted_catalog_source_document",
+    "trusted_catalog_source_filename",
     "trusted_catalog_source_record",
     "url_identity",
     "validate_download_url",

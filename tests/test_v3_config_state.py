@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from spritelab.utils.safe_fs import AnchoredDirectory
+from spritelab.v3 import config as config_module
 from spritelab.v3.config import DEFAULT_CONFIG, ConfigError, ProjectConfig, discover_config
 from spritelab.v3.model import AuditStatus, StageStatus
 from spritelab.v3.status import build_project_state
@@ -128,6 +130,41 @@ def test_missing_config_can_load_inspection_defaults(monkeypatch: pytest.MonkeyP
     assert config.values["execution"]["allow_training"] is False
 
 
+def test_activation_commit_reader_accepts_only_one_exact_retained_stage(tmp_path: Path) -> None:
+    target = tmp_path / "record.json"
+    payload = b'{"committed":true}\n'
+    target.write_bytes(payload)
+    alias = tmp_path / f".{target.name}.staging-{'a' * 32}"
+    alias.hardlink_to(target)
+
+    with AnchoredDirectory(tmp_path, tmp_path) as anchor:
+        assert (
+            config_module._safe_child_bytes(
+                anchor,
+                target.name,
+                max_bytes=1024,
+                allow_retained_stage=True,
+            )
+            == payload
+        )
+        with pytest.raises(ConfigError):
+            config_module._safe_child_bytes(
+                anchor,
+                target.name,
+                max_bytes=1024,
+                allow_retained_stage=False,
+            )
+
+    (tmp_path / f".{target.name}.staging-{'b' * 32}").write_bytes(b"wrong inode")
+    with AnchoredDirectory(tmp_path, tmp_path) as anchor, pytest.raises(ConfigError):
+        config_module._safe_child_bytes(
+            anchor,
+            target.name,
+            max_bytes=1024,
+            allow_retained_stage=True,
+        )
+
+
 @pytest.mark.parametrize(
     "value,match",
     [
@@ -155,9 +192,12 @@ def test_environment_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     monkeypatch.setenv("SPRITELAB_CONFIG", str(config_path))
     monkeypatch.setenv("SPRITELAB_PROJECT_ROOT", str(root))
     monkeypatch.setenv("SPRITELAB_RUNS_DIR", str(runs))
+    assert not root.exists()
     config = ProjectConfig.load(tmp_path)
     assert config.root == root.resolve()
     assert config.runs_dir == runs.resolve()
+    assert config.values["execution"] == DEFAULT_CONFIG["execution"]
+    assert not root.exists()
 
 
 def test_environment_override_missing_file_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -238,6 +278,13 @@ def test_evaluation_and_promotion_readiness_require_training_identity_binding(
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"synthetic checkpoint")
     benchmark.write_text('{"prompts": ["synthetic sprite"]}\n', encoding="utf-8")
+    checkpoint_claim = {
+        "path": "checkpoints/checkpoint_step_000100_ema.pt",
+        "dataset_identity": "synthetic-training-dataset-v1",
+        "view_identity": "synthetic-training-view-v1",
+        "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+        "verified": True,
+    }
     training_state = {
         "schema_version": "spritelab.v3.run-state.v1",
         "run_id": "train-identity",
@@ -247,8 +294,14 @@ def test_evaluation_and_promotion_readiness_require_training_identity_binding(
             "dataset_identity": "synthetic-training-dataset-v1",
             "view_identity": "synthetic-training-view-v1",
         },
+        "checkpoints": [checkpoint_claim],
     }
     _write_json(tmp_path, "runs/v3/train-identity/state.json", training_state)
+    _write_json(
+        tmp_path,
+        "runs/v3/train-identity/run_completion_marker.json",
+        {"complete": True, "checkpoints": [checkpoint_claim]},
+    )
     _write_json(
         tmp_path,
         "runs/v3/train-identity/command.json",

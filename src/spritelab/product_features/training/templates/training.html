@@ -30,7 +30,7 @@
 </section>
 
 <section class="panel" aria-labelledby="compute-settings-title"><div class="section-heading"><div><span class="eyebrow">Compute configuration v{{ compute_configuration_version }}</span><h2 id="compute-settings-title">Where training runs</h2></div><span>{{ "Saved for this project" if compute_settings_saved else "Project default" }}</span></div>
-  <form id="compute-settings" class="compute-form" novalidate>
+  <form id="compute-settings" class="compute-form" novalidate data-configuration-version="{{ compute_configuration_version }}" data-backend-identity="{{ compute_backend_identity }}">
     <label for="compute-type">Compute backend<select id="compute-type" name="type">
       <option value="local" {% if compute_settings.backend_type == 'local' %}selected{% endif %}>Local computer</option><option value="ssh" {% if compute_settings.backend_type == 'ssh' %}selected{% endif %}>Remote SSH machine</option><option value="runpod" {% if compute_settings.backend_type == 'runpod' %}selected{% endif %}>RunPod — Not available in this build</option><option value="other" {% if compute_settings.backend_type == 'other' %}selected{% endif %}>Other provider plugin</option>
     </select></label>
@@ -49,7 +49,7 @@
     <div class="compute-unavailable" data-compute-panel="runpod" hidden role="note"><strong>Not available in this build</strong><p>RunPod lifecycle support is scaffold-only. Settings cannot imply readiness and launch remains disabled.</p></div>
     <div class="compute-fields" data-compute-panel="other" hidden><label for="other-backend">Registered backend ID<input id="other-backend" name="backend_id" value="{{ compute_settings.backend_id or '' }}"></label></div>
     <div class="compute-fields shared-compute-fields"><label for="preview-interval">Preview interval (steps)<input id="preview-interval" name="preview_interval" type="number" min="1" value="{{ compute_settings.preview_interval }}"></label>
-      <label for="run-profile">Run profile<select id="run-profile" name="run_profile"><option value="recommended">Recommended</option><option value="fast_preview">Fast preview</option><option value="quality">Quality</option><option value="custom">Custom</option></select></label></div>
+      <label for="run-profile">Production profile<select id="run-profile" name="run_profile"><option value="recommended" selected>Recommended conditioned training</option></select><small>Production Start and Resume are restricted to the audited recommended profile.</small></label></div>
     <div class="form-actions"><button class="button primary" id="save-compute" type="button">Save compute settings</button><button class="button secondary" id="test-compute" type="button">Test connection</button><button class="button secondary" id="estimate-compute" type="button">Estimate resources</button><button class="button danger" id="clear-compute" type="button">Clear configuration</button></div>
     <div id="compute-status" class="action-summary" role="status" aria-live="polite">Opening this page made zero compute probes and zero remote calls.</div>
   </form>
@@ -57,11 +57,16 @@
 
 <section class="panel" aria-labelledby="training-plan-title"><div class="section-heading"><div><span class="eyebrow">Validated plan</span><h2 id="training-plan-title">Training readiness</h2></div><span id="availability-state">Checking durable project state…</span></div>
   <div class="readiness-grid"><article><span>Dataset</span><strong id="dataset">Checking…</strong></article><article><span>Model</span><strong id="model">Recommended baseline</strong></article><article><span>Compute</span><strong id="compute">{{ compute_settings.backend_type|replace('_',' ')|title }}</strong></article><article><span>Estimated time</span><strong id="estimate">Not estimated</strong></article></div>
-  <p id="blockers" class="blocked" role="status" aria-live="polite"></p><button class="button primary" id="start" type="button" disabled aria-describedby="blockers">Start training</button>
+  <p id="blockers" class="blocked" role="status" aria-live="polite"></p>
+  <div id="cloud-confirmation" class="audit-gate-note" hidden>
+    <label><input id="confirm-cloud" type="checkbox" aria-describedby="cloud-confirmation-note"> I understand that starting or resuming this cloud backend can incur compute, storage, and network costs.</label>
+    <p id="cloud-confirmation-note">A fresh confirmation is required for each cloud start or resume. Immediately after you act, the server issues one short-lived, one-use authorization bound to the exact saved configuration version and backend, as well as the campaign, activation, and action. The confirmation is cleared whenever the visible form changes.</p>
+  </div>
+  <button class="button primary" id="start" type="button" disabled aria-describedby="blockers cloud-confirmation-note">Start training</button>
 </section>
 
 <section id="dashboard" class="training-dashboard" {% if not training_run_id %}hidden{% endif %} data-training-run-id="{{ training_run_id or '' }}" aria-labelledby="dashboard-title">
-  <div class="section-heading"><div><span class="eyebrow">Durable live events</span><h2 id="dashboard-title">Live training dashboard</h2></div><span id="dashboard-connection" role="status">Reconstructed</span></div>
+  <div class="section-heading"><div><span class="eyebrow">Durable live events</span><h2 id="dashboard-title">Live training dashboard</h2></div><div><span id="dashboard-connection" role="status">Reconstructed</span> <button class="button secondary" id="connect-dashboard" type="button">Follow live</button></div></div>
   <div class="dashboard-metrics"><article><span>Overall status</span><strong data-metric="status">{{ training_dashboard.status if training_dashboard else 'NOT_STARTED' }}</strong></article><article><span>Current stage</span><strong data-metric="stage">Campaign</strong></article><article><span>Seed progress</span><strong data-metric="seed-progress">0 / 0</strong></article><article><span>Optimizer step</span><strong data-metric="optimizer-step">0</strong></article><article><span>Training loss</span><strong data-metric="loss">No data</strong></article><article><span>Validation loss</span><strong data-metric="validation-loss">No data</strong></article><article><span>Learning rate</span><strong data-metric="learning-rate">No data</strong></article><article><span>Gradient norm</span><strong data-metric="gradient-norm">No data</strong></article><article><span>GPU utilization</span><strong data-metric="gpu-utilization">No data</strong></article><article><span>VRAM</span><strong data-metric="vram">No data</strong></article><article><span>Elapsed</span><strong data-metric="elapsed">No data</strong></article><article><span>ETA</span><strong data-metric="eta">No data</strong></article></div>
   <div class="chart-grid training-chart-grid">
     <figure class="chart-frame" data-training-chart="loss"><figcaption>Training loss</figcaption><p id="loss-summary" class="chart-current" aria-live="polite">Current value: No data</p><svg id="loss-chart" class="chart" viewBox="0 0 640 220" role="img" aria-labelledby="loss-chart-title" aria-describedby="loss-summary"><title id="loss-chart-title">Training loss by optimizer step</title><g data-chart-series></g></svg><div id="loss-no-data" class="chart-empty">No training loss data yet.</div><details class="chart-table"><summary>Text data for training loss</summary><div class="responsive-table"><table><thead><tr><th>Seed</th><th>Step</th><th>Training loss</th></tr></thead><tbody id="loss-table"></tbody></table></div></details></figure>
@@ -70,8 +75,16 @@
   </div>
   <div class="two-column"><section class="panel"><h3>Checkpoint timeline</h3><ol id="checkpoint-timeline" class="message-list"><li>No checkpoints reported yet.</li></ol><p><strong>Latest verified checkpoint:</strong> <span id="latest-checkpoint">None</span></p></section>
     <section class="panel"><h3>Warnings</h3><ul id="training-warnings" class="message-list"><li>No warnings.</li></ul><h3>Exploratory previews</h3><ul id="training-previews" class="message-list"><li>No exploratory previews yet.</li></ul></section></div>
+  <section class="panel" aria-labelledby="training-outcomes-title">
+    <h3 id="training-outcomes-title">Durable backend outcomes</h3>
+    <p id="training-resource-warning" class="blocked" role="alert" hidden></p>
+    <div class="two-column">
+      <div><h4>Per-seed launch state</h4><ul id="training-seed-outcomes" class="message-list"><li>No per-seed outcomes yet.</li></ul></div>
+      <div><h4>Backend job state</h4><ul id="training-job-outcomes" class="message-list"><li>No backend job outcomes yet.</li></ul></div>
+    </div>
+  </section>
   <section class="panel"><div class="section-heading"><h3>Logs</h3><a id="open-logs" href="#">Open logs</a></div><pre id="training-logs" class="log-preview">No structured log events yet.</pre></section>
-  <div class="dashboard-actions"><button class="button secondary" id="pause" type="button" disabled aria-describedby="pause-reason">Pause</button><button class="button primary" id="resume" type="button" disabled aria-describedby="resume-reason">Resume</button><button class="button danger" id="cancel" type="button" disabled>Cancel</button><a class="button secondary" id="open-report" href="#" hidden>Open report</a><span id="pause-reason" class="sr-only">Pause is available only while the backend reports running.</span><span id="resume-reason" class="sr-only">Resume requires a verified safe checkpoint and backend identity.</span></div>
+  <div class="dashboard-actions"><button class="button secondary" id="pause" type="button" disabled aria-describedby="pause-reason">Pause</button><button class="button primary" id="resume" type="button" disabled aria-describedby="resume-reason cloud-confirmation-note">Resume</button><button class="button danger" id="cancel" type="button" disabled>Cancel</button><a class="button secondary" id="open-report" href="#" hidden>Open report</a><span id="pause-reason" class="sr-only">Pause is available only while the backend reports running.</span><span id="resume-reason" class="sr-only">Resume requires a verified safe checkpoint and backend identity. Cloud backends also require the fresh cost confirmation above.</span></div>
 </section>
 <script id="training-initial-dashboard" type="application/json">{{ (training_dashboard or {})|tojson }}</script>
 <link rel="stylesheet" href="/plugins/training/static/training.css">

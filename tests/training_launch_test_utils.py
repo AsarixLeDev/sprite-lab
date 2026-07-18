@@ -8,6 +8,18 @@ from spritelab.training.campaign import DEFAULT_SEEDS, file_sha256, plan_campaig
 from spritelab.training.launch import ValidatedTrainingLaunch, prepare_validated_training_launch
 
 
+class _StaticLaunchAuthorizationVerifier:
+    def __init__(self, evidence_sha256: str) -> None:
+        self.launch_authorization_evidence_sha256 = evidence_sha256
+
+    def verify_unchanged(self) -> None:
+        return None
+
+
+def launch_authorization_verifier(launch: ValidatedTrainingLaunch) -> _StaticLaunchAuthorizationVerifier:
+    return _StaticLaunchAuthorizationVerifier(launch.receipt.launch_authorization_evidence_sha256)
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
@@ -20,11 +32,16 @@ def validated_launch(tmp_path: Path, backend_id: str = "fake") -> ValidatedTrain
     ]
     for path, value in (
         (dataset, {"records": ["sprite"]}),
-        (split, {"train": ["sprite"]}),
+        (split, {"split": "train", "sprite_id": "sprite", "npz_file": "train.npz", "npz_row": 0}),
         (vocabulary, {"tokens": ["sprite"]}),
         (benchmark, {"prompts": ["sprite"]}),
     ):
-        _write_json(path, value)
+        if path == split:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value, sort_keys=True) + "\n", encoding="utf-8")
+        else:
+            _write_json(path, value)
+    (inputs / "train.npz").write_bytes(b"synthetic retained dataset artifact")
     optimizer = {"name": "adamw"}
     schedule = {"name": "cosine"}
     loss = {"name": "uniform_velocity"}
@@ -77,7 +94,7 @@ def validated_launch(tmp_path: Path, backend_id: str = "fake") -> ValidatedTrain
         "executable": True,
         "launch_authorized": True,
     }
-    campaign = plan_campaign(spec)
+    campaign = plan_campaign(spec, execution_root=tmp_path)
     for run in campaign["expected_runs"]:
         _write_json(Path(run["resolved_config_path"]), run["resolved_config"])
     config_path = tmp_path / "validated-campaign.json"
@@ -104,7 +121,9 @@ def compute_request(tmp_path: Path, backend_id: str = "fake") -> ComputeJobReque
         environment=launch.environment,
         execution_spec_identity=launch.receipt.execution_spec_sha256,
         output_root_identity=launch.receipt.output_root_identity,
+        launch_authorization_evidence_sha256=launch.receipt.launch_authorization_evidence_sha256,
         compute_backend_id=backend_id,
         launch_receipt=launch.receipt,
         validator_context=launch.validator_context,
+        launch_authorization_verifier=launch_authorization_verifier(launch),
     )

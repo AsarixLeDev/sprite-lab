@@ -710,16 +710,10 @@ def build_review_router(
             if semantic.get("needs_review") is not True or item_id in reviewed:
                 continue
             pending.append(item)
-        rows = [
-            _public_labeling_item(output, item, graph)
-            for item in pending[: max(1, min(limit, 250))]
-        ]
-        auto_prefilled = sum(
-            _semantic_triage_state(item) == "auto_prefilled" for item in eligible
-        )
+        rows = [_public_labeling_item(output, item, graph) for item in pending[: max(1, min(limit, 250))]]
+        auto_prefilled = sum(_semantic_triage_state(item) == "auto_prefilled" for item in eligible)
         provider_pending = sum(
-            _semantic_triage_state(item) in {"provider_unavailable", "certification_blocked"}
-            for item in eligible
+            _semantic_triage_state(item) in {"provider_unavailable", "certification_blocked"} for item in eligible
         )
         if pending:
             queue_message = (

@@ -107,9 +107,7 @@ def test_provider_is_invoked_through_shared_contract(tmp_path: Path) -> None:
     assert provider.actions[0].parameters["proposals_are_human_truth"] is False
     assert result.data["counts"]["semantically_labeled"] == 1
     assert result.data["semantic"]["conditioned_dataset_ready"] is True
-    semantic = json.loads((tmp_path / "out" / "items.jsonl").read_text(encoding="utf-8").splitlines()[0])[
-        "semantic"
-    ]
+    semantic = json.loads((tmp_path / "out" / "items.jsonl").read_text(encoding="utf-8").splitlines()[0])["semantic"]
     assert semantic["triage_state"] == "auto_prefilled"
     assert semantic["semantic_supervision_eligible"] is True
     assert semantic["keep_requires_human_truth"] is False

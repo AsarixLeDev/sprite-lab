@@ -28,7 +28,7 @@ Candidates come only from canonical `spritelab.v3.run-state.v1` training run sta
 - checkpoint step and live/EMA variant;
 - verification state.
 
-Incomplete, invalid, foreign, unsafe-resume, stale-dataset, unverified, and missing checkpoints are excluded from the normal selector. The advanced technical endpoint preserves the controlled reason and reveals identities/paths only after explicit acknowledgement. The default is the newest complete checkpoint, preferring EMA for an otherwise identical run and step.
+Incomplete, invalid, foreign, unsafe-resume, stale-dataset, unverified, and missing checkpoints are excluded from the normal selector. The ordinary checkpoint API is always pathless; a `technical_details` query cannot upgrade it. The advanced technical endpoint preserves the controlled reason and reveals identities/paths only after explicit acknowledgement. The default is the newest complete checkpoint, preferring EMA for an otherwise identical run and step.
 
 ## Evaluation execution
 
@@ -54,6 +54,8 @@ The product service invokes `spritelab.evaluation.suite.score_suite` for evaluat
 The dashboard contains stage progress, metric cards, distributions, category results, permitted source aggregates, a filterable sample gallery, a checkpoint comparison projection, memorization and review state, the final gate summary, and downloadable JSON report data. Charts use per-image report rows; when rows or a metric are missing they show an explicit no-data state.
 
 Source aggregates are opt-in and use public source identities only. Gallery records never return training/source filesystem paths. Checkpoint paths are reduced to a public artifact name outside technical details.
+
+Evaluation action flags accept exact JSON booleans only. Strings such as `"false"`, numbers, arrays, and objects are rejected before generation, so they cannot satisfy explicit-action, billable-confirmation, dry-run, or source-result gates. Generator and evaluator exception details remain private; durable stages and public API errors use fixed pathless, credential-free messages.
 
 Comparisons require identical metric-definition identities. Reports with different explicit definitions, schemas, thresholds, detector policies, comparison methods, or parameter identities are rejected before any average or delta is calculated.
 

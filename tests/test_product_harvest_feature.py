@@ -113,6 +113,10 @@ def _binding(
         license_http_status=200,
         license_content_sha256=hashlib.sha256(b"license-page").hexdigest(),
         automation_terms=terms,
+        zero_cost_reviewed=True,
+        zero_cost_verification_identity_sha256="1" * 64,
+        zero_cost_evidence_text_sha256="2" * 64,
+        zero_cost_probe_receipt_identity_sha256="3" * 64,
         attestation_identity_sha256="0" * 64,
     )
     return replace(

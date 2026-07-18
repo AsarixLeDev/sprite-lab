@@ -12,14 +12,19 @@ from spritelab.product_features.training.dashboard import DashboardState
 from spritelab.product_features.training.previews import PreviewConfiguration, PreviewScheduler
 
 
-def _event(event_type: str = "progress", **metrics) -> ProductEvent:
+def _event(
+    event_type: str = "progress",
+    *,
+    status: ProductStatus = ProductStatus.RUNNING,
+    **metrics,
+) -> ProductEvent:
     return ProductEvent(
         run_id="campaign",
         timestamp=datetime.now(timezone.utc).isoformat(),
         feature="training",
         stage="seed",
         event_type=event_type,
-        status=ProductStatus.RUNNING,
+        status=status,
         current=int(metrics.get("optimizer_step", 0)),
         total=1_000,
         metrics=metrics,
@@ -95,6 +100,17 @@ def test_learning_rate_chart_is_accessible_gap_aware_and_narrow_responsive() -> 
     assert "@media(forced-colors:active)" in css
 
 
+def test_cancel_control_uses_dashboard_action_availability() -> None:
+    root = Path(__file__).resolve().parents[1]
+    javascript = (root / "src/spritelab/product_features/training/static/training.js").read_text(encoding="utf-8")
+    dashboard = DashboardState("campaign", "local")
+
+    dashboard.apply(_event(status=ProductStatus.RUNNING))
+
+    assert dashboard.to_dict()["cancel_available"] is True
+    assert '$("cancel").disabled=!data.cancel_available' in javascript
+
+
 def test_remote_checkpoint_is_not_safe_until_download_hash_and_identity_verify() -> None:
     dashboard = DashboardState("campaign", "ssh")
     dashboard.apply(
@@ -124,6 +140,68 @@ def test_remote_checkpoint_is_not_safe_until_download_hash_and_identity_verify()
     )
     assert dashboard.last_safe_resume_point is not None
     assert dashboard.to_dict()["unsafe_resume_available"] is False
+
+
+@pytest.mark.parametrize(
+    ("backend_id", "flag"),
+    [
+        ("ssh", "downloaded"),
+        ("ssh", "hash_verified"),
+        ("ssh", "remote_identity_verified"),
+        ("local", "hash_verified"),
+        ("local", "identity_verified"),
+    ],
+)
+@pytest.mark.parametrize("hostile_value", ["true", 1, [True], {"verified": True}])
+def test_checkpoint_safety_flags_require_literal_true(
+    backend_id: str,
+    flag: str,
+    hostile_value: object,
+) -> None:
+    dashboard = DashboardState("campaign", backend_id)
+    metrics = {
+        "seed": 731001,
+        "optimizer_step": 500,
+        "checkpoint": "seed/checkpoint.pt",
+        "sha256": "a" * 64,
+        "downloaded": True,
+        "hash_verified": True,
+        "remote_identity_verified": True,
+        "identity_verified": True,
+    }
+    metrics[flag] = hostile_value
+
+    dashboard.apply(_event("checkpoint", status=ProductStatus.PAUSED, **metrics))
+
+    checkpoint = dashboard.checkpoints[0]
+    if hasattr(checkpoint, flag):
+        assert getattr(checkpoint, flag) is False
+    assert checkpoint.safe_resume is False
+    assert dashboard.last_safe_resume_point is None
+    assert dashboard.resume_available is False
+
+
+@pytest.mark.parametrize("hostile_value", ["true", 1, [True], {"verified": True}])
+def test_safe_resume_projection_requires_literal_true(hostile_value: object) -> None:
+    dashboard = DashboardState("campaign", "ssh")
+    dashboard.apply(
+        _event(
+            "checkpoint",
+            status=ProductStatus.PAUSED,
+            seed=731001,
+            optimizer_step=500,
+            checkpoint="seed/checkpoint.pt",
+            sha256="a" * 64,
+            remote_identity_verified=True,
+            downloaded=True,
+            hash_verified=True,
+        )
+    )
+    dashboard.checkpoints[0].safe_resume = hostile_value  # type: ignore[assignment]
+    dashboard.apply(_event(status=ProductStatus.PAUSED))
+
+    assert dashboard.last_safe_resume_point is None
+    assert dashboard.resume_available is False
 
 
 def test_remote_uncertainty_warns_about_continuing_cost() -> None:

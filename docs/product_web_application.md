@@ -87,7 +87,7 @@ Logs have a separate SSE endpoint at `GET /api/runs/{run_id}/logs`. Log text is 
 - `/runs` lists recent valid run state directories.
 - `/runs/{run_id}` shows stage timeline, progress, counters, elapsed time, ETA, metrics, recent messages, artifact names, action visibility, log preview, report availability, and resume availability.
 - `/runs/{run_id}/logs` shows a safe streaming log surface.
-- `/runs/{run_id}/report` serves only the fixed `report/index.html` for a validated run ID.
+- `/runs/{run_id}/report` downloads a fixed-schema, pathless public run snapshot as inert JSON for a validated run ID. Raw feature report bytes are never streamed through this route, and the response uses `nosniff`, `no-store`, and a route-specific sandbox policy.
 
 There is no arbitrary path or directory browser. Artifact references are presented as portable display names rather than absolute paths.
 

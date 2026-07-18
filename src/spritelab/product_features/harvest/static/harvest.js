@@ -254,8 +254,10 @@
       progress.setAttribute("aria-label", `${probe.stage || probe.status} probe progress`);
       const status = element("p", probe.message || `${probe.stage || probe.status}`);
       const controls = element("div", undefined, "harvest-actions");
+      let reviewedEvidence = null;
       const evidence = action("Probe evidence", async () => {
-        detail.textContent = JSON.stringify(await request(`/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/evidence`), null, 2);
+        reviewedEvidence = await request(`/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/evidence`);
+        detail.textContent = JSON.stringify(reviewedEvidence, null, 2);
       }); evidence.dataset.run = probe.probe_id; controls.append(evidence);
       if (["QUEUED", "RUNNING", "CANCELLING"].includes(probe.status)) {
         const cancel = action("Cancel probe", async () => {
@@ -271,10 +273,11 @@
       if (probe.status === "READY") {
         const promotion = element("label", undefined, "harvest-check harvest-promotion-check");
         const checkbox = document.createElement("input"); checkbox.type = "checkbox";
-        promotion.append(checkbox, document.createTextNode(" I separately authorize trusted-catalog promotion."));
+        promotion.append(checkbox, document.createTextNode(" I reviewed the displayed retained price evidence and separately authorize trusted-catalog promotion."));
         const promote = action("Promote trusted source", async () => {
-          if (!checkbox.checked) { probeSummary.textContent = "Check the separate catalog-promotion authorization first."; return; }
-          const receipt = await request(`/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/promote`, {method: "POST", body: JSON.stringify({explicit_action: true, authorize_catalog_promotion: true})});
+          const evidenceReceipt = reviewedEvidence?.receipt;
+          if (!checkbox.checked || !evidenceReceipt?.verification_identity || !evidenceReceipt?.source_pack_evidence_sha256) { probeSummary.textContent = "Load and review Probe evidence, then check the separate promotion authorization."; return; }
+          const receipt = await request(`/harvest/api/probes/${encodeURIComponent(probe.probe_id)}/promote`, {method: "POST", body: JSON.stringify({explicit_action: true, authorize_catalog_promotion: true, authorize_zero_cost_evidence_review: true, reviewed_verification_identity: evidenceReceipt.verification_identity, reviewed_source_pack_evidence_sha256: evidenceReceipt.source_pack_evidence_sha256})});
           detail.textContent = JSON.stringify(receipt, null, 2);
           const [catalog] = await Promise.all([request("/harvest/api/sources"), refresh()]); renderSources(catalog);
         }); promote.dataset.run = probe.probe_id;

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import os
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -79,6 +82,9 @@ class SpriteTrainingDataset(_DatasetBase):
         role_ramp_transplant: RoleRampTransplantConfig | None = None,
         palette_conditioning: bool = False,
         palette_conditioning_allow_missing: bool = False,
+        retained_records: Sequence[Mapping[str, Any]] | None = None,
+        retained_npz_descriptors: Mapping[str, int] | None = None,
+        retained_npz_sha256: Mapping[str, str] | None = None,
     ) -> None:
         _require_torch()
         self.dataset_dir = Path(dataset_dir)
@@ -100,7 +106,11 @@ class SpriteTrainingDataset(_DatasetBase):
         )
         self._palette_swap_draw_counter = 0
 
-        all_records = read_jsonl(self.training_manifest)
+        all_records = (
+            read_jsonl(self.training_manifest)
+            if retained_records is None
+            else [dict(record) for record in retained_records]
+        )
         self.all_records = list(all_records)
         sprite_id_set = None if self.sprite_ids is None else set(self.sprite_ids)
         records = [
@@ -122,6 +132,34 @@ class SpriteTrainingDataset(_DatasetBase):
         # fully-built per-sample dict for deterministic datasets; stochastic
         # palette swap disables it so repeated draws can vary.
         self._npz_cache: dict[str, dict[str, np.ndarray]] = npz_cache if npz_cache is not None else {}
+        self._retained_npz_descriptors = (
+            None
+            if retained_npz_descriptors is None
+            else {str(name): int(descriptor) for name, descriptor in retained_npz_descriptors.items()}
+        )
+        self._retained_npz_sha256 = (
+            None
+            if retained_npz_sha256 is None
+            else {str(name): str(value) for name, value in retained_npz_sha256.items()}
+        )
+        if (self._retained_npz_descriptors is None) is not (self._retained_npz_sha256 is None):
+            raise ValueError("retained dataset descriptors and hashes must be supplied together")
+        if self._retained_npz_descriptors is not None:
+            assert self._retained_npz_sha256 is not None
+            if set(self._retained_npz_descriptors) != set(self._retained_npz_sha256):
+                raise ValueError("retained dataset descriptor and hash inventories differ")
+            for name, descriptor in self._retained_npz_descriptors.items():
+                digest = self._retained_npz_sha256[name]
+                if (
+                    not name
+                    or type(descriptor) is not int
+                    or descriptor < 0
+                    or len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                ):
+                    raise ValueError("retained dataset descriptor inventory is malformed")
+            for name in sorted(self._retained_npz_descriptors):
+                self._load_npz(name)
         self._sample_cache: dict[int, dict[str, Any]] = {}
         self.role_ramp_library = (
             build_role_ramp_library(
@@ -301,6 +339,33 @@ class SpriteTrainingDataset(_DatasetBase):
         if cached is not None:
             return cached
         path = self.dataset_dir / npz_file
+        if self._retained_npz_descriptors is not None:
+            assert self._retained_npz_sha256 is not None
+            descriptor = self._retained_npz_descriptors.get(npz_file)
+            if descriptor is None:
+                raise FileNotFoundError(f"manifest references an unretained npz file: {path}")
+            duplicate = os.dup(descriptor)
+            try:
+                os.lseek(duplicate, 0, os.SEEK_SET)
+                chunks: list[bytes] = []
+                while True:
+                    chunk = os.read(duplicate, 1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                content = b"".join(chunks)
+                if hashlib.sha256(content).hexdigest() != self._retained_npz_sha256[npz_file]:
+                    raise ValueError(f"retained dataset artifact content changed: {path}")
+                with np.load(io.BytesIO(content), allow_pickle=False) as data:
+                    missing = [key for key in REQUIRED_NPZ_KEYS if key not in data.files]
+                    if missing:
+                        raise ValueError(f"{path}: missing required arrays: {', '.join(missing)}")
+                    arrays = {key: data[key] for key in data.files}
+            finally:
+                os.close(duplicate)
+            self._validate_npz_shapes(path, arrays)
+            self._npz_cache[npz_file] = arrays
+            return arrays
         if not path.is_file():
             raise FileNotFoundError(f"manifest references missing npz file: {path}")
         with np.load(path, allow_pickle=False) as data:

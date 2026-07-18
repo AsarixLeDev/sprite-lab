@@ -9,7 +9,7 @@ import re
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from spritelab.training.smoke_bundle import (
@@ -17,6 +17,7 @@ from spritelab.training.smoke_bundle import (
     SMOKE_EVIDENCE_SCHEMA,
     SMOKE_SCOPE,
     SMOKE_STATUS,
+    SMOKE_WALL_CLOCK_LIMIT_SECONDS,
     SmokeBundleError,
     VerifiedSmokeBundle,
     anchored_directory,
@@ -28,9 +29,11 @@ from spritelab.training.smoke_bundle import (
     load_device_receipt,
     load_plan,
     load_playground_registration,
+    portable_relative_parts,
     prepare_smoke_environment_binding,
     prepare_smoke_interpreter_binding,
     prepare_smoke_orchestration_code_identity,
+    prepare_smoke_runtime_closure,
     publish_evidence,
     publish_plan,
     publish_playground_snapshot,
@@ -639,6 +642,13 @@ class ExploratorySmokeWorkflow:
         manifests: dict[str, bytes] = {}
         configuration_records: dict[str, Any] = {}
         allowed_overrides: dict[str, Any] = {}
+        software_version_override: Mapping[str, Any] | None = None
+        hardware_summary_overrides: dict[str, Mapping[str, Any]] = {}
+        if self._manifest_builder is None:
+            from spritelab.training.experiment_system import hardware_summary, software_version
+
+            software_version_override = software_version(self.project_root)
+            hardware_summary_overrides = {device: hardware_summary(target_device=device) for device in ("cpu", "cuda")}
         for device in ("cpu", "cuda"):
             config = copy.deepcopy(dict(base))
             output_path = f"runs/v3/training-smokes/{smoke_id}/{device}"
@@ -650,7 +660,12 @@ class ExploratorySmokeWorkflow:
             config_path = f"artifacts/training/smokes/{smoke_id}/configs/{device}.json"
             manifest_path = f"artifacts/training/smokes/{smoke_id}/configs/{device}.manifest.json"
             config_bytes = canonical_json_bytes(config, pretty=True)
-            manifest = self._build_manifest(self.project_root / config_path, config)
+            manifest = self._build_manifest(
+                self.project_root / config_path,
+                config,
+                software_version_override=software_version_override,
+                hardware_summary_override=hardware_summary_overrides.get(device),
+            )
             manifest_bytes = canonical_json_bytes(manifest, pretty=True)
             configurations[device] = config_bytes
             manifests[device] = manifest_bytes
@@ -667,6 +682,11 @@ class ExploratorySmokeWorkflow:
                 "output_path": output_path,
                 "environment": public_environment,
                 "child_environment": child_environment,
+                "wall_clock_limit_seconds": SMOKE_WALL_CLOCK_LIMIT_SECONDS[device],
+                "writable_roots": [
+                    f"artifacts/training/smokes/{smoke_id}/execution/{device}",
+                    output_path,
+                ],
             }
             allowed_overrides[device] = {
                 "name": config["name"],
@@ -683,6 +703,7 @@ class ExploratorySmokeWorkflow:
                 "purpose": "exploratory",
                 "interpreter": prepare_smoke_interpreter_binding(),
                 "orchestration_code": prepare_smoke_orchestration_code_identity(self.project_root),
+                "runtime_closure": prepare_smoke_runtime_closure(self.project_root),
                 "bindings": dict(context.bindings),
                 "source": {
                     "source_run_id": source.get("run_id"),
@@ -712,12 +733,29 @@ class ExploratorySmokeWorkflow:
         )
         return plan, configurations, manifests
 
-    def _build_manifest(self, path: Path, config: Mapping[str, Any]) -> Mapping[str, Any]:
+    def _build_manifest(
+        self,
+        path: Path,
+        config: Mapping[str, Any],
+        *,
+        software_version_override: Mapping[str, Any] | None = None,
+        hardware_summary_override: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
         builder = self._manifest_builder
+        builder_options: dict[str, Any] = {}
         if builder is None:
             from spritelab.training.cli.experiment_cmds import prepare_experiment_manifest
 
             builder = prepare_experiment_manifest
+            if software_version_override is None or hardware_summary_override is None:
+                raise SmokeBundleError(
+                    "manifest_context",
+                    "The server could not bind the smoke manifest's software and hardware context.",
+                )
+            builder_options = {
+                "software_version_override": software_version_override,
+                "hardware_summary_override": hardware_summary_override,
+            }
         runtime = dict(config["runtime"])
         batch_size = min(2, int(runtime["batch_size"]))
         overrides = {
@@ -736,6 +774,7 @@ class ExploratorySmokeWorkflow:
                 config=config,
                 runtime_overrides=overrides,
                 resolution_root=self.project_root,
+                **builder_options,
             )
         )
 
@@ -855,7 +894,11 @@ class ExploratorySmokeWorkflow:
             return self._activation_loader(prospective, require_audit=require_audit)
         from spritelab.product_features.training.activation import load_conditioned_training_activation
 
-        return load_conditioned_training_activation(prospective, require_audit=require_audit)
+        return load_conditioned_training_activation(
+            prospective,
+            require_audit=require_audit,
+            require_activation_commit=False,
+        )
 
     def _read_json(self, path: Path, *, max_bytes: int) -> dict[str, Any]:
         payload = read_stable_single_link_bytes(path, boundary=self.project_root, max_bytes=max_bytes)
@@ -869,20 +912,14 @@ class ExploratorySmokeWorkflow:
 
 
 def _canonical_relative(value: str) -> str:
-    path = PurePosixPath(value)
-    windows = PureWindowsPath(value)
-    if (
-        not value
-        or value != value.strip()
-        or "\\" in value
-        or path.is_absolute()
-        or windows.is_absolute()
-        or windows.drive
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
+    try:
+        parts = portable_relative_parts(value)
+    except SmokeBundleError as exc:
+        raise SmokeBundleError("publication_reference", "A server-owned publication reference is invalid.") from exc
+    canonical = PurePosixPath(*parts).as_posix()
+    if canonical != value:
         raise SmokeBundleError("publication_reference", "A server-owned publication reference is invalid.")
-    return value
+    return canonical
 
 
 def _project_owned_path(root: Path, value: str) -> tuple[str, Path]:

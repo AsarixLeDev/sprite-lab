@@ -215,11 +215,7 @@ def create_settings_router(
                     next_action="Save provider settings or choose Automatic, then test again.",
                 )
             probe = await run_in_threadpool(selected.probe)
-            validation = (
-                await run_in_threadpool(selected.validate_model, settings.model)
-                if probe.available
-                else None
-            )
+            validation = await run_in_threadpool(selected.validate_model, settings.model) if probe.available else None
             observed_state = validation.state if validation is not None else probe.state
             observation = repository.record_observation(
                 "provider",

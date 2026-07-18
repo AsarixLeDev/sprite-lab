@@ -28,7 +28,7 @@ from spritelab.product_features.evaluation.checkpoints import (
     expected_dataset_identity,
     expected_training_view_identity,
 )
-from spritelab.product_features.evaluation.dashboard import build_dashboard
+from spritelab.product_features.evaluation.dashboard import build_dashboard, public_evaluation_projection
 from spritelab.product_features.evaluation.memorization_display import (
     INCOMPLETE_EVIDENCE_MESSAGE,
     memorization_display,
@@ -74,6 +74,11 @@ class EvaluationRequest:
     explicit_action: bool = False
     confirm_billable: bool = False
     allow_source_results: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("dry_run", "explicit_action", "confirm_billable", "allow_source_results"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"EvaluationRequest.{name} must be an exact boolean.")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -189,7 +194,7 @@ class EvaluationService:
         self.runs_directory = _runs_directory(config, self.project_root, runs_directory)
         self.generator = generator
         self._uses_default_evaluator = evaluator is None
-        self.evaluator = evaluator or self._existing_evaluator
+        self.evaluator: Evaluator = evaluator or self._existing_evaluator
         self.output_root = (output_root or self.runs_directory).resolve()
         self.events = EventRepository(self.output_root, private_roots=(self.project_root,))
         self.latest_report: dict[str, Any] | None = None
@@ -417,12 +422,17 @@ class EvaluationService:
         try:
             checkpoint_sha256 = _file_sha256(checkpoint_path)
             benchmark_sha256 = _file_sha256(benchmark_path)
-        except OSError as exc:
+        except OSError:
             return ProductResult(
                 status=ProductStatus.BLOCKED,
                 feature="evaluation",
                 message="Evaluation inputs could not be bound to immutable launch identities.",
-                blockers=(ProductBlocker("evaluation_identity", str(exc)),),
+                blockers=(
+                    ProductBlocker(
+                        "evaluation_identity",
+                        "Evaluation input identity verification failed safely.",
+                    ),
+                ),
                 data=self._result_data(stages, integrity, generation_runs=0),
             )
 
@@ -560,10 +570,10 @@ class EvaluationService:
                 )
             else:
                 report = self.evaluator(generated, metrics_directory)
-        except Exception as exc:
+        except Exception:
             active = next((stage for stage in stages if stage.status == "RUNNING"), generation)
             active.status = "FAILED"
-            active.message = f"Stage failed: {exc}"
+            active.message = "Evaluation stage failed safely; adapter diagnostics remain private."
             for stage in stages[stages.index(active) + 1 : -1]:
                 stage.status = "BLOCKED"
                 stage.message = "Blocked by an earlier failed stage."
@@ -651,7 +661,12 @@ class EvaluationService:
                 if review_count
                 else "Review queue is complete."
             )
-        dashboard = build_dashboard(report, self.latest_rows, allow_source_results=request.allow_source_results)
+        dashboard = build_dashboard(
+            report,
+            self.latest_rows,
+            allow_source_results=request.allow_source_results,
+            private_roots=(self.project_root,),
+        )
         status = (
             ProductStatus.BLOCKED
             if hard_count or not evidence_complete
@@ -738,6 +753,7 @@ class EvaluationService:
         self.latest_message = message
         data = self._result_data(stages, integrity, generation_runs=1)
         data.update({"dashboard": dashboard, "memorization": memo_display, "report": report})
+        data = public_evaluation_projection(data, surface="run_data", private_roots=(self.project_root,))
         return ProductResult(
             status=status,
             feature="evaluation",
@@ -861,7 +877,11 @@ class EvaluationService:
                 key=str(value["key"]),
                 title=str(value["title"]),
                 status=str(value["status"]),
-                message=str(value["message"]),
+                message=(
+                    "Evaluation stage failed safely; adapter diagnostics remain private."
+                    if value["status"] == "FAILED"
+                    else str(value["message"])
+                ),
                 current=int(value["current"]),
                 total=int(value["total"]) if value["total"] is not None else None,
                 metrics=dict(value["metrics"]),
@@ -1070,6 +1090,7 @@ class EvaluationService:
             self.latest_report or {},
             self.latest_rows,
             allow_source_results=allow_source_results,
+            private_roots=(self.project_root,),
         )
         value.update(
             {
@@ -1080,7 +1101,7 @@ class EvaluationService:
                 "memorization": self.latest_memorization,
             }
         )
-        return value
+        return public_evaluation_projection(value, surface="dashboard", private_roots=(self.project_root,))
 
     def _result_data(
         self,
@@ -1090,7 +1111,7 @@ class EvaluationService:
         generation_runs: int,
         dry_run: bool = False,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": "spritelab.product.evaluation-run.v1",
             "stages": [stage.to_dict() for stage in stages],
             "progress": {
@@ -1102,3 +1123,4 @@ class EvaluationService:
             "promotion_actions": 0,
             "dry_run": dry_run,
         }
+        return public_evaluation_projection(payload, surface="run_data", private_roots=(self.project_root,))

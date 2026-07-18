@@ -62,6 +62,7 @@ RESUME_HARD_FIELDS = (
 
 LEGACY_EXPERIMENT_MANIFEST_VERSIONS = ("spritelab_experiment_v1", "spritelab_experiment_v2")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 _PRECISION_POLICIES = frozenset({"fp32", "fp16", "bf16", "amp"})
 _AUXILIARY_HEAD_MODES = frozenset({"absent", "palette_index"})
 
@@ -305,18 +306,105 @@ def software_version(repo: str | Path | None = None) -> dict[str, Any]:
     }
 
 
-def hardware_summary() -> dict[str, Any]:
-    cuda = bool(torch is not None and torch.cuda.is_available())
+def hardware_summary(*, target_device: str | None = None) -> dict[str, Any]:
+    """Describe hardware visible to this process or to one smoke-device projection.
+
+    Smoke preparation runs before the contained child receives its minimal
+    environment.  Projecting ``cpu`` hides CUDA exactly as the CPU child does;
+    projecting ``cuda`` records only device zero because the child is bound to
+    ``CUDA_VISIBLE_DEVICES=0``.  Ordinary experiment manifests continue to
+    describe every device visible to their current process.
+    """
+
+    if target_device not in {None, "cpu", "cuda"}:
+        raise ValueError("hardware-summary target_device must be 'cpu', 'cuda', or None")
+    cuda_requested = bool(target_device != "cpu" and torch is not None and torch.cuda.is_available())
+    visible_cuda_count = torch.cuda.device_count() if cuda_requested else 0
+    cuda = bool(cuda_requested and visible_cuda_count > 0)
+    if not cuda:
+        cuda_device_count = 0
+        cuda_devices: list[str] = []
+    elif target_device == "cuda":
+        cuda_device_count = 1
+        cuda_devices = [torch.cuda.get_device_name(0)]
+    else:
+        cuda_device_count = visible_cuda_count
+        cuda_devices = [torch.cuda.get_device_name(index) for index in range(cuda_device_count)]
     return {
         "platform": platform.platform(),
         "machine": platform.machine(),
         "cpu_count": os.cpu_count(),
         "cuda_available": cuda,
-        "cuda_device_count": torch.cuda.device_count() if cuda else 0,
-        "cuda_devices": [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())]
-        if cuda
-        else [],
+        "cuda_device_count": cuda_device_count,
+        "cuda_devices": cuda_devices,
     }
+
+
+def _validated_software_version(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("precomputed software version must be an object")
+    result = deepcopy(dict(value))
+    if set(result) != {"package_version", "git_commit", "git_dirty", "python", "torch"}:
+        raise ValueError("precomputed software version has an inexact schema")
+    for key in ("package_version", "python"):
+        field = result[key]
+        if not isinstance(field, str) or not field or len(field) > 256:
+            raise ValueError(f"precomputed software version {key} is malformed")
+    commit = result["git_commit"]
+    if not isinstance(commit, str) or (commit != "unknown" and not _GIT_COMMIT_RE.fullmatch(commit)):
+        raise ValueError("precomputed software version git_commit is malformed")
+    if result["git_dirty"] is not None and type(result["git_dirty"]) is not bool:
+        raise ValueError("precomputed software version git_dirty is malformed")
+    torch_version = result["torch"]
+    if torch_version is not None and (
+        not isinstance(torch_version, str) or not torch_version or len(torch_version) > 256
+    ):
+        raise ValueError("precomputed software version torch is malformed")
+    return result
+
+
+def _validated_hardware_summary(
+    value: Mapping[str, Any],
+    *,
+    target_device: Any = None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("precomputed hardware summary must be an object")
+    result = deepcopy(dict(value))
+    if set(result) != {
+        "platform",
+        "machine",
+        "cpu_count",
+        "cuda_available",
+        "cuda_device_count",
+        "cuda_devices",
+    }:
+        raise ValueError("precomputed hardware summary has an inexact schema")
+    for key in ("platform", "machine"):
+        field = result[key]
+        if not isinstance(field, str) or len(field) > 4096:
+            raise ValueError(f"precomputed hardware summary {key} is malformed")
+    cpu_count = result["cpu_count"]
+    if cpu_count is not None and (type(cpu_count) is not int or cpu_count < 1):
+        raise ValueError("precomputed hardware summary cpu_count is malformed")
+    available = result["cuda_available"]
+    count = result["cuda_device_count"]
+    devices = result["cuda_devices"]
+    if (
+        type(available) is not bool
+        or type(count) is not int
+        or not 0 <= count <= 1024
+        or not isinstance(devices, list)
+        or len(devices) != count
+        or any(not isinstance(name, str) or not name or len(name) > 4096 for name in devices)
+        or available != (count > 0)
+    ):
+        raise ValueError("precomputed hardware summary CUDA projection is malformed")
+    if target_device == "cpu" and (available or count != 0 or devices):
+        raise ValueError("precomputed CPU hardware summary must hide CUDA")
+    if target_device == "cuda" and available and count != 1:
+        raise ValueError("precomputed CUDA hardware summary must bind exactly one visible device")
+    return result
 
 
 def _strict_manifest_integer(value: Any, label: str, *, minimum: int) -> int:
@@ -335,6 +423,10 @@ def build_experiment_manifest(
     structured_vocab: Any = None,
     repo: str | Path | None = None,
     checkpoint_lineage: Sequence[str] = (),
+    dataset_manifest_sha256: str | None = None,
+    split_manifest_sha256: str | None = None,
+    software_version_override: Mapping[str, Any] | None = None,
+    hardware_summary_override: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     model_config = dict(config.get("model", {}))
     # Config-only manifests retain null measured fields.  Production training
@@ -350,6 +442,12 @@ def build_experiment_manifest(
     )
     dataset_path = Path(dataset_manifest)
     split_path = Path(split_manifest or dataset_manifest)
+    dataset_hash = file_sha256(dataset_path) if dataset_manifest_sha256 is None else dataset_manifest_sha256
+    split_hash = file_sha256(split_path) if split_manifest_sha256 is None else split_manifest_sha256
+    if not isinstance(dataset_hash, str) or not _SHA256_RE.fullmatch(dataset_hash):
+        raise ValueError("dataset manifest SHA-256 is malformed")
+    if not isinstance(split_hash, str) or not _SHA256_RE.fullmatch(split_hash):
+        raise ValueError("split manifest SHA-256 is malformed")
     optimizer = deepcopy(config.get("optimizer", {}))
     loss = deepcopy(config.get("loss", {}))
     runtime = deepcopy(config.get("runtime", {}))
@@ -439,9 +537,9 @@ def build_experiment_manifest(
         "name": str(config.get("name", "unnamed")),
         "ablation": str(config.get("ablation", "baseline")),
         "dataset_manifest": str(dataset_path),
-        "dataset_manifest_hash": file_sha256(dataset_path),
+        "dataset_manifest_hash": dataset_hash,
         "split_manifest": str(split_path),
-        "split_manifest_hash": file_sha256(split_path),
+        "split_manifest_hash": split_hash,
         "model_architecture": architecture,
         "model_architecture_hash": architecture["hash"],
         "conditioning_schema": conditioning,
@@ -454,11 +552,22 @@ def build_experiment_manifest(
         "augmentation_configuration": deepcopy(config.get("augmentation", {})),
         "random_seeds": seeds,
         "seed_identity_hash": stable_hash(seeds),
-        "software_version": software_version(repo),
+        "software_version": (
+            software_version(repo)
+            if software_version_override is None
+            else _validated_software_version(software_version_override)
+        ),
         "precision_mode": precision_policy,
         "precision_policy": precision_policy,
         "autocast_policy": autocast_policy,
-        "hardware_summary": hardware_summary(),
+        "hardware_summary": (
+            hardware_summary()
+            if hardware_summary_override is None
+            else _validated_hardware_summary(
+                hardware_summary_override,
+                target_device=runtime.get("device"),
+            )
+        ),
         "evaluation_suite_version": EVALUATION_SUITE_VERSION,
         "checkpoint_lineage": lineage,
         "lineage_parent_identity": lineage_parent_identity,

@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
+import re
+import stat
 from collections.abc import Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import yaml
+
+from spritelab.utils.safe_fs import AnchoredDirectory, UnsafeFilesystemOperation
 
 CONFIG_NAME = "spritelab.yaml"
 SECTIONS: dict[str, set[str]] = {
@@ -294,6 +301,178 @@ def discover_config(start: Path | None = None) -> Path | None:
     return None
 
 
+def _safe_child_bytes(
+    anchor: AnchoredDirectory,
+    name: str,
+    *,
+    max_bytes: int,
+    allow_retained_stage: bool,
+) -> bytes:
+    """Read one exact anchored child, optionally binding its retained POSIX stage."""
+
+    before = anchor.lstat(name)
+    if not stat.S_ISREG(before.st_mode) or _config_metadata_is_link_or_reparse(before) or before.st_size > max_bytes:
+        raise ConfigError("A project configuration commit artifact is unsafe.")
+    if allow_retained_stage:
+        alias = _config_retained_stage_alias(anchor, name, before)
+    elif before.st_nlink == 1:
+        alias = None
+    else:
+        raise ConfigError("A project configuration commit artifact is unsafe.")
+    descriptor = anchor.open_file_immovable(name, os.O_RDONLY | int(getattr(os, "O_BINARY", 0)))
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or opened.st_size != before.st_size
+            or opened.st_nlink != before.st_nlink
+        ):
+            raise ConfigError("A project configuration commit artifact changed while opened.")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            content = handle.read(max_bytes + 1)
+        opened_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after = anchor.lstat(name)
+    if (
+        len(content) != before.st_size
+        or len(content) > max_bytes
+        or after.st_dev != before.st_dev
+        or after.st_ino != before.st_ino
+        or after.st_size != before.st_size
+        or after.st_mtime_ns != before.st_mtime_ns
+        or after.st_nlink != before.st_nlink
+        or opened_after.st_dev != before.st_dev
+        or opened_after.st_ino != before.st_ino
+        or opened_after.st_size != before.st_size
+        or opened_after.st_mtime_ns != before.st_mtime_ns
+        or opened_after.st_nlink != before.st_nlink
+    ):
+        raise ConfigError("A project configuration commit artifact changed while read.")
+    if allow_retained_stage and _config_retained_stage_alias(anchor, name, after) != alias:
+        raise ConfigError("A retained project configuration commit stage changed.")
+    return content
+
+
+def _config_retained_stage_alias(
+    anchor: AnchoredDirectory,
+    name: str,
+    metadata: os.stat_result,
+) -> str | None:
+    prefix = f".{name}.staging-"
+    candidates = [candidate for candidate in anchor.names() if candidate.startswith(prefix)]
+    if metadata.st_nlink == 1:
+        if candidates:
+            raise ConfigError("A single-link project commit artifact has retained-stage residue.")
+        return None
+    if (
+        metadata.st_nlink != 2
+        or len(candidates) != 1
+        or re.fullmatch(re.escape(prefix) + r"[0-9a-f]{32}", candidates[0]) is None
+    ):
+        raise ConfigError("A project configuration commit artifact lost its exact retained publication stage.")
+    candidate = candidates[0]
+    alias = anchor.lstat(candidate)
+    if (
+        not stat.S_ISREG(alias.st_mode)
+        or _config_metadata_is_link_or_reparse(alias)
+        or alias.st_dev != metadata.st_dev
+        or alias.st_ino != metadata.st_ino
+        or alias.st_nlink != 2
+        or alias.st_size != metadata.st_size
+        or alias.st_mtime_ns != metadata.st_mtime_ns
+    ):
+        raise ConfigError("A retained project configuration commit stage does not bind the exact target inode.")
+    return candidate
+
+
+def _config_metadata_is_link_or_reparse(metadata: os.stat_result) -> bool:
+    attributes = int(getattr(metadata, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
+def _strict_json_mapping(content: bytes) -> dict[str, Any]:
+    def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, child in pairs:
+            if key in value:
+                raise ConfigError("A project activation commit document has duplicate keys.")
+            value[key] = child
+        return value
+
+    try:
+        value = json.loads(content.decode("utf-8"), object_pairs_hook=object_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ConfigError("A project activation commit document is invalid.") from exc
+    if not isinstance(value, dict):
+        raise ConfigError("A project activation commit document must be an object.")
+    return value
+
+
+def _activation_commit_effective_config(root: Path, canonical: bytes) -> bytes:
+    """Resolve an immutable conditioned activation marker without mutating config."""
+
+    from spritelab.product_features.training.activation_commit import (
+        ACTIVATION_PROJECT_COMMIT_NAME,
+        ActivationCommitError,
+        canonical_activation_commit_bytes,
+        validate_activation_project_commit,
+    )
+
+    try:
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            # An explicitly selected project root may be prospective. With no
+            # directory there cannot yet be an activation marker to apply, and
+            # passive configuration loading must not create the root.
+            return canonical
+        with AnchoredDirectory(root, root) as root_anchor:
+            if not root_anchor.lexists(ACTIVATION_PROJECT_COMMIT_NAME):
+                return canonical
+            marker_bytes = _safe_child_bytes(
+                root_anchor,
+                ACTIVATION_PROJECT_COMMIT_NAME,
+                max_bytes=32 * 1024 * 1024,
+                allow_retained_stage=True,
+            )
+            marker = _strict_json_mapping(marker_bytes)
+            if canonical_activation_commit_bytes(marker) != marker_bytes:
+                raise ConfigError("The project activation commit marker is not canonical.")
+            job_id = marker.get("job_id")
+            if not isinstance(job_id, str) or re.fullmatch(r"conditioned-[0-9a-f]{20}", job_id) is None:
+                raise ConfigError("The project activation commit marker has an invalid job binding.")
+            with ExitStack() as stack:
+                current = root_anchor
+                for part in ("runs", "v3", "conditioned-dataset-v5", job_id, "activation_receipt"):
+                    current = stack.enter_context(current.open_directory_immovable(part))
+                documents: dict[str, dict[str, Any]] = {}
+                for name in ("receipt.json", "journal.json", "record.json"):
+                    content = _safe_child_bytes(
+                        current,
+                        name,
+                        max_bytes=1024 * 1024,
+                        allow_retained_stage=True,
+                    )
+                    document = _strict_json_mapping(content)
+                    if canonical_activation_commit_bytes(document) != content:
+                        raise ConfigError("A project activation commit document is not canonical.")
+                    documents[name] = document
+            _summary, effective = validate_activation_project_commit(
+                marker,
+                receipt=documents["receipt.json"],
+                journal=documents["journal.json"],
+                record=documents["record.json"],
+                current_config_sha256=hashlib.sha256(canonical).hexdigest(),
+                expected_job_id=job_id,
+            )
+            return effective
+    except (OSError, UnsafeFilesystemOperation, ActivationCommitError) as exc:
+        raise ConfigError("The immutable project activation commit is unavailable or invalid.") from exc
+
+
 @dataclass(frozen=True)
 class ProjectConfig:
     root: Path
@@ -309,13 +488,21 @@ class ProjectConfig:
             root_override = os.environ.get("SPRITELAB_PROJECT_ROOT")
             root = Path(root_override).expanduser().resolve() if root_override else (start or Path.cwd()).resolve()
             return cls(root=root, path=None, values=copy.deepcopy(DEFAULT_CONFIG))
-        try:
-            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError) as exc:
-            raise ConfigError(f"Could not read {path}: {exc}") from exc
-        values = _validate(raw)
         root_override = os.environ.get("SPRITELAB_PROJECT_ROOT")
         root = Path(root_override).expanduser().resolve() if root_override else path.parent.resolve()
+        try:
+            with AnchoredDirectory(path.parent, path.parent) as config_anchor:
+                canonical = _safe_child_bytes(
+                    config_anchor,
+                    path.name,
+                    max_bytes=16 * 1024 * 1024,
+                    allow_retained_stage=False,
+                )
+            effective = _activation_commit_effective_config(root, canonical)
+            raw = yaml.safe_load(effective.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise ConfigError(f"Could not read {path}: {exc}") from exc
+        values = _validate(raw)
         runs_override = os.environ.get("SPRITELAB_RUNS_DIR")
         if runs_override:
             values["paths"]["runs"] = runs_override

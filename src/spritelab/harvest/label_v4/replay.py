@@ -326,7 +326,8 @@ def _refresh_color_roles(row: dict[str, Any]) -> None:
 
 
 def _refresh_description(row: dict[str, Any]) -> None:
-    semantics = row.get("semantics") if isinstance(row.get("semantics"), dict) else {}
+    raw_semantics = row.get("semantics")
+    semantics = raw_semantics if isinstance(raw_semantics, dict) else {}
     filename = row.get("deterministic_evidence", {}).get("filename", {})
     facts = {
         **semantics,

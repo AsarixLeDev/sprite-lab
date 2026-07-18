@@ -46,6 +46,7 @@ class CheckpointState:
 class DashboardState:
     run_id: str
     backend_id: str
+    event_cursor: int = 0
     status: ProductStatus = ProductStatus.NOT_STARTED
     campaign_current: int = 0
     campaign_total: int | None = None
@@ -59,11 +60,16 @@ class DashboardState:
     logs: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     previews: list[dict[str, Any]] = field(default_factory=list)
+    terminal_status: str | None = None
+    seed_outcomes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    job_outcomes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    unknown_backend_operation_count: int = 0
     remote_resource_uncertain: bool = False
     may_accrue_cost: bool = False
     shutdown_guidance: str | None = None
     pause_available: bool = False
     resume_available: bool = False
+    cancel_available: bool = False
 
     def apply(self, event: ProductEvent) -> None:
         if event.run_id != self.run_id:
@@ -114,31 +120,68 @@ class DashboardState:
             self.warnings.append(event.message)
         elif event.event_type == "exploratory_preview":
             self.previews.append(dict(event.metrics))
-        elif event.event_type == "remote_failure":
-            uncertain = bool(event.metrics.get("resource_state_uncertain"))
-            accruing = bool(event.metrics.get("may_accrue_cost"))
-            self.remote_resource_uncertain |= uncertain
-            self.may_accrue_cost |= accruing
-            if uncertain:
-                self.shutdown_guidance = str(
-                    event.metrics.get("shutdown_guidance")
-                    or "Provider state is uncertain. Open the provider console, locate the resource by ID, and stop or terminate it explicitly."
-                )
+        if event.metrics.get("resource_state_uncertain") is True:
+            self.remote_resource_uncertain = True
+            self.shutdown_guidance = str(
+                event.metrics.get("shutdown_guidance")
+                or "Provider state is uncertain. Open the provider console and stop or terminate the retained resource."
+            )
+        if event.metrics.get("may_accrue_cost") is True:
+            self.may_accrue_cost = True
+        seed_outcomes = event.metrics.get("seed_outcomes")
+        if isinstance(seed_outcomes, (list, tuple)):
+            self.seed_outcomes = {
+                str(item.get("run_id")): dict(item)
+                for item in seed_outcomes
+                if isinstance(item, dict) and isinstance(item.get("run_id"), str)
+            }
+        job_outcomes = event.metrics.get("job_outcomes")
+        if isinstance(job_outcomes, (list, tuple)):
+            self.job_outcomes = {
+                str(item.get("job_id")): dict(item)
+                for item in job_outcomes
+                if isinstance(item, dict) and isinstance(item.get("job_id"), str)
+            }
+        terminal_status = event.metrics.get("terminal_status")
+        if isinstance(terminal_status, str) and terminal_status:
+            self.terminal_status = terminal_status
+        unknown_count = event.metrics.get("unknown_backend_operation_count")
+        if type(unknown_count) is int and unknown_count >= 0:
+            self.unknown_backend_operation_count = unknown_count
+        if event.metrics.get("resource_shutdown_verified") is True:
+            self.remote_resource_uncertain = False
+            self.may_accrue_cost = False
+            self.shutdown_guidance = None
+        elif event.metrics.get("resource_state_verified") is True:
+            self.remote_resource_uncertain = False
+            if event.metrics.get("may_accrue_cost") is not True:
+                self.shutdown_guidance = None
+        elif event.metrics.get("may_accrue_cost") is True:
+            self.may_accrue_cost = True
         if event.metrics.get("estimated_completion"):
             self.estimated_completion = str(event.metrics["estimated_completion"])
         if event.metrics.get("checkpoint_schedule"):
             self.checkpoint_schedule = [int(item) for item in event.metrics["checkpoint_schedule"]]
         self.pause_available = self.status == ProductStatus.RUNNING
         self.resume_available = self.status == ProductStatus.PAUSED and any(
-            item.safe_resume for item in self.checkpoints
+            item.safe_resume is True for item in self.checkpoints
+        )
+        retained_risk = bool(
+            self.job_outcomes
+            or self.unknown_backend_operation_count
+            or self.remote_resource_uncertain
+            or self.may_accrue_cost
+        )
+        self.cancel_available = self.status in {ProductStatus.RUNNING, ProductStatus.PAUSED} or (
+            self.status in {ProductStatus.BLOCKED, ProductStatus.FAILED} and retained_risk
         )
 
     def _checkpoint(self, event: ProductEvent, seed: int | None) -> None:
         remote = self.backend_id != "local"
-        downloaded = bool(event.metrics.get("downloaded"))
-        hash_verified = bool(event.metrics.get("hash_verified"))
-        remote_identity_verified = bool(event.metrics.get("remote_identity_verified"))
-        local_identity_verified = bool(event.metrics.get("identity_verified"))
+        downloaded = event.metrics.get("downloaded") is True
+        hash_verified = event.metrics.get("hash_verified") is True
+        remote_identity_verified = event.metrics.get("remote_identity_verified") is True
+        local_identity_verified = event.metrics.get("identity_verified") is True
         safe = (
             downloaded and hash_verified and remote_identity_verified
             if remote
@@ -172,7 +215,7 @@ class DashboardState:
 
     @property
     def last_safe_resume_point(self) -> CheckpointState | None:
-        safe = [item for item in self.checkpoints if item.safe_resume]
+        safe = [item for item in self.checkpoints if item.safe_resume is True]
         return max(safe, key=lambda item: item.optimizer_step, default=None)
 
     def to_dict(self) -> dict[str, Any]:
@@ -181,7 +224,9 @@ class DashboardState:
         payload = {
             "run_id": self.run_id,
             "backend_id": self.backend_id,
+            "event_cursor": self.event_cursor,
             "status": self.status.value,
+            "terminal_status": self.terminal_status,
             "campaign_progress": {"current": self.campaign_current, "total": self.campaign_total},
             "seeds": [
                 {**asdict(item), "status": item.status.value}
@@ -197,10 +242,14 @@ class DashboardState:
             "estimated_completion": self.estimated_completion,
             "pause_available": self.pause_available,
             "resume_available": self.resume_available,
+            "cancel_available": self.cancel_available,
             "unsafe_resume_available": False,
             "logs": self.logs,
             "warnings": self.warnings,
             "previews": self.previews,
+            "seed_outcomes": [dict(value) for _key, value in sorted(self.seed_outcomes.items())],
+            "job_outcomes": [dict(value) for _key, value in sorted(self.job_outcomes.items())],
+            "unknown_backend_operation_count": self.unknown_backend_operation_count,
             "remote_resource_uncertain": self.remote_resource_uncertain,
             "may_accrue_cost": self.may_accrue_cost,
             "shutdown_guidance": self.shutdown_guidance,

@@ -93,6 +93,31 @@ RETRYABLE_PROBE_STATUSES = frozenset({"FAILED", "CANCELLED", "INTERRUPTED"})
 _MAX_METADATA_BYTES = 4 * 1024 * 1024
 _MAX_EVENTS = 500
 _MAX_EVENT_BYTES = 4096
+_PROMOTION_RECEIPT_KEYS = frozenset(
+    {
+        "schema_version",
+        "probe_id",
+        "source_id",
+        "promoted_at",
+        "explicit_action",
+        "catalog_changed",
+        "catalog_identity",
+        "source_catalog_identity",
+        "raw_response_sha256",
+        "backend_capability_evidence_identity",
+        "verifier_id",
+        "verifier_code_identity_sha256",
+        "probe_receipt_identity",
+        "result_identity",
+        "zero_cost_evidence_reviewed",
+        "reviewed_verification_identity",
+        "reviewed_source_pack_evidence_sha256",
+        "terminal_commit_identity",
+        "private_direct_url_exposed",
+        "paths_exposed",
+        "promotion_identity",
+    }
+)
 _LEASE_SECONDS = 3.0
 _HEARTBEAT_SECONDS = 0.5
 _TEXT_LIMITS = {
@@ -521,12 +546,19 @@ class CatalogProbeService:
         *,
         explicit_action: bool,
         authorize_catalog_promotion: bool,
+        authorize_zero_cost_evidence_review: bool,
+        reviewed_verification_identity: str | None,
+        reviewed_source_pack_evidence_sha256: str | None,
         capability_evidence: BackendCapabilityEvidence,
     ) -> dict[str, Any]:
-        if explicit_action is not True or authorize_catalog_promotion is not True:
+        if (
+            explicit_action is not True
+            or authorize_catalog_promotion is not True
+            or authorize_zero_cost_evidence_review is not True
+        ):
             raise CatalogProbeError(
                 "catalog_promotion_authorization_required",
-                "Trusted-catalog promotion requires a separate explicit authorization.",
+                "Trusted-catalog promotion requires separate explicit catalog and exact zero-cost evidence review authorizations.",
                 status_code=422,
             )
         with self._mutation_guard():
@@ -536,11 +568,25 @@ class CatalogProbeService:
                 state = self._read_state(run_dir, run_anchor)
                 self._validate_promotion_capability_evidence(request, capability_evidence)
                 if run_anchor.lexists("promotion_receipt.json"):
-                    receipt = self._read_json(run_dir / "promotion_receipt.json", run_anchor)
-                    if receipt.get("schema_version") != PROBE_PROMOTION_RECEIPT_SCHEMA:
-                        raise CatalogProbeError("invalid_catalog_promotion", "Catalog promotion evidence is invalid.")
-                    self._notify_catalog_refreshed()
-                    return receipt
+                    promotion_receipt = self._read_json(run_dir / "promotion_receipt.json", run_anchor)
+                    probe_receipt = self._read_json(run_dir / "probe_receipt.json", run_anchor)
+                    result = self._read_json(run_dir / "result.json", run_anchor)
+                    terminal_commit = self._read_json(run_dir / "terminal_commit.json", run_anchor)
+                    catalog = load_trusted_catalog(self.project_root)
+                    self._validate_promotion_receipt(
+                        promotion_receipt,
+                        probe_id=probe_id,
+                        request=request,
+                        probe_receipt=probe_receipt,
+                        result=result,
+                        terminal_commit=terminal_commit,
+                        catalog=catalog,
+                        capability_evidence=capability_evidence,
+                        reviewed_verification_identity=reviewed_verification_identity,
+                        reviewed_source_pack_evidence_sha256=reviewed_source_pack_evidence_sha256,
+                    )
+                    self._notify_catalog_refreshed(catalog)
+                    return promotion_receipt
                 if state["status"] != "READY" or not self._terminal_commit_valid(run_dir, run_anchor, state):
                     raise CatalogProbeError(
                         "catalog_probe_not_promotable",
@@ -549,6 +595,12 @@ class CatalogProbeService:
                 receipt = self._read_json(run_dir / "probe_receipt.json", run_anchor)
                 result = self._read_json(run_dir / "result.json", run_anchor)
                 self._validate_receipt_records(probe_id, request, receipt, result)
+                _validate_exact_zero_cost_review(
+                    reviewed_verification_identity=reviewed_verification_identity,
+                    reviewed_source_pack_evidence_sha256=reviewed_source_pack_evidence_sha256,
+                    expected_verification_identity=receipt.get("verification_identity"),
+                    expected_source_pack_evidence_sha256=receipt.get("source_pack_evidence_sha256"),
+                )
                 try:
                     source = self._reverify_promoted_source(run_dir, run_anchor, request, receipt, result)
                 except CatalogProbeError:
@@ -585,6 +637,10 @@ class CatalogProbeService:
                     "verifier_id": CATALOG_EVIDENCE_VERIFIER_ID,
                     "verifier_code_identity_sha256": catalog_evidence_verifier_code_identity(),
                     "probe_receipt_identity": _identity(receipt),
+                    "result_identity": _identity(result),
+                    "zero_cost_evidence_reviewed": True,
+                    "reviewed_verification_identity": reviewed_verification_identity,
+                    "reviewed_source_pack_evidence_sha256": reviewed_source_pack_evidence_sha256,
                     "terminal_commit_identity": _identity(
                         self._read_json(run_dir / "terminal_commit.json", run_anchor)
                     ),
@@ -845,6 +901,7 @@ class CatalogProbeService:
                         "same_pack_evidence_verified": True,
                         "zero_cost_evidence_verified": verified.zero_cost_verified,
                         "license_conflict_checked": verified.license_conflict_checked,
+                        "source_pack_evidence_text": verified.source_pack_evidence_text,
                         "source_pack_evidence_sha256": hashlib.sha256(
                             verified.source_pack_evidence_text.encode("utf-8")
                         ).hexdigest(),
@@ -1093,6 +1150,7 @@ class CatalogProbeService:
                 or receipt.get("license_conflict_checked") is not True
                 or receipt.get("source_pack_evidence_sha256")
                 != hashlib.sha256(verified.source_pack_evidence_text.encode("utf-8")).hexdigest()
+                or receipt.get("source_pack_evidence_text") != verified.source_pack_evidence_text
             ):
                 raise CatalogProbeError(
                     "catalog_probe_evidence_changed",
@@ -1150,6 +1208,10 @@ class CatalogProbeService:
                 license_http_status=license_snapshot.http_status,
                 license_content_sha256=license_snapshot.content_sha256,
                 automation_terms=terms_binding,
+                zero_cost_reviewed=True,
+                zero_cost_verification_identity_sha256=str(receipt["verification_identity"]),
+                zero_cost_evidence_text_sha256=str(receipt["source_pack_evidence_sha256"]),
+                zero_cost_probe_receipt_identity_sha256=str(receipt["receipt_identity"]),
                 attestation_identity_sha256="0" * 64,
             )
             binding = replace(
@@ -1268,6 +1330,76 @@ class CatalogProbeService:
             raise CatalogProbeError("invalid_catalog_probe_receipt", "Catalog probe receipt is invalid.")
         if receipt.get("verifier_code_identity_sha256") != catalog_evidence_verifier_code_identity():
             raise CatalogProbeError("catalog_probe_stale", "Catalog evidence verifier code changed after the probe.")
+
+    def _validate_promotion_receipt(
+        self,
+        promotion: Mapping[str, Any],
+        *,
+        probe_id: str,
+        request: Mapping[str, Any],
+        probe_receipt: Mapping[str, Any],
+        result: Mapping[str, Any],
+        terminal_commit: Mapping[str, Any],
+        catalog: tuple[HarvestSource, ...],
+        capability_evidence: BackendCapabilityEvidence,
+        reviewed_verification_identity: str | None,
+        reviewed_source_pack_evidence_sha256: str | None,
+    ) -> None:
+        source_id = str(request.get("source_id", ""))
+        self._validate_receipt_records(probe_id, request, probe_receipt, result)
+        source = next((item for item in catalog if item.source_id == source_id), None)
+        terminal_identity = _identity(terminal_commit)
+        promotion_identity = promotion.get("promotion_identity")
+        if (
+            set(promotion) != _PROMOTION_RECEIPT_KEYS
+            or promotion.get("schema_version") != PROBE_PROMOTION_RECEIPT_SCHEMA
+            or promotion.get("probe_id") != probe_id
+            or promotion.get("source_id") != source_id
+            or promotion.get("explicit_action") is not True
+            or type(promotion.get("catalog_changed")) is not bool
+            or promotion.get("private_direct_url_exposed") is not False
+            or promotion.get("paths_exposed") is not False
+            or promotion.get("zero_cost_evidence_reviewed") is not True
+            or not isinstance(promotion.get("promoted_at"), str)
+            or promotion_identity
+            != _identity({key: value for key, value in promotion.items() if key != "promotion_identity"})
+            or source is None
+            or promotion.get("catalog_identity") != _catalog_identity_from_sources(catalog)
+            or promotion.get("source_catalog_identity") != source.catalog_identity
+            or promotion.get("raw_response_sha256") != result.get("raw_response_sha256")
+            or promotion.get("backend_capability_evidence_identity") != capability_evidence.identity
+            or promotion.get("verifier_id") != CATALOG_EVIDENCE_VERIFIER_ID
+            or promotion.get("verifier_code_identity_sha256") != catalog_evidence_verifier_code_identity()
+            or promotion.get("probe_receipt_identity") != _identity(probe_receipt)
+            or promotion.get("result_identity") != _identity(result)
+            or promotion.get("terminal_commit_identity") != terminal_identity
+            or terminal_commit.get("schema_version") != PROBE_TERMINAL_COMMIT_SCHEMA
+            or terminal_commit.get("probe_id") != probe_id
+            or terminal_commit.get("committed_status") != "READY"
+            or terminal_commit.get("request_identity") != _identity(request)
+            or terminal_commit.get("receipt_identity") != _identity(probe_receipt)
+            or terminal_commit.get("result_identity") != _identity(result)
+            or terminal_commit.get("raw_response_sha256") != result.get("raw_response_sha256")
+            or terminal_commit.get("paths_exposed") is not False
+            or terminal_commit.get("terminal_commit_identity")
+            != _identity({key: value for key, value in terminal_commit.items() if key != "terminal_commit_identity"})
+            or source.evidence_binding.zero_cost_verification_identity_sha256
+            != promotion.get("reviewed_verification_identity")
+            or source.evidence_binding.zero_cost_evidence_text_sha256
+            != promotion.get("reviewed_source_pack_evidence_sha256")
+            or source.evidence_binding.zero_cost_probe_receipt_identity_sha256 != probe_receipt.get("receipt_identity")
+        ):
+            raise CatalogProbeError("invalid_catalog_promotion", "Catalog promotion evidence is invalid.")
+        try:
+            _parse_utc(str(promotion["promoted_at"]))
+        except ValueError as exc:
+            raise CatalogProbeError("invalid_catalog_promotion", "Catalog promotion evidence is invalid.") from exc
+        _validate_exact_zero_cost_review(
+            reviewed_verification_identity=reviewed_verification_identity,
+            reviewed_source_pack_evidence_sha256=reviewed_source_pack_evidence_sha256,
+            expected_verification_identity=promotion.get("reviewed_verification_identity"),
+            expected_source_pack_evidence_sha256=promotion.get("reviewed_source_pack_evidence_sha256"),
+        )
 
     def _terminal_commit_valid(
         self,
@@ -1928,6 +2060,28 @@ def _generic_lease_live(state: Mapping[str, Any], lease: Mapping[str, Any]) -> b
         )
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def _validate_exact_zero_cost_review(
+    *,
+    reviewed_verification_identity: str | None,
+    reviewed_source_pack_evidence_sha256: str | None,
+    expected_verification_identity: Any,
+    expected_source_pack_evidence_sha256: Any,
+) -> None:
+    submitted_identity = str(reviewed_verification_identity or "")
+    submitted_evidence_sha256 = str(reviewed_source_pack_evidence_sha256 or "")
+    if (
+        SHA256_PATTERN.fullmatch(submitted_identity) is None
+        or SHA256_PATTERN.fullmatch(submitted_evidence_sha256) is None
+        or submitted_identity != expected_verification_identity
+        or submitted_evidence_sha256 != expected_source_pack_evidence_sha256
+    ):
+        raise CatalogProbeError(
+            "catalog_zero_cost_evidence_review_required",
+            "Promotion requires review of the exact unchanged retained zero-cost evidence identity and text hash.",
+            status_code=409,
+        )
 
 
 def _identity(value: Any) -> str:

@@ -6,9 +6,7 @@ import re
 import unicodedata
 from pathlib import PurePosixPath, PureWindowsPath
 
-_WINDOWS_RESERVED = re.compile(
-    r"(?i)^(?:con|prn|aux|nul|clock\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$"
-)
+_WINDOWS_RESERVED = re.compile(r"(?i)^(?:con|prn|aux|nul|clock\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?$")
 _WINDOWS_FORBIDDEN = frozenset('<>:"|?*')
 
 
@@ -38,11 +36,7 @@ def canonical_portable_relative_path(value: str) -> str:
     if not parts:
         raise ValueError("A portable relative path is empty.")
     for part in parts:
-        if (
-            part in {"", ".", ".."}
-            or part != part.rstrip(". ")
-            or _WINDOWS_RESERVED.fullmatch(part) is not None
-        ):
+        if part in {"", ".", ".."} or part != part.rstrip(". ") or _WINDOWS_RESERVED.fullmatch(part) is not None:
             raise ValueError("A portable relative path contains an unsafe component.")
     return value
 
