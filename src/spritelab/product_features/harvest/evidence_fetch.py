@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import SplitResult, urljoin, urlunsplit
+from urllib.parse import SplitResult, urljoin, urlsplit, urlunsplit
 
 from spritelab.harvest.download import (
     HARVEST_USER_AGENT,
@@ -116,6 +116,7 @@ _OPENGAMEART_HOST = "opengameart.org"
 _OPENGAMEART_DETAIL_PATH = re.compile(r"^/content/[^/]+/?$")
 _OPENGAMEART_ADAPTER_ID = "spritelab.harvest.source-adapter.opengameart.v1"
 _OPENGAMEART_CC0_LICENSE_URL = "https://creativecommons.org/publicdomain/zero/1.0/"
+_OPENGAMEART_CC0_LICENSE_HOSTS = frozenset({"creativecommons.org", "www.creativecommons.org"})
 _OPENGAMEART_LEGACY_ART_LICENSE_LINK_UPGRADES = {
     "http://creativecommons.org/licenses/by/3.0/": "https://creativecommons.org/licenses/by/3.0/",
     "http://creativecommons.org/licenses/by-sa/3.0/": "https://creativecommons.org/licenses/by-sa/3.0/",
@@ -502,10 +503,8 @@ class _OpenGameArtHTMLParser(HTMLParser):
                 try:
                     joined_link = urljoin(self.base_url, hrefs[0])
                     active_role_names = {capture.role for _root, capture in self._active_roles}
-                    if joined_link in _OPENGAMEART_LEGACY_ART_LICENSE_LINK_UPGRADES and active_role_names == {
-                        "art-licenses"
-                    }:
-                        joined_link = _OPENGAMEART_LEGACY_ART_LICENSE_LINK_UPGRADES[joined_link]
+                    if active_role_names == {"art-licenses"}:
+                        joined_link = _upgrade_opengameart_art_license_link(joined_link)
                     elif joined_link in _OPENGAMEART_LEGACY_OPP_WEBSITES and active_role_names == {"body"}:
                         joined_link = _OPENGAMEART_CANONICAL_OPP_WEBSITE
                     link = canonical_url_string(joined_link, allow_query=True)
@@ -574,6 +573,77 @@ class OpenGameArtPrefillFields:
     direct_download_url: str
 
 
+def _is_opengameart_cc0_license_link(value: str, *, allow_http: bool = False) -> bool:
+    """Recognize equivalent official CC0 1.0 deed URLs without broad URL guessing."""
+
+    try:
+        parsed = urlsplit(value)
+        host = (parsed.hostname or "").casefold().rstrip(".")
+        port = parsed.port
+    except ValueError:
+        return False
+    allowed_schemes = {"https", "http"} if allow_http else {"https"}
+    if (
+        parsed.scheme.casefold() not in allowed_schemes
+        or host not in _OPENGAMEART_CC0_LICENSE_HOSTS
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    path = parsed.path.casefold().rstrip("/")
+    return (
+        path == "/publicdomain/zero/1.0"
+        or re.fullmatch(
+            r"/publicdomain/zero/1\.0/deed(?:\.[a-z]{2,3}(?:_[a-z]{2})?)?",
+            path,
+        )
+        is not None
+    )
+
+
+def _upgrade_opengameart_art_license_link(value: str) -> str:
+    upgraded = _OPENGAMEART_LEGACY_ART_LICENSE_LINK_UPGRADES.get(value)
+    if upgraded is not None:
+        return upgraded
+    if _is_opengameart_cc0_license_link(value, allow_http=True) and value.casefold().startswith("http://"):
+        parsed = urlsplit(value)
+        return urlunsplit(("https", parsed.netloc, parsed.path, parsed.query, parsed.fragment))
+    return value
+
+
+def _opengameart_license_prefill(
+    folded_license_text: str,
+    links: list[str],
+    source_url: str,
+) -> tuple[str, str]:
+    """Bind one supported OGA license and return its canonical evidence URL."""
+
+    license_links = frozenset(links)
+    cc0_links = frozenset(link for link in license_links if _is_opengameart_cc0_license_link(link))
+    unsupported_license_named = (
+        re.search(r"\b(?:cc[- ]?by(?:[- ]sa)?|gpl|oga[- ]?by)\b", folded_license_text) is not None
+    )
+    cc0_named = re.search(r"\bcc0(?:\s*1\.0)?\b", folded_license_text) is not None
+    if (
+        (cc0_named or cc0_links)
+        and license_links == cc0_links
+        and not unsupported_license_named
+        and not _license_conflict(folded_license_text, "cc0-1.0")
+    ):
+        return "cc0-1.0", _OPENGAMEART_CC0_LICENSE_URL
+    if (
+        not license_links
+        and not unsupported_license_named
+        and _license_declared(folded_license_text, "public-domain")
+        and not _license_conflict(folded_license_text, "public-domain")
+    ):
+        return "public-domain", source_url
+    return "", ""
+
+
 def extract_opengameart_prefill_fields(source_url: str, source_bytes: bytes) -> OpenGameArtPrefillFields:
     """Extract safe retry defaults from retained OpenGameArt HTML.
 
@@ -602,29 +672,12 @@ def extract_opengameart_prefill_fields(source_url: str, source_bytes: bytes) -> 
     if not 4 <= len(role_text["title"]) <= 200:
         raise EvidenceFetchError("The OpenGameArt title field is not usable as a title prefill.")
 
-    license_capture = captures["art-licenses"]
     folded_license = role_text["art-licenses"].casefold()
-    license_id = ""
-    license_url = ""
-    license_links = frozenset(license_capture.links)
-    unsupported_license_named = re.search(r"\b(?:cc[- ]?by(?:[- ]sa)?|gpl|oga[- ]?by)\b", folded_license) is not None
-    cc0_bound = _license_declared(folded_license, "cc0-1.0") or (_OPENGAMEART_CC0_LICENSE_URL in license_capture.links)
-    if (
-        cc0_bound
-        and license_links <= {_OPENGAMEART_CC0_LICENSE_URL}
-        and not unsupported_license_named
-        and not _license_conflict(folded_license, "cc0-1.0")
-    ):
-        license_id = "cc0-1.0"
-        license_url = _OPENGAMEART_CC0_LICENSE_URL
-    elif (
-        not license_links
-        and not unsupported_license_named
-        and _license_declared(folded_license, "public-domain")
-        and not _license_conflict(folded_license, "public-domain")
-    ):
-        license_id = "public-domain"
-        license_url = source_url
+    license_id, license_url = _opengameart_license_prefill(
+        folded_license,
+        captures["art-licenses"].links,
+        source_url,
+    )
 
     file_links = tuple(captures["art-files"].links)
     direct_download_url = file_links[0] if len(file_links) == 1 else ""
@@ -1040,7 +1093,17 @@ def _verify_opengameart_evidence(
     folded_license_role = role_text["art-licenses"].casefold()
     if _license_conflict(folded_license_role, license_id):
         raise EvidenceFetchError("The OpenGameArt art-licenses field contains conflicting rights language.")
-    if not _license_declared(folded_license_role, license_id) and license_url not in license_capture.links:
+    detected_license_id, detected_license_url = _opengameart_license_prefill(
+        folded_license_role,
+        license_capture.links,
+        source_url,
+    )
+    exact_supported_binding = license_id == detected_license_id and license_url == detected_license_url
+    if (
+        not _license_declared(folded_license_role, license_id)
+        and license_url not in license_capture.links
+        and not exact_supported_binding
+    ):
         raise EvidenceFetchError("The OpenGameArt art-licenses field does not bind the selected license.")
 
     direct_occurrences = {

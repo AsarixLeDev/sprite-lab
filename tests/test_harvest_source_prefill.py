@@ -24,13 +24,20 @@ OGA_LICENSE_URL = "https://creativecommons.org/publicdomain/zero/1.0/"
 OGA_DIRECT_URL = "https://opengameart.org/sites/default/files/battleaxes_01.zip"
 
 
-def _oga_source_html(*, extra_license_link: str = "", extra_file_link: str = "") -> bytes:
+def _oga_source_html(
+    *,
+    license_href: str = OGA_LICENSE_URL,
+    license_label: str = "CC0 1.0 public domain",
+    extra_license_link: str = "",
+    extra_file_link: str = "",
+) -> bytes:
     return (
         '<div class="node node-art view-mode-full clearfix">'
         '<div class="field field-name-title"><h1>Behr\'s 2500+ Pixel Battle Axes 32x32 Archive</h1></div>'
         '<div class="field field-name-author-submitter">Submitted by Behrtron</div>'
         '<div class="field field-name-field-art-licenses">'
-        f'<a href="{OGA_LICENSE_URL}">CC0 1.0 public domain</a>{extra_license_link}</div>'
+        f'<a href="{license_href}"><img src="/cc0.png"><div class="license-name">'
+        f"{license_label}</div></a>{extra_license_link}</div>"
         '<div class="field field-name-body">Totally free in the public domain.</div>'
         '<div class="field field-name-field-art-files">'
         f'<a href="{OGA_DIRECT_URL}">battleaxes_01.zip</a>{extra_file_link}</div>'
@@ -107,6 +114,26 @@ def test_retained_opengameart_evidence_prefills_exact_bound_fields() -> None:
     assert prefill.direct_download_url == OGA_DIRECT_URL
     assert prefill.attribution_text == "Behrtron"
     assert prefill.review_fields == ("terms_evidence_url",)
+
+
+@pytest.mark.parametrize(
+    "license_href",
+    (
+        "http://creativecommons.org/publicdomain/zero/1.0/",
+        "https://creativecommons.org/publicdomain/zero/1.0/deed.en",
+        "http://www.creativecommons.org/publicdomain/zero/1.0/deed.fr",
+    ),
+)
+def test_opengameart_prefill_normalizes_live_cc0_license_variants(license_href: str) -> None:
+    prefill = build_source_prefill(
+        OGA_SOURCE_URL,
+        retained_source_bytes=_oga_source_html(license_href=license_href, license_label="CC0"),
+    )
+
+    assert prefill.license_id == "cc0-1.0"
+    assert prefill.license_evidence_url == OGA_LICENSE_URL
+    assert "license_id" not in prefill.review_fields
+    assert "license_evidence_url" not in prefill.review_fields
 
 
 def test_retained_opengameart_evidence_does_not_guess_between_file_links() -> None:
@@ -275,6 +302,7 @@ def test_web_opengameart_prefill_reads_exact_fields_before_probe(tmp_path: Path)
     assert prefill["title"] == "Behr's 2500+ Pixel Battle Axes 32x32 Archive"
     assert prefill["creator"] == "Behrtron"
     assert prefill["license_id"] == "cc0-1.0"
+    assert prefill["license_evidence_url"] == OGA_LICENSE_URL
     assert prefill["direct_download_url"] == OGA_DIRECT_URL
     assert len(transport.calls) == 2
     assert not (project / "harvest_runs").exists()

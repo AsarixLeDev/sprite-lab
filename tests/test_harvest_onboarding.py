@@ -925,10 +925,18 @@ def test_opengameart_adapter_accepts_one_live_shaped_record_and_binds_manifest()
     assert "commenter" not in first.source_pack_evidence_text
 
 
-def test_opengameart_adapter_upgrades_only_the_live_legacy_cc0_deed_link() -> None:
+@pytest.mark.parametrize(
+    "license_href",
+    (
+        "http://creativecommons.org/publicdomain/zero/1.0/",
+        "https://creativecommons.org/publicdomain/zero/1.0/deed.en",
+        "http://www.creativecommons.org/publicdomain/zero/1.0/deed.fr",
+    ),
+)
+def test_opengameart_adapter_normalizes_live_cc0_deed_links(license_href: str) -> None:
     source = _oga_source_html().replace(
         OGA_LICENSE_URL.encode(),
-        b"http://creativecommons.org/publicdomain/zero/1.0/",
+        license_href.encode(),
         1,
     )
 
